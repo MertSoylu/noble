@@ -1,0 +1,37 @@
+# Her push ve PR'da: biçim, clippy ve testler.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    # Ana hedef platform: gerçek PTY (ConPTY), render ve uçtan uca testlerin tamamı.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  linux:
+    # Linux'ta derleme, clippy ve birim testleri. PTY testleri shell'in OSC 7
+    # göndermesine bağlı olduğundan (varsayılan bash göndermez) burada koşulmaz.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --lib

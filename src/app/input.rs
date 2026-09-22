@@ -1,0 +1,860 @@
+//! Klavye ve fare girdisinin yorumlanması.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
+
+use super::{App, Drag, Hit, Overlay, SortKey, ToastLevel, View};
+use crate::keys::{Action, Chord};
+use crate::sensors::ProcInfo;
+use crate::term::input::{encode_key, encode_mouse};
+use crate::term::layout::{PaneId, ratio_from_point};
+use crate::term::pane::Selection;
+
+impl App {
+    /// Filtrelenmiş ve sıralanmış süreç listesi.
+    pub fn visible_procs(&self) -> Vec<ProcInfo> {
+        let Some(s) = &self.sensors.last else { return Vec::new() };
+        let q = self.system.filter.trim().to_lowercase();
+        let mut list: Vec<ProcInfo> = s
+            .procs
+            .iter()
+            .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q) || p.pid.to_string().starts_with(&q))
+            .cloned()
+            .collect();
+        let desc = self.system.desc;
+        list.sort_by(|a, b| {
+            let ord = match self.system.sort {
+                SortKey::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(std::cmp::Ordering::Equal),
+                SortKey::Mem => a.mem.cmp(&b.mem),
+                SortKey::Pid => a.pid.cmp(&b.pid),
+                SortKey::Name => b.name.to_lowercase().cmp(&a.name.to_lowercase()),
+            };
+            if desc { ord.reverse() } else { ord }
+        });
+        list
+    }
+
+    pub(super) fn on_input(&mut self, e: Event) {
+        match e {
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            Event::Mouse(m) => self.on_mouse(m),
+            Event::Resize(w, h) => self.size = (w, h),
+            Event::Paste(text) => self.on_paste(&text),
+            _ => {}
+        }
+    }
+
+    fn on_paste(&mut self, text: &str) {
+        match &mut self.overlay {
+            Some(Overlay::Palette(st)) => {
+                st.query.push_str(text.lines().next().unwrap_or(""));
+                st.refilter();
+                return;
+            }
+            Some(Overlay::Prompt(p)) => {
+                let line: String = text.lines().next().unwrap_or("").chars().take(p.purpose.max_len()).collect();
+                p.value.push_str(&line);
+                return;
+            }
+            Some(_) => return,
+            None => {}
+        }
+        if let Some(p) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
+            p.scroll_reset();
+            p.paste(text);
+        } else if self.view == View::Bridge && self.bridge.filtering {
+            self.bridge.filter.push_str(text.lines().next().unwrap_or(""));
+            self.bridge.proj_sel = 0;
+        }
+    }
+
+    pub fn on_key(&mut self, k: KeyEvent) {
+        if self.boot.take().is_some() {
+            return;
+        }
+        if self.overlay.is_some() {
+            self.overlay_key(k);
+            return;
+        }
+        if self.search.is_some() && !self.prefix_armed && self.search_key(k) {
+            return;
+        }
+        let chord = Chord::from_event(&k);
+        if self.prefix_armed {
+            self.prefix_armed = false;
+            if chord == self.keymap.prefix {
+                self.run(Action::SendPrefix);
+            } else if k.code != KeyCode::Esc {
+                match self.keymap.prefix_map.get(&chord).copied() {
+                    Some(a) => self.run(a),
+                    None => self
+                        .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for help", self.keymap.prefix)),
+                }
+            }
+            return;
+        }
+        if chord == self.keymap.prefix {
+            self.prefix_armed = true;
+            return;
+        }
+        if let Some(a) = self.keymap.direct_map.get(&chord).copied() {
+            self.run(a);
+            return;
+        }
+        match self.view {
+            View::Bridge => self.bridge_key(k),
+            View::System => self.system_key(k),
+            View::Settings => self.settings_key(k),
+            View::Term(_) => self.term_key(k),
+        }
+    }
+
+    fn term_key(&mut self, k: KeyEvent) {
+        let Some(id) = self.focused_pane() else { return };
+        let Some(p) = self.panes.get_mut(&id) else { return };
+        p.selection = None;
+        p.scroll_reset();
+        let (app_cursor, alt) = {
+            let parser = p.parser();
+            (parser.screen().application_cursor(), parser.screen().alternate_screen())
+        };
+        // Shell'de Enter bir komut başlatır: bitişini (prompt dönüşü) ölçmek için.
+        if k.code == KeyCode::Enter && !alt {
+            p.command_started = Some(Instant::now());
+        }
+        p.write(&encode_key(&k, app_cursor));
+    }
+
+    fn overlay_key(&mut self, k: KeyEvent) {
+        if matches!(self.overlay, Some(Overlay::Menu(_))) {
+            self.menu_key(k);
+            return;
+        }
+        let Some(mut ov) = self.overlay.take() else { return };
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let keep = match &mut ov {
+            Overlay::Palette(st) => match k.code {
+                KeyCode::Esc => false,
+                KeyCode::Enter => {
+                    if let Some(item) = st.current().cloned() {
+                        self.run_palette(item.cmd);
+                    }
+                    // Komut yeni bir overlay açmış olabilir (ör. yeniden adlandırma).
+                    return;
+                }
+                KeyCode::Up => {
+                    st.selected = st.selected.saturating_sub(1);
+                    true
+                }
+                KeyCode::Char('p' | 'k') if ctrl => {
+                    st.selected = st.selected.saturating_sub(1);
+                    true
+                }
+                KeyCode::Down | KeyCode::Tab => {
+                    st.selected = (st.selected + 1).min(st.matches.len().saturating_sub(1));
+                    true
+                }
+                KeyCode::Char('n' | 'j') if ctrl => {
+                    st.selected = (st.selected + 1).min(st.matches.len().saturating_sub(1));
+                    true
+                }
+                KeyCode::PageUp => {
+                    st.selected = st.selected.saturating_sub(8);
+                    true
+                }
+                KeyCode::PageDown => {
+                    st.selected = (st.selected + 8).min(st.matches.len().saturating_sub(1));
+                    true
+                }
+                KeyCode::Home => {
+                    st.selected = 0;
+                    true
+                }
+                KeyCode::End => {
+                    st.selected = st.matches.len().saturating_sub(1);
+                    true
+                }
+                KeyCode::Backspace => {
+                    st.query.pop();
+                    st.refilter();
+                    true
+                }
+                KeyCode::Char('u') if ctrl => {
+                    st.query.clear();
+                    st.refilter();
+                    true
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    st.query.push(c);
+                    st.selected = 0;
+                    st.refilter();
+                    true
+                }
+                _ => true,
+            },
+            // Menü tuşları `menu_key`'de işlenir; buraya gelmez.
+            Overlay::Menu(_) => true,
+            Overlay::Welcome { prefix } => {
+                let n = super::settings::PREFIXES.len();
+                match k.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        let p = *prefix;
+                        self.finish_welcome(p, true);
+                        return;
+                    }
+                    KeyCode::Esc => {
+                        let p = *prefix;
+                        self.finish_welcome(p, false);
+                        return;
+                    }
+                    KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => *prefix = (*prefix + n - 1) % n,
+                    KeyCode::Right | KeyCode::Down | KeyCode::Tab | KeyCode::Char('l' | 'j') => {
+                        *prefix = (*prefix + 1) % n
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Overlay::Schemes(p) => {
+                let n = self.scheme_options().len();
+                let step = |p: &mut super::SchemePicker, d: i32| {
+                    p.selected = (p.selected as i32 + d).clamp(0, n as i32 - 1) as usize;
+                };
+                match k.code {
+                    KeyCode::Esc => {
+                        // Önizlemeyi geri al.
+                        self.cfg.terminal.colors = p.original.clone();
+                        false
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        if let Some(name) = self.scheme_options().get(p.selected).cloned() {
+                            self.set_term_colors(&name);
+                        }
+                        false
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        step(p, -1);
+                        self.preview_scheme(p.selected);
+                        true
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                        step(p, 1);
+                        self.preview_scheme(p.selected);
+                        true
+                    }
+                    KeyCode::PageUp => {
+                        step(p, -8);
+                        self.preview_scheme(p.selected);
+                        true
+                    }
+                    KeyCode::PageDown => {
+                        step(p, 8);
+                        self.preview_scheme(p.selected);
+                        true
+                    }
+                    KeyCode::Home => {
+                        p.selected = 0;
+                        self.preview_scheme(0);
+                        true
+                    }
+                    KeyCode::End => {
+                        p.selected = n.saturating_sub(1);
+                        self.preview_scheme(p.selected);
+                        true
+                    }
+                    _ => true,
+                }
+            }
+            Overlay::Help { scroll } => match k.code {
+                KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter => false,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *scroll = scroll.saturating_sub(1);
+                    true
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *scroll = scroll.saturating_add(1);
+                    true
+                }
+                KeyCode::PageUp => {
+                    *scroll = scroll.saturating_sub(10);
+                    true
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    *scroll = scroll.saturating_add(10);
+                    true
+                }
+                KeyCode::Home => {
+                    *scroll = 0;
+                    true
+                }
+                _ => true,
+            },
+            Overlay::Confirm(_) => match k.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                    if let Overlay::Confirm(c) = ov {
+                        self.confirm(c.action);
+                    }
+                    return;
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => false,
+                _ => true,
+            },
+            Overlay::Prompt(p) => match k.code {
+                KeyCode::Esc => false,
+                KeyCode::Enter => {
+                    if let Overlay::Prompt(p) = ov {
+                        self.submit_prompt(p);
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    p.value.pop();
+                    true
+                }
+                KeyCode::Char('u') if ctrl => {
+                    p.value.clear();
+                    true
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    if p.value.chars().count() < p.purpose.max_len() {
+                        p.value.push(c);
+                    }
+                    true
+                }
+                _ => true,
+            },
+        };
+        if keep && self.overlay.is_none() {
+            self.overlay = Some(ov);
+        }
+    }
+
+    fn move_project(&mut self, delta: i32) {
+        let n = self.visible_projects().len();
+        if n == 0 {
+            return;
+        }
+        self.bridge.proj_sel = (self.bridge.proj_sel as i32 + delta).clamp(0, n as i32 - 1) as usize;
+    }
+
+    /// Seçili projenin dizini (başlatıcılar ve "klasörü aç" için).
+    fn bridge_target_dir(&self) -> Option<PathBuf> {
+        self.selected_project().map(|p| p.path.clone())
+    }
+
+    fn open_selected(&mut self) {
+        match self.selected_project().map(|p| p.path.clone()) {
+            Some(p) => self.open_project_shell(p),
+            None => self.run(Action::NewTab),
+        }
+    }
+
+    fn bridge_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if self.bridge.filtering {
+            match k.code {
+                KeyCode::Esc => {
+                    self.bridge.filtering = false;
+                    self.bridge.filter.clear();
+                }
+                KeyCode::Enter => {
+                    self.bridge.filtering = false;
+                    if self.selected_project().is_some() {
+                        self.open_selected();
+                        self.bridge.filter.clear();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if self.bridge.filter.pop().is_none() {
+                        self.bridge.filtering = false;
+                    }
+                    self.bridge.proj_sel = 0;
+                }
+                KeyCode::Up => self.move_project(-1),
+                KeyCode::Down => self.move_project(1),
+                KeyCode::Char(c) if !ctrl => {
+                    self.bridge.filter.push(c);
+                    self.bridge.proj_sel = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let KeyCode::Char(c) = k.code
+            && !ctrl
+            && !k.modifiers.contains(KeyModifiers::ALT)
+            && let Some(i) = self.launchers.iter().position(|(l, _)| l.key.starts_with(c))
+        {
+            let dir = self.bridge_target_dir();
+            self.launch(i, dir);
+            return;
+        }
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_project(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_project(1),
+            KeyCode::PageUp => self.move_project(-8),
+            KeyCode::PageDown => self.move_project(8),
+            KeyCode::Home => self.move_project(-10_000),
+            KeyCode::End => self.move_project(10_000),
+            KeyCode::Enter => self.open_selected(),
+            KeyCode::Char('/') => {
+                self.bridge.filtering = true;
+                self.bridge.filter.clear();
+                self.bridge.proj_sel = 0;
+            }
+            KeyCode::Esc => self.bridge.filter.clear(),
+            KeyCode::Char('t') => self.run(Action::NewTab),
+            KeyCode::Char('m') => self.run(Action::System),
+            KeyCode::Char('s') => self.run(Action::Settings),
+            KeyCode::Char('p' | ':') => self.run(Action::Palette),
+            KeyCode::Char('?') => self.run(Action::Help),
+            KeyCode::Char('q') => self.request_quit(),
+            KeyCode::Char('c') if ctrl => self.request_quit(),
+            KeyCode::Char('w') => self.run(Action::SaveWorkspace),
+            KeyCode::Char('r') => self.rescan_projects(),
+            KeyCode::Char('R') => self.refresh_ai(),
+            KeyCode::Char('a') => self.run(Action::AddProjectFolder),
+            KeyCode::Char('o') => {
+                if let Some(p) = self.bridge_target_dir() {
+                    self.open_in_explorer(&p);
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
+            _ => {}
+        }
+    }
+
+    fn system_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if self.system.filtering {
+            match k.code {
+                KeyCode::Esc => {
+                    self.system.filtering = false;
+                    self.system.filter.clear();
+                }
+                KeyCode::Enter => self.system.filtering = false,
+                KeyCode::Backspace => {
+                    if self.system.filter.pop().is_none() {
+                        self.system.filtering = false;
+                    }
+                }
+                KeyCode::Up => self.move_proc(-1),
+                KeyCode::Down => self.move_proc(1),
+                KeyCode::Char(c) if !ctrl => self.system.filter.push(c),
+                _ => {}
+            }
+            return;
+        }
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_proc(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_proc(1),
+            KeyCode::PageUp => self.move_proc(-15),
+            KeyCode::PageDown => self.move_proc(15),
+            KeyCode::Home => self.move_proc(-100_000),
+            KeyCode::End => self.move_proc(100_000),
+            KeyCode::Char('c') if !ctrl => self.set_sort(SortKey::Cpu),
+            KeyCode::Char('m') => self.set_sort(SortKey::Mem),
+            KeyCode::Char('p') => self.set_sort(SortKey::Pid),
+            KeyCode::Char('n') => self.set_sort(SortKey::Name),
+            KeyCode::Char('/') => {
+                self.system.filtering = true;
+                self.system.filter.clear();
+            }
+            KeyCode::Char('K') | KeyCode::Delete => {
+                let procs = self.visible_procs();
+                if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
+                    self.request_kill(p.pid, p.name.clone());
+                } else {
+                    self.toast(ToastLevel::Info, "select a process first (↑/↓)");
+                }
+            }
+            KeyCode::Esc => {
+                if self.system.filter.is_empty() {
+                    self.view = View::Bridge;
+                } else {
+                    self.system.filter.clear();
+                }
+            }
+            KeyCode::Char('q') => self.view = View::Bridge,
+            KeyCode::Char('c') if ctrl => self.view = View::Bridge,
+            KeyCode::Char('?') => self.run(Action::Help),
+            KeyCode::Char(':') => self.run(Action::Palette),
+            KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
+            _ => {}
+        }
+    }
+
+    fn set_sort(&mut self, key: SortKey) {
+        if self.system.sort == key {
+            self.system.desc = !self.system.desc;
+        } else {
+            self.system.sort = key;
+            self.system.desc = !matches!(key, SortKey::Name | SortKey::Pid);
+        }
+    }
+
+    fn move_proc(&mut self, delta: i32) {
+        let procs = self.visible_procs();
+        if procs.is_empty() {
+            return;
+        }
+        let cur = self.system.selected_pid.and_then(|pid| procs.iter().position(|p| p.pid == pid));
+        let next = match cur {
+            Some(i) => (i as i32 + delta).clamp(0, procs.len() as i32 - 1) as usize,
+            None => 0,
+        };
+        self.system.selected_pid = Some(procs[next].pid);
+    }
+
+    // ─── Fare ───────────────────────────────────────────────────────────────
+
+    fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
+        self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())
+    }
+
+    fn tab_of(&self, pane: PaneId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.root.contains(pane))
+    }
+
+    fn forward_mouse(&self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
+        let Some(p) = self.panes.get(&pane) else { return false };
+        let (mode, enc) = {
+            let parser = p.parser();
+            (parser.screen().mouse_protocol_mode(), parser.screen().mouse_protocol_encoding())
+        };
+        let col = m.column.saturating_sub(inner.x).min(inner.width.saturating_sub(1));
+        let row = m.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
+        match encode_mouse(m, col, row, mode, enc) {
+            Some(bytes) => {
+                p.write(&bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn pane_wants_mouse(&self, pane: PaneId) -> bool {
+        self.panes
+            .get(&pane)
+            .map(|p| p.parser().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None)
+            .unwrap_or(false)
+    }
+
+    fn on_mouse(&mut self, m: MouseEvent) {
+        self.hover = Some((m.column, m.row));
+        if self.boot.is_some() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.boot = None;
+            }
+            return;
+        }
+        match m.kind {
+            MouseEventKind::Down(btn) => self.mouse_down(btn, &m),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(&m),
+            MouseEventKind::Drag(_) => {
+                if let Some(Drag::Forward { pane, inner }) = &self.drag {
+                    self.forward_mouse(*pane, *inner, &m);
+                }
+            }
+            MouseEventKind::Up(_) => self.mouse_up(&m),
+            MouseEventKind::ScrollUp => self.mouse_wheel(&m, 1),
+            MouseEventKind::ScrollDown => self.mouse_wheel(&m, -1),
+            MouseEventKind::Moved => {
+                let over = match self.hit_at(m.column, m.row) {
+                    Some(Hit::Pane { pane, inner }) if self.overlay.is_none() => Some((pane, inner)),
+                    _ => None,
+                };
+                self.update_link_hover(over, &m);
+                if let Some((pane, inner)) = over
+                    && Some(pane) == self.focused_pane()
+                {
+                    self.forward_mouse(pane, inner, &m);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_down(&mut self, btn: MouseButton, m: &MouseEvent) {
+        let (x, y) = (m.column, m.row);
+        let double =
+            self.last_click.is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
+        self.last_click = Some((Instant::now(), x, y));
+        let Some(hit) = self.hit_at(x, y) else { return };
+        let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+        // Sağ tık: sekme, pane başlığı ve projede bağlam menüsü.
+        if btn == MouseButton::Right && self.overlay.is_none() {
+            match &hit {
+                Hit::Tab(i) => return self.open_tab_menu(*i, x, y + 1),
+                Hit::PaneTitle(p) => return self.open_pane_menu(*p, x, y + 1),
+                Hit::Project(row) => {
+                    self.bridge.proj_sel = *row;
+                    if let Some(p) = self.selected_project().map(|p| p.path.clone()) {
+                        self.open_project_menu(p, x, y + 1);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        match hit {
+            Hit::Backdrop if matches!(self.overlay, Some(Overlay::Welcome { .. })) => {}
+            Hit::Backdrop => self.overlay = None,
+            Hit::Inert => {}
+            Hit::TabBridge => self.view = View::Bridge,
+            Hit::TabSystem => self.view = View::System,
+            Hit::TabSettings => self.view = View::Settings,
+            Hit::Tab(i) => {
+                if double && self.view == View::Term(i) {
+                    self.rename_tab_prompt(i);
+                } else {
+                    self.go_tab(i + 1);
+                    self.drag = Some(Drag::Tab { index: i });
+                }
+            }
+            Hit::PaneTitle(p) => {
+                self.focus_pane(p);
+            }
+            Hit::MenuItem(i) => {
+                let cmd = match &self.overlay {
+                    Some(Overlay::Menu(m)) => m.items.get(i).filter(|it| it.enabled).map(|it| it.cmd.clone()),
+                    _ => None,
+                };
+                if let Some(cmd) = cmd {
+                    self.run_menu(cmd);
+                }
+            }
+            Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
+            Hit::TabClose(i) => self.remove_tab(i),
+            Hit::NewTab => self.run(Action::NewTab),
+            Hit::Pane { pane, inner } => {
+                if let Some(ti) = self.tab_of(pane) {
+                    self.tabs[ti].focus = pane;
+                }
+                let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
+                if btn == MouseButton::Left && ctrl && self.open_link_at(pane, inner, m) {
+                    return;
+                }
+                let wants = self.pane_wants_mouse(pane) && !shift;
+                match btn {
+                    MouseButton::Left => {
+                        if wants {
+                            self.forward_mouse(pane, inner, m);
+                            self.drag = Some(Drag::Forward { pane, inner });
+                        } else {
+                            for p in self.panes.values_mut() {
+                                p.selection = None;
+                            }
+                            if let Some(p) = self.panes.get_mut(&pane) {
+                                let at = (y.saturating_sub(inner.y), x.saturating_sub(inner.x));
+                                p.selection = Some(Selection { anchor: at, head: at });
+                            }
+                            self.drag = Some(Drag::Select { pane, inner });
+                        }
+                    }
+                    MouseButton::Right | MouseButton::Middle => {
+                        if wants {
+                            self.forward_mouse(pane, inner, m);
+                        } else if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text())
+                            && let Some(p) = self.panes.get(&pane)
+                        {
+                            p.scroll_reset();
+                            p.paste(&text);
+                        }
+                    }
+                }
+            }
+            Hit::PaneZoom(id) => {
+                if let Some(ti) = self.tab_of(id) {
+                    self.toggle_zoom(ti, id);
+                }
+            }
+            Hit::PaneClose(id) => self.close_pane(id),
+            Hit::Divider { tab, div } => self.drag = Some(Drag::Divider { tab, div }),
+            Hit::Project(i) => {
+                if self.bridge.proj_sel == i && double {
+                    self.open_selected();
+                } else {
+                    self.bridge.proj_sel = i;
+                }
+            }
+            Hit::OpenSelected => self.open_selected(),
+            Hit::AiRefresh => self.refresh_ai(),
+            Hit::Setting(i)
+                if self.settings_items().get(i)
+                    == Some(&super::SettingItem::Setting(super::SettingKey::TermColors)) =>
+            {
+                self.settings_sel = i;
+                self.open_scheme_picker();
+            }
+            Hit::Setting(i) => {
+                self.settings_sel = i;
+                if let Some(item) = self.settings_items().get(i).copied() {
+                    self.activate_setting(item, 1);
+                }
+            }
+            Hit::TermScheme(i) => {
+                if let Some(name) = self.scheme_options().get(i).cloned() {
+                    self.overlay = None;
+                    self.set_term_colors(&name);
+                }
+            }
+            Hit::PaneSplit { pane, dir } => {
+                if let Some(ti) = self.tab_of(pane) {
+                    self.tabs[ti].focus = pane;
+                    self.view = View::Term(ti);
+                    self.split(dir);
+                }
+            }
+            Hit::Launcher(i) => {
+                let dir = self.bridge_target_dir();
+                self.launch(i, dir);
+            }
+            Hit::OpenFiles => {
+                if let Some(p) = self.bridge_target_dir() {
+                    self.open_in_explorer(&p);
+                }
+            }
+            Hit::Proc(pid) => self.system.selected_pid = Some(pid),
+            Hit::SortCol(k) => self.set_sort(k),
+            Hit::PaletteItem(i) => {
+                if let Some(Overlay::Palette(st)) = &mut self.overlay {
+                    st.selected = i;
+                    if let Some(item) = st.current().cloned() {
+                        self.overlay = None;
+                        self.run_palette(item.cmd);
+                    }
+                }
+            }
+            Hit::ConfirmYes => {
+                if let Some(Overlay::Confirm(c)) = self.overlay.take() {
+                    self.confirm(c.action);
+                }
+            }
+            Hit::ConfirmNo => self.overlay = None,
+            Hit::WelcomePrefix(i) => {
+                if let Some(Overlay::Welcome { prefix }) = &mut self.overlay {
+                    *prefix = i;
+                }
+            }
+            Hit::WelcomeDone => {
+                if let Some(Overlay::Welcome { prefix }) = &self.overlay {
+                    let p = *prefix;
+                    self.finish_welcome(p, true);
+                }
+            }
+        }
+    }
+
+    fn mouse_drag(&mut self, m: &MouseEvent) {
+        let (x, y) = (m.column, m.row);
+        match &self.drag {
+            Some(Drag::Divider { tab, div }) => {
+                let ratio = ratio_from_point(div, x, y);
+                if let Some(t) = self.tabs.get_mut(*tab) {
+                    t.root.set_ratio(&div.path, ratio);
+                }
+            }
+            Some(Drag::Select { pane, inner }) => {
+                let (pane, inner) = (*pane, *inner);
+                let row = y.clamp(inner.y, inner.bottom().saturating_sub(1)) - inner.y;
+                let col = x.clamp(inner.x, inner.right().saturating_sub(1)) - inner.x;
+                if let Some(p) = self.panes.get_mut(&pane)
+                    && let Some(sel) = &mut p.selection
+                {
+                    sel.head = (row, col);
+                }
+            }
+            Some(Drag::Forward { pane, inner }) => {
+                let (pane, inner) = (*pane, *inner);
+                self.forward_mouse(pane, inner, m);
+            }
+            Some(Drag::Tab { index }) => {
+                let from = *index;
+                if let Some(Hit::Tab(to)) = self.hit_at(x, y)
+                    && to != from
+                {
+                    self.move_tab(from, to);
+                    self.drag = Some(Drag::Tab { index: to });
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn mouse_up(&mut self, m: &MouseEvent) {
+        match self.drag.take() {
+            Some(Drag::Select { pane, .. }) => {
+                let text = self.panes.get(&pane).and_then(|p| p.selected_text());
+                match text {
+                    Some(t) if self.cfg.terminal.copy_on_select => self.set_clipboard(&t, true),
+                    Some(_) => {}
+                    None => {
+                        if let Some(p) = self.panes.get_mut(&pane) {
+                            p.selection = None;
+                        }
+                    }
+                }
+            }
+            Some(Drag::Forward { pane, inner }) => {
+                self.forward_mouse(pane, inner, m);
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_wheel(&mut self, m: &MouseEvent, dir: i32) {
+        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
+            *scroll = if dir > 0 { scroll.saturating_sub(3) } else { scroll.saturating_add(3) };
+            return;
+        }
+        if let Some(Overlay::Schemes(p)) = &mut self.overlay {
+            let n = self.term_schemes.len() + 1;
+            p.selected = if dir > 0 { p.selected.saturating_sub(1) } else { (p.selected + 1).min(n - 1) };
+            let sel = p.selected;
+            self.preview_scheme(sel);
+            return;
+        }
+        if let Some(Overlay::Palette(st)) = &mut self.overlay {
+            st.selected = if dir > 0 {
+                st.selected.saturating_sub(1)
+            } else {
+                (st.selected + 1).min(st.matches.len().saturating_sub(1))
+            };
+            return;
+        }
+        if self.overlay.is_some() {
+            return;
+        }
+        match self.hit_at(m.column, m.row) {
+            Some(Hit::Pane { pane, inner }) => {
+                if self.pane_wants_mouse(pane) {
+                    self.forward_mouse(pane, inner, m);
+                    return;
+                }
+                let Some(p) = self.panes.get(&pane) else { return };
+                let (alt, app_cursor) = {
+                    let parser = p.parser();
+                    (parser.screen().alternate_screen(), parser.screen().application_cursor())
+                };
+                if alt {
+                    // Alternatif ekranda (less, man…) tekerlek ok tuşu olur.
+                    let code = if dir > 0 { KeyCode::Up } else { KeyCode::Down };
+                    let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), app_cursor);
+                    for _ in 0..3 {
+                        p.write(&bytes);
+                    }
+                } else {
+                    p.scroll(dir * 3);
+                }
+            }
+            Some(Hit::Project(_)) => self.move_project(-dir),
+            Some(Hit::Setting(_)) => self.move_setting(-dir),
+            Some(Hit::Proc(_)) => self.move_proc(-dir * 3),
+            _ => {}
+        }
+    }
+}
