@@ -1,0 +1,307 @@
+//! Küçük, saf yardımcılar: biçimlendirme, bulanık eşleşme, PATH araması.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Bayt sayısını kısa insan okunur biçime çevirir: 1536 → "1.5K".
+pub fn fmt_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}B")
+    } else if value >= 100.0 {
+        format!("{value:.0}{}", UNITS[unit])
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
+/// Saniye başına bayt: "1.2M/s".
+pub fn fmt_rate(bytes_per_sec: f64) -> String {
+    format!("{}/s", fmt_bytes(bytes_per_sec.max(0.0) as u64))
+}
+
+/// Süreyi en büyük iki birimle yazar: "2h 14m", "4d 3h", "45s".
+pub fn fmt_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    let (days, hours, mins) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins:02}m")
+    } else if mins > 0 {
+        format!("{mins}m")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Geçmiş zamanı tek birimle, kompakt yazar: "now", "5m", "2h", "3d", "6w".
+pub fn fmt_ago(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        "now".into()
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86_400 {
+        format!("{}h", s / 3600)
+    } else if s < 86_400 * 14 {
+        format!("{}d", s / 86_400)
+    } else if s < 86_400 * 365 {
+        format!("{}w", s / (86_400 * 7))
+    } else {
+        format!("{}y", s / (86_400 * 365))
+    }
+}
+
+/// Ekran genişliği (sütun) hesabı.
+pub fn width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Metni `max` sütuna sığdırır; taşarsa sonuna "…" koyar.
+pub fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw + 1 > max {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Metnin başını kırpar (yollar için): "…\Desktop\noble".
+pub fn truncate_left(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if width(s) <= max {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out: Vec<char> = Vec::new();
+    let mut w = 0;
+    for ch in chars.iter().rev() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw + 1 > max {
+            break;
+        }
+        out.push(*ch);
+        w += cw;
+    }
+    out.push('…');
+    out.iter().rev().collect()
+}
+
+/// Metni sağa hizalı olarak `w` sütuna doldurur.
+pub fn pad_left(s: &str, w: usize) -> String {
+    let cur = width(s);
+    if cur >= w { s.to_string() } else { format!("{}{s}", " ".repeat(w - cur)) }
+}
+
+/// Metni sola hizalı olarak `w` sütuna doldurur (taşarsa kırpar).
+pub fn pad_right(s: &str, w: usize) -> String {
+    let t = truncate(s, w);
+    let cur = width(&t);
+    format!("{t}{}", " ".repeat(w.saturating_sub(cur)))
+}
+
+/// Ev dizinini "~" ile kısaltır.
+pub fn tilde(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home = home.display().to_string();
+        if let Some(rest) = text.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    text
+}
+
+/// Bulanık alt-dizi eşleşmesi. Eşleşmezse `None`; eşleşirse skor (büyük = iyi).
+/// Ardışık harfler, kelime başları ve baştan eşleşme ödüllendirilir.
+pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
+    let q: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let orig: Vec<char> = text.chars().collect();
+    let mut score = 0i32;
+    let mut qi = 0;
+    let mut prev_match: Option<usize> = None;
+    for (i, ch) in t.iter().enumerate() {
+        if qi < q.len() && *ch == q[qi] {
+            let mut s = 1;
+            if let Some(p) = prev_match
+                && p + 1 == i
+            {
+                s += 5;
+            }
+            let boundary = i == 0
+                || matches!(t[i - 1], ' ' | '-' | '_' | ':' | '/' | '\\' | '.')
+                || (orig.get(i).is_some_and(|c| c.is_uppercase()) && orig.get(i - 1).is_some_and(|c| c.is_lowercase()));
+            if boundary {
+                s += 8;
+            }
+            if i == 0 {
+                s += 6;
+            }
+            score += s;
+            prev_match = Some(i);
+            qi += 1;
+        }
+    }
+    if qi < q.len() {
+        return None;
+    }
+    // Kısa metinler hafifçe öne çıkar.
+    score -= (t.len() as i32) / 8;
+    Some(score)
+}
+
+/// PATH üzerinde çalıştırılabilir dosyayı bulur (Windows'ta PATHEXT'e bakar).
+pub fn which(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return candidate.exists().then(|| candidate.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    let exts: Vec<String> = if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        let mut v: Vec<String> = pathext.split(';').filter(|e| !e.is_empty()).map(|e| e.to_lowercase()).collect();
+        if Path::new(name).extension().is_some() {
+            v.insert(0, String::new());
+        }
+        v
+    } else {
+        vec![String::new()]
+    };
+    for dir in std::env::split_paths(&path) {
+        for ext in &exts {
+            let full = dir.join(format!("{name}{ext}"));
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    None
+}
+
+/// Bir programı arka planda çalıştırmak için `Command` hazırlar: Windows'ta
+/// `.cmd/.bat` shim'leri `cmd /C` üzerinden çalıştırılır ve konsol penceresi açılmaz.
+pub fn command_for(program: &Path) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = {
+        let ext = program.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(program);
+            c
+        } else {
+            std::process::Command::new(program)
+        }
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd
+}
+
+/// Basit base64 çözücü (OSC 52 pano istekleri için).
+pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a' + 26) as u32,
+            b'0'..=b'9' => (c - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+    let clean: Vec<u8> = input.iter().copied().filter(|c| *c != b'=' && !c.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    for chunk in clean.chunks(4) {
+        let mut acc = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            acc |= val(*c)? << (18 - 6 * i);
+        }
+        out.push((acc >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(acc as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_format() {
+        assert_eq!(fmt_bytes(512), "512B");
+        assert_eq!(fmt_bytes(1536), "1.5K");
+        assert_eq!(fmt_bytes(32 * 1024 * 1024 * 1024), "32.0G");
+        assert_eq!(fmt_bytes(300 * 1024 * 1024), "300M");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(fmt_duration(Duration::from_secs(45)), "45s");
+        assert_eq!(fmt_duration(Duration::from_secs(2 * 3600 + 14 * 60)), "2h 14m");
+        assert_eq!(fmt_duration(Duration::from_secs(4 * 86_400 + 3 * 3600)), "4d 3h");
+        assert_eq!(fmt_ago(Duration::from_secs(30)), "now");
+        assert_eq!(fmt_ago(Duration::from_secs(7200)), "2h");
+    }
+
+    #[test]
+    fn truncation() {
+        assert_eq!(truncate("hello world", 8), "hello w…");
+        assert_eq!(truncate("hi", 8), "hi");
+        assert_eq!(truncate_left("C:\\Users\\Mert\\Desktop", 10), "…t\\Desktop");
+        assert_eq!(pad_left("7", 3), "  7");
+        assert_eq!(pad_right("abc", 5), "abc  ");
+    }
+
+    #[test]
+    fn fuzzy() {
+        assert!(fuzzy_score("spr", "Split Pane Right").is_some());
+        assert!(fuzzy_score("xyz", "Split Pane Right").is_none());
+        let a = fuzzy_score("new", "New Tab").unwrap();
+        let b = fuzzy_score("new", "Go to Next Window").unwrap_or(-100);
+        assert!(a > b);
+    }
+
+    #[test]
+    fn base64() {
+        assert_eq!(base64_decode(b"aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode(b"aGk=").unwrap(), b"hi");
+    }
+}
