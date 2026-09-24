@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+<defs>
+<pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24,0 H0 V24" fill="none" stroke="#3d3326" stroke-width="0.6" opacity="0.5"/></pattern>
+<linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0.55" stop-color="#0c0a07" stop-opacity="0"/><stop offset="1" stop-color="#0c0a07" stop-opacity="1"/></linearGradient>
+</defs>
+<rect width="1280" height="640" fill="#0c0a07"/>
+<rect width="1280" height="640" fill="url(#grid)"/>
+<image href="banner.svg" x="100" y="18" width="1080" height="270"/>
+<image href="home.svg" x="120" y="300" width="1040" height="663"/>
+<rect y="300" width="1280" height="340" fill="url(#fade)"/>
+</svg>
