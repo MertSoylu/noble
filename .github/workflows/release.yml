@@ -38,7 +38,7 @@ jobs:
       - name: Paketle (Linux)
         if: runner.os == 'Linux'
         run: tar -czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release noble -C "$GITHUB_WORKSPACE" README.md LICENSE
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: ${{ matrix.archive }}
           generate_release_notes: true
