@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
+use super::input::ctrl_held;
 use super::{App, LinkHover, SearchState, ToastLevel};
 use crate::term::layout::PaneId;
 use crate::term::link;
@@ -78,7 +79,7 @@ impl App {
     /// Keys while the search is open. `false` means the key is handled normally.
     pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
         let Some(s) = self.search.as_mut() else { return false };
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = ctrl_held(&k);
         match k.code {
             KeyCode::Esc => self.close_search(),
             KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => self.search_step(1),
@@ -143,6 +144,27 @@ impl App {
                 line.map(|l| format!("{base}:{l}")).unwrap_or(base)
             }
         };
+        // Without a graphical session: URLs go to the clipboard, files to a terminal editor.
+        if !crate::util::has_desktop() {
+            match &target {
+                link::Link::Url(url) => {
+                    let url = url.clone();
+                    self.set_clipboard(&url, false);
+                    self.toast(
+                        ToastLevel::Info,
+                        format!("no browser here — copied {}", crate::util::truncate(&url, 50)),
+                    );
+                    return true;
+                }
+                link::Link::File { path, line, .. } => {
+                    let (path, line) = (path.clone(), *line);
+                    let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if path.is_file() && self.edit_in_tab(&path, line, &title) {
+                        return true;
+                    }
+                }
+            }
+        }
         match link::open(&target) {
             Ok(()) => self.toast(ToastLevel::Info, format!("opening {}", crate::util::truncate(&label, 60))),
             Err(e) => self.toast(ToastLevel::Error, format!("could not open link: {e}")),

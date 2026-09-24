@@ -607,7 +607,7 @@ pub fn find_scheme<'a>(list: &'a [TermScheme], name: &str) -> Option<&'a TermSch
         .or_else(|| list.iter().find(|s| s.label.eq_ignore_ascii_case(n)))
 }
 
-/// "#rrggbb" ya da "rrggbb" → renk.
+/// "#rrggbb" or "rrggbb" → color.
 pub fn parse_hex(text: &str) -> Option<Color> {
     let h = text.trim().trim_start_matches('#');
     if h.len() != 6 {

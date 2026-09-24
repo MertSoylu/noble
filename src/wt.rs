@@ -11,7 +11,7 @@ use crate::theme::{self, TermScheme, WINDOWS_TERMINAL};
 /// Okunan ayarlar.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WtImport {
-    /// `settings.json` → `schemes` (kimlikleri "wt:<ad>").
+    /// `settings.json` → `schemes` (ids "wt:<name>").
     pub schemes: Vec<TermScheme>,
     /// Name of the PowerShell profile's scheme (or the default profile's).
     pub profile_scheme: Option<String>,
@@ -72,7 +72,7 @@ pub fn all_schemes(import: Option<&WtImport>) -> Vec<TermScheme> {
 }
 
 pub fn parse(text: &str) -> Option<WtImport> {
-    let root: Value = serde_json::from_str(&strip_jsonc(text)).ok()?;
+    let root: Value = serde_json::from_str(&strip_jsonc(crate::util::strip_bom(text))).ok()?;
     let schemes = root
         .get("schemes")
         .and_then(Value::as_array)

@@ -70,7 +70,7 @@ fn read_windows() -> Option<Battery> {
 
 /// Interprets the `SYSTEM_POWER_STATUS` fields (separate function: testable).
 pub fn from_windows(ac: u8, flag: u8, percent: u8, life_secs: u32) -> Option<Battery> {
-    // 128 = sistem pili yok, 255 = bilinmiyor.
+    // 128 = no system battery, 255 = unknown.
     if flag & 128 != 0 || flag == 255 || percent > 100 {
         return None;
     }
@@ -85,7 +85,7 @@ pub fn from_windows(ac: u8, flag: u8, percent: u8, life_secs: u32) -> Option<Bat
     Some(Battery { percent: percent as f32, state, secs_left, secs_to_full: None })
 }
 
-/// Linux: ilk `type == Battery` girdisini okur.
+/// Linux: reads the first `type == Battery` entry.
 pub fn read_linux(root: &std::path::Path) -> Option<Battery> {
     let entries = std::fs::read_dir(root).ok()?;
     for e in entries.flatten() {

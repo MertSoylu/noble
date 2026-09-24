@@ -216,7 +216,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true   # save tabs on exit, restore them at startup
 copy_on_select = true    # copy mouse-selected text to the clipboard
-colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme) | theme | dark-plus | campbell | light-gray …
+colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | dark-plus | campbell | light-gray …
 background = ""          # override the scheme background, e.g. '#c8c8c8' (empty = the scheme's own)
 foreground = ""          # override the scheme text color, e.g. '#2e2e2e'
 notify = true            # notify when a background tab needs attention (bell, app notification)

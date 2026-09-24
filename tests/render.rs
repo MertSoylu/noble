@@ -318,6 +318,13 @@ fn bridge_keyboard_flow() {
     assert_eq!(app.visible_projects().len(), 1);
     assert_eq!(app.selected_project().unwrap().name, "dotfiles");
     save("bridge-filter-120x34", &render(&mut app, 120, 34));
+    // AltGr (Ctrl+Alt on Windows) symbols are typed as text, not dropped as shortcuts.
+    let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    for c in ['\\', '@'] {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), altgr));
+    }
+    assert!(app.bridge.filtering);
+    assert_eq!(app.bridge.filter, "dot\\@");
     key(&mut app, KeyCode::Esc);
     assert!(app.bridge.filter.is_empty());
     // Prefix + unknown key: a warning, no crash.
@@ -390,11 +397,22 @@ fn real_terminal_session() {
 }
 
 /// Shell integration: after `cd` the pane knows the real directory (OSC 9;9 / OSC 7).
+/// Every supported shell that is installed is checked (Git Bash on Windows).
 #[test]
 fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
     if cfg!(windows) {
         check_cwd_tracking("cmd.exe");
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_cwd_tracking(&git_bash.display().to_string());
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_cwd_tracking(&path.display().to_string());
+            }
+        }
     }
 }
 
@@ -601,6 +619,17 @@ fn settings_screen_mouse_and_keys() {
     app.settings_sel = claude;
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.cfg.ai.providers.iter().any(|p| p == "claude"));
+    // The Claude hooks row only exists when Claude Code is installed (or our hooks are still set).
+    let hooks = noble::app::SettingItem::Setting(noble::app::SettingKey::ClaudeHooks);
+    assert!(app.settings_items().contains(&hooks));
+    assert!(render(&mut app, 160, 45).contains("Claude Code status hooks"));
+    app.ai_installed.retain(|id| *id != "claude");
+    assert!(!app.settings_items().contains(&hooks));
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("status hooks"), "{text}");
+    app.hooks_installed = true;
+    assert!(app.settings_items().contains(&hooks));
+    app.hooks_installed = false;
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, View::Bridge);
     // Keyboard navigation in the theme grid does not overflow.
@@ -1458,6 +1487,7 @@ fn heavy_output_throughput() {
 /// invoked as `"C:\...\claude.exe"`.
 #[test]
 fn cmd_runs_quoted_commands() {
+    // cmd.exe only exists on Windows; Unix shell quoting is covered by `pane::tests::unix_quoting`.
     if !cfg!(windows) {
         return;
     }

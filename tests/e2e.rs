@@ -131,7 +131,7 @@ fn full_session_lifecycle() {
     // The config template is written on the first run.
     assert!(home.join("config.toml").exists());
 
-    // Yeni sekme + komut.
+    // New tab + command.
     h.send(b"t");
     h.wait_for("drag border", 10);
     std::thread::sleep(Duration::from_millis(1500));

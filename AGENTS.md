@@ -20,8 +20,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo test --release --test render heavy_output -- --ignored --nocapture` — 50k-line output throughput
 - `cargo clippy --all-targets` — kept warning-free
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
-- CI: `.github/workflows/ci.yml` (Windows: fmt + clippy `-D warnings` + all tests; Linux: clippy + `--lib`),
-  `release.yml` (Windows/Linux binaries on a `v*` tag)
+- CI: `.github/workflows/ci.yml` (Windows and Linux: fmt + clippy `-D warnings` + all tests, Linux with zsh and
+  fish installed; plus a static musl build), `release.yml` (Windows x86_64, Linux x86_64/ARM64 musl binaries on
+  a `v*` tag; `gh workflow run release.yml --ref <branch>` builds them all without publishing)
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
 - `cargo run -- --no-boot` — run without the boot animation; `--paths` prints the config/data locations
 - `NOBLE_HOME` moves the config and data directory (to experiment without touching the real config)
@@ -30,12 +31,24 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Language:** everything is written in **English**: documentation (README, CONTRIBUTING, CHANGELOG, this
   file, workflow and config comments), issue/PR text, commit messages, code identifiers, code comments and UI
   text. This overrides any personal language preference.
-- **After every change, update the dev build:** run `cmd /c "%CD%\install.cmd"` (from PowerShell use the full
-  path; the relative name is not found) so the user can open the latest state by typing `noble-dev`. This step
-  is never skipped. The script builds in release mode and installs `~/.cargo/bin/noble-dev.exe`; it never
-  touches the stable `noble`. It renames a running noble-dev.exe out of the way first. `noble-dev` shows
-  "NOBLE dev" in the top bar and saves its session to `session-dev.json` (`util::is_dev_build`); config and
-  data are shared.
+- **After every change, update the dev build:** on Windows run `cmd /c "%CD%\install.cmd"` (from PowerShell use
+  the full path; the relative name is not found), on Linux/macOS `./install.sh`, so the user can open the latest
+  state by typing `noble-dev`. This step is never skipped. The scripts build in release mode and install
+  `~/.cargo/bin/noble-dev(.exe)`; they never touch the stable `noble` and work while noble-dev is running.
+  `noble-dev` shows "NOBLE dev" in the top bar and saves its session to `session-dev.json`
+  (`util::is_dev_build`); config and data are shared.
+- **Windows and Linux are equal platforms.** Every feature must work on both, or degrade gracefully where the
+  OS lacks something (e.g. no desktop over SSH: `util::has_desktop`). When touching OS-specific code:
+  - Keep platform branches small and side by side (`cfg!(windows)` / `#[cfg(...)]` in the same function), each
+    with a comment naming what the other platform does; never leave a platform with a silent no-op.
+  - Name things by what they do, not by the OS (paths via `dirs`, programs via `util::which`, `Path` joins —
+    no hard-coded `\` or `/`, `.exe` or drive letters outside Windows-only branches).
+  - Shells: PowerShell and cmd on Windows; bash, zsh and fish everywhere (Git Bash too); a new shell feature
+    needs all of them (`term/pane.rs` `ShellKind`, `term/integration.rs`).
+  - Tests that need a real shell or tool run on both platforms, choosing the command per OS, and cover every
+    installed shell; a Windows-only or Linux-only test returns early on the other OS with a comment saying
+    why. Both CI jobs must stay green — a change is not done while either fails.
+  - User-facing docs (README, config comments, UI text) describe both platforms.
 - README images are generated with `cargo run --example screenshots` (`docs/assets/*.svg`, fake data);
   regenerate them when a screen shown in the README changes. The banner (`docs/assets/banner.svg`) is
   hand-written.
@@ -69,6 +82,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
   shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/input.rs` xterm key/mouse encoding and AltGr
   handling.
+- **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT`; bash (`--rcfile`),
+  zsh (`ZDOTDIR`) and fish (`--init-command`) get scripts from `term/integration.rs`, written to
+  `<data>/shell/` before a pane starts (`ShellSpec::prepared`). The scripts source the user's own config first,
+  then emit OSC 7 on every prompt; Git Bash/Cygwin paths are turned into Windows paths.
+- **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
+  owning process); without a system clipboard copied text goes out as OSC 52.
 - **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133);
   `App::on_pty_output` treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).

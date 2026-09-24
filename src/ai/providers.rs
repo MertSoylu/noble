@@ -197,9 +197,26 @@ fn agy_credential_exists() -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("gemini:antigravity"))
 }
 
+/// On Linux the same keyring entry (service `gemini`, user `antigravity`) lives in
+/// the Secret Service. `SearchItems` only returns item paths, never a secret.
 #[cfg(not(windows))]
 fn agy_credential_exists() -> bool {
-    false
+    let Some(gdbus) = util::which("gdbus") else { return false };
+    util::command_for(&gdbus)
+        .args(["call", "--session", "--timeout", "3", "--dest", "org.freedesktop.secrets"])
+        .args(["--object-path", "/org/freedesktop/secrets", "--method"])
+        .args(["org.freedesktop.Secret.Service.SearchItems", "{'service': 'gemini', 'username': 'antigravity'}"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| secret_search_found(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// `SearchItems` reply: `([objectpath '/org/…/1'], @ao [])` — unlocked and locked
+/// item paths. Any path (even a locked one) means a session exists.
+#[cfg_attr(windows, allow(dead_code))]
+fn secret_search_found(reply: &str) -> bool {
+    reply.contains("/org/freedesktop/secrets/")
 }
 
 fn agy_detect(env: &Env) -> Presence {
@@ -448,6 +465,14 @@ mod tests {
         assert_eq!(u.windows[0].label, "5H");
         assert_eq!(u.windows[1].used, 44);
         assert_eq!(u.plan.as_deref(), Some("PLUS"));
+    }
+
+    #[test]
+    fn agy_secret_service_reply() {
+        assert!(secret_search_found("([objectpath '/org/freedesktop/secrets/collection/login/7'], @ao [])"));
+        assert!(secret_search_found("(@ao [], [objectpath '/org/freedesktop/secrets/collection/login/7'])"));
+        assert!(!secret_search_found("(@ao [], @ao [])"));
+        assert!(!secret_search_found(""));
     }
 
     #[test]

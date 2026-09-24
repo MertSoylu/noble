@@ -85,8 +85,9 @@ and a sortable process table.
 <td valign="top">
 
 **🎨 20 themes, live config**<br>
-Amber, Ice, Synthwave, Catppuccin, Tokyo Night, Nord, Gruvbox… Terminal panes can follow your Windows
-Terminal color scheme. `config.toml` reloads live and a bad value never crashes the app.
+Amber, Ice, Synthwave, Catppuccin, Tokyo Night, Nord, Gruvbox… Terminal panes follow the theme, a built-in
+scheme or, on Windows, your Windows Terminal scheme. `config.toml` reloads live and a bad value never crashes
+the app.
 
 </td>
 </tr>
@@ -127,8 +128,9 @@ from the palette.
 
 ## 📦 Install
 
-**Prebuilt binaries:** download the archive for Windows or Linux from the
+**Prebuilt binaries:** download the archive for Windows (x86_64) or Linux (x86_64, ARM64) from the
 [latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put `noble` on your PATH.
+The Linux binaries are static, so they run on any distribution.
 
 **With Cargo** (Rust 1.88+):
 
@@ -157,8 +159,12 @@ binary for your platform and replaces the installed one; restart NOBLE afterward
 <br>
 
 Any truecolor terminal with a regular monospace font works, no Nerd Font needed: Windows Terminal, WezTerm,
-Kitty, Alacritty, iTerm2. Cascadia Code / Cascadia Mono render every glyph NOBLE uses (box drawing, block
-elements, braille).
+Kitty, Alacritty, GNOME Terminal, Konsole, iTerm2. Cascadia Code / Cascadia Mono render every glyph NOBLE uses
+(box drawing, block elements, braille).
+
+Copy and paste use the system clipboard (Windows, X11 and Wayland). Without one, e.g. over SSH, copied text is
+sent to your terminal with OSC 52, links are copied instead of opened, and files and the config open in a
+terminal editor (`$EDITOR`, else nano or vim).
 
 To open NOBLE in its own tab from the Windows Terminal dropdown:
 
@@ -175,8 +181,8 @@ noble [--config <path>] [--no-boot]
 </details>
 
 > [!NOTE]
-> Windows is the primary platform and runs the full test suite in CI. Linux is built and unit-tested in CI.
-> macOS should build but is not tested yet. Reports and fixes are welcome.
+> Windows and Linux are both fully supported: CI runs the whole test suite, real terminals and end-to-end
+> included, on both. macOS should build but is not tested yet. Reports and fixes are welcome.
 
 ## ⌨ Keys
 
@@ -222,7 +228,7 @@ not as `ctrl+alt` chords.
 ## 🔧 Configuration
 
 `noble --paths` prints the locations (Windows: `%APPDATA%\noble\config.toml`, data in `%LOCALAPPDATA%\noble`;
-`NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
+Linux: `~/.config/noble/config.toml`, data in `~/.local/share/noble`; `NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
 Errors show up as a toast and never crash the app. Most options can also be changed from the Settings screen.
 
 <details>
@@ -244,7 +250,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true
 copy_on_select = true
-colors = "windows-terminal"  # windows-terminal (your PowerShell scheme) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
+colors = "windows-terminal"  # windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
 background = ""          # override the scheme's background, e.g. "#c8c8c8"
 foreground = ""          # override the scheme's text color
 notify = true            # toast + bell when a background tab needs attention
@@ -324,10 +330,17 @@ moment Claude asks for permission.
 
 <br>
 
-NOBLE learns each pane's working directory from OSC 7 / OSC 9;9. For PowerShell it wraps your existing prompt
-(oh-my-posh included) to emit OSC 9;9; for `cmd.exe` it sets a `PROMPT` that does the same unless you already
-have one. Bash/zsh prompts that emit OSC 7 work automatically. This is what lets splits open in the current
-directory and sessions restore where you left off. Each prompt (OSC 7, OSC 9;9 or OSC 133) also tells NOBLE
+NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, with no setup:
+
+- **PowerShell** (Windows and Linux): your existing prompt (oh-my-posh included) is wrapped to emit OSC 9;9.
+- **cmd.exe**: a `PROMPT` that does the same, unless you already have one.
+- **bash, zsh, fish** (Git Bash too): your own `~/.bashrc`, `.zshrc` or `config.fish` loads first, then a
+  small hook reports OSC 7 on every prompt. Starship, oh-my-zsh and friends keep working. The hook scripts live
+  in the data folder under `shell/`; pass `--norc` (bash), `-f` (zsh) or `--no-config` (fish) in `shell_args`
+  to start the shell untouched.
+- Any other shell whose prompt emits OSC 7 works too.
+
+This is what lets splits open in the current directory and sessions restore where you left off. Each prompt (OSC 7, OSC 9;9 or OSC 133) also tells NOBLE
 that the previous command finished: it refreshes that repository's git status and, for background tabs,
 reports long-running commands. OSC 9 / OSC 777 notifications and the bell mark a background tab with `◆`.
 

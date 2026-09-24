@@ -88,7 +88,7 @@ pub enum PromptPurpose {
 }
 
 impl PromptPurpose {
-    /// Girilebilecek en uzun metin (yollar uzun olabilir).
+    /// Maximum input length (paths can be long).
     pub fn max_len(&self) -> usize {
         match self {
             PromptPurpose::AddRoot => 260,
@@ -308,7 +308,7 @@ struct PaneSignal {
     notice: Option<String>,
     /// If the prompt returned and the user started a command, that command's duration.
     finished: Option<Duration>,
-    /// Prompt geri geldiyse pane'in dizini.
+    /// The pane's directory when its prompt came back.
     cwd: Option<PathBuf>,
 }
 
@@ -329,6 +329,7 @@ pub struct App {
     pub theme: Theme,
     pub keymap: Keymap,
     pub shell: ShellSpec,
+    pub clipboard: crate::clipboard::Clipboard,
     pub view: View,
     pub tabs: Vec<Tab>,
     pub panes: HashMap<PaneId, Pane>,
@@ -504,7 +505,7 @@ impl App {
     ) -> App {
         let theme = Theme::by_name(&cfg.general.theme, cfg.general.transparent);
         let keymap = Keymap::from_config(&cfg.keys);
-        let shell = resolve_shell(&cfg.terminal);
+        let shell = resolve_shell(&cfg.terminal, &paths.data);
         let operator = if cfg.general.operator.trim().is_empty() {
             std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "operator".into())
         } else {
@@ -519,6 +520,8 @@ impl App {
             theme,
             keymap,
             shell,
+            // OSC 52 goes to the real terminal only, never into test output.
+            clipboard: crate::clipboard::Clipboard::new(services.is_some()),
             view: View::Bridge,
             tabs: Vec::new(),
             panes: HashMap::new(),
@@ -950,7 +953,7 @@ impl App {
         self.bridge.proj_sel = self.bridge.proj_sel.min(n.saturating_sub(1));
     }
 
-    /// Filtreye uyan projelerin indeksleri.
+    /// Indices of the projects that match the filter.
     pub fn visible_projects(&self) -> Vec<usize> {
         let q = self.bridge.filter.trim();
         if q.is_empty() {
@@ -1133,14 +1136,28 @@ impl App {
     }
 
     pub fn set_clipboard(&mut self, text: &str, announce: bool) {
-        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())) {
-            Ok(()) => {
+        match self.clipboard.set(text) {
+            Some(via) => {
                 if announce {
                     let n = text.chars().count();
-                    self.toast(ToastLevel::Ok, format!("copied {n} chars"));
+                    let how = if via == crate::clipboard::Copied::Terminal { " via the terminal" } else { "" };
+                    self.toast(ToastLevel::Ok, format!("copied {n} chars{how}"));
                 }
             }
-            Err(_) => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+        }
+    }
+
+    /// Pastes the system clipboard into a pane.
+    pub fn paste_clipboard(&mut self, pane: PaneId) {
+        match self.clipboard.get() {
+            Some(text) => {
+                if let Some(p) = self.panes.get(&pane) {
+                    p.scroll_reset();
+                    p.paste(&text);
+                }
+            }
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
         }
     }
 
@@ -1229,7 +1246,7 @@ impl App {
         let old = std::mem::replace(&mut self.cfg, cfg);
         self.theme = Theme::by_name(&self.cfg.general.theme, self.cfg.general.transparent);
         self.keymap = Keymap::from_config(&self.cfg.keys);
-        self.shell = resolve_shell(&self.cfg.terminal);
+        self.shell = resolve_shell(&self.cfg.terminal, &self.paths.data);
         self.launchers = launcher_availability(&self.cfg.launchers);
         if !self.cfg.general.operator.trim().is_empty() {
             self.operator = self.cfg.general.operator.trim().to_string();

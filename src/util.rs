@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Is this a dev install: `install.cmd` installs the binary as `noble-dev` so it
+/// Is this a dev install: `install.cmd` / `install.sh` install the binary as `noble-dev` so it
 /// runs side by side with the stable `noble`.
 pub fn is_dev_build() -> bool {
     static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -136,16 +136,24 @@ pub fn pad_right(s: &str, w: usize) -> String {
     format!("{t}{}", " ".repeat(w.saturating_sub(cur)))
 }
 
+/// Drops a UTF-8 byte order mark: JSON written by Windows tools (PowerShell 5
+/// `Set-Content -Encoding utf8`, Notepad) may start with one and serde rejects it.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Shortens the home directory to "~".
 pub fn tilde(path: &Path) -> String {
-    let text = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
-        let home = home.display().to_string();
-        if let Some(rest) = text.strip_prefix(&home) {
-            return format!("~{rest}");
+    // Compared by path components: "C:\Users\Mert2" is not under "C:\Users\Mert".
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".into();
         }
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
     }
-    text
+    path.display().to_string()
 }
 
 /// Fuzzy substring match. `None` when there is no match; otherwise a score
@@ -188,6 +196,17 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     // Short texts get a slight edge.
     score -= (t.len() as i32) / 8;
     Some(score)
+}
+
+/// Is there a graphical session to open files, folders and URLs in? Always on
+/// Windows and macOS; elsewhere an X11/Wayland display and `xdg-open` are needed
+/// (not the case over plain SSH or on a text console).
+pub fn has_desktop() -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
+    }
+    let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|d| !d.is_empty()));
+    display && which("xdg-open").is_some()
 }
 
 /// Finds an executable on PATH (checks PATHEXT on Windows).
@@ -242,6 +261,24 @@ pub fn command_for(program: &Path) -> std::process::Command {
     cmd
 }
 
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Simple base64 encoder (to send OSC 52 to the outer terminal).
+pub fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let acc = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (*b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64[(acc >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Simple base64 decoder (for OSC 52 clipboard requests).
 pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
@@ -275,6 +312,27 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_round_trip() {
+        for text in ["", "f", "fo", "foo", "foob", "fooba", "foobar", "çğ ✓"] {
+            let encoded = base64_encode(text.as_bytes());
+            assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes(), "{encoded}");
+        }
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn tilde_only_shortens_paths_under_home() {
+        let home = dirs::home_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(tilde(&home), "~");
+        assert_eq!(tilde(&home.join("src")), format!("~{sep}src"));
+        // A sibling that only shares the name as a text prefix stays as it is.
+        let sibling = PathBuf::from(format!("{}2", home.display())).join("x");
+        assert_eq!(tilde(&sibling), sibling.display().to_string());
+    }
 
     #[test]
     fn bytes_format() {

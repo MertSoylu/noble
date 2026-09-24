@@ -311,7 +311,7 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
         let start = x;
         x = hud::put(buf, x, y, &text, tab_style(active), tw);
         if app.tabs[i].alert && !active {
-            // Dikkat isteyen sekme: vurgulu elmas (tamamlanan komut, zil, bildirim).
+            // Tab that needs attention: highlighted diamond (finished command, bell, notification).
             hud::put(buf, x - 1, y, "◆", Style::default().fg(th.warn).bg(th.raised).add_modifier(Modifier::BOLD), 1);
         } else if app.tabs[i].activity && !active {
             hud::put(buf, x - 1, y, "•", Style::default().fg(th.accent2).bg(th.raised), 1);

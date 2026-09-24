@@ -12,7 +12,7 @@ fn now() -> i64 {
 
 fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
     let text = std::fs::read_to_string(file).ok()?;
-    serde_json::from_str(&text).ok()
+    serde_json::from_str(crate::util::strip_bom(&text)).ok()
 }
 
 /// Atomic write: temp file first, then rename.
