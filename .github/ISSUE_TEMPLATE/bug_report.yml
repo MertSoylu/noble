@@ -30,7 +30,7 @@ body:
     attributes:
       label: NOBLE version
       description: Output of `noble --version`
-      placeholder: noble 1.0.0
+      placeholder: noble 1.1.0
     validations:
       required: true
   - type: input

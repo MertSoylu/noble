@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.0]
+
 ### Added
 - Full Linux support, on par with Windows. bash, zsh and fish (Git Bash on Windows too) now report their
   working directory without any setup: your own `~/.bashrc`, `.zshrc` or `config.fish` loads first, then NOBLE
@@ -66,5 +68,6 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/MertSoylu/noble/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/MertSoylu/noble/releases/tag/v1.0.0
