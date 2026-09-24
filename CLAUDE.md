@@ -22,7 +22,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
 - CI: `.github/workflows/ci.yml` (Windows and Linux: fmt + clippy `-D warnings` + all tests, Linux with zsh and
   fish installed; plus a static musl build), `release.yml` (Windows x86_64, Linux x86_64/ARM64 musl binaries on
-  a `v*` tag)
+  a `v*` tag; `gh workflow run release.yml --ref <branch>` builds them all without publishing)
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
 - `cargo run -- --no-boot` — run without the boot animation; `--paths` prints the config/data locations
 - `NOBLE_HOME` moves the config and data directory (to experiment without touching the real config)
