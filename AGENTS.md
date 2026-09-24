@@ -27,9 +27,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `NOBLE_HOME` moves the config and data directory (to experiment without touching the real config)
 
 ## Rules
-- **Language:** all documentation (README, CONTRIBUTING, CHANGELOG, this file, workflow and config comments,
-  issue/PR text) and all **commit messages** are written in **English**. This overrides any personal preference
-  for Turkish commit messages or comments. Code identifiers, code comments and UI text are in English.
+- **Language:** everything is written in **English**: documentation (README, CONTRIBUTING, CHANGELOG, this
+  file, workflow and config comments), issue/PR text, commit messages, code identifiers, code comments and UI
+  text. This overrides any personal language preference.
 - **After every change, update the dev build:** run `cmd /c "%CD%\install.cmd"` (from PowerShell use the full
   path; the relative name is not found) so the user can open the latest state by typing `noble-dev`. This step
   is never skipped. The script builds in release mode and installs `~/.cargo/bin/noble-dev.exe`; it never
