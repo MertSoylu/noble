@@ -6,6 +6,13 @@ rust-version = "1.88"
 description = "NOBLE — retro-futurist HUD terminal workspace: real shells, projects, system sensors and AI quota in one cockpit"
 license = "MIT"
 readme = "README.md"
+authors = ["Mert Soylu"]
+repository = "https://github.com/MertSoylu/noble"
+homepage = "https://github.com/MertSoylu/noble"
+keywords = ["terminal", "tui", "ratatui", "workspace", "multiplexer"]
+categories = ["command-line-utilities", "development-tools"]
+# crates.io paketi yalnızca derlemek için gerekenleri taşır.
+exclude = [".github/", ".claude/", "docs/", "tests/", "examples/", "install.cmd", "CLAUDE.md"]
 
 [lib]
 name = "noble"
