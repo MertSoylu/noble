@@ -28,7 +28,23 @@ pub struct GitInfo {
     pub branch: Option<String>,
     pub last_subject: Option<String>,
     pub last_commit: Option<i64>,
+    /// Son commit'ler, en yenisi önce (Home'daki proje kartı için).
+    pub commits: Vec<Commit>,
+    /// Değişen dosyalar: iki harflik porcelain durumu ve yol (en fazla `MAX_CHANGES`).
+    pub changes: Vec<(String, String)>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Commit {
+    pub hash: String,
+    pub time: i64,
+    pub author: String,
+    pub subject: String,
+}
+
+/// Proje kartı için tutulan en fazla commit ve dosya sayısı.
+pub const MAX_COMMITS: usize = 8;
+pub const MAX_CHANGES: usize = 40;
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -208,6 +224,11 @@ pub fn parse_status(output: &str) -> GitInfo {
             if line.starts_with("??") {
                 info.untracked += 1;
             }
+            if info.changes.len() < MAX_CHANGES && line.len() > 3 {
+                // "XY yol" ya da yeniden adlandırmada "XY eski -> yeni".
+                let path = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]).trim_matches('"');
+                info.changes.push((line[..2].to_string(), path.to_string()));
+            }
         }
     }
     info
@@ -228,17 +249,33 @@ fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
     if let Ok(log) = util::command_for(git)
         .arg("-C")
         .arg(path)
-        .args(["log", "-1", "--format=%ct%x1f%s"])
+        .args(["log", &format!("-{MAX_COMMITS}"), "--format=%h%x1f%ct%x1f%an%x1f%s"])
         .stderr(std::process::Stdio::null())
         .output()
     {
-        let text = String::from_utf8_lossy(&log.stdout);
-        if let Some((ts, subject)) = text.trim().split_once('\u{1f}') {
-            info.last_commit = ts.parse().ok();
-            info.last_subject = Some(subject.to_string());
+        info.commits = parse_log(&String::from_utf8_lossy(&log.stdout));
+        if let Some(c) = info.commits.first() {
+            info.last_commit = Some(c.time);
+            info.last_subject = Some(c.subject.clone());
         }
     }
     Some(info)
+}
+
+/// `git log --format=%h%x1f%ct%x1f%an%x1f%s` çıktısını çözer.
+pub fn parse_log(output: &str) -> Vec<Commit> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(4, '\u{1f}');
+            Some(Commit {
+                hash: f.next()?.to_string(),
+                time: f.next()?.parse().ok()?,
+                author: f.next()?.to_string(),
+                subject: f.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Proje iş parçacığına istekler.
@@ -361,6 +398,20 @@ mod tests {
         assert_eq!(fresh.branch.as_deref(), Some("main"));
         let gone = parse_status("## feat...origin/feat [gone]\n");
         assert_eq!(gone.ahead, 0);
+        assert_eq!(info.changes, vec![(" M".into(), "src/a.rs".into()), ("??".into(), "new.txt".into())]);
+        let renamed = parse_status("## main\nR  old.rs -> new.rs\n");
+        assert_eq!(renamed.changes, vec![("R ".into(), "new.rs".into())]);
+    }
+
+    #[test]
+    fn log_parsing() {
+        let out = "a1b2c3d\u{1f}1700000000\u{1f}Mert\u{1f}feat: x \u{1f} y\nbad line\n";
+        let log = parse_log(out);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].hash, "a1b2c3d");
+        assert_eq!(log[0].time, 1_700_000_000);
+        assert_eq!(log[0].author, "Mert");
+        assert_eq!(log[0].subject, "feat: x \u{1f} y");
     }
 
     #[test]

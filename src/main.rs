@@ -66,7 +66,8 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             "-V" | "--version" => {
-                println!("noble {}", env!("CARGO_PKG_VERSION"));
+                let dev = if noble::util::is_dev_build() { " (dev build)" } else { "" };
+                println!("noble {}{dev}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--config" => match args.next() {
@@ -86,7 +87,12 @@ fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, crossterm::terminal::SetTitle("NOBLE"))?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::terminal::SetTitle(if noble::util::is_dev_build() { "NOBLE dev" } else { "NOBLE" })
+    )?;
     #[cfg(not(windows))]
     execute!(out, crossterm::event::EnableBracketedPaste)?;
     // Ana iş parçacığı paniklerse terminali geri yükle; arka plan panikleri

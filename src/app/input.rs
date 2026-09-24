@@ -268,6 +268,35 @@ impl App {
                     _ => true,
                 }
             }
+            Overlay::Launchers { selected } => {
+                let list = self.installed_launchers();
+                let sel = (*selected).min(list.len().saturating_sub(1));
+                match k.code {
+                    KeyCode::Esc | KeyCode::Char('q') => false,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *selected = sel.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                        *selected = (sel + 1).min(list.len().saturating_sub(1));
+                        true
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        if let Some(&i) = list.get(sel) {
+                            self.change_launcher(i, false, 1);
+                        }
+                        true
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
+                        let dir = if matches!(k.code, KeyCode::Left | KeyCode::Char('h')) { -1 } else { 1 };
+                        if let Some(&i) = list.get(sel) {
+                            self.change_launcher(i, true, dir);
+                        }
+                        true
+                    }
+                    _ => true,
+                }
+            }
             Overlay::Help { scroll } => match k.code {
                 KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter => false,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -383,11 +412,13 @@ impl App {
             }
             return;
         }
-        if let KeyCode::Char(c) = k.code
-            && !ctrl
-            && !k.modifiers.contains(KeyModifiers::ALT)
-            && let Some(i) = self.launchers.iter().position(|(l, _)| l.key.starts_with(c))
-        {
+        let launcher = match k.code {
+            KeyCode::Char(c) if !ctrl && !k.modifiers.contains(KeyModifiers::ALT) => {
+                self.quick_launchers().find(|(_, l)| l.key.starts_with(c)).map(|(i, _)| i)
+            }
+            _ => None,
+        };
+        if let Some(i) = launcher {
             let dir = self.bridge_target_dir();
             self.launch(i, dir);
             return;
@@ -695,6 +726,15 @@ impl App {
                 if let Some(item) = self.settings_items().get(i).copied() {
                     self.activate_setting(item, 1);
                 }
+            }
+            Hit::LaunchShow(i) | Hit::LaunchKey(i) => {
+                if let Some(Overlay::Launchers { selected }) = &mut self.overlay
+                    && let Some(row) =
+                        self.launchers.iter().enumerate().filter(|(_, (_, ok))| *ok).position(|(j, _)| j == i)
+                {
+                    *selected = row;
+                }
+                self.change_launcher(i, matches!(hit, Hit::LaunchKey(_)), 1);
             }
             Hit::TermScheme(i) => {
                 if let Some(name) = self.scheme_options().get(i).cloned() {

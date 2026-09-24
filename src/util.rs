@@ -5,6 +5,18 @@ use std::time::Duration;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Geliştirme kurulumu mu: `install.cmd` ikiliyi `noble-dev` adıyla kurar ki
+/// kararlı `noble` ile yan yana çalışsın.
+pub fn is_dev_build() -> bool {
+    static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEV.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().eq_ignore_ascii_case("noble-dev")))
+            .unwrap_or(false)
+    })
+}
+
 /// Bayt sayısını kısa insan okunur biçime çevirir: 1536 → "1.5K".
 pub fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];

@@ -45,15 +45,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let signed_in = signed_in(app);
     let sessions = app.all_agent_sessions();
     let room = right.height.saturating_sub(hero_h + 10);
-    // Kullanım grafiği yalnızca sistem paneline yer kalıyorsa gösterilir.
     let shown = !signed_in.is_empty() || !sessions.is_empty();
-    let graphs = shown && ai_height(app, &signed_in, sessions.len(), true) <= room;
-    let ai_h = if shown { ai_height(app, &signed_in, sessions.len(), graphs).min(room + hero_h) } else { 0 };
+    let ai_h = if shown { ai_height(app, &signed_in, sessions.len()).min(room + hero_h) } else { 0 };
     // Sağ sütun saatin altından başlar: soldaki proje paneliyle aynı hizada.
     let top = right.y + hero_h;
     let avail = right.height.saturating_sub(hero_h);
     if ai_h >= 5 {
-        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, &sessions, graphs, hits);
+        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, &sessions, hits);
         system_panel(buf, Rect::new(right.x, top + ai_h, right.width, avail - ai_h), app, hits);
     } else {
         system_panel(buf, Rect::new(right.x, top, right.width, avail), app, hits);
@@ -69,7 +67,7 @@ fn greeting(hour: u32) -> &'static str {
     }
 }
 
-fn capitalize(s: &str) -> String {
+pub(super) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
@@ -192,6 +190,15 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let branch_w = if w >= 48 { (w / 5).clamp(6, 18) } else { 0 };
     let gaps = 1 + u16::from(status_w > 0) + u16::from(branch_w > 0);
     let name_w = w.saturating_sub(2 + branch_w + status_w + ago_w + gaps);
+    let header = list_h >= 6 && branch_w > 0;
+    // Liste kısa kalıyorsa altındaki boşluğa seçili projenin kartı gelir.
+    let needed = u16::from(header) + vis.len() as u16;
+    let card_h = if app.projects_loaded && !vis.is_empty() && footer_h == 3 && w >= 40 && list_h >= needed + CARD_MIN {
+        list_h - needed
+    } else {
+        0
+    };
+    list_h -= card_h;
 
     if !app.projects_loaded {
         hud::put(
@@ -215,7 +222,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         hud::put(buf, x, y, &format!("Nothing matches “{}”", app.bridge.filter), th.dim(), w);
     } else {
         // Sütun başlıkları: yer varsa listenin üstünde, silik.
-        if list_h >= 6 && branch_w > 0 {
+        if header {
             let mut hx = x + 1;
             hud::put(buf, hx, y, "PROJECT", th.dim(), name_w);
             hx += name_w + 1;
@@ -292,35 +299,38 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let a = p.last_active.map(ago).unwrap_or_default();
             hud::put(buf, cx, ry, &util::pad_left(&a, ago_w as usize), st(th.dim()), ago_w);
             hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Project(row)));
-            // Fare üzerindeyse sağ uçta hızlı eylemler.
+            // Fare üzerindeyse sağ uçta hızlı eylemler. Yalnızca "LAST" sütununun
+            // (ve iki yanındaki boşluğun) yerini kaplar; git durumu görünür kalır.
             let hovered = app.hover.is_some_and(|(hx, hy)| hy == ry && hx >= inner.x && hx < inner.right());
             if hovered && app.overlay.is_none() && w >= 40 {
-                let acts = [
-                    (" code ", ProjectAct::Code),
-                    (" pull ", ProjectAct::Pull),
-                    (if pinned { " ★ " } else { " ☆ " }, ProjectAct::Pin),
-                    (" ⋯ ", ProjectAct::More),
-                ];
-                let total: u16 = acts.iter().map(|(l, _)| util::width(l) as u16 + 1).sum();
-                let mut ax = (x + w).saturating_sub(total);
+                let acts = [(if pinned { " ★ " } else { " ☆ " }, ProjectAct::Pin), (" ⋯ ", ProjectAct::More)];
+                let total: u16 = acts.iter().map(|(l, _)| util::width(l) as u16).sum();
+                let mut ax = (x + w).saturating_sub(total).max(inner.x);
                 for (label, act) in acts {
                     let lw = util::width(label) as u16;
                     hud::put(buf, ax, ry, label, Style::default().fg(th.fg).bg(th.raised), lw);
                     hits.push((Rect::new(ax, ry, lw, 1), Hit::ProjectAct(row, act)));
-                    ax += lw + 1;
+                    ax += lw;
                 }
             }
         }
     }
 
+    if card_h > 0
+        && let Some(p) = app.selected_project()
+    {
+        project_card(buf, Rect::new(inner.x, y + list_h, inner.width, card_h), app, p);
+    }
     if footer_h == 0 {
         return;
     }
     let by = inner.bottom() - 1;
     if footer_h == 3 {
-        // Seçili proje: açık AI oturumları, git durumu cümlesi ve son commit.
+        // Seçili proje: açık AI oturumları, git durumu cümlesi ve son commit
+        // (kart açıksa son commit orada yazdığı için klasör yolu).
         if let Some(p) = app.selected_project() {
             let detail = match p.git.as_ref().and_then(|g| g.last_subject.clone().map(|s| (s, g.last_commit))) {
+                _ if card_h > 0 => util::tilde(&p.path),
                 Some((s, Some(t))) => format!("last commit: {s} · {} ago", ago_ts(t)),
                 Some((s, None)) => format!("last commit: {s}"),
                 None => util::tilde(&p.path),
@@ -353,12 +363,102 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         *cx += 1;
     };
     button(&mut cx, "⏎", "Open", Hit::OpenSelected, true);
-    for (i, (l, ok)) in app.launchers.iter().enumerate() {
-        button(&mut cx, &l.key, &capitalize(&l.name), Hit::Launcher(i), *ok);
+    for (i, l) in app.quick_launchers() {
+        button(&mut cx, &l.key, &capitalize(&l.name), Hit::Launcher(i), true);
     }
     button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
     if cx + 12 <= end {
         hud::put_right(buf, end, by, "/ search", th.dim());
+    }
+}
+
+/// Proje kartının en az yüksekliği (ayraç + başlık + birkaç satır).
+const CARD_MIN: u16 = 6;
+
+/// Seçili projenin kartı: son commit'ler ve değişen dosyalar. Veriler proje
+/// taramasının zaten çalıştırdığı `git status` / `git log` çıktısından gelir.
+fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Project) {
+    let th = &app.theme;
+    let x = area.x + 1;
+    let w = area.width.saturating_sub(2);
+    let mut y = area.y;
+    // Ayraç: "── noble-rs ─────────".
+    hud::hline(buf, area.x, y, area.width, "─", Style::default().fg(th.line));
+    hud::put(buf, x + 1, y, &format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize)), th.dim(), w);
+    y += 1;
+    let rows = area.bottom().saturating_sub(y);
+    let Some(g) = p.git.as_ref() else {
+        hud::put(buf, x, y + 1, "checking git status…", th.dim(), w);
+        return;
+    };
+    // Dosyalar sütunlar hâlinde; sütun genişliği en uzun yola göre.
+    let longest = g.changes.iter().map(|(_, f)| util::width(f)).max().unwrap_or(0) as u16;
+    let col_w = (longest + 5).clamp(16, w.max(16));
+    let cols = (w / col_w).clamp(1, 4) as usize;
+    // Listede olmayan dosyalar (ör. `MAX_CHANGES` sınırı) için bir "+N more" hücresi.
+    let entries = g.changes.len() + usize::from(g.dirty as usize > g.changes.len());
+    let change_want = entries.div_ceil(cols).max(1) as u16;
+    // Önce commit'lere yer ver, dosyalara en az 3 satır (ya da gereken kadarı) kalsın.
+    let commit_rows = (g.commits.len() as u16).min(rows.saturating_sub(4 + change_want.min(3)));
+    let change_rows = rows.saturating_sub(if commit_rows > 0 { commit_rows + 2 } else { 0 } + 2).min(change_want);
+
+    y += 1;
+    if commit_rows > 0 {
+        hud::put(buf, x, y, "RECENT COMMITS", th.dim(), w);
+        y += 1;
+        for c in g.commits.iter().take(commit_rows as usize) {
+            let right = format!("{:>4}  {}", ago_ts(c.time), util::truncate(&c.author, 12));
+            let right_w = util::width(&right) as u16;
+            let mut cx = hud::put(buf, x, y, &c.hash, Style::default().fg(th.accent2), 8);
+            cx += 1;
+            let room = (x + w).saturating_sub(cx + right_w + 2);
+            hud::put(buf, cx, y, &util::truncate(&c.subject, room as usize), th.text(), room);
+            hud::put_right(buf, x + w, y, &right, th.dim());
+            y += 1;
+        }
+        y += 1;
+    }
+    if change_rows == 0 || y >= area.bottom() {
+        return;
+    }
+    hud::put(buf, x, y, "CHANGES", th.dim(), w);
+    if g.dirty > 0 {
+        hud::put(buf, x + 8, y, &g.dirty.to_string(), Style::default().fg(th.warn), 6);
+    }
+    y += 1;
+    if g.dirty == 0 {
+        hud::put(buf, x, y, "✓ working tree clean", Style::default().fg(th.ok), w);
+        return;
+    }
+    let slots = change_rows as usize * cols;
+    let all_fit = g.changes.len() >= g.dirty as usize && g.changes.len() <= slots;
+    let shown = if all_fit { g.changes.len() } else { g.changes.len().min(slots.saturating_sub(1)) };
+    let hidden = (g.dirty as usize).saturating_sub(shown);
+    for (i, (code, file)) in g.changes.iter().take(shown).enumerate() {
+        let (row, col) = (i % change_rows as usize, i / change_rows as usize);
+        let cx = x + col as u16 * col_w;
+        let cy = y + row as u16;
+        let (mark, color) = change_mark(code, th);
+        hud::put(buf, cx, cy, mark, Style::default().fg(color), 1);
+        hud::put(buf, cx + 2, cy, &util::truncate_left(file, col_w.saturating_sub(4) as usize), th.text(), col_w - 3);
+    }
+    if hidden > 0 {
+        let i = shown;
+        let (row, col) = (i % change_rows as usize, i / change_rows as usize);
+        let more = format!("+{hidden} more");
+        hud::put(buf, x + col as u16 * col_w, y + row as u16, &more, th.dim(), col_w);
+    }
+}
+
+/// Porcelain durum kodundan tek harf ve renk: M değişti, A eklendi, D silindi, ? yeni.
+fn change_mark(code: &str, th: &Theme) -> (&'static str, ratatui::style::Color) {
+    match code.trim().chars().next().unwrap_or(' ') {
+        '?' => ("?", th.accent),
+        'A' => ("A", th.ok),
+        'D' => ("D", th.crit),
+        'R' => ("R", th.accent2),
+        'U' => ("U", th.crit),
+        _ => ("M", th.warn),
     }
 }
 
@@ -438,7 +538,7 @@ fn state_rank(state: AgentState) -> u8 {
 /// Oturum listesinde gösterilen en fazla satır.
 const MAX_SESSION_ROWS: usize = 4;
 
-fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, graphs: bool) -> u16 {
+fn ai_height(app: &App, list: &[&ProviderState], sessions: usize) -> u16 {
     let mut h: u16 = 2;
     if sessions > 0 {
         h += sessions.min(MAX_SESSION_ROWS) as u16 + 1 + u16::from(sessions > MAX_SESSION_ROWS);
@@ -446,44 +546,10 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, graphs: bool) 
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
         let note = u16::from(matches!(p.status, Status::Error(_)));
-        let graph = u16::from(graphs && has_history(app, p));
         let pace = u16::from(pace_line(app, p).is_some());
-        h += 1 + rows + note + graph + pace + 1;
+        h += 1 + rows + note + pace + 1;
     }
     h
-}
-
-/// Grafik penceresi: son 24 saat.
-const GRAPH_SECS: i64 = 24 * 3600;
-
-/// Grafikte gösterilen pencere: kısa (5 saatlik) pencere, yoksa ilki.
-fn graph_window(p: &ProviderState) -> Option<&str> {
-    let u = p.usage.as_ref()?;
-    u.windows.iter().find(|w| w.label == "5H").or(u.windows.first()).map(|w| w.label.as_str())
-}
-
-fn has_history(app: &App, p: &ProviderState) -> bool {
-    let Some(label) = graph_window(p) else { return false };
-    let key = crate::store::UsageHistory::key(p.id, label);
-    let since = chrono::Utc::now().timestamp() - GRAPH_SECS;
-    app.usage_history.series.get(&key).is_some_and(|l| l.iter().filter(|(t, _)| *t >= since).count() >= 2)
-}
-
-/// Son 24 saatin kullanım eğrisi (tek satır braille).
-fn usage_graph(buf: &mut Buffer, app: &App, p: &ProviderState, x: u16, y: u16, w: u16) {
-    let th = &app.theme;
-    let Some(label) = graph_window(p) else { return };
-    let key = crate::store::UsageHistory::key(p.id, label);
-    hud::put(buf, x, y, "24h", th.dim(), 5);
-    let gw = w.saturating_sub(5);
-    let now = chrono::Utc::now().timestamp();
-    let vals: Vec<f64> = app
-        .usage_history
-        .resample(&key, now - GRAPH_SECS, now, gw as usize * 2)
-        .into_iter()
-        .map(|v| v.map(|u| u as f64 / 100.0).unwrap_or(0.0))
-        .collect();
-    hud::braille_area(buf, Rect::new(x + 5, y, gw, 1), &vals, th.accent_dim, th.accent);
 }
 
 fn reset_in(ts: i64) -> String {
@@ -494,25 +560,19 @@ fn reset_in(ts: i64) -> String {
     util::fmt_duration(Duration::from_secs((ts - now) as u64)).replace(' ', "")
 }
 
-/// "Bu hızla 5h 1h20m'de dolar": sıfırlanmadan önce dolacaksa uyarı metni.
+/// "Bu hızla 5h 1h20m'de dolar": 5 saatlik pencere sıfırlanmadan önce
+/// dolacaksa uyarı metni. Haftalık pencere için tahmin yapılmaz.
 fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
     let u = p.usage.as_ref()?;
     let now = chrono::Utc::now().timestamp();
-    u.windows
-        .iter()
-        .filter_map(|w| {
-            let reset = w.resets_at?;
-            let span = match w.label.as_str() {
-                "5H" => 5 * 3600,
-                "WEEK" => 7 * 86_400,
-                _ => return None,
-            };
-            let key = crate::store::UsageHistory::key(p.id, &w.label);
-            let eta = app.usage_history.pace_eta(&key, reset - span, now, w.used)?;
-            (now + (eta as i64) < reset).then_some((eta, crate::ai::window_name(&w.label)))
-        })
-        .min_by_key(|(eta, _)| *eta)
-        .map(|(eta, name)| format!("▲ {name} full in ~{} at this pace", util::fmt_duration(Duration::from_secs(eta))))
+    let w = u.windows.iter().find(|w| w.label == "5H")?;
+    let reset = w.resets_at?;
+    let key = crate::store::UsageHistory::key(p.id, &w.label);
+    let eta = app.usage_history.pace_eta(&key, reset - 5 * 3600, now, w.used)?;
+    (now + (eta as i64) < reset).then(|| {
+        let name = crate::ai::window_name(&w.label);
+        format!("▲ {name} full in ~{} at this pace", util::fmt_duration(Duration::from_secs(eta)))
+    })
 }
 
 fn ai_panel(
@@ -521,7 +581,6 @@ fn ai_panel(
     app: &App,
     list: &[&ProviderState],
     sessions: &[crate::app::AgentSession],
-    graphs: bool,
     hits: &mut Vec<(Rect, Hit)>,
 ) {
     let th = &app.theme;
@@ -613,10 +672,6 @@ fn ai_panel(
             hud::put(buf, x, y, &text, Style::default().fg(th.warn), w);
             y += 1;
         }
-        if graphs && has_history(app, p) && y < bottom {
-            usage_graph(buf, app, p, x, y, w);
-            y += 1;
-        }
         y += 1;
     }
 }
@@ -656,26 +711,35 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
         hud::bar(buf, x + 5, y, bar_w, pct, th.level(pct), th);
         hud::put_right(buf, x + w, y, &format!("{pct:.0}%"), Style::default().fg(th.level(pct)));
     };
+    // Grafikler boş kalan yüksekliği paylaşır: CPU en fazla 10, RAM (az değiştiği
+    // için ince) en fazla 3 satır. Sabit satırlar: CPU, boşluk, RAM, bilgi, boşluk,
+    // diskler, boşluk, NET, UP. Yer darsa 1-2 satırlık CPU grafiği NET/UP'tan önce gelir.
+    let disks = last.disks.len().min(2) as u16;
+    let avail = bottom.saturating_sub(y);
+    let spare = avail.saturating_sub(8 + disks);
+    let mem_g = if spare >= 8 { (spare / 4).clamp(2, 3) } else { 0 };
+    let cpu_g = match spare - mem_g {
+        n if n >= 2 => n.min(10),
+        _ => avail.saturating_sub(5 + disks).min(2),
+    };
     if y < bottom {
         metric(buf, y, "CPU", last.cpu as f64);
         y += 1;
     }
-    let graph_h = if inner.height >= 14 {
-        3
-    } else if inner.height >= 10 {
-        2
-    } else {
-        0
-    };
-    if graph_h > 0 && y + graph_h <= bottom {
+    if cpu_g > 0 && y + cpu_g <= bottom {
         let vals: Vec<f64> = s.cpu_hist.iter().map(|v| *v as f64 / 100.0).collect();
-        hud::braille_area(buf, Rect::new(x, y, w, graph_h), &vals, th.accent_dim, th.accent);
-        y += graph_h;
+        hud::braille_area(buf, Rect::new(x, y, w, cpu_g), &vals, th.accent_dim, th.accent);
+        y += cpu_g;
     }
     y += 1;
     if y < bottom {
         metric(buf, y, "RAM", s.mem_pct() as f64);
         y += 1;
+    }
+    if mem_g > 0 && y + mem_g <= bottom {
+        let vals: Vec<f64> = s.mem_hist.iter().map(|v| *v as f64 / 100.0).collect();
+        hud::braille_area(buf, Rect::new(x, y, w, mem_g), &vals, th.accent_dim, th.accent2);
+        y += mem_g;
     }
     if y < bottom {
         let info = format!("{} of {}", util::fmt_bytes(last.mem_used), util::fmt_bytes(last.mem_total));

@@ -367,14 +367,18 @@ impl App {
     /// Seçili projede (ya da verilen dizinde) başlatıcı komutunu yeni sekmede çalıştırır.
     pub fn launch(&mut self, idx: usize, dir: Option<PathBuf>) {
         let Some((launcher, available)) = self.launchers.get(idx).cloned() else { return };
+        if !available {
+            self.toast(
+                ToastLevel::Warn,
+                format!("{} is not installed ('{}' not on PATH)", launcher.name, launcher.command),
+            );
+            return;
+        }
         let target = dir.or_else(|| self.selected_project().map(|p| p.path.clone()));
         let Some(path) = target else {
             self.toast(ToastLevel::Warn, "select a project first");
             return;
         };
-        if !available {
-            self.toast(ToastLevel::Warn, format!("'{}' not found on PATH — running anyway", launcher.command));
-        }
         let origin = format!("{} · {}", dir_name(&path), launcher.name);
         let command = self.shell.invocation(&launcher.command);
         self.new_tab(path, Some(&command), Some(origin));

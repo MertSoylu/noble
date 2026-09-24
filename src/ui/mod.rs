@@ -286,7 +286,8 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             Style::default().fg(th.dim).bg(th.raised)
         }
     };
-    let mut x = hud::put(buf, area.x, y, " NOBLE ", th.chip(), limit);
+    let brand = if app.dev { " NOBLE dev " } else { " NOBLE " };
+    let mut x = hud::put(buf, area.x, y, brand, th.chip(), limit);
     x += 1;
     let fixed = [(View::Bridge, "Home", Hit::TabBridge), (View::System, "System", Hit::TabSystem)];
     for (view, label, hit) in fixed {
@@ -339,16 +340,31 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
 fn hints(app: &App) -> Vec<(String, String)> {
     let h = |k: &str, v: &str| (k.to_string(), v.to_string());
     if app.prefix_armed {
-        return vec![
-            h("t", "new tab"),
-            h("v", "split right"),
-            h("s", "split down"),
-            h("x", "close"),
-            h("z", "zoom"),
-            h("arrows", "move focus"),
-            h("0", "home"),
-            h("?", "all keys"),
-        ];
+        // Pane komutları (bölme, kapatma, büyütme, odak) yalnızca terminalde işe yarar.
+        if matches!(app.view, View::Term(_)) {
+            return vec![
+                h("t", "new tab"),
+                h("v", "split right"),
+                h("s", "split down"),
+                h("x", "close"),
+                h("z", "zoom"),
+                h("arrows", "move focus"),
+                h("0", "home"),
+                h("?", "all keys"),
+            ];
+        }
+        let mut v = vec![h("t", "new tab")];
+        if !app.tabs.is_empty() {
+            v.push(h("1…9", "go to tab"));
+        }
+        if app.view != View::Bridge {
+            v.push(h("0", "home"));
+        }
+        if app.view != View::Settings {
+            v.push(h("S", "settings"));
+        }
+        v.extend([h(":", "commands"), h("?", "all keys")]);
+        return v;
     }
     match app.view {
         View::Bridge => {
