@@ -11,7 +11,7 @@ env:
 
 jobs:
   windows:
-    # Primary platform: the full suite, including real PTY (ConPTY), render and end-to-end tests.
+    # The full suite, including real PTY (ConPTY), render and end-to-end tests.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,14 +24,16 @@ jobs:
       - run: cargo test
 
   linux:
-    # Linux: build, clippy and unit tests. The PTY tests rely on the shell emitting
-    # OSC 7 (default bash does not), so they are not run here.
+    # Linux is a first-class platform: the same full suite. zsh and fish are installed
+    # so the shell integration of every supported shell is exercised in a real PTY.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y zsh fish
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --lib
+      - run: cargo test

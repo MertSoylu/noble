@@ -397,11 +397,22 @@ fn real_terminal_session() {
 }
 
 /// Shell integration: after `cd` the pane knows the real directory (OSC 9;9 / OSC 7).
+/// Every supported shell that is installed is checked (Git Bash on Windows).
 #[test]
 fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
     if cfg!(windows) {
         check_cwd_tracking("cmd.exe");
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_cwd_tracking(&git_bash.display().to_string());
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_cwd_tracking(&path.display().to_string());
+            }
+        }
     }
 }
 

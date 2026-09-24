@@ -504,7 +504,7 @@ impl App {
     ) -> App {
         let theme = Theme::by_name(&cfg.general.theme, cfg.general.transparent);
         let keymap = Keymap::from_config(&cfg.keys);
-        let shell = resolve_shell(&cfg.terminal);
+        let shell = resolve_shell(&cfg.terminal, &paths.data);
         let operator = if cfg.general.operator.trim().is_empty() {
             std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "operator".into())
         } else {
@@ -1229,7 +1229,7 @@ impl App {
         let old = std::mem::replace(&mut self.cfg, cfg);
         self.theme = Theme::by_name(&self.cfg.general.theme, self.cfg.general.transparent);
         self.keymap = Keymap::from_config(&self.cfg.keys);
-        self.shell = resolve_shell(&self.cfg.terminal);
+        self.shell = resolve_shell(&self.cfg.terminal, &self.paths.data);
         self.launchers = launcher_availability(&self.cfg.launchers);
         if !self.cfg.general.operator.trim().is_empty() {
             self.operator = self.cfg.general.operator.trim().to_string();

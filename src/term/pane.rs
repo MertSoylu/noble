@@ -11,6 +11,7 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 
 use crate::config::TerminalCfg;
 use crate::event::AppEvent;
+use crate::term::integration;
 use crate::term::layout::PaneId;
 use crate::util;
 
@@ -76,7 +77,8 @@ impl vt100::Callbacks for Callbacks {
         match params {
             // OSC 7: file://host/path
             [b"7", rest @ ..] if !rest.is_empty() => {
-                self.cwd = Some(parse_cwd_url(&join(rest)));
+                let path = parse_cwd_url(&join(rest));
+                self.cwd = Some(if cfg!(windows) { msys_to_windows(&path) } else { path });
                 self.prompt = true;
             }
             // OSC 9;9: Windows Terminal's cwd report.
@@ -184,6 +186,15 @@ pub fn parse_cwd_url(raw: &str) -> String {
     p
 }
 
+/// Git Bash / MSYS2 report Windows directories as `/c/Users/me`; turns that into `C:/Users/me`.
+pub fn msys_to_windows(path: &str) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+        return format!("{}:/{}", (b[1] as char).to_ascii_uppercase(), path[2..].trim_start_matches('/'));
+    }
+    path.to_string()
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -236,27 +247,85 @@ pub fn process_label(title: &str, fallback: &str) -> String {
 pub struct ShellSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// Directory of the bash/zsh/fish integration scripts (`term::integration`);
+    /// `None` starts the shell exactly as configured.
+    pub integration: Option<PathBuf>,
 }
 
 impl ShellSpec {
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> ShellSpec {
+        ShellSpec { program: program.into(), args, integration: None }
+    }
+
     pub fn label(&self) -> String {
         process_label("", &self.program)
     }
 
     fn kind(&self) -> ShellKind {
-        let name = self.label().to_lowercase();
-        if name == "pwsh" || name == "powershell" {
-            ShellKind::PowerShell
-        } else if name == "cmd" {
-            ShellKind::Cmd
-        } else {
-            ShellKind::Posix
+        match self.label().to_lowercase().as_str() {
+            "pwsh" | "powershell" => ShellKind::PowerShell,
+            "cmd" => ShellKind::Cmd,
+            "bash" => ShellKind::Bash,
+            "zsh" => ShellKind::Zsh,
+            "fish" => ShellKind::Fish,
+            _ => ShellKind::Posix,
+        }
+    }
+
+    /// The integration directory, unless this shell has none or the user's
+    /// arguments skip the startup files (or run a command instead).
+    fn integration_dir(&self) -> Option<&Path> {
+        let dir = self.integration.as_deref()?;
+        let skip: &[&str] = match self.kind() {
+            ShellKind::Bash => &["--norc", "--rcfile", "--init-file", "-c"],
+            ShellKind::Zsh => &["-f", "--no-rcs", "-c"],
+            ShellKind::Fish => &["-N", "--no-config", "-c", "--command"],
+            _ => return None,
+        };
+        (!self.args.iter().any(|a| skip.contains(&a.as_str()))).then_some(dir)
+    }
+
+    /// Writes the integration scripts. If that fails the shell starts without them
+    /// (a missing `--rcfile` would also skip the user's `~/.bashrc`).
+    pub fn prepared(&self) -> ShellSpec {
+        let mut spec = self.clone();
+        let failed = spec.integration_dir().is_some_and(|dir| integration::install(dir).is_err());
+        if failed {
+            spec.integration = None;
+        }
+        spec
+    }
+
+    /// Arguments of an interactive shell: the user's own plus the integration.
+    fn interactive_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        match (self.kind(), self.integration_dir()) {
+            (ShellKind::Bash, Some(dir)) => {
+                // bash wants long options before single-letter ones.
+                args.extend(["--rcfile".into(), integration::bash_rc(dir).display().to_string()]);
+                args.extend(self.args.iter().cloned());
+            }
+            (ShellKind::Fish, Some(dir)) => {
+                args.extend(self.args.iter().cloned());
+                let script = integration::fish_script(dir).display().to_string();
+                args.extend(["--init-command".into(), format!("source {}", self.quote(&script))]);
+            }
+            _ => args.extend(self.args.iter().cloned()),
+        }
+        args
+    }
+
+    /// Quotes one word for this Unix shell (fish escapes inside single quotes differently).
+    fn quote(&self, word: &str) -> String {
+        match self.kind() {
+            ShellKind::Fish => format!("'{}'", word.replace('\\', r"\\").replace('\'', r"\'")),
+            _ => format!("'{}'", word.replace('\'', r"'\''")),
         }
     }
 
     /// Arguments that start the shell so it runs `command` first and then stays
-    /// interactive. A prompt hook reporting the working directory to PowerShell is
-    /// added as well (so the split and the session record know the real directory).
+    /// interactive. A prompt hook reporting the working directory is added as well
+    /// (so the split and the session record know the real directory).
     pub fn args_with_command(&self, command: Option<&str>) -> Vec<String> {
         let mut args = self.args.clone();
         let cmd = command.filter(|c| !c.trim().is_empty());
@@ -275,11 +344,17 @@ impl ShellSpec {
                     args.extend(["/K".into(), "%NOBLE_LAUNCH%".into()]);
                 }
             }
-            ShellKind::Posix => {
-                if let Some(c) = cmd {
-                    args.extend(["-c".into(), format!("{c}; exec {}", self.program)]);
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => match cmd {
+                None => args = self.interactive_args(),
+                Some(c) => {
+                    // After the command the same shell takes over, with the integration.
+                    let again: Vec<String> = std::iter::once(self.program.as_str())
+                        .chain(self.interactive_args().iter().map(String::as_str))
+                        .map(|w| self.quote(w))
+                        .collect();
+                    args.extend(["-c".into(), format!("{c}; exec {}", again.join(" "))]);
                 }
-            }
+            },
         }
         args
     }
@@ -305,7 +380,7 @@ impl ShellSpec {
         match self.kind() {
             ShellKind::PowerShell => format!("& '{}'{tail}", path.display().to_string().replace('\'', "''")),
             ShellKind::Cmd => format!("\"{}\"{tail}", path.display()),
-            ShellKind::Posix => command.to_string(),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => command.to_string(),
         }
     }
 
@@ -316,21 +391,41 @@ impl ShellSpec {
         match self.kind() {
             ShellKind::PowerShell => format!("& '{}' {args}", path.replace('\'', "''")),
             ShellKind::Cmd => format!("\"{path}\" {args}"),
-            ShellKind::Posix => format!("'{}' {args}", path.replace('\'', r"'\''")),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => {
+                format!("{} {args}", self.quote(&path))
+            }
         }
     }
 
     /// Shell-specific environment variables: for cmd a directory-reporting PROMPT
-    /// and the command to run (`NOBLE_LAUNCH`, so the quotes stay untouched).
+    /// and the command to run (`NOBLE_LAUNCH`, so the quotes stay untouched); for
+    /// zsh the integration's `ZDOTDIR` and the user's own one.
     pub fn extra_env(&self, command: Option<&str>) -> Vec<(String, String)> {
         let mut env = Vec::new();
-        if let ShellKind::Cmd = self.kind() {
-            if std::env::var("PROMPT").is_err() {
-                env.push(("PROMPT".into(), r"$E]9;9;$P$E\$P$G".into()));
+        match self.kind() {
+            ShellKind::Cmd => {
+                if std::env::var("PROMPT").is_err() {
+                    env.push(("PROMPT".into(), r"$E]9;9;$P$E\$P$G".into()));
+                }
+                if let Some(c) = command.filter(|c| !c.trim().is_empty()) {
+                    env.push(("NOBLE_LAUNCH".into(), c.to_string()));
+                }
             }
-            if let Some(c) = command.filter(|c| !c.trim().is_empty()) {
-                env.push(("NOBLE_LAUNCH".into(), c.to_string()));
+            ShellKind::Zsh => {
+                if let Some(dir) = self.integration_dir() {
+                    let ours = integration::zsh_dir(dir);
+                    // Inside a NOBLE pane ZDOTDIR may already be ours; the user's is kept aside then.
+                    let user = std::env::var_os("ZDOTDIR")
+                        .filter(|d| Path::new(d) != ours)
+                        .or_else(|| std::env::var_os("NOBLE_USER_ZDOTDIR"))
+                        .filter(|d| !d.is_empty());
+                    if let Some(user) = user {
+                        env.push(("NOBLE_USER_ZDOTDIR".into(), user.to_string_lossy().into_owned()));
+                    }
+                    env.push(("ZDOTDIR".into(), ours.display().to_string()));
+                }
             }
+            _ => {}
         }
         env
     }
@@ -344,11 +439,15 @@ pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function gl
 enum ShellKind {
     PowerShell,
     Cmd,
+    Bash,
+    Zsh,
+    Fish,
+    /// Another Unix shell (sh, dash, nu …): started as configured, without integration.
     Posix,
 }
 
-/// Decides which shell to use.
-pub fn resolve_shell(cfg: &TerminalCfg) -> ShellSpec {
+/// Decides which shell to use; bash/zsh/fish get the integration scripts from `<data>/shell`.
+pub fn resolve_shell(cfg: &TerminalCfg, data: &Path) -> ShellSpec {
     let program = if !cfg.shell.trim().is_empty() {
         cfg.shell.trim().to_string()
     } else if cfg!(windows) {
@@ -360,7 +459,8 @@ pub fn resolve_shell(cfg: &TerminalCfg) -> ShellSpec {
     } else {
         std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
     };
-    let mut spec = ShellSpec { program, args: cfg.shell_args.clone() };
+    let mut spec = ShellSpec::new(program, cfg.shell_args.clone());
+    spec.integration = Some(data.join("shell"));
     if spec.args.is_empty() && matches!(spec.kind(), ShellKind::PowerShell) {
         spec.args.push("-NoLogo".into());
     }
@@ -429,8 +529,9 @@ impl Pane {
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .context("could not open a pseudo terminal")?;
-        let mut cmd = CommandBuilder::new(&spec.shell.program);
-        cmd.args(spec.shell.args_with_command(spec.command));
+        let shell = spec.shell.prepared();
+        let mut cmd = CommandBuilder::new(&shell.program);
+        cmd.args(shell.args_with_command(spec.command));
         let cwd = if spec.cwd.is_dir() {
             spec.cwd.to_path_buf()
         } else {
@@ -443,7 +544,7 @@ impl Pane {
         cmd.env("NOBLE_PANE", id.to_string());
         // So the Claude Code hooks write the state to the right NOBLE instance.
         cmd.env("NOBLE_INSTANCE", std::process::id().to_string());
-        for (k, v) in spec.shell.extra_env(spec.command) {
+        for (k, v) in shell.extra_env(spec.command) {
             cmd.env(k, v);
         }
         let mut child =
@@ -740,29 +841,78 @@ mod tests {
         // A '%' before a multi-byte character is kept as it is (used to panic).
         assert_eq!(parse_cwd_url("file://h/tmp/%aé"), "/tmp/%aé");
         assert_eq!(parse_cwd_url("file://h/tmp/%+a"), "/tmp/%+a");
+        assert_eq!(msys_to_windows("/c/Users/me"), "C:/Users/me");
+        assert_eq!(msys_to_windows("/d"), "D:/");
+        assert_eq!(msys_to_windows("/home/me"), "/home/me");
+        assert_eq!(msys_to_windows("/tmp"), "/tmp");
     }
 
     #[test]
     fn shell_command_args() {
-        let pwsh = ShellSpec { program: "C:\\pwsh.exe".into(), args: vec!["-NoLogo".into()] };
+        let pwsh = ShellSpec::new("C:\\pwsh.exe", vec!["-NoLogo".into()]);
         let with = pwsh.args_with_command(Some("claude"));
         assert_eq!(&with[..3], ["-NoLogo", "-NoExit", "-Command"]);
         assert!(with[3].starts_with(PWSH_CWD_HOOK) && with[3].ends_with("; claude"));
         assert!(!PWSH_CWD_HOOK.contains('"'));
         assert_eq!(pwsh.args_with_command(None)[3], PWSH_CWD_HOOK);
         assert!(pwsh.extra_env(Some("claude")).is_empty());
-        let cmd = ShellSpec { program: "cmd.exe".into(), args: vec![] };
+        let cmd = ShellSpec::new("cmd.exe", vec![]);
         assert_eq!(cmd.args_with_command(Some("codex")), vec!["/K", "%NOBLE_LAUNCH%"]);
         let quoted = r#""C:\Program Files\x\claude.exe" --resume"#;
         assert!(cmd.extra_env(Some(quoted)).contains(&("NOBLE_LAUNCH".into(), quoted.into())));
         assert!(cmd.args_with_command(None).is_empty());
-        let bash = ShellSpec { program: "/bin/bash".into(), args: vec![] };
-        assert_eq!(bash.args_with_command(Some("gemini")), vec!["-c", "gemini; exec /bin/bash"]);
+        let bash = ShellSpec::new("/bin/bash", vec![]);
+        assert_eq!(bash.args_with_command(Some("gemini")), vec!["-c", "gemini; exec '/bin/bash'"]);
+        assert!(bash.args_with_command(None).is_empty());
+    }
+
+    #[test]
+    fn unix_shell_integration() {
+        let dir = PathBuf::from("/data/shell");
+        let with = |program: &str, args: Vec<String>| {
+            let mut spec = ShellSpec::new(program, args);
+            spec.integration = Some(dir.clone());
+            spec
+        };
+        let rc = integration::bash_rc(&dir).display().to_string();
+        let bash = with("/usr/bin/bash", vec!["-i".into()]);
+        assert_eq!(bash.args_with_command(None), vec!["--rcfile".to_string(), rc.clone(), "-i".into()]);
+        // After a launcher command the shell comes back with the integration.
+        let launched = bash.args_with_command(Some("claude"));
+        assert_eq!(launched[..2], ["-i", "-c"]);
+        assert_eq!(launched[2], format!("claude; exec '/usr/bin/bash' '--rcfile' '{rc}' '-i'"));
+        // Arguments that skip the startup files turn it off.
+        assert_eq!(with("bash", vec!["--norc".into()]).args_with_command(None), vec!["--norc"]);
+
+        let zsh = with("/bin/zsh", vec![]);
+        assert!(zsh.args_with_command(None).is_empty());
+        let env = zsh.extra_env(None);
+        let zdotdir = integration::zsh_dir(&dir).display().to_string();
+        assert!(env.contains(&("ZDOTDIR".into(), zdotdir)), "{env:?}");
+        assert!(with("zsh", vec!["-f".into()]).extra_env(None).is_empty());
+
+        let fish = with("fish", vec![]);
+        let args = fish.args_with_command(None);
+        assert_eq!(args[0], "--init-command");
+        assert!(args[1].starts_with("source '") && args[1].contains("noble.fish"), "{args:?}");
+
+        // Other shells start as configured.
+        assert!(with("/bin/dash", vec![]).args_with_command(None).is_empty());
+        assert!(with("/bin/dash", vec![]).extra_env(None).is_empty());
+    }
+
+    #[test]
+    fn unix_quoting() {
+        let sh = ShellSpec::new("/bin/sh", vec![]);
+        assert_eq!(sh.quote("it's"), r"'it'\''s'");
+        let fish = ShellSpec::new("fish", vec![]);
+        assert_eq!(fish.quote(r"a\b'c"), r"'a\\b\'c'");
+        assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y"), "'/opt/my tool/x' --y");
     }
 
     #[test]
     fn launcher_invocation() {
-        let pwsh = ShellSpec { program: "powershell.exe".into(), args: vec![] };
+        let pwsh = ShellSpec::new("powershell.exe", vec![]);
         // A command that is not on PATH stays as it is.
         assert_eq!(pwsh.invocation("definitely-not-a-real-tool --x"), "definitely-not-a-real-tool --x");
         if cfg!(windows) {
@@ -771,7 +921,7 @@ mod tests {
                 inv.starts_with("& '") && inv.to_lowercase().contains("cmd.exe'") && inv.ends_with(" /c echo hi"),
                 "{inv}"
             );
-            let cmd = ShellSpec { program: "cmd.exe".into(), args: vec![] };
+            let cmd = ShellSpec::new("cmd.exe", vec![]);
             assert!(cmd.invocation("cmd").starts_with('"'));
         }
     }
