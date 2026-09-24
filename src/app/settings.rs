@@ -21,6 +21,11 @@ pub enum SettingKey {
     AiEnabled,
     Claude,
     Codex,
+    Antigravity,
+    QuickLaunch,
+    OpenCodeGo,
+    Kilo,
+    CommandCode,
     AiRefresh,
     AiWarn,
     ClaudeHooks,
@@ -38,6 +43,17 @@ pub const PREFIXES: [&str; 4] = ["ctrl+a", "ctrl+b", "ctrl+space", "ctrl+g"];
 pub const REFRESH_MINUTES: [u64; 4] = [1, 5, 15, 30];
 /// Kota uyarı eşikleri (0 = kapalı).
 pub const WARN_PERCENTS: [u8; 4] = [0, 80, 90, 95];
+pub use crate::config::LAUNCH_KEYS;
+
+/// AI sağlayıcı anahtarları (Settings sırası).
+pub const PROVIDER_KEYS: [SettingKey; 6] = [
+    SettingKey::Claude,
+    SettingKey::Codex,
+    SettingKey::Antigravity,
+    SettingKey::OpenCodeGo,
+    SettingKey::Kilo,
+    SettingKey::CommandCode,
+];
 
 impl SettingKey {
     pub fn label(&self) -> &'static str {
@@ -56,9 +72,27 @@ impl SettingKey {
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
             SettingKey::Codex => "Codex",
+            SettingKey::Antigravity => "Antigravity",
+            SettingKey::QuickLaunch => "Quick launch",
+            SettingKey::OpenCodeGo => "OpenCode Go",
+            SettingKey::Kilo => "Kilo Code",
+            SettingKey::CommandCode => "Command Code",
             SettingKey::AiRefresh => "Refresh every",
             SettingKey::AiWarn => "Warn when usage reaches",
             SettingKey::ClaudeHooks => "Claude Code status hooks",
+        }
+    }
+
+    /// Sağlayıcı anahtarının `ai::providers` kimliği (sağlayıcı değilse "").
+    pub fn provider_id(&self) -> &'static str {
+        match self {
+            SettingKey::Claude => "claude",
+            SettingKey::Codex => "codex",
+            SettingKey::Antigravity => "antigravity",
+            SettingKey::OpenCodeGo => "opencode-go",
+            SettingKey::Kilo => "kilo",
+            SettingKey::CommandCode => "command-code",
+            _ => "",
         }
     }
 
@@ -68,6 +102,7 @@ impl SettingKey {
             SettingKey::Shell
                 | SettingKey::Prefix
                 | SettingKey::TermColors
+                | SettingKey::QuickLaunch
                 | SettingKey::AiRefresh
                 | SettingKey::AiWarn
         )
@@ -104,15 +139,19 @@ impl App {
                 SettingKey::CopySelect,
                 SettingKey::TermColors,
                 SettingKey::Notify,
+                SettingKey::QuickLaunch,
                 SettingKey::AiEnabled,
-                SettingKey::Claude,
-                SettingKey::Codex,
-                SettingKey::AiRefresh,
-                SettingKey::AiWarn,
-                SettingKey::ClaudeHooks,
             ]
             .map(SettingItem::Setting),
         );
+        // Kurulu olmayan sağlayıcı zaten görünmez; açılıp kapatılması da anlamsız.
+        v.extend(
+            PROVIDER_KEYS
+                .iter()
+                .filter(|k| self.ai_installed.contains(&k.provider_id()))
+                .map(|k| SettingItem::Setting(*k)),
+        );
+        v.extend([SettingKey::AiRefresh, SettingKey::AiWarn, SettingKey::ClaudeHooks].map(SettingItem::Setting));
         v.extend([SettingItem::OpenConfig, SettingItem::ReloadConfig]);
         v
     }
@@ -133,6 +172,10 @@ impl App {
             SettingKey::AiEnabled => c.ai.enabled,
             SettingKey::Claude => has("claude"),
             SettingKey::Codex => has("codex"),
+            SettingKey::Antigravity => has("antigravity"),
+            SettingKey::OpenCodeGo => has("opencode-go"),
+            SettingKey::Kilo => has("kilo"),
+            SettingKey::CommandCode => has("command-code"),
             _ => false,
         }
     }
@@ -150,6 +193,15 @@ impl App {
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
             SettingKey::AiRefresh => format!("{} min", self.cfg.ai.refresh_minutes),
             SettingKey::TermColors => self.scheme_label(&self.cfg.terminal.colors),
+            SettingKey::QuickLaunch => {
+                let installed = self.installed_launchers();
+                let shown = installed.iter().filter(|i| self.launchers[**i].0.show).count();
+                if installed.is_empty() {
+                    "none installed".into()
+                } else {
+                    format!("{shown} of {} shown", installed.len())
+                }
+            }
             SettingKey::AiWarn => match self.cfg.ai.warn_at {
                 0 => "Off".into(),
                 p => format!("{p}%"),
@@ -170,9 +222,43 @@ impl App {
         }
     }
 
+    /// Başlatıcı listesini config'e yazar (`[[launchers]]` blokları yeniden oluşturulur).
+    fn persist_launchers(&mut self) {
+        if self.services.is_none() {
+            return;
+        }
+        let text = std::fs::read_to_string(&self.paths.config).unwrap_or_else(|_| crate::config::DEFAULT_CONFIG.into());
+        let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
+        if std::fs::write(&self.paths.config, updated).is_ok() {
+            self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
+        }
+    }
+
+    /// Başlatıcıyı gösterir/gizler ya da kısayolunu diğerlerinin kullanmadığı
+    /// bir sonraki tuşa çevirir.
+    pub fn change_launcher(&mut self, idx: usize, key: bool, dir: i32) {
+        let mut c = self.cfg.clone();
+        if idx >= c.launchers.len() {
+            return;
+        }
+        if key {
+            let taken: Vec<String> =
+                c.launchers.iter().enumerate().filter(|(j, _)| *j != idx).map(|(_, l)| l.key.clone()).collect();
+            let free: Vec<String> = LAUNCH_KEYS.iter().map(|k| k.to_string()).filter(|k| !taken.contains(k)).collect();
+            let cur = c.launchers[idx].key.clone();
+            let next = if free.contains(&cur) { cycle(&free, &cur, dir) } else { free.first().cloned().unwrap_or(cur) };
+            c.launchers[idx].key = next;
+        } else {
+            c.launchers[idx].show ^= true;
+        }
+        self.apply_config(c);
+        self.persist_launchers();
+    }
+
     /// Bir öğeyi uygular: tema seçer, anahtarı çevirir ya da değeri döndürür.
     pub fn activate_setting(&mut self, item: SettingItem, dir: i32) {
         match item {
+            SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
             SettingItem::Setting(SettingKey::ClaudeHooks) => self.toggle_claude_hooks(),
             SettingItem::Theme(i) => {
                 if let Some(t) = THEMES.get(i) {
@@ -184,6 +270,8 @@ impl App {
             SettingItem::Setting(key) => {
                 let mut c = self.cfg.clone();
                 let (section, name, value) = match key {
+                    // Açılır pencereden ayarlanır (yukarıda işlenir).
+                    SettingKey::QuickLaunch => return self.open_launcher_picker(),
                     SettingKey::Transparent => {
                         c.general.transparent ^= true;
                         ("general", "transparent", c.general.transparent.to_string())
@@ -236,8 +324,13 @@ impl App {
                         c.ai.enabled ^= true;
                         ("ai", "enabled", c.ai.enabled.to_string())
                     }
-                    SettingKey::Claude | SettingKey::Codex => {
-                        let id = if key == SettingKey::Claude { "claude" } else { "codex" };
+                    SettingKey::Claude
+                    | SettingKey::Codex
+                    | SettingKey::Antigravity
+                    | SettingKey::OpenCodeGo
+                    | SettingKey::Kilo
+                    | SettingKey::CommandCode => {
+                        let id = key.provider_id();
                         if c.ai.providers.iter().any(|p| p.eq_ignore_ascii_case(id)) {
                             c.ai.providers.retain(|p| !p.eq_ignore_ascii_case(id));
                         } else {
@@ -364,6 +457,20 @@ impl App {
             Some(s) => s.label.clone(),
             None => "Follow theme".into(),
         }
+    }
+
+    /// Kurulu başlatıcılar (`launchers` sırası); açılır pencere bunları listeler.
+    pub fn installed_launchers(&self) -> Vec<usize> {
+        self.launchers.iter().enumerate().filter(|(_, (_, ok))| *ok).map(|(i, _)| i).collect()
+    }
+
+    /// Hızlı başlatma penceresini açar (kurulu başlatıcı yoksa uyarır).
+    pub fn open_launcher_picker(&mut self) {
+        if self.installed_launchers().is_empty() {
+            self.toast(ToastLevel::Warn, "none of the launcher commands are installed");
+            return;
+        }
+        self.overlay = Some(super::Overlay::Launchers { selected: 0 });
     }
 
     /// Şema seçicisini açar; seçili satır mevcut şemadır.

@@ -110,15 +110,13 @@ impl App {
             });
         }
         if let Some(p) = self.selected_project() {
-            for (i, (l, ok)) in self.launchers.iter().enumerate() {
-                if *ok {
-                    items.push(PaletteItem {
-                        title: format!("Launch {} in {}", l.name, p.name),
-                        group: "RUN",
-                        hint: l.key.clone(),
-                        cmd: PaletteCmd::Launch { launcher: i, path: p.path.clone() },
-                    });
-                }
+            for (i, l) in self.quick_launchers() {
+                items.push(PaletteItem {
+                    title: format!("Launch {} in {}", l.name, p.name),
+                    group: "RUN",
+                    hint: l.key.clone(),
+                    cmd: PaletteCmd::Launch { launcher: i, path: p.path.clone() },
+                });
             }
         }
         for p in self.projects.iter().take(120) {

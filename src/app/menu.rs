@@ -46,8 +46,6 @@ pub struct Menu {
 /// Proje satırının üzerine gelince görünen hızlı eylemler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectAct {
-    Code,
-    Pull,
     Pin,
     More,
 }
@@ -105,10 +103,8 @@ impl App {
         let Some(p) = self.projects.iter().find(|p| p.path == path) else { return };
         let name = p.name.clone();
         let mut items = vec![item("Open terminal", "⏎", MenuCmd::OpenProject(path.clone()))];
-        for (i, (l, ok)) in self.launchers.iter().enumerate() {
-            let mut it = item(&format!("Start {}", l.name), &l.key, MenuCmd::Launch(i, path.clone()));
-            it.enabled = *ok;
-            items.push(it);
+        for (i, l) in self.quick_launchers() {
+            items.push(item(&format!("Start {}", l.name), &l.key, MenuCmd::Launch(i, path.clone())));
         }
         items.push(item("Open in VS Code", "", MenuCmd::OpenCode(path.clone())));
         items.push(item("Open folder", "o", MenuCmd::OpenFolder(path.clone())));
@@ -263,8 +259,6 @@ impl App {
         let Some(path) = self.visible_projects().get(row).map(|i| self.projects[*i].path.clone()) else { return };
         self.bridge.proj_sel = row;
         match act {
-            ProjectAct::Code => self.open_in_code(&path),
-            ProjectAct::Pull => self.git_pull(&path),
             ProjectAct::Pin => self.toggle_pin(&path),
             ProjectAct::More => self.open_project_menu(path, x, y),
         }

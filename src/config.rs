@@ -86,6 +86,13 @@ pub struct Launcher {
     pub key: String,
     pub name: String,
     pub command: String,
+    /// Home'da düğme/kısayol olarak görünsün mü (yüklü değilse zaten gizlenir).
+    #[serde(default = "yes")]
+    pub show: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for General {
@@ -136,16 +143,41 @@ impl Default for AiCfg {
         Self {
             enabled: true,
             refresh_minutes: 5,
-            providers: ["claude", "codex"].iter().map(|s| s.to_string()).collect(),
+            providers: ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             warn_at: 90,
         }
     }
 }
 
+/// Başlatıcılara atanabilecek Home tuşları: Home'un kendi kısayollarıyla
+/// (k j t m s p q w r a o) çakışmayanlar.
+pub const LAUNCH_KEYS: [&str; 15] = ["c", "x", "l", "g", "d", "e", "f", "b", "n", "u", "v", "y", "z", "i", "h"];
+
+/// Varsayılan başlatıcılar (tuş, ad, komut). Kurulu olmayanlar Home'da görünmez.
+const DEFAULT_LAUNCHERS: [(&str, &str, &str); 13] = [
+    ("c", "claude", "claude"),
+    ("x", "codex", "codex"),
+    ("e", "opencode", "opencode"),
+    ("i", "copilot", "copilot"),
+    ("g", "antigravity", "agy"),
+    ("v", "pi", "pi"),
+    ("b", "oh-my-pi", "omp"),
+    ("f", "freebuff", "freebuff"),
+    ("z", "grok build", "grok"),
+    ("u", "cursor", "cursor-agent"),
+    // `cmd` takma adı Windows'un cmd.exe'siyle çakışır.
+    ("d", "command code", "command-code"),
+    ("l", "cline", "cline"),
+    ("n", "kilo code", "kilo"),
+];
+
 pub fn default_launchers() -> Vec<Launcher> {
-    [("c", "claude", "claude"), ("x", "codex", "codex")]
+    DEFAULT_LAUNCHERS
         .iter()
-        .map(|(k, n, c)| Launcher { key: k.to_string(), name: n.to_string(), command: c.to_string() })
+        .map(|(k, n, c)| Launcher { key: k.to_string(), name: n.to_string(), command: c.to_string(), show: true })
         .collect()
 }
 
@@ -203,10 +235,11 @@ exclude = []
 [ai]
 enabled = true
 refresh_minutes = 5      # yalnızca Home açıkken; Home'a dönünce hemen yenilenir
-providers = ["claude", "codex"]
+providers = ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
 warn_at = 90             # bir kota penceresi bu yüzdeye ulaşınca uyar (0 = kapalı)
 
-# LAUNCH panelinde seçili projede tek tuşla çalışan komutlar.
+# Home'da seçili projede tek tuşla çalışan komutlar. Yalnızca PATH'te bulunanlar
+# görünür; `show = false` gizler (Settings → Quick launch).
 [[launchers]]
 key = "c"
 name = "claude"
@@ -216,6 +249,61 @@ command = "claude"
 key = "x"
 name = "codex"
 command = "codex"
+
+[[launchers]]
+key = "e"
+name = "opencode"
+command = "opencode"
+
+[[launchers]]
+key = "i"
+name = "copilot"
+command = "copilot"
+
+[[launchers]]
+key = "g"
+name = "antigravity"
+command = "agy"
+
+[[launchers]]
+key = "v"
+name = "pi"
+command = "pi"
+
+[[launchers]]
+key = "b"
+name = "oh-my-pi"
+command = "omp"
+
+[[launchers]]
+key = "f"
+name = "freebuff"
+command = "freebuff"
+
+[[launchers]]
+key = "z"
+name = "grok build"
+command = "grok"
+
+[[launchers]]
+key = "u"
+name = "cursor"
+command = "cursor-agent"
+
+[[launchers]]
+key = "d"
+name = "command code"
+command = "command-code"
+
+[[launchers]]
+key = "l"
+name = "cline"
+command = "cline"
+
+[[launchers]]
+key = "n"
+name = "kilo code"
+command = "kilo"
 "#;
 
 /// Uygulamanın dosya yolları. `NOBLE_HOME` ortam değişkeni hepsini tek klasöre alır.
@@ -253,11 +341,37 @@ pub struct Loaded {
 pub fn parse(text: &str) -> Result<Config, String> {
     let mut cfg: Config = toml::from_str(text).map_err(|e| e.message().to_string())?;
     // Desteği kaldırılan sağlayıcılar sessizce düşer.
-    cfg.ai.providers.retain(|p| matches!(p.to_ascii_lowercase().as_str(), "claude" | "codex"));
+    cfg.ai.providers.retain(|p| {
+        matches!(
+            p.to_ascii_lowercase().as_str(),
+            "claude" | "codex" | "antigravity" | "opencode-go" | "kilo" | "command-code"
+        )
+    });
     if cfg.launchers.is_empty() && !text.contains("[[launchers]]") {
         cfg.launchers = default_launchers();
+    } else {
+        add_missing_launchers(&mut cfg.launchers);
     }
     Ok(cfg)
+}
+
+/// Eski config'lerde olmayan varsayılan başlatıcıları sona ekler (komutu
+/// listede olmayanlar). Tuşu doluysa boştaki ilk tuş verilir. Gizlemek için
+/// silmek yerine `show = false` kullanılır; o yüzden geri eklenmeleri sorun değil.
+fn add_missing_launchers(list: &mut Vec<Launcher>) {
+    for d in default_launchers() {
+        if list.iter().any(|l| l.command.eq_ignore_ascii_case(&d.command)) {
+            continue;
+        }
+        let taken = |k: &str| list.iter().any(|l| l.key == k);
+        let key = if taken(&d.key) {
+            LAUNCH_KEYS.iter().find(|k| !taken(k)).map(|k| k.to_string())
+        } else {
+            Some(d.key.clone())
+        };
+        let Some(key) = key else { continue };
+        list.push(Launcher { key, ..d });
+    }
 }
 
 /// Config'i okur; dosya yoksa açıklamalı şablonu yazar.
@@ -337,6 +451,56 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
     s
 }
 
+/// Tüm `[[launchers]]` bloklarını verilen listeyle değiştirir; diğer her şey
+/// (yorumlar dahil) korunur. Bloklar ilk bloğun olduğu yere, yoksa sona yazılır.
+pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut insert_at = None;
+    let mut in_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_block = trimmed == "[[launchers]]";
+            if in_block {
+                // Blok içeriği (sondaki boş satırlar dahil) atlanır.
+                insert_at.get_or_insert(out.len());
+                continue;
+            }
+        }
+        if !in_block {
+            out.push(line.to_string());
+        }
+    }
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let mut blocks = Vec::new();
+    for (i, l) in list.iter().enumerate() {
+        if i > 0 {
+            blocks.push(String::new());
+        }
+        blocks.push("[[launchers]]".into());
+        blocks.push(format!("key = {}", quote(&l.key)));
+        blocks.push(format!("name = {}", quote(&l.name)));
+        blocks.push(format!("command = {}", quote(&l.command)));
+        if !l.show {
+            blocks.push("show = false".into());
+        }
+    }
+    let at = insert_at.unwrap_or_else(|| {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.len()
+    });
+    // Sonrasında başka bölüm varsa araya boş satır.
+    if at < out.len() && !out[at].trim().is_empty() {
+        blocks.push(String::new());
+    }
+    out.splice(at..at, blocks);
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +509,7 @@ mod tests {
     fn default_template_parses() {
         let cfg = parse(DEFAULT_CONFIG).unwrap();
         assert_eq!(cfg.general.theme, "amber");
-        assert_eq!(cfg.launchers.len(), 2);
+        assert_eq!(cfg.launchers.len(), DEFAULT_LAUNCHERS.len());
         assert_eq!(cfg.keys.prefix, "ctrl+a");
         assert_eq!(cfg, Config::default());
     }
@@ -356,7 +520,63 @@ mod tests {
         assert_eq!(cfg.general.theme, "ice");
         assert!(cfg.general.boot_animation);
         assert_eq!(cfg.terminal.scrollback, 5000);
-        assert_eq!(cfg.launchers.len(), 2);
+        assert_eq!(cfg.launchers.len(), DEFAULT_LAUNCHERS.len());
+    }
+
+    #[test]
+    fn set_launchers_rewrites_blocks() {
+        let mut list = default_launchers();
+        list[1].show = false;
+        list[0].key = "l".into();
+        let out = set_launchers(DEFAULT_CONFIG, &list);
+        let cfg = parse(&out).unwrap();
+        assert_eq!(cfg.launchers, list);
+        assert_eq!(out.matches("[[launchers]]").count(), list.len());
+        assert!(out.contains("show = false") && out.contains("# Home'da seçili projede"));
+        // Başka bölümle arada kalan bloklar da doğru değişir.
+        let text = "[[launchers]]\nkey = \"c\"\nname = \"a\"\ncommand = \"a\"\n\n[general]\ntheme = \"ice\"\n";
+        let cfg = parse(&set_launchers(text, &list)).unwrap();
+        assert_eq!(cfg.launchers, list);
+        assert_eq!(cfg.general.theme, "ice");
+    }
+
+    #[test]
+    fn old_config_gets_new_launchers() {
+        // Eski config: yalnızca claude/codex, "e" tuşu başka komutta, codex gizli.
+        let text = "[[launchers]]
+key = \"c\"
+name = \"claude\"
+command = \"claude\"
+
+                    [[launchers]]
+key = \"x\"
+name = \"codex\"
+command = \"codex\"
+show = false
+
+                    [[launchers]]
+key = \"e\"
+name = \"aider\"
+command = \"aider\"
+";
+        let cfg = parse(text).unwrap();
+        let names: Vec<_> = cfg.launchers.iter().map(|l| (l.key.as_str(), l.name.as_str())).collect();
+        assert_eq!(names[..5], [("c", "claude"), ("x", "codex"), ("e", "aider"), ("l", "opencode"), ("i", "copilot")]);
+        assert_eq!(cfg.launchers.len(), DEFAULT_LAUNCHERS.len() + 1);
+        // Tuşlar çakışmaz.
+        let mut keys: Vec<_> = cfg.launchers.iter().map(|l| l.key.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), cfg.launchers.len());
+        assert!(!cfg.launchers[1].show);
+        // Sağlayıcı listesi kullanıcının seçimi olarak kalır.
+        let cfg = parse(
+            "[ai]
+providers = [\"claude\", \"gemini\"]
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.ai.providers, ["claude"]);
     }
 
     #[test]

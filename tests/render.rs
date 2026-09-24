@@ -125,6 +125,25 @@ fn demo_app(w: u16, h: u16) -> App {
                 branch: Some("main".into()),
                 last_subject: Some("feat: HUD bridge".into()),
                 last_commit: Some(chrono::Utc::now().timestamp() - 7200),
+                commits: [
+                    ("a1b2c3d", 7200, "feat: HUD bridge"),
+                    ("9f8e7d6", 5 * 3600, "fix: hover buttons no longer leak text"),
+                    ("4c5d6e7", 26 * 3600, "docs: README keys table"),
+                    ("0badc0d", 3 * 86_400, "refactor: split app into modules"),
+                ]
+                .iter()
+                .map(|(h, ago, s)| noble::projects::Commit {
+                    hash: h.to_string(),
+                    time: chrono::Utc::now().timestamp() - ago,
+                    author: "Mert".into(),
+                    subject: s.to_string(),
+                })
+                .collect(),
+                changes: vec![
+                    (" M".into(), "src/ui/bridge.rs".into()),
+                    ("M ".into(), "src/app/menu.rs".into()),
+                    ("??".into(), "tests/new.rs".into()),
+                ],
             }),
         ),
         mk("api-server", "feature/auth-refresh", 90, Some(GitInfo { dirty: 0, ..Default::default() })),
@@ -217,6 +236,33 @@ fn bridge_renders_at_all_sizes() {
     }
     let wide = render(&mut demo_app(160, 45), 160, 45);
     assert!(wide.contains("● 3 changed ↑1") && wide.contains("✓ clean") && wide.contains("● 1 changed ↓2"), "{wide}");
+    // Liste kısa: altında seçili projenin kartı (commit'ler + değişen dosyalar).
+    assert!(wide.contains("RECENT COMMITS") && wide.contains("9f8e7d6 fix: hover buttons"), "{wide}");
+    assert!(wide.contains("M src/ui/bridge.rs") && wide.contains("? tests/new.rs"), "{wide}");
+    // Yer genişken System'de CPU grafiği büyür (en az 4 satır braille).
+    let braille_rows = wide.lines().filter(|l| l.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))).count();
+    assert!(braille_rows >= 5, "{wide}");
+    // Kartta yer yoksa gösterilmez; kirli ama dosya listesi boş proje "clean" demez.
+    let small = render(&mut demo_app(56, 18), 56, 18);
+    assert!(!small.contains("RECENT COMMITS"), "{small}");
+    let mut app = demo_app(160, 45);
+    app.bridge.proj_sel = app.visible_projects().iter().position(|i| app.projects[*i].name == "Noble").unwrap();
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("+54 more") && !text.contains("working tree clean"), "{text}");
+    // Sığmayan dosyalar sütunlara dağılır, kalanı "+N more" olur; hiçbir boyutta taşma yok.
+    let idx = app.visible_projects()[app.bridge.proj_sel];
+    if let Some(g) = app.projects[idx].git.as_mut() {
+        g.changes = (0..40).map(|i| (" M".to_string(), format!("src/module_{i}.rs"))).collect();
+    }
+    let text = render(&mut app, 160, 45);
+    save("bridge-card-many-160x45", &text);
+    assert!(text.contains("src/module_0.rs") && text.contains(" more"), "{text}");
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
+    }
+    app.bridge.proj_sel = 1;
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("✓ working tree clean"), "{text}");
     // Ekran taşmaları: çok küçük boyutlarda da panik yok.
     for (w, h) in [(1, 1), (5, 3), (20, 4), (200, 3), (3, 60)] {
         let mut app = demo_app(w, h);
@@ -277,7 +323,12 @@ fn bridge_keyboard_flow() {
     // Prefix + bilinmeyen tuş: uyarı, çökme yok.
     app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
     assert!(app.prefix_armed);
-    save("bridge-prefix-120x34", &render(&mut app, 120, 34));
+    let text = render(&mut app, 120, 34);
+    save("bridge-prefix-120x34", &text);
+    // Home'da terminale özgü (bölme, büyütme) ipuçları gösterilmez.
+    let bar = text.lines().last().unwrap_or_default();
+    assert!(bar.contains("new tab") && bar.contains("commands"), "{bar}");
+    assert!(!bar.contains("split") && !bar.contains("zoom"), "{bar}");
     key(&mut app, KeyCode::Char('y'));
     assert!(!app.prefix_armed);
     // Tema döngüsü.
@@ -401,8 +452,10 @@ fn boot_sequence_renders() {
 fn launcher_runs_command_in_directory() {
     let mut app = demo_app(110, 30);
     let probe = if cfg!(windows) { "cmd /c echo LAUNCH_PROBE_OK" } else { "echo LAUNCH_PROBE_OK" };
-    app.launchers =
-        vec![(noble::config::Launcher { key: "z".into(), name: "probe".into(), command: probe.into() }, true)];
+    app.launchers = vec![(
+        noble::config::Launcher { key: "z".into(), name: "probe".into(), command: probe.into(), show: true },
+        true,
+    )];
     app.launch(0, Some(std::env::temp_dir()));
     assert_eq!(app.tabs.len(), 1);
     assert!(app.tab_title(0).ends_with("· probe"), "{}", app.tab_title(0));
@@ -439,6 +492,80 @@ fn click(app: &mut App, x: u16, y: u16) {
 
 fn find_hit(app: &App, pred: impl Fn(&noble::app::Hit) -> bool) -> Option<ratatui::layout::Rect> {
     app.hits.iter().rev().find(|(_, h)| pred(h)).map(|(r, _)| *r)
+}
+
+/// Kurulu olmayan başlatıcı Home'da görünmez ve çalışmaz; kurulu olan Settings'ten
+/// gizlenebilir ve kısayolu değiştirilebilir.
+#[test]
+fn launchers_only_installed_and_configurable() {
+    use noble::app::{Hit, Overlay, SettingItem, SettingKey};
+    use noble::config::Launcher;
+    let mut app = demo_app(110, 30);
+    let present = if cfg!(windows) { "cmd" } else { "sh" };
+    let mut cfg = app.cfg.clone();
+    cfg.launchers = vec![
+        Launcher { key: "c".into(), name: "claude".into(), command: present.into(), show: true },
+        Launcher { key: "x".into(), name: "codex".into(), command: "noble-missing-tool-xyz".into(), show: true },
+    ];
+    app.apply_config(cfg);
+    let text = render(&mut app, 110, 30);
+    save("bridge-launchers-110x30", &text);
+    assert!(text.contains("c Claude") && !text.contains("x Codex"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::Launcher(1)).is_none());
+    // Kurulu olmayanın tuşu hiçbir şey açmaz.
+    app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(app.tabs.len(), 0);
+
+    // Settings: tek satır ("1 of 1 shown"), ayarlar açılır pencerede.
+    let items = app.settings_items();
+    let ql = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::QuickLaunch)).unwrap();
+    app.run(Action::Settings);
+    app.settings_sel = ql;
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Quick launch") && text.contains("1 of 1 shown"), "{text}");
+    let row = find_hit(&app, |h| *h == Hit::Setting(ql)).expect("quick launch row");
+    click(&mut app, row.x + 3, row.y);
+    assert!(matches!(app.overlay, Some(Overlay::Launchers { .. })));
+    let text = render(&mut app, 110, 30);
+    save("settings-launchers-110x30", &text);
+    // Yalnızca kurulu olan listelenir.
+    assert!(text.contains("QUICK LAUNCH") && text.contains("Claude") && !text.contains("Codex"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::LaunchShow(1)).is_none());
+    // Kısayol: "x" başka başlatıcıda olduğu için atlanır.
+    app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.cfg.launchers[0].key, "l");
+    app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.cfg.launchers[0].key, "c");
+    // Tuş çipine tıklamak da değiştirir; pencere açık kalır.
+    render(&mut app, 110, 30);
+    let chip = find_hit(&app, |h| *h == Hit::LaunchKey(0)).expect("key chip");
+    click(&mut app, chip.x + 1, chip.y);
+    assert_eq!(app.cfg.launchers[0].key, "l");
+    assert!(app.overlay.is_some());
+    // Satıra tıklamak gizler.
+    render(&mut app, 110, 30);
+    let row = find_hit(&app, |h| *h == Hit::LaunchShow(0)).expect("launcher row");
+    click(&mut app, row.x + 3, row.y);
+    assert!(!app.cfg.launchers[0].show);
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
+    }
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    app.run(Action::Bridge);
+    let text = render(&mut app, 110, 30);
+    assert!(!text.contains("l Claude") && !text.contains("c Claude"), "{text}");
+    // Kurulu olmayan AI sağlayıcısının ayarı yok.
+    app.ai_installed = vec!["claude"];
+    let items = app.settings_items();
+    assert!(items.contains(&SettingItem::Setting(SettingKey::Claude)));
+    assert!(!items.contains(&SettingItem::Setting(SettingKey::Codex)));
+    app.run(Action::Settings);
+    let text = render(&mut app, 110, 60);
+    assert!(text.contains("Claude Code") && !text.contains("OpenCode Go"), "{text}");
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
+    }
 }
 
 #[test]
@@ -746,8 +873,10 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
     });
     app.handle(AppEvent::Projects(projects));
     let probe = if cfg!(windows) { "cmd /c echo claude-probe" } else { "echo claude-probe" };
-    app.launchers =
-        vec![(noble::config::Launcher { key: "z".into(), name: "claude".into(), command: probe.into() }, true)];
+    app.launchers = vec![(
+        noble::config::Launcher { key: "z".into(), name: "claude".into(), command: probe.into(), show: true },
+        true,
+    )];
     app.launch(0, Some(dir.clone()));
     assert_eq!(app.agent_sessions(&dir), vec![("claude", noble::app::AgentState::Running)]);
     app.run(Action::Bridge);
@@ -759,7 +888,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
     save("bridge-agents-160x45", &text);
     assert!(text.contains("claude running"), "{text}");
     assert!(text.contains("agentdemo ●"), "{text}");
-    assert!(text.contains("24h"), "{text}");
+    assert!(!text.contains("24h"), "{text}");
     for (w, h) in SIZES {
         render(&mut app, w, h);
     }
@@ -1101,7 +1230,7 @@ fn project_row_actions_and_pins() {
     mouse(&mut app, MouseEventKind::Moved, row.x + 5, row.y);
     let text = render(&mut app, 110, 30);
     save("project-hover-110x30", &text);
-    assert!(text.contains(" code ") && text.contains(" pull "), "{text}");
+    assert!(text.contains(" ☆  ⋯ ") && !text.contains(" code ") && !text.contains(" pull "), "{text}");
     let pin = find_hit(&app, |h| *h == Hit::ProjectAct(3, ProjectAct::Pin)).expect("pin button");
     let name = app.projects[app.visible_projects()[3]].name.clone();
     click(&mut app, pin.x + 1, pin.y);
@@ -1172,6 +1301,13 @@ fn quota_pace_warning_line() {
     let text = render(&mut app, 160, 45);
     save("bridge-pace-160x45", &text);
     assert!(text.contains("▲ 5h full in ~37m at this pace"), "{text}");
+    // Haftalık pencere hızla dolsa bile tahmin gösterilmez (yalnızca 5 saatlik).
+    let week = noble::store::UsageHistory::key("codex", "WEEK");
+    app.usage_history = noble::store::UsageHistory::memory();
+    app.usage_history.record(&week, now - 3600, 80);
+    app.usage_history.record(&week, now, 92);
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("at this pace"), "{text}");
 }
 
 /// `noble hook <olay>`: derlenmiş binary stdin'deki JSON'u okuyup durum dosyasını yazar;
@@ -1399,4 +1535,22 @@ fn clock_hides_seconds_on_battery() {
     let digits = |s: String| s.chars().filter(|c| c.is_ascii_digit()).count();
     assert_eq!(digits(secs_row(&plugged)), 2, "seconds shown when plugged in:\n{plugged}");
     assert_eq!(digits(secs_row(&battery)), 0, "no seconds on battery:\n{battery}");
+}
+
+#[test]
+fn every_provider_is_configurable() {
+    use noble::app::{PROVIDER_KEYS, SettingItem};
+    let mut app = demo_app(110, 30);
+    let ids: Vec<&str> = noble::ai::providers::registry().iter().map(|d| d.id).collect();
+    // Her sağlayıcının bir ayarı var ve varsayılan config hepsini tanıyor.
+    let keyed: Vec<&str> = PROVIDER_KEYS.iter().map(|k| k.provider_id()).collect();
+    assert_eq!(keyed, ids);
+    let parsed = noble::config::parse(noble::config::DEFAULT_CONFIG).unwrap();
+    assert_eq!(parsed.ai.providers, ids);
+    // Aç/kapa gerçekten değişiyor.
+    for key in PROVIDER_KEYS {
+        let before = app.setting_on(key);
+        app.activate_setting(SettingItem::Setting(key), 1);
+        assert_ne!(app.setting_on(key), before, "{key:?}");
+    }
 }

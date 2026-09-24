@@ -1,4 +1,4 @@
-//! AI abonelik kotası takibi (Claude Code, Codex).
+//! AI abonelik kotası takibi (Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code, Command Code).
 //!
 //! Kimlik bilgileri yalnızca makinedeki mevcut CLI oturumlarından okunur, sadece
 //! ilgili sağlayıcıya istek başlığında gönderilir; asla ekrana basılmaz ya da
@@ -90,14 +90,33 @@ pub fn window_name(label: &str) -> String {
 
 /// Pane'de çalışan AI aracı: başlatıcı komutundan ya da pencere başlığından.
 pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
-    let hay = format!("{} {}", command.unwrap_or(""), label).to_lowercase();
-    if hay.contains("claude") {
-        Some("claude")
-    } else if hay.contains("codex") {
-        Some("codex")
-    } else {
-        None
+    // Başlatıcıdan açıldıysa komutun dosya adı kesin bilgi verir.
+    let stem = command
+        .and_then(|c| std::path::Path::new(c.trim().trim_matches(['&', ' ', '\'', '"'])).file_stem())
+        .map(|s| s.to_string_lossy().to_lowercase());
+    const BY_COMMAND: [(&str, &str); 13] = [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("opencode", "opencode"),
+        ("copilot", "copilot"),
+        ("agy", "antigravity"),
+        ("pi", "pi"),
+        ("omp", "oh-my-pi"),
+        ("freebuff", "freebuff"),
+        ("grok", "grok"),
+        ("cursor-agent", "cursor"),
+        ("command-code", "command code"),
+        ("cline", "cline"),
+        ("kilo", "kilo"),
+    ];
+    if let Some(stem) = stem.as_deref()
+        && let Some((_, kind)) = BY_COMMAND.iter().find(|(c, _)| *c == stem)
+    {
+        return Some(kind);
     }
+    // Elle yazılan komutlar için pencere başlığı: yalnızca ayırt edici adlar.
+    let hay = format!("{} {}", command.unwrap_or(""), label).to_lowercase();
+    ["claude", "codex", "opencode", "copilot", "antigravity", "freebuff"].into_iter().find(|k| hay.contains(k))
 }
 
 /// Sağlayıcıların çalışma ortamı (testte sahte ev dizini verilebilir).
@@ -233,6 +252,34 @@ pub fn stdio_rpc(
     result
 }
 
+/// Programı çalıştırıp stdout'unu döndürür; süre aşılırsa süreç sonlandırılır.
+/// Çıktı 1 MiB ile sınırlıdır, stderr okunmaz (hata metni loglanmaz).
+pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String, String> {
+    use std::io::Read;
+    const CAP: u64 = 1 << 20;
+    let mut cmd = util::command_for(program);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|_| "cli not runnable".to_string())?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.take(CAP + 1).read_to_end(&mut buf);
+        let _ = out_tx.send(buf);
+    });
+    let result = match out_rx.recv_timeout(timeout) {
+        Ok(buf) if buf.len() as u64 > CAP => Err("output too large".to_string()),
+        Ok(buf) => Ok(String::from_utf8_lossy(&buf).into_owned()),
+        Err(_) => Err("timeout".to_string()),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
 // ─── Önbellek ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -252,6 +299,13 @@ fn save_cache(file: &Path, cache: &HashMap<String, CacheEntry>) {
     if let Ok(text) = serde_json::to_string_pretty(cache) {
         let _ = std::fs::write(file, text);
     }
+}
+
+/// Bu sistemde kurulu (oturum açılmamış olsa da) sağlayıcıların kimlikleri.
+pub fn installed_providers() -> Vec<&'static str> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let env = Env::new(home);
+    providers::registry().into_iter().filter(|d| (d.detect)(&env) != Presence::NotInstalled).map(|d| d.id).collect()
 }
 
 /// Açılışta gösterilecek ilk durumlar: önbellekte verisi olanlar.
@@ -399,7 +453,12 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, 
                         name: def.name,
                         login_hint: def.login_hint,
                         presence: Presence::Ready,
-                        status: if e == "session expired" { Status::SignIn } else { Status::Error(e) },
+                        // "no plan": giriş var ama kotalı abonelik yok → panelde gösterilmez.
+                        status: if e == "session expired" || e == "no plan" {
+                            Status::SignIn
+                        } else {
+                            Status::Error(e)
+                        },
                         usage: cached.as_ref().map(|c| c.usage.clone()),
                         fetched_at: cached.map(|c| c.fetched_at),
                     },
@@ -422,7 +481,11 @@ mod tests {
         assert_eq!(agent_kind(Some(r"& 'C:\bin\claude.exe'"), "pwsh"), Some("claude"));
         assert_eq!(agent_kind(None, "✳ Claude Code"), Some("claude"));
         assert_eq!(agent_kind(Some("codex"), "node"), Some("codex"));
+        assert_eq!(agent_kind(Some(r"& 'C:\Users\a\AppData\Local\agy\bin\agy.exe'"), "pwsh"), Some("antigravity"));
+        assert_eq!(agent_kind(Some("opencode"), "pwsh"), Some("opencode"));
+        assert_eq!(agent_kind(None, "GitHub Copilot"), Some("copilot"));
         assert_eq!(agent_kind(None, "pwsh"), None);
+        assert_eq!(agent_kind(None, "legacy agy notes"), None);
     }
 
     #[test]

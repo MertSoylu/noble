@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::hud;
-use crate::app::{App, Hit, SettingItem, SettingKey};
+use crate::app::{App, Hit, PROVIDER_KEYS, SettingItem, SettingKey};
 use crate::theme::THEMES;
 use crate::util;
 
@@ -52,22 +52,17 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
             SettingKey::CopySelect,
             SettingKey::TermColors,
             SettingKey::Notify,
+            SettingKey::QuickLaunch,
         ]
         .map(key),
     );
     v.push(Line::Blank);
     v.push(Line::Header("AI usage"));
-    v.extend(
-        [
-            SettingKey::AiEnabled,
-            SettingKey::Claude,
-            SettingKey::Codex,
-            SettingKey::AiRefresh,
-            SettingKey::AiWarn,
-            SettingKey::ClaudeHooks,
-        ]
-        .map(key),
-    );
+    // Kurulu olmayan sağlayıcıların satırı yok (`settings_items` süzer).
+    let present = |k: &SettingKey| items.contains(&SettingItem::Setting(*k));
+    v.push(key(SettingKey::AiEnabled));
+    v.extend(PROVIDER_KEYS.iter().filter(|k| present(k)).map(|k| key(*k)));
+    v.extend([SettingKey::AiRefresh, SettingKey::AiWarn, SettingKey::ClaudeHooks].map(key));
     v.push(Line::Blank);
     v.push(Line::Buttons(vec![pos(SettingItem::OpenConfig), pos(SettingItem::ReloadConfig)]));
     v
@@ -122,33 +117,36 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 }
             }
             Line::Item(i) => {
-                if let SettingItem::Setting(key) = items[*i] {
-                    let selected = *i == sel;
-                    let row = Rect::new(inner.x, y, inner.width, 1);
-                    if selected {
-                        hud::set_bg_row(buf, row.x, y, row.width, th.sel_bg);
-                        hud::put(buf, row.x, y, "▌", Style::default().fg(th.accent).bg(th.sel_bg), 1);
+                // Satırın etiketi ve değeri: aç/kapa (Some(bool)) ya da döngülü metin.
+                let (label, toggle, text) = match items[*i] {
+                    SettingItem::Setting(key) => {
+                        let toggle = key.is_toggle().then(|| app.setting_on(key));
+                        (key.label().to_string(), toggle, app.setting_value(key))
                     }
-                    let bg = if selected { th.sel_bg } else { th.bg };
-                    hud::put(buf, x, y, key.label(), th.text().bg(bg), iw);
-                    if key == SettingKey::TermColors {
-                        hits.push((row, Hit::Setting(*i)));
-                        let label_end = x + util::width(key.label()) as u16 + 2;
-                        scheme_chip(buf, label_end, x + iw, y, app, bg);
-                        continue;
-                    }
-                    let (value, style) = if key.is_toggle() {
-                        if app.setting_on(key) {
-                            ("● On".to_string(), Style::default().fg(th.accent).bg(bg).add_modifier(Modifier::BOLD))
-                        } else {
-                            ("○ Off".to_string(), th.dim().bg(bg))
-                        }
-                    } else {
-                        (format!("‹ {} ›", app.setting_value(key)), Style::default().fg(th.accent2).bg(bg))
-                    };
-                    hud::put_right(buf, x + iw, y, &value, style);
-                    hits.push((row, Hit::Setting(*i)));
+                    _ => continue,
+                };
+                let selected = *i == sel;
+                let row = Rect::new(inner.x, y, inner.width, 1);
+                if selected {
+                    hud::set_bg_row(buf, row.x, y, row.width, th.sel_bg);
+                    hud::put(buf, row.x, y, "▌", Style::default().fg(th.accent).bg(th.sel_bg), 1);
                 }
+                let bg = if selected { th.sel_bg } else { th.bg };
+                hud::put(buf, x, y, &label, th.text().bg(bg), iw);
+                hits.push((row, Hit::Setting(*i)));
+                if items[*i] == SettingItem::Setting(SettingKey::TermColors) {
+                    let label_end = x + util::width(&label) as u16 + 2;
+                    scheme_chip(buf, label_end, x + iw, y, app, bg);
+                    continue;
+                }
+                let (value, style) = match toggle {
+                    Some(true) => {
+                        ("● On".to_string(), Style::default().fg(th.accent).bg(bg).add_modifier(Modifier::BOLD))
+                    }
+                    Some(false) => ("○ Off".to_string(), th.dim().bg(bg)),
+                    None => (format!("‹ {text} ›"), Style::default().fg(th.accent2).bg(bg)),
+                };
+                hud::put_right(buf, x + iw, y, &value, style);
             }
             Line::Buttons(list) => {
                 let mut cx = x;

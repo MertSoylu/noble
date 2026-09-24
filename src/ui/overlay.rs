@@ -22,6 +22,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Welcome { prefix } => welcome(buf, area, app, *prefix, hits),
         Overlay::Palette(st) => palette(buf, area, app, st, hits),
         Overlay::Schemes(p) => schemes(buf, area, app, p, hits),
+        Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
         Overlay::Help { scroll } => help(buf, area, app, *scroll, hits),
         Overlay::Confirm(c) => {
@@ -291,6 +292,66 @@ fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker
     }
 }
 
+/// Hızlı başlatma penceresi: kurulu her başlatıcı için Home'da görünürlük ve
+/// kısayol tuşu. Satıra tıklamak gösterir/gizler, tuş çipine tıklamak değiştirir.
+fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mut Vec<(Rect, Hit)>) {
+    let th = &app.theme;
+    let list = app.installed_launchers();
+    let w = 56.min(area.width.saturating_sub(2));
+    let h = (list.len() as u16 + 5).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    hits.push((rect, Hit::Inert));
+    let inner = boxed(buf, rect, "QUICK LAUNCH", th, th.accent);
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+    let x = inner.x + 1;
+    let iw = inner.width.saturating_sub(2);
+    let list_h = inner.height.saturating_sub(2) as usize;
+    let selected = selected.min(list.len().saturating_sub(1));
+    let offset = (selected + 1).saturating_sub(list_h);
+    for (row, (n, &i)) in list.iter().enumerate().skip(offset).take(list_h).enumerate() {
+        let Some((l, _)) = app.launchers.get(i) else { continue };
+        let y = inner.y + row as u16;
+        let line = Rect::new(inner.x, y, inner.width, 1);
+        let is_sel = n == selected;
+        let bg = if is_sel { th.sel_bg } else { th.raised };
+        hud::fill(buf, line, Style::default().bg(bg));
+        if is_sel {
+            hud::put(buf, inner.x, y, "▌", Style::default().fg(th.accent).bg(bg), 1);
+        }
+        let (mark, mark_st) = if l.show {
+            ("●", Style::default().fg(th.accent).bg(bg))
+        } else {
+            ("○", Style::default().fg(th.dim).bg(bg))
+        };
+        let mut cx = hud::put(buf, x, y, mark, mark_st, 1) + 1;
+        let name_st = if l.show { th.text().bg(bg) } else { th.dim().bg(bg) };
+        let name_w = 18.min(iw.saturating_sub(12));
+        let name = util::truncate(&super::bridge::capitalize(&l.name), name_w as usize);
+        hud::put(buf, cx, y, &name, name_st, name_w);
+        cx += name_w;
+        // Tuş çipi sağda; komut adı arada (yer varsa).
+        let chip = format!(" ‹ {} › ", l.key);
+        let chip_w = util::width(&chip) as u16;
+        let chip_x = (x + iw).saturating_sub(chip_w);
+        let cmd_w = chip_x.saturating_sub(cx + 2);
+        if cmd_w >= 6 {
+            hud::put(buf, cx + 1, y, &util::truncate(&l.command, cmd_w as usize), th.dim().bg(bg), cmd_w);
+        }
+        hud::put(buf, chip_x, y, &chip, Style::default().fg(th.accent2).bg(bg), chip_w);
+        hits.push((line, Hit::LaunchShow(i)));
+        hits.push((Rect::new(chip_x, y, chip_w, 1), Hit::LaunchKey(i)));
+    }
+    let by = inner.bottom() - 1;
+    let hint = ["space show/hide · ←→ shortcut · esc close", "space show · ←→ key · esc", "esc close"]
+        .into_iter()
+        .find(|h| util::width(h) as u16 <= iw);
+    if let Some(hint) = hint {
+        hud::put_right(buf, x + iw, by, hint, th.dim());
+    }
+}
+
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
@@ -452,9 +513,8 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
     ] {
         v.push((k.into(), d.into(), false));
     }
-    for (l, ok) in &app.launchers {
-        let note = if *ok { "" } else { "  (not installed)" };
-        v.push((l.key.clone(), format!("run {} in the project{note}", l.command), false));
+    for (_, l) in app.quick_launchers() {
+        v.push((l.key.clone(), format!("run {} in the project", l.command), false));
     }
 
     section(&mut v, "SYSTEM");

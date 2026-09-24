@@ -30,7 +30,7 @@ use crate::theme::Theme;
 
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
-pub use settings::{PREFIXES, SettingItem, SettingKey};
+pub use settings::{LAUNCH_KEYS, PREFIXES, PROVIDER_KEYS, SettingItem, SettingKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -116,6 +116,10 @@ pub enum Overlay {
     },
     Palette(PaletteState),
     Schemes(SchemePicker),
+    /// Hızlı başlatma ayarları: `selected`, kurulu başlatıcılar listesindeki satır.
+    Launchers {
+        selected: usize,
+    },
     Menu(Menu),
     Help {
         scroll: u16,
@@ -171,6 +175,9 @@ pub enum Hit {
     Setting(usize),
     /// Şema seçicideki satır (`scheme_options` sırası).
     TermScheme(usize),
+    /// Hızlı başlatma penceresi: göster/gizle ve kısayol (`launchers` sırası).
+    LaunchShow(usize),
+    LaunchKey(usize),
     OpenFiles,
     Proc(u32),
     SortCol(SortKey),
@@ -353,9 +360,13 @@ pub struct App {
     services: Option<Services>,
     /// Başlatıcılar ve PATH'te bulunup bulunmadıkları.
     pub launchers: Vec<(Launcher, bool)>,
+    /// Bu sistemde kurulu AI sağlayıcıları (Settings yalnızca bunları listeler).
+    pub ai_installed: Vec<&'static str>,
     pub quit: bool,
     pub started: Instant,
     pub restored_tabs: usize,
+    /// `noble-dev` olarak çalışıyor: üst çubukta işaretlenir, oturum ayrı dosyada.
+    pub dev: bool,
     pub operator: String,
     /// Git durumu istenen depolar ve istek zamanı (tekrarları seyreltmek için).
     git_requested: HashMap<PathBuf, Instant>,
@@ -398,6 +409,12 @@ fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
 }
 
 impl App {
+    /// Home'da gösterilecek başlatıcılar: PATH'te bulunan ve gizlenmemiş olanlar
+    /// (`launchers` içindeki sırasıyla birlikte).
+    pub fn quick_launchers(&self) -> impl Iterator<Item = (usize, &Launcher)> {
+        self.launchers.iter().enumerate().filter(|(_, (l, ok))| *ok && l.show).map(|(i, (l, _))| (i, l))
+    }
+
     /// Arka plan hizmetleri olmadan (testler ve ekran görüntüleri için).
     pub fn headless(cfg: Config, size: (u16, u16)) -> App {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -438,6 +455,8 @@ impl App {
         let services = Services { sensor_req: sensor_tx, rescan: rescan_tx, ai_refresh: ai_tx, proj_cfg, ai_cfg };
         let cache = ai::load_cache(&paths.data_file("ai-cache.json"));
         let mut app = App::build(cfg, paths, Some(services), tx, size, recent, workspaces);
+        app.ai_installed = ai::installed_providers();
+        app.dev = crate::util::is_dev_build();
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
         app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
@@ -457,7 +476,7 @@ impl App {
             app.toast(ToastLevel::Warn, w);
         }
         if app.cfg.terminal.restore_session
-            && let Some(ws) = crate::store::load_session(&app.paths.data_file("session.json"))
+            && let Some(ws) = crate::store::load_session(&app.paths.data_file(app.session_file()))
         {
             app.restored_tabs = app.open_workspace(&ws);
             app.view = View::Bridge;
@@ -521,9 +540,11 @@ impl App {
             rx: None,
             services,
             launchers,
+            ai_installed: ai::providers::registry().iter().map(|d| d.id).collect(),
             quit: false,
             started: Instant::now(),
             restored_tabs: 0,
+            dev: false,
             operator,
             git_requested: HashMap::new(),
             search: None,
@@ -1164,11 +1185,16 @@ impl App {
         }
     }
 
+    /// Oturum dosyası: `noble-dev` kararlı sürümün sekmelerini ezmesin diye ayrı.
+    fn session_file(&self) -> &'static str {
+        if self.dev { "session-dev.json" } else { "session.json" }
+    }
+
     /// Çıkışta: oturumu kaydet.
     pub fn shutdown(&mut self) {
         if self.cfg.terminal.restore_session {
             let ws = self.snapshot("last session");
-            crate::store::save_session(&self.paths.data_file("session.json"), &ws);
+            crate::store::save_session(&self.paths.data_file(self.session_file()), &ws);
         }
         self.panes.clear();
     }
