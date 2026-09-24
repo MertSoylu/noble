@@ -427,8 +427,14 @@ fn check_cwd_tracking(shell: &str) {
     std::fs::create_dir_all(&target).unwrap();
     app.new_tab(dirs::home_dir().unwrap(), None, Some("cwd".into()));
     let id = app.tabs[0].focus;
-    std::thread::sleep(Duration::from_millis(1500));
-    app.pump();
+    // Type only once the first prompt reported its directory: a slow cold start (pwsh
+    // on Linux) would otherwise swallow the input typed before the shell was ready.
+    let ready = std::time::Instant::now() + Duration::from_secs(30);
+    while app.panes[&id].parser().callbacks().cwd.is_none() {
+        assert!(std::time::Instant::now() < ready, "{shell}: no first prompt\n{}", render(&mut app, 110, 30));
+        app.pump();
+        std::thread::sleep(Duration::from_millis(100));
+    }
     app.panes[&id].write(format!("cd \"{}\"\r", target.display()).as_bytes());
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let want = std::fs::canonicalize(&target).unwrap();
