@@ -1,7 +1,7 @@
 /target
 *.log
 
-# Yerel araç ve editör ayarları
+# Local tool and editor settings
 .claude/
 .freebuff/
 .vscode/

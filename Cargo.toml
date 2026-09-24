@@ -11,7 +11,7 @@ repository = "https://github.com/MertSoylu/noble"
 homepage = "https://github.com/MertSoylu/noble"
 keywords = ["terminal", "tui", "ratatui", "workspace", "multiplexer"]
 categories = ["command-line-utilities", "development-tools"]
-# crates.io paketi yalnızca derlemek için gerekenleri taşır.
+# The crates.io package only ships what is needed to build.
 exclude = [".github/", ".claude/", "docs/", "tests/", "examples/", "install.cmd", "CLAUDE.md"]
 
 [lib]

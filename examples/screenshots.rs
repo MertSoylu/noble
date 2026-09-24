@@ -301,17 +301,16 @@ fn terminals(app: &mut App) {
     }
     let tab = app.tabs.len() - 1;
     let ids = app.tabs[tab].panes();
-    let left = LEFT.replace('\n', "\r\n");
-    let right = RIGHT.replace('\n', "\r\n");
-    for (id, (title, cwd, body)) in ids.iter().zip([
-        ("cargo", "file://workstation/D:/dev/noble", left.as_str()),
-        ("git", "file://workstation/D:/dev/noble", right.as_str()),
-    ]) {
-        let seq = format!("\x1b]0;{title}\x07\x1b]7;{cwd}\x07\x1b[2J\x1b[H{body}");
+    // Sol pane'de Claude Code, sağda Codex: içerik pane'in gerçek boyutuna göre çizilir.
+    let screens: [(&str, Screen); 2] = [("claude", claude_screen), ("codex", codex_screen)];
+    for (id, (title, screen)) in ids.iter().zip(screens) {
+        let (rows, cols) = app.panes[id].parser().screen().size();
+        let body = screen(rows, cols);
+        let seq = format!("\x1b]0;{title}\x07\x1b[2J\x1b[H{body}");
         app.panes[id].parser().process(seq.as_bytes());
     }
     if let Some(&first) = app.tabs[0].panes().first() {
-        let seq = "\x1b]0;node\x07\x1b]7;file://workstation/D:/dev/api-gateway\x07\x1b[2J\x1b[H";
+        let seq = "\x1b]0;node\x07\x1b[2J\x1b[H";
         app.panes[&first].parser().process(seq.as_bytes());
     }
     // Arka plan sekmesinde uzun komut bitti: ◆ işareti.
@@ -319,55 +318,131 @@ fn terminals(app: &mut App) {
     app.tabs[tab].focus = ids[0];
 }
 
-const LEFT: &str = "\x1b[1;36mD:\\dev\\noble\x1b[0m on \x1b[1;35m main\x1b[0m \x1b[31m[!+?]\x1b[0m
-\x1b[1;32m❯\x1b[0m cargo test
-\x1b[1;32m   Compiling\x1b[0m noble v1.0.0 (D:\\dev\\noble)
-\x1b[1;32m    Finished\x1b[0m `test` profile [unoptimized + debuginfo] target(s) in 6.84s
-\x1b[1;32m     Running\x1b[0m unittests src\\lib.rs
+/// Pane boyutundan (satır, sütun) ekran içeriği üreten fonksiyon.
+type Screen = fn(u16, u16) -> String;
 
-running 72 tests
-test ai::json::tests::labels_normalize ... \x1b[32mok\x1b[0m
-test ai::providers::tests::claude_payload ... \x1b[32mok\x1b[0m
-test ai::providers::tests::codex_payload ... \x1b[32mok\x1b[0m
-test config::tests::default_template_parses ... \x1b[32mok\x1b[0m
-test projects::tests::status_parsing ... \x1b[32mok\x1b[0m
-test term::layout::tests::split_and_close ... \x1b[32mok\x1b[0m
-test term::link::tests::file_line_detection ... \x1b[32mok\x1b[0m
+/// 24 bit ön plan rengi.
+fn fg(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
 
-test result: \x1b[32mok\x1b[0m. 72 passed; 0 failed; 3 ignored
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
 
-\x1b[1;32m     Running\x1b[0m tests\\render.rs
-running 35 tests
-test bridge_renders_at_all_sizes ... \x1b[32mok\x1b[0m
-test real_terminal_session ... \x1b[32mok\x1b[0m
-test terminal_compatibility_basics ... \x1b[32mok\x1b[0m
+/// Yuvarlak köşeli kutu: her satır `width` sütuna tamamlanır.
+fn boxed(lines: &[String], width: usize, border: &str) -> String {
+    let inner = width.saturating_sub(2);
+    let mut out = format!("{border}╭{}╮{RESET}\n", "─".repeat(inner));
+    for line in lines {
+        let visible = strip_ansi(line).chars().count();
+        let pad = inner.saturating_sub(visible + 1);
+        out.push_str(&format!("{border}│{RESET} {line}{}{border}│{RESET}\n", " ".repeat(pad)));
+    }
+    out.push_str(&format!("{border}╰{}╯{RESET}\n", "─".repeat(inner)));
+    out
+}
 
-test result: \x1b[32mok\x1b[0m. 34 passed; 0 failed; 1 ignored
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (false, '\x1b') => esc = true,
+            (true, 'm') => esc = false,
+            (true, _) => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
-\x1b[1;36mD:\\dev\\noble\x1b[0m on \x1b[1;35m main\x1b[0m took \x1b[33m14s\x1b[0m
-\x1b[1;32m❯\x1b[0m ";
+/// Üst içeriği yazar, alt bloğu ekranın dibine yerleştirir ve imleci alt bloğun
+/// içinde `cursor` (satır, sütun) konumuna taşır.
+fn finish(top: String, bottom: String, rows: u16, cursor: (u16, u16)) -> String {
+    let bottom_lines = bottom.lines().count() as u16;
+    let at = rows.saturating_sub(bottom_lines) + 1;
+    format!(
+        "{}\x1b[{at};1H{}\x1b[{};{}H",
+        top.replace('\n', "\r\n"),
+        bottom.trim_end_matches('\n').replace('\n', "\r\n"),
+        at + cursor.0,
+        cursor.1
+    )
+}
 
-const RIGHT: &str = "\x1b[1;32m❯\x1b[0m git log --oneline --graph
-\x1b[31m*\x1b[0m \x1b[33m7c1e9a2\x1b[0m \x1b[1;36m(HEAD -> main)\x1b[0m feat: project card on Home
-\x1b[31m*\x1b[0m \x1b[33mb24f0d8\x1b[0m feat: quick launch for 13 AI CLIs
-\x1b[31m*\x1b[0m \x1b[33me91c3b4\x1b[0m fix: keep git status visible on hover
-\x1b[31m*\x1b[0m   \x1b[33md40a1f3\x1b[0m Merge branch 'battery'
-\x1b[31m|\x1b[32m\\\x1b[0m
-\x1b[31m|\x1b[0m \x1b[32m*\x1b[0m \x1b[33m9b7e2c0\x1b[0m feat: battery estimate
-\x1b[31m|\x1b[0m \x1b[32m*\x1b[0m \x1b[33m18f6a3d\x1b[0m feat: battery sensor
-\x1b[31m|\x1b[32m/\x1b[0m
-\x1b[31m*\x1b[0m \x1b[33m5a0d7e1\x1b[0m perf: redraw only when something changes
-\x1b[31m*\x1b[0m \x1b[33mc3f8b62\x1b[0m docs: keyboard reference
+/// Claude Code oturumu: karşılama kutusu, bir istek, araç çağrıları ve giriş kutusu.
+fn claude_screen(rows: u16, cols: u16) -> String {
+    let orange = fg(215, 119, 87);
+    let gray = fg(153, 153, 153);
+    let dim = fg(110, 110, 110);
+    let green = fg(78, 186, 101);
+    let w = (cols as usize).saturating_sub(1).min(64);
+    let mut top = boxed(
+        &[
+            format!("{orange}✻{RESET} {BOLD}Welcome to Claude Code!{RESET}"),
+            String::new(),
+            format!("  {gray}/help for help, /status for your current setup{RESET}"),
+            String::new(),
+            format!(r"  {gray}cwd: D:\dev\noble{RESET}"),
+        ],
+        w,
+        &orange,
+    );
+    let tool = |name: &str, arg: &str| format!("{green}●{RESET} {BOLD}{name}{RESET}({arg})\n");
+    let result = |text: &str| format!("  {dim}⎿{RESET}  {text}\n");
+    top.push_str(&format!("\n{gray}> add opencode to the quick-launch defaults{RESET}\n\n"));
+    top.push_str("● I'll add OpenCode to the default launchers and cover it\n  with a test.\n\n");
+    top.push_str(&tool("Read", "src/config.rs"));
+    top.push_str(&result(&format!("Read {BOLD}598{RESET} lines")));
+    top.push('\n');
+    top.push_str(&tool("Update", "src/config.rs"));
+    top.push_str(&result(&format!("Updated {BOLD}src/config.rs{RESET} with {BOLD}1{RESET} addition")));
+    top.push_str(&format!("       {dim}461{RESET}      (\"x\", \"codex\", \"codex\"),\n"));
+    top.push_str(&format!("       {dim}462{RESET} {green}+    (\"e\", \"opencode\", \"opencode\"),{RESET}\n"));
+    top.push('\n');
+    top.push_str(&tool("Bash", "cargo test --lib config"));
+    top.push_str(&result(&format!("test result: {green}ok{RESET}. 9 passed; 0 failed")));
+    top.push('\n');
+    top.push_str("● Done. Press e on Home to start OpenCode in the selected\n  project.\n");
+    let mut bottom = boxed(&[format!("{gray}>{RESET} ")], (cols as usize).saturating_sub(1), &dim);
+    bottom.push_str(&format!("  {dim}? for shortcuts{RESET}\n"));
+    finish(top, bottom, rows, (1, 5))
+}
 
-\x1b[1;32m❯\x1b[0m git status -sb
-\x1b[32m## main...origin/main\x1b[0m [ahead \x1b[32m2\x1b[0m]
- \x1b[31mM\x1b[0m src/app/settings.rs
- \x1b[31mM\x1b[0m src/ui/bridge.rs
-\x1b[32mM\x1b[0m  README.md
- \x1b[31mD\x1b[0m docs/old-notes.md
-\x1b[31m??\x1b[0m examples/screenshots.rs
-
-\x1b[1;32m❯\x1b[0m ";
+/// Codex oturumu: başlık kutusu, başlangıç ipuçları, bir inceleme ve istem satırı.
+fn codex_screen(rows: u16, cols: u16) -> String {
+    let dim = fg(128, 128, 128);
+    let cyan = fg(86, 182, 194);
+    let green = fg(78, 186, 101);
+    let red = fg(220, 90, 90);
+    let w = (cols as usize).saturating_sub(1).min(48);
+    let mut top = boxed(
+        &[format!("{BOLD}>_ OpenAI Codex{RESET}"), String::new(), format!(r"{dim}directory:{RESET} D:\dev\noble")],
+        w,
+        &dim,
+    );
+    top.push_str(&format!("\n  {dim}To get started, describe a task or try one of these commands:{RESET}\n\n"));
+    for (cmd, what) in [
+        ("/init", "create an AGENTS.md file with instructions for Codex"),
+        ("/status", "show current session configuration"),
+        ("/review", "review any changes and find issues"),
+    ] {
+        top.push_str(&format!("  {cyan}{cmd}{RESET} {dim}- {what}{RESET}\n"));
+    }
+    top.push_str(&format!("\n{BOLD}›{RESET} review battery.rs for edge cases in the time estimate\n\n"));
+    top.push_str(&format!("{dim}•{RESET} {BOLD}Explored{RESET}\n"));
+    top.push_str(&format!("  {dim}└ Read{RESET} battery.rs\n    {dim}Search{RESET} charge_rate in src\n\n"));
+    top.push_str(&format!("{dim}•{RESET} Two edge cases in the estimate:\n\n"));
+    top.push_str("  1. A charge rate of 0 divides by zero; guard it and fall\n");
+    top.push_str("     back to the time reported by the OS.\n");
+    top.push_str("  2. Readings older than 10 minutes skew the rate; drop them\n");
+    top.push_str("     before averaging.\n\n");
+    top.push_str(&format!("{green}•{RESET} {BOLD}Edited{RESET} src/battery.rs ({green}+6{RESET} {red}-2{RESET})\n"));
+    let bottom = format!(
+        "{BOLD}›{RESET} {dim}Ask Codex to do anything{RESET}\n\n  {dim}⏎ send   ⇧⏎ newline   ctrl+c quit{RESET}\n"
+    );
+    finish(top, bottom, rows, (0, 3))
+}
 
 // ─── SVG ─────────────────────────────────────────────────────────────────────
 

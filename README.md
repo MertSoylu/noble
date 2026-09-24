@@ -110,7 +110,7 @@ from the palette.
 ## 📸 Screens
 
 <p align="center">
-  <img src="docs/assets/terminals.svg" alt="Split terminal panes running cargo test and git log" width="100%">
+  <img src="docs/assets/terminals.svg" alt="Claude Code and Codex running side by side in split panes" width="100%">
 </p>
 
 <table>

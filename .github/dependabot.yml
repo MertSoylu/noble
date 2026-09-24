@@ -1,4 +1,4 @@
-# Bağımlılık güncellemeleri: Cargo haftalık, GitHub Actions aylık.
+# Dependency updates: Cargo weekly, GitHub Actions monthly.
 version: 2
 updates:
   - package-ecosystem: cargo

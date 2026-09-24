@@ -1,4 +1,4 @@
-# Her push ve PR'da: biçim, clippy ve testler.
+# On every push and PR: formatting, clippy and tests.
 name: CI
 
 on:
@@ -11,7 +11,7 @@ env:
 
 jobs:
   windows:
-    # Ana hedef platform: gerçek PTY (ConPTY), render ve uçtan uca testlerin tamamı.
+    # Primary platform: the full suite, including real PTY (ConPTY), render and end-to-end tests.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,8 +24,8 @@ jobs:
       - run: cargo test
 
   linux:
-    # Linux'ta derleme, clippy ve birim testleri. PTY testleri shell'in OSC 7
-    # göndermesine bağlı olduğundan (varsayılan bash göndermez) burada koşulmaz.
+    # Linux: build, clippy and unit tests. The PTY tests rely on the shell emitting
+    # OSC 7 (default bash does not), so they are not run here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
