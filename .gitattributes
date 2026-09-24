@@ -1,0 +1,3 @@
+# Scripts keep the line endings their shell needs, whatever core.autocrlf says.
+*.sh text eol=lf
+*.cmd text eol=crlf

@@ -42,6 +42,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: shellcheck install.sh
 
   linux-musl:
     # The release builds static musl binaries (`release.yml`); make sure they still build.

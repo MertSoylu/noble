@@ -99,6 +99,8 @@ fn main() -> anyhow::Result<()> {
         EnableMouseCapture,
         crossterm::terminal::SetTitle(if noble::util::is_dev_build() { "NOBLE dev" } else { "NOBLE" })
     )?;
+    // Unix: pastes arrive as one `Event::Paste`. crossterm's Windows console input has no
+    // bracketed paste; there a paste arrives as ordinary key events and reaches the shell as typed text.
     #[cfg(not(windows))]
     execute!(out, crossterm::event::EnableBracketedPaste)?;
     // Restore the terminal if the main thread panics; background panics are

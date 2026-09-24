@@ -1487,6 +1487,7 @@ fn heavy_output_throughput() {
 /// invoked as `"C:\...\claude.exe"`.
 #[test]
 fn cmd_runs_quoted_commands() {
+    // cmd.exe only exists on Windows; Unix shell quoting is covered by `pane::tests::unix_quoting`.
     if !cfg!(windows) {
         return;
     }

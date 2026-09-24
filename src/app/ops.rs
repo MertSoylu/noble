@@ -15,6 +15,17 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The editor for terminal tabs: `$VISUAL`, `$EDITOR`, else the first of nano, vim
+/// and vi found on PATH (none of them on a stock Windows).
+fn terminal_editor() -> Option<String> {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .or_else(|| ["nano", "vim", "vi"].into_iter().find(|e| crate::util::which(e).is_some()).map(String::from))
+}
+
 fn dir_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
@@ -390,6 +401,11 @@ impl App {
     }
 
     pub fn open_in_explorer(&mut self, path: &Path) {
+        // No file manager without a graphical session (SSH, console): a shell tab there instead.
+        if !crate::util::has_desktop() {
+            self.open_project_shell(path.to_path_buf());
+            return;
+        }
         let program = if cfg!(windows) {
             "explorer"
         } else if cfg!(target_os = "macos") {
@@ -403,7 +419,25 @@ impl App {
         }
     }
 
-    // ─── Tema / config ──────────────────────────────────────────────────────
+    /// Opens a file in a terminal editor in a new tab (at `line` when the editor
+    /// understands `+N`). `false` when no editor is found.
+    pub fn edit_in_tab(&mut self, path: &Path, line: Option<u32>, title: &str) -> bool {
+        let Some(editor) = terminal_editor() else { return false };
+        let program = editor.split_whitespace().next().unwrap_or("");
+        let name = Path::new(program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let jump = match line {
+            Some(l) if ["nano", "vi", "vim", "nvim", "emacs", "micro", "kak"].contains(&name.as_str()) => {
+                format!(" +{l}")
+            }
+            _ => String::new(),
+        };
+        let command = format!("{editor}{jump} \"{}\"", path.display());
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(home);
+        self.new_tab(dir, Some(&command), Some(title.into()));
+        true
+    }
+
+    // ─── Theme / config ──────────────────────────────────────────────────────
 
     pub fn set_theme(&mut self, name: &str) {
         self.cfg.general.theme = name.to_string();
@@ -421,11 +455,8 @@ impl App {
 
     fn open_config(&mut self) {
         let path = self.paths.config.clone();
-        let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).ok().filter(|e| !e.trim().is_empty());
-        if let Some(editor) = editor {
-            let quoted = format!("{editor} \"{}\"", path.display());
-            let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(home);
-            self.new_tab(dir, Some(&quoted), Some("config".into()));
+        let from_env = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).is_ok_and(|e| !e.trim().is_empty());
+        if (from_env || !crate::util::has_desktop()) && self.edit_in_tab(&path, None, "config") {
             return;
         }
         let result = if cfg!(windows) {

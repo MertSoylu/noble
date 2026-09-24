@@ -261,7 +261,7 @@ pub fn run_cli(args: &[String]) -> i32 {
         return 0;
     }
     if crate::util::is_dev_build() {
-        eprintln!("noble-dev is built from source; update it with install.cmd instead.");
+        eprintln!("noble-dev is built from source; update it with install.cmd / install.sh instead.");
         return 1;
     }
     let exe = match std::env::current_exe() {

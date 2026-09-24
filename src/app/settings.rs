@@ -113,9 +113,17 @@ impl SettingKey {
 
 /// Shell options found on this machine ("" = automatic).
 pub fn shell_options() -> Vec<String> {
-    let names: &[&str] = if cfg!(windows) { &["pwsh", "powershell", "cmd"] } else { &["bash", "zsh", "fish"] };
+    let names: &[&str] =
+        if cfg!(windows) { &["pwsh", "powershell", "cmd"] } else { &["bash", "zsh", "fish", "pwsh", "nu"] };
     let mut v = vec![String::new()];
     v.extend(names.iter().filter(|n| crate::util::which(n).is_some()).map(|n| n.to_string()));
+    if cfg!(windows) {
+        // Git Bash is rarely on PATH (and `bash` there may be the WSL launcher): use its full path.
+        let git = std::env::var_os("ProgramFiles").map(|p| std::path::PathBuf::from(p).join(r"Git\bin\bash.exe"));
+        if let Some(git) = git.filter(|p| p.is_file()) {
+            v.push(git.display().to_string().replace('\\', "/"));
+        }
+    }
     v
 }
 
@@ -191,10 +199,14 @@ impl App {
     pub fn setting_value(&self, key: SettingKey) -> String {
         match key {
             SettingKey::Shell => {
-                if self.cfg.terminal.shell.trim().is_empty() {
+                let shell = self.cfg.terminal.shell.trim();
+                if shell.is_empty() {
                     format!("auto ({})", self.shell.label())
+                } else if shell.contains(['/', '\\']) {
+                    // A full path (Git Bash): the program name is enough.
+                    self.shell.label()
                 } else {
-                    self.cfg.terminal.shell.clone()
+                    shell.to_string()
                 }
             }
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
@@ -356,7 +368,8 @@ impl App {
                     }
                     SettingKey::Shell => {
                         c.terminal.shell = cycle(&shell_options(), &c.terminal.shell, dir);
-                        ("terminal", "shell", format!("\"{}\"", c.terminal.shell))
+                        let escaped = c.terminal.shell.replace('\\', "\\\\").replace('"', "\\\"");
+                        ("terminal", "shell", format!("\"{escaped}\""))
                     }
                     SettingKey::Prefix => {
                         let cur = c.keys.prefix.clone();

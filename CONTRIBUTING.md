@@ -43,11 +43,8 @@ Useful flags and variables:
 If you use NOBLE every day and also hack on it, install the working tree under a **different name**:
 
 ```sh
-# Windows
-install.cmd                     # builds --release and installs it as `noble-dev`
-
-# Linux / macOS
-cargo build --release && cp target/release/noble ~/.cargo/bin/noble-dev
+install.cmd                     # Windows: builds --release and installs it as `noble-dev`
+./install.sh                    # Linux / macOS: the same
 ```
 
 `noble` (from a release or `cargo install noble`) stays untouched, and `noble-dev` runs your latest changes.
@@ -59,8 +56,9 @@ pins, AI cache, Claude hook status). For a completely separate sandbox add `NOBL
 $env:NOBLE_HOME = "$env:TEMP\noble-sandbox"; noble-dev
 ```
 
-`install.cmd` works while `noble-dev` is running: Windows refuses to overwrite a running `.exe` but allows
-renaming it, so the script moves the old binary out of the way first.
+Both scripts work while `noble-dev` is running: Windows refuses to overwrite a running `.exe` but allows
+renaming it, so `install.cmd` moves the old binary out of the way first; `install.sh` puts the new file in
+place with a rename, which Unix allows for a running binary.
 
 ## Tests
 

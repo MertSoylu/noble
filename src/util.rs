@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Is this a dev install: `install.cmd` installs the binary as `noble-dev` so it
+/// Is this a dev install: `install.cmd` / `install.sh` install the binary as `noble-dev` so it
 /// runs side by side with the stable `noble`.
 pub fn is_dev_build() -> bool {
     static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -196,6 +196,17 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     // Short texts get a slight edge.
     score -= (t.len() as i32) / 8;
     Some(score)
+}
+
+/// Is there a graphical session to open files, folders and URLs in? Always on
+/// Windows and macOS; elsewhere an X11/Wayland display and `xdg-open` are needed
+/// (not the case over plain SSH or on a text console).
+pub fn has_desktop() -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
+    }
+    let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|d| !d.is_empty()));
+    display && which("xdg-open").is_some()
 }
 
 /// Finds an executable on PATH (checks PATHEXT on Windows).

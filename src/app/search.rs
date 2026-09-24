@@ -144,6 +144,27 @@ impl App {
                 line.map(|l| format!("{base}:{l}")).unwrap_or(base)
             }
         };
+        // Without a graphical session: URLs go to the clipboard, files to a terminal editor.
+        if !crate::util::has_desktop() {
+            match &target {
+                link::Link::Url(url) => {
+                    let url = url.clone();
+                    self.set_clipboard(&url, false);
+                    self.toast(
+                        ToastLevel::Info,
+                        format!("no browser here — copied {}", crate::util::truncate(&url, 50)),
+                    );
+                    return true;
+                }
+                link::Link::File { path, line, .. } => {
+                    let (path, line) = (path.clone(), *line);
+                    let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if path.is_file() && self.edit_in_tab(&path, line, &title) {
+                        return true;
+                    }
+                }
+            }
+        }
         match link::open(&target) {
             Ok(()) => self.toast(ToastLevel::Info, format!("opening {}", crate::util::truncate(&label, 60))),
             Err(e) => self.toast(ToastLevel::Error, format!("could not open link: {e}")),

@@ -923,6 +923,10 @@ mod tests {
             );
             let cmd = ShellSpec::new("cmd.exe", vec![]);
             assert!(cmd.invocation("cmd").starts_with('"'));
+        } else {
+            // On Unix the command runs as written: the shell finds it on PATH itself.
+            let bash = ShellSpec::new("/bin/bash", vec![]);
+            assert_eq!(bash.invocation("sh -c 'echo hi'"), "sh -c 'echo hi'");
         }
     }
 
