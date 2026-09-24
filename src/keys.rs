@@ -1,4 +1,4 @@
-//! Tuş akorları, eylemler ve tuş haritası (prefix + doğrudan kısayollar).
+//! Key chords, actions and the key map (prefix + direct shortcuts).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -22,13 +22,13 @@ impl Chord {
         Self::new(ev.code, ev.modifiers)
     }
 
-    /// Karakter tuşlarında SHIFT bilgisi karakterin kendisinde taşınır
-    /// ("A", "|"), bu yüzden eşleştirme için atılır.
+    /// For character keys the SHIFT info is carried by the character itself
+    /// ("A", "|"), so it is dropped when matching.
     fn normalized(mut self) -> Self {
         self.mods &= KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT;
         if let KeyCode::Char(c) = self.code {
             self.mods.remove(KeyModifiers::SHIFT);
-            // AltGr (Ctrl+Alt) ile üretilen sembol düz karakter sayılır.
+            // A symbol produced with AltGr (Ctrl+Alt) counts as a plain character.
             if crate::term::input::is_altgr_char(self.mods, c) {
                 self.mods = KeyModifiers::NONE;
             }
@@ -45,13 +45,13 @@ impl Chord {
         self
     }
 
-    /// "ctrl+a", "alt+1", "shift+up", "|", "space", "f5" gibi metinleri çözer.
+    /// Parses texts like "ctrl+a", "alt+1", "shift+up", "|", "space", "f5".
     pub fn parse(text: &str) -> Option<Chord> {
         let text = text.trim();
         if text.is_empty() {
             return None;
         }
-        // "+" tek başına bir tuş olabilir; "ctrl++" gibi yazımları da destekle.
+        // "+" alone can be a key; also support spellings like "ctrl++".
         let (mod_part, key_part) = if text == "+" {
             ("", "+")
         } else if let Some(stripped) = text.strip_suffix("++") {
@@ -141,7 +141,7 @@ impl fmt::Display for Chord {
     }
 }
 
-/// Uygulamanın tüm eylemleri. Config'de snake_case adlarıyla anılır.
+/// All actions of the app. Known in the config by their snake_case names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Bridge,
@@ -282,7 +282,7 @@ impl Action {
         Action::ALL.iter().copied().find(|a| a.id() == id)
     }
 
-    /// Palette ve yardım ekranında görünen başlık.
+    /// The title shown in the palette and the help screen.
     pub fn title(&self) -> String {
         match self {
             Action::Bridge => "Go Home".into(),
@@ -360,12 +360,12 @@ pub struct Keymap {
     pub prefix: Chord,
     pub prefix_map: HashMap<Chord, Action>,
     pub direct_map: HashMap<Chord, Action>,
-    /// Config'deki geçersiz girdiler (kullanıcıya gösterilir).
+    /// Invalid entries in the config (shown to the user).
     pub warnings: Vec<String>,
 }
 
 fn c(s: &str) -> Chord {
-    Chord::parse(s).expect("geçerli varsayılan akor")
+    Chord::parse(s).expect("valid default chord")
 }
 
 pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
@@ -465,12 +465,12 @@ impl Keymap {
                 }
             }
         }
-        // Prefix akoru doğrudan haritada olamaz; aksi halde asla prefix kurulamaz.
+        // The prefix chord cannot be in the direct map, or the prefix could never be set.
         direct_map.remove(&prefix);
         Keymap { prefix, prefix_map, direct_map, warnings }
     }
 
-    /// Bir eylemin en kısa kısayolu (palette ipucu için).
+    /// The shortest shortcut of an action (for the palette hint).
     pub fn hint(&self, action: Action) -> Option<String> {
         let direct =
             self.direct_map.iter().filter(|(_, a)| **a == action).map(|(k, _)| k.to_string()).min_by_key(|s| s.len());

@@ -29,8 +29,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 ## Rules
 - **Language:** all documentation (README, CONTRIBUTING, CHANGELOG, this file, workflow and config comments,
   issue/PR text) and all **commit messages** are written in **English**. This overrides any personal preference
-  for Turkish commit messages. Code identifiers and UI text are English; code comments are currently Turkish
-  and new comments follow the surrounding code.
+  for Turkish commit messages or comments. Code identifiers, code comments and UI text are in English.
 - **After every change, update the dev build:** run `cmd /c "%CD%\install.cmd"` (from PowerShell use the full
   path; the relative name is not found) so the user can open the latest state by typing `noble-dev`. This step
   is never skipped. The script builds in release mode and installs `~/.cargo/bin/noble-dev.exe`; it never
@@ -89,6 +88,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (error = toast, never a crash); `store.rs` stores
   recent dirs, the session, workspaces, AI usage history and UI state (`state.json`: welcome seen, pinned
   projects) with atomic JSON writes.
+- **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
+  (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
+  is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
+  `noble update`). `noble update` downloads the `release.yml` archive for the platform, unpacks it with the
+  system `tar` and swaps the binary (the running one is renamed to `*.old`, removed on the next launch).
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, `id`, `title`, `group`), handle it in `App::run`,

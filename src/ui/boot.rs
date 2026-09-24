@@ -1,5 +1,5 @@
-//! Açılış sekansı: logo taranarak belirir, alt sistemler gerçek durumlarıyla
-//! tek tek "çevrimiçi" olur. Herhangi bir tuş ya da tıklama atlar.
+//! Boot sequence: the logo appears scanline by scanline, the subsystems come
+//! "online" one by one with their real status. Any key or click skips it.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,7 +18,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let t = t.clamp(0.0, 1.0);
     let ms = boot.started.elapsed().as_millis();
 
-    // Arka plan ızgarası: seyrek noktalar, tarama çizgisi aşağı iner.
+    // Background grid: sparse dots, the scan line moves downwards.
     let scan_y = area.y + ((area.height as f64) * (t * 1.4).min(1.0)) as u16;
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -41,12 +41,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let top = area.y + area.height.saturating_sub(block_h) / 2;
     let content_w = 46u16.min(area.width.saturating_sub(2));
     let left = area.x + area.width.saturating_sub(content_w) / 2;
-    // İçerik bloğunun arkası temiz kalsın (ızgara noktaları metne karışmasın).
+    // Keep the back of the content block clean (grid dots must not mix into the text).
     let pad_w = content_w.max(logo_w).saturating_add(6).min(area.width);
     let block = Rect::new(area.x + (area.width - pad_w) / 2, top.saturating_sub(1).max(area.y), pad_w, block_h + 2);
     hud::clear(buf, block.intersection(area), th);
 
-    // Logo: soldan sağa açılır, tarama başı parlak.
+    // Logo: reveals left to right, the scan head is bright.
     if area.width > logo_w + 2 && area.height >= 12 {
         let lx = area.x + (area.width - logo_w) / 2;
         let reveal = ((t / 0.45).min(1.0) * logo_w as f64) as u16;
@@ -72,7 +72,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         hud::put_center(buf, area, top + 1, "◢◤ NOBLE", th.accent_bold());
     }
 
-    // Kontrol listesi: her satır sırayla belirir.
+    // Checklist: each row appears in turn.
     let list_y = top + 6;
     let dots_w = content_w.saturating_sub(8 + 18);
     for (i, (label, value, ready)) in lines.iter().enumerate() {
@@ -93,7 +93,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         hud::put(buf, x + 1, y, &util::truncate(value, 22), th.accent2(), 22);
     }
 
-    // İlerleme çubuğu.
+    // Progress bar.
     let py = list_y + lines.len() as u16 + 1;
     hud::bar(buf, left, py, content_w, t * 100.0, th.accent, th);
     let blink = (ms / 400) % 2 == 0;

@@ -1,9 +1,9 @@
-//! Klavye ve fare olaylarını PTY'ye gönderilecek xterm bayt dizilerine çevirir.
+//! Turns keyboard and mouse events into xterm byte sequences sent to the PTY.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
-/// xterm değiştirici parametresi: 1 + shift + 2·alt + 4·ctrl.
+/// xterm modifier parameter: 1 + shift + 2·alt + 4·ctrl.
 fn modifier_param(mods: KeyModifiers) -> u8 {
     let mut m = 1;
     if mods.contains(KeyModifiers::SHIFT) {
@@ -18,16 +18,16 @@ fn modifier_param(mods: KeyModifiers) -> u8 {
     m
 }
 
-/// Ctrl+Alt ile gelen, harf olmayan karakter AltGr ile üretilmiştir.
+/// A non-letter character arriving with Ctrl+Alt was produced by AltGr.
 pub fn is_altgr_char(mods: KeyModifiers, c: char) -> bool {
     mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_ascii_alphabetic()
 }
 
-/// Tuş olayını baytlara çevirir. `app_cursor`: DECCKM (uygulama imleç modu).
+/// Encodes a key event into bytes. `app_cursor`: DECCKM (application cursor mode).
 pub fn encode_key(ev: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     let mut mods = ev.modifiers;
-    // Windows AltGr = Ctrl+Alt: '@', '{', '|', '€' gibi üretilmiş karakterler
-    // olduğu gibi gönderilir, kontrol koduna çevrilmez.
+    // Windows AltGr = Ctrl+Alt: produced characters like '@', '{', '|', '€'
+    // are sent as they are and never turned into control codes.
     if let KeyCode::Char(c) = ev.code
         && is_altgr_char(mods, c)
     {
@@ -44,7 +44,7 @@ pub fn encode_key(ev: &KeyEvent, app_cursor: bool) -> Vec<u8> {
         }
         bytes
     };
-    // CSI imleç tuşları: ESC [ x / ESC O x / ESC [ 1 ; m x
+    // CSI cursor keys: ESC [ x / ESC O x / ESC [ 1 ; m x
     let cursor = |letter: u8| -> Vec<u8> {
         if plain {
             if app_cursor { vec![0x1b, b'O', letter] } else { vec![0x1b, b'[', letter] }
@@ -52,7 +52,7 @@ pub fn encode_key(ev: &KeyEvent, app_cursor: bool) -> Vec<u8> {
             format!("\x1b[1;{m}{}", letter as char).into_bytes()
         }
     };
-    // Tilde tuşları: ESC [ n ~ / ESC [ n ; m ~
+    // Tilde keys: ESC [ n ~ / ESC [ n ; m ~
     let tilde = |n: u8| -> Vec<u8> {
         if plain { format!("\x1b[{n}~").into_bytes() } else { format!("\x1b[{n};{m}~").into_bytes() }
     };
@@ -125,8 +125,8 @@ pub fn encode_key(ev: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     }
 }
 
-/// Fare olayını, pane'in istediği protokole göre kodlar. `col`/`row` pane
-/// içine göre 0 tabanlıdır. Uygulama bu olay türünü istemiyorsa `None`.
+/// Encodes a mouse event per the protocol the pane requested. `col`/`row` are
+/// 0-based inside the pane. `None` when the app does not want this event type.
 pub fn encode_mouse(
     ev: &MouseEvent,
     col: u16,
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(encode_key(&key(KeyCode::Char('@'), altgr), false), b"@");
         assert_eq!(encode_key(&key(KeyCode::Char('{'), altgr), false), b"{");
         assert_eq!(encode_key(&key(KeyCode::Char('€'), altgr), false), "€".as_bytes());
-        // Gerçek Ctrl+Alt+harf hâlâ ESC + kontrol kodu.
+        // A real Ctrl+Alt+letter is still ESC + control code.
         assert_eq!(encode_key(&key(KeyCode::Char('b'), altgr), false), vec![0x1b, 2]);
     }
 

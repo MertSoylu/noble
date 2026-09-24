@@ -1,4 +1,4 @@
-//! Çizim katmanı: üst şerit, görünümler, durum çubuğu, bildirimler, overlay'ler.
+//! Drawing layer: top strip, views, status bar, notifications, overlays.
 
 mod boot;
 mod bridge;
@@ -54,6 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if area.height >= 2 {
         status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app);
     }
+    update_notice(buf, area, app, &mut hits);
     toasts(buf, area, app);
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
@@ -65,7 +66,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Sayfanın sekme şeridindeki sırası: geçiş yönünü belirler.
+/// The page's order in the tab strip: determines the transition direction.
 fn view_order(v: View) -> usize {
     match v {
         View::Bridge => 0,
@@ -75,7 +76,7 @@ fn view_order(v: View) -> usize {
     }
 }
 
-/// Sayfa değiştiyse geçişi başlatır ve kaydırmayı uygular. Geçiş yoksa `true`.
+/// Starts the transition and applies the scroll when the page changed. `true` when there is none.
 fn slide(buf: &mut Buffer, body: Rect, app: &mut App) -> bool {
     let body = body.intersection(buf.area);
     let current = buf_region(buf, body);
@@ -96,7 +97,7 @@ fn slide(buf: &mut Buffer, body: Rect, app: &mut App) -> bool {
     }
     let t = crate::app::ease(sl.started, crate::app::SLIDE_DURATION);
     let w = body.width as i32;
-    // Yeni sayfa `dir` yönünden gelir; eski sayfa aynı hızla karşı yana çıkar.
+    // The new page comes from direction `dir`; the old one leaves the same way at the same speed.
     let shift = (sl.dir as f64 * (1.0 - t) * w as f64).round() as i32;
     for y in body.top()..body.bottom() {
         for x in body.left()..body.right() {
@@ -126,8 +127,8 @@ fn buf_region(buf: &Buffer, area: Rect) -> Buffer {
     out
 }
 
-/// Fare altındaki tıklanabilir öğeyi vurgular: satır ve düğmelerde zemin,
-/// panellerde çerçeve, bölücülerde çizgi rengi değişir.
+/// Highlights the clickable item under the mouse: background on rows and buttons,
+/// frame color on panels, line color on dividers.
 fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     let Some((x, y)) = app.hover else { return };
     if app.drag.is_some() && !matches!(app.drag_kind(), Some("divider")) {
@@ -139,7 +140,7 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     match hit {
         Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) => {}
         Hit::Divider { .. } => {
-            // Sürüklenebilir kenar: ortak çerçeve çizgisini vurgula.
+            // Draggable edge: highlight the shared frame line.
             for yy in rect.top()..rect.bottom() {
                 for xx in rect.left()..rect.right() {
                     if let Some(c) = buf.cell_mut((xx, yy)) {
@@ -149,14 +150,14 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
             }
         }
         Hit::Setting(i) if *i < crate::theme::THEMES.len() => {
-            // Tema kartının kendi renkleri korunur; sol kenara işaret konur.
+            // The theme card keeps its own colors; a marker is placed on the left edge.
             if let Some(c) = buf.cell_mut((rect.x, rect.y)) {
                 c.set_symbol("▌");
                 c.set_fg(th.accent);
             }
         }
         Hit::TermScheme(_) => {
-            // Şema çipi de kendi renklerini korur.
+            // The scheme chip also keeps its own colors.
             if let Some(c) = buf.cell_mut((rect.x, rect.y)) {
                 c.set_symbol("▌");
                 c.set_fg(th.accent);
@@ -171,7 +172,7 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
             }
         }
         _ => {
-            // Büyük tıklanabilir paneller: çerçeve vurgu rengine döner.
+            // Large clickable panels: the frame turns to the accent color.
             let edge = |xx: u16, yy: u16| {
                 xx == rect.left() || xx == rect.right() - 1 || yy == rect.top() || yy == rect.bottom() - 1
             };
@@ -189,7 +190,7 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     }
 }
 
-/// Pil bloğunun yüksekliği: yer varsa 3 satırlık simge, yoksa tek satır; pil yoksa 0.
+/// Height of the battery block: a 3-row icon when there is room, one row otherwise; 0 without a battery.
 pub(crate) fn battery_rows(app: &App, avail: u16) -> u16 {
     match app.sensors.battery() {
         Some(_) if avail >= 16 => 3,
@@ -198,8 +199,8 @@ pub(crate) fn battery_rows(app: &App, avail: u16) -> u16 {
     }
 }
 
-/// Pil bloğu: solda pil simgesi, sağda yüzde ve kalan süre. Şarjda simgenin
-/// içinde bir parıltı kayar ve yüzdenin yanında ↯ görünür.
+/// Battery block: icon on the left, percentage and time left on the right. While
+/// charging a shimmer slides inside the icon and ↯ shows next to the percentage.
 pub(crate) fn battery_block(buf: &mut Buffer, area: Rect, app: &App) {
     use crate::battery::PowerState;
     let Some((b, eta)) = app.sensors.battery() else { return };
@@ -220,11 +221,11 @@ pub(crate) fn battery_block(buf: &mut Buffer, area: Rect, app: &App) {
     }
     .min(area.width / 2);
     let icon_w = area.width.saturating_sub(text_w + 2).min(30);
-    // Parıltı dolgunun içinde soldan sağa kayar, sonunda kısa bir mola verir.
+    // The shimmer slides through the fill from left to right and pauses briefly at the end.
     let cells = icon_w.saturating_sub(3);
     let filled = (b.percent as f64 / 100.0 * cells as f64).floor() as u16;
     let shimmer = (charging && filled > 1).then(|| {
-        // Yavaş adım: boştaki ekranda her kare değişip CPU harcamasın.
+        // Slow step: an idle screen must not change every frame and burn CPU.
         let step = (app.started.elapsed().as_millis() / 450) as u16;
         step % (filled + 4)
     });
@@ -243,7 +244,7 @@ pub(crate) fn battery_block(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-/// Pil rengi: şarjda ikincil vurgu, pilde azaldıkça uyarı → kritik.
+/// Battery color: accent2 while charging, warning → critical as it drains on battery.
 pub(crate) fn battery_color(b: &crate::battery::Battery, th: &crate::theme::Theme) -> ratatui::style::Color {
     use crate::battery::PowerState;
     match b.state {
@@ -296,7 +297,7 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
         hits.push((Rect::new(start, y, x - start, 1), hit));
     }
     x = hud::put(buf, x, y, " │", th.line().bg(th.raised), limit.saturating_sub(x));
-    // Terminal sekmeleri: sığmayanlar "+N" olarak özetlenir.
+    // Terminal tabs: those that do not fit are summarized as "+N".
     let mut hidden = 0;
     for i in 0..app.tabs.len() {
         let active = app.view == View::Term(i);
@@ -336,11 +337,11 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     hits.push((Rect::new(sx, y, util::width(settings_label) as u16, 1), Hit::TabSettings));
 }
 
-/// Bağlama göre birkaç kısa ipucu.
+/// A few short hints for the context.
 fn hints(app: &App) -> Vec<(String, String)> {
     let h = |k: &str, v: &str| (k.to_string(), v.to_string());
     if app.prefix_armed {
-        // Pane komutları (bölme, kapatma, büyütme, odak) yalnızca terminalde işe yarar.
+        // Pane commands (split, close, zoom, focus) only make sense in a terminal.
         if matches!(app.view, View::Term(_)) {
             return vec![
                 h("t", "new tab"),
@@ -368,8 +369,8 @@ fn hints(app: &App) -> Vec<(String, String)> {
     }
     match app.view {
         View::Bridge => {
-            // ⏎, başlatıcılar (c, x) ve "/ search" Projeler panelinin düğmelerinde
-            // zaten yazıyor; burada yalnızca panelde olmayan kısayollar.
+            // ⏎, the launchers (c, x) and "/ search" are already on the Projects
+            // panel's buttons; only shortcuts not in the panel appear here.
             if app.bridge.filtering {
                 return vec![h("type", "search"), h("↑↓", "select"), h("esc", "clear")];
             }
@@ -394,7 +395,7 @@ fn hints(app: &App) -> Vec<(String, String)> {
     }
 }
 
-/// Durum çubuğunda sırayla gösterilen ipuçları (az bilinen özellikler).
+/// Hints shown in turn on the status bar (lesser-known features).
 const TIPS: [&str; 10] = [
     "ctrl+click a URL or file:line in a terminal to open it",
     "prefix / searches a terminal's scrollback",
@@ -408,7 +409,7 @@ const TIPS: [&str; 10] = [
     "prefix z zooms the focused pane",
 ];
 
-/// Şu an gösterilecek ipucu (her 20 saniyede bir değişir).
+/// The hint to show right now (changes every 20 seconds).
 fn current_tip(app: &App) -> &'static str {
     TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()]
 }
@@ -443,12 +444,41 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
     if area.width >= 50 {
         hud::put_right(buf, area.right(), y, &right, th.dim().bg(th.raised));
     }
-    // İpucu, kısayol ipuçlarından sonra boş kalan yere sığarsa gösterilir.
+    // The hint shows only if it fits in the space left after the shortcut hints.
     let tip = format!("tip: {}", current_tip(app));
     let tip_w = util::width(&tip) as u16;
     if !app.prefix_armed && x + tip_w + 4 <= limit {
         hud::put_right(buf, limit.saturating_sub(2), y, &tip, Style::default().fg(th.accent_dim).bg(th.raised));
     }
+}
+
+/// New version notice: bottom right, just above the status bar. On terminal tabs
+/// it drops to the right of the status bar so it never covers the shell's last line.
+fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
+    let Some(version) = app.update_notice() else { return };
+    if area.height < 6 || area.width < 30 || app.overlay.is_some() {
+        return;
+    }
+    let th = &app.theme;
+    let in_term = matches!(app.view, View::Term(_));
+    let y = area.bottom() - if in_term { 1 } else { 2 };
+    let (button, close) = (" update ", " × ");
+    let fixed = (1 + util::width(button) + util::width(close) + 1) as u16;
+    let long = format!(" ↑ NOBLE {version} is available ");
+    let short = format!(" ↑ {version} ");
+    let room = area.width.saturating_sub(fixed + 2) / 2;
+    let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
+    let w = fixed + util::width(&text) as u16;
+    let x0 = area.right().saturating_sub(w);
+    let bg = Style::default().bg(th.raised);
+    let mut x = hud::put(buf, x0, y, "▌", Style::default().fg(th.accent2).bg(th.raised), 1);
+    x = hud::put(buf, x, y, &text, bg.fg(th.fg).add_modifier(Modifier::BOLD), w);
+    x = hud::put(buf, x, y, button, Style::default().fg(th.on_accent).bg(th.accent2).add_modifier(Modifier::BOLD), w);
+    hits.push((Rect::new(x0, y, x - x0, 1), Hit::Update));
+    let cx = x;
+    x = hud::put(buf, x, y, close, bg.fg(th.dim), w);
+    hud::put(buf, x, y, " ", bg, 1);
+    hits.push((Rect::new(cx, y, x - cx, 1), Hit::UpdateDismiss));
 }
 
 fn toasts(buf: &mut Buffer, area: Rect, app: &App) {

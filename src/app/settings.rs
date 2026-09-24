@@ -1,4 +1,4 @@
-//! Ayarlar sekmesi: seçilebilir öğeler, değer değiştirme ve config'e kalıcı yazım.
+//! Settings tab: selectable items, value changes and persistent writes to the config.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -29,6 +29,7 @@ pub enum SettingKey {
     AiRefresh,
     AiWarn,
     ClaudeHooks,
+    Updates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,11 +42,11 @@ pub enum SettingItem {
 
 pub const PREFIXES: [&str; 4] = ["ctrl+a", "ctrl+b", "ctrl+space", "ctrl+g"];
 pub const REFRESH_MINUTES: [u64; 4] = [1, 5, 15, 30];
-/// Kota uyarı eşikleri (0 = kapalı).
+/// Quota warning thresholds (0 = off).
 pub const WARN_PERCENTS: [u8; 4] = [0, 80, 90, 95];
 pub use crate::config::LAUNCH_KEYS;
 
-/// AI sağlayıcı anahtarları (Settings sırası).
+/// AI provider ids (Settings order).
 pub const PROVIDER_KEYS: [SettingKey; 6] = [
     SettingKey::Claude,
     SettingKey::Codex,
@@ -80,10 +81,11 @@ impl SettingKey {
             SettingKey::AiRefresh => "Refresh every",
             SettingKey::AiWarn => "Warn when usage reaches",
             SettingKey::ClaudeHooks => "Claude Code status hooks",
+            SettingKey::Updates => "Check for updates",
         }
     }
 
-    /// Sağlayıcı anahtarının `ai::providers` kimliği (sağlayıcı değilse "").
+    /// The provider id in `ai::providers` ("" when it is not a provider).
     pub fn provider_id(&self) -> &'static str {
         match self {
             SettingKey::Claude => "claude",
@@ -109,7 +111,7 @@ impl SettingKey {
     }
 }
 
-/// Bu sistemde bulunan shell seçenekleri ("" = otomatik).
+/// Shell options found on this machine ("" = automatic).
 pub fn shell_options() -> Vec<String> {
     let names: &[&str] = if cfg!(windows) { &["pwsh", "powershell", "cmd"] } else { &["bash", "zsh", "fish"] };
     let mut v = vec![String::new()];
@@ -123,7 +125,7 @@ fn cycle<T: PartialEq + Clone>(options: &[T], current: &T, dir: i32) -> T {
 }
 
 impl App {
-    /// Sayfadaki seçilebilir öğeler, görüntülenme sırasıyla.
+    /// Selectable items on the page, in display order.
     pub fn settings_items(&self) -> Vec<SettingItem> {
         let mut v: Vec<SettingItem> = (0..THEMES.len()).map(SettingItem::Theme).collect();
         v.extend(
@@ -133,6 +135,7 @@ impl App {
                 SettingKey::Animations,
                 SettingKey::Clock24,
                 SettingKey::Seconds,
+                SettingKey::Updates,
                 SettingKey::Shell,
                 SettingKey::Prefix,
                 SettingKey::Restore,
@@ -144,7 +147,7 @@ impl App {
             ]
             .map(SettingItem::Setting),
         );
-        // Kurulu olmayan sağlayıcı zaten görünmez; açılıp kapatılması da anlamsız.
+        // A provider that is not installed is hidden anyway; toggling it is meaningless.
         v.extend(
             PROVIDER_KEYS
                 .iter()
@@ -165,6 +168,7 @@ impl App {
             SettingKey::Animations => c.general.animations,
             SettingKey::Clock24 => c.general.clock_24h,
             SettingKey::Seconds => c.general.show_seconds,
+            SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
             SettingKey::Notify => c.terminal.notify,
@@ -180,7 +184,7 @@ impl App {
         }
     }
 
-    /// Döngülü ayarların görünen değeri.
+    /// Displayed value of a cycling setting.
     pub fn setting_value(&self, key: SettingKey) -> String {
         match key {
             SettingKey::Shell => {
@@ -210,7 +214,7 @@ impl App {
         }
     }
 
-    /// Config dosyasındaki tek bir değeri yorumları koruyarak günceller.
+    /// Updates a single value in the config file, preserving its comments.
     fn persist(&mut self, section: &str, key: &str, value_toml: &str) {
         if self.services.is_none() {
             return;
@@ -222,7 +226,7 @@ impl App {
         }
     }
 
-    /// Başlatıcı listesini config'e yazar (`[[launchers]]` blokları yeniden oluşturulur).
+    /// Writes the launcher list to the config (`[[launchers]]` blocks are rebuilt).
     fn persist_launchers(&mut self) {
         if self.services.is_none() {
             return;
@@ -234,8 +238,8 @@ impl App {
         }
     }
 
-    /// Başlatıcıyı gösterir/gizler ya da kısayolunu diğerlerinin kullanmadığı
-    /// bir sonraki tuşa çevirir.
+    /// Shows/hides a launcher or flips its shortcut to the next key
+    /// that no other launcher uses.
     pub fn change_launcher(&mut self, idx: usize, key: bool, dir: i32) {
         let mut c = self.cfg.clone();
         if idx >= c.launchers.len() {
@@ -255,7 +259,7 @@ impl App {
         self.persist_launchers();
     }
 
-    /// Bir öğeyi uygular: tema seçer, anahtarı çevirir ya da değeri döndürür.
+    /// Applies an item: picks a theme, toggles a key or cycles a value.
     pub fn activate_setting(&mut self, item: SettingItem, dir: i32) {
         match item {
             SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
@@ -270,7 +274,7 @@ impl App {
             SettingItem::Setting(key) => {
                 let mut c = self.cfg.clone();
                 let (section, name, value) = match key {
-                    // Açılır pencereden ayarlanır (yukarıda işlenir).
+                    // Set from the popup (handled above).
                     SettingKey::QuickLaunch => return self.open_launcher_picker(),
                     SettingKey::Transparent => {
                         c.general.transparent ^= true;
@@ -292,6 +296,10 @@ impl App {
                         c.general.show_seconds ^= true;
                         ("general", "show_seconds", c.general.show_seconds.to_string())
                     }
+                    SettingKey::Updates => {
+                        c.general.check_updates ^= true;
+                        ("general", "check_updates", c.general.check_updates.to_string())
+                    }
                     SettingKey::Restore => {
                         c.terminal.restore_session ^= true;
                         ("terminal", "restore_session", c.terminal.restore_session.to_string())
@@ -300,7 +308,7 @@ impl App {
                         c.terminal.copy_on_select ^= true;
                         ("terminal", "copy_on_select", c.terminal.copy_on_select.to_string())
                     }
-                    // Config'e değil Claude'un ayar dosyasına yazılır (yukarıda işlenir).
+                    // Written to Claude's own settings file, not the config (handled above).
                     SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),
                     SettingKey::TermColors => {
                         let names = self.scheme_options();
@@ -362,8 +370,8 @@ impl App {
         }
     }
 
-    /// Claude Code hook'larını `~/.claude/settings.json`'a ekler ya da kaldırır.
-    /// Başsız modda (testler) gerçek dosyaya asla dokunulmaz.
+    /// Adds or removes the Claude Code hooks in `~/.claude/settings.json`.
+    /// In headless mode (tests) the real file is never touched.
     pub fn toggle_claude_hooks(&mut self) {
         let Some(path) = crate::hooks::settings_path().filter(|_| self.services.is_some()) else {
             self.toast(ToastLevel::Warn, "Claude Code settings are not available here");
@@ -388,7 +396,7 @@ impl App {
         }
     }
 
-    /// Prefix tuşunu değiştirir ve config'e yazar.
+    /// Changes the prefix key and writes it to the config.
     pub fn set_prefix(&mut self, prefix: &str) {
         let mut c = self.cfg.clone();
         c.keys.prefix = prefix.to_string();
@@ -396,13 +404,13 @@ impl App {
         self.persist("keys", "prefix", &format!("\"{prefix}\""));
     }
 
-    /// Karşılama ekranını açar; mevcut prefix seçili gelir.
+    /// Opens the welcome screen with the current prefix selected.
     pub fn show_welcome(&mut self) {
         let prefix = PREFIXES.iter().position(|p| p.eq_ignore_ascii_case(self.cfg.keys.prefix.trim())).unwrap_or(0);
         self.overlay = Some(super::Overlay::Welcome { prefix });
     }
 
-    /// Karşılamayı kapatır; `apply` ise seçilen prefix uygulanır. Bir daha gösterilmez.
+    /// Closes the welcome; with `apply` the selected prefix takes effect. Never shown again.
     pub fn finish_welcome(&mut self, prefix: usize, apply: bool) {
         self.overlay = None;
         if apply
@@ -416,8 +424,8 @@ impl App {
         self.ui_state.save();
     }
 
-    /// Proje taramasına kök klasör ekler. Liste boşsa (otomatik mod) önce
-    /// varsayılan klasörler yazılır ki onlar da taranmaya devam etsin.
+    /// Adds a root folder to the project scan. If the list is empty (auto mode) the
+    /// default folders are written first so they keep being scanned too.
     pub fn add_project_root(&mut self, raw: &str) {
         let raw = raw.trim().trim_matches('"');
         let path = match raw.strip_prefix('~') {
@@ -444,14 +452,14 @@ impl App {
         self.toast(ToastLevel::Ok, format!("added {} · scanning…", crate::util::tilde(&path)));
     }
 
-    /// Seçicideki şema kimlikleri: önce "temayı izle", sonra `term_schemes`.
+    /// Scheme ids in the selector: "follow theme" first, then `term_schemes`.
     pub fn scheme_options(&self) -> Vec<String> {
         std::iter::once(crate::theme::FOLLOW_THEME.to_string())
             .chain(self.term_schemes.iter().map(|s| s.name.clone()))
             .collect()
     }
 
-    /// Şemanın görünen adı; bilinmiyorsa (ör. Windows Terminal bulunamadı) temaya düşer.
+    /// Display name of a scheme; unknown ones (e.g. Windows Terminal not found) fall back to the theme.
     pub fn scheme_label(&self, name: &str) -> String {
         match crate::theme::find_scheme(&self.term_schemes, name) {
             Some(s) => s.label.clone(),
@@ -459,12 +467,12 @@ impl App {
         }
     }
 
-    /// Kurulu başlatıcılar (`launchers` sırası); açılır pencere bunları listeler.
+    /// Installed launchers (`launchers` order); the popup lists these.
     pub fn installed_launchers(&self) -> Vec<usize> {
         self.launchers.iter().enumerate().filter(|(_, (_, ok))| *ok).map(|(i, _)| i).collect()
     }
 
-    /// Hızlı başlatma penceresini açar (kurulu başlatıcı yoksa uyarır).
+    /// Opens the quick launch popup (warns when no launcher is installed).
     pub fn open_launcher_picker(&mut self) {
         if self.installed_launchers().is_empty() {
             self.toast(ToastLevel::Warn, "none of the launcher commands are installed");
@@ -473,7 +481,7 @@ impl App {
         self.overlay = Some(super::Overlay::Launchers { selected: 0 });
     }
 
-    /// Şema seçicisini açar; seçili satır mevcut şemadır.
+    /// Opens the scheme selector; the selected row is the current scheme.
     pub fn open_scheme_picker(&mut self) {
         self.reload_schemes();
         let current = self.cfg.terminal.colors.clone();
@@ -486,14 +494,14 @@ impl App {
         self.overlay = Some(super::Overlay::Schemes(super::SchemePicker { selected, original: current }));
     }
 
-    /// Seçicide gezinirken şemayı kaydetmeden uygular.
+    /// Previews a scheme while navigating the selector, without saving it.
     pub(super) fn preview_scheme(&mut self, idx: usize) {
         if let Some(name) = self.scheme_options().get(idx) {
             self.cfg.terminal.colors = name.clone();
         }
     }
 
-    /// Terminal renk şemasını seçer ve config'e yazar.
+    /// Picks the terminal color scheme and writes it to the config.
     pub fn set_term_colors(&mut self, name: &str) {
         let mut c = self.cfg.clone();
         c.terminal.colors = name.to_string();
@@ -510,7 +518,7 @@ impl App {
         self.settings_sel = (self.settings_sel as i32 + delta).clamp(0, n - 1) as usize;
     }
 
-    /// Tema ızgarasının sütun sayısı (çizimle aynı hesap).
+    /// Column count of the theme grid (same calculation as the drawing).
     pub fn theme_columns(&self) -> usize {
         let inner = crate::ui::settings_width(self.size.0).saturating_sub(6);
         (inner as usize / crate::ui::THEME_CARD_W as usize).clamp(1, 6)
@@ -528,7 +536,7 @@ impl App {
                         self.settings_sel = sel - cols as usize;
                     }
                 } else if let Some(SettingItem::Theme(_)) = items.get(sel.saturating_sub(1)) {
-                    // Izgaranın son satırının başına dön.
+                    // Wrap to the start of the grid's last row.
                     let n = THEMES.len();
                     self.settings_sel = n - 1 - (n - 1) % cols as usize;
                 } else {

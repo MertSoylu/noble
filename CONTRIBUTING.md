@@ -161,7 +161,6 @@ A few rules hold the design together:
 - [ ] UI changes checked in `target/audit/*.txt`, including the small sizes
 - [ ] README screenshots regenerated if a pictured screen changed
 - [ ] User-facing changes noted under **Unreleased** in [CHANGELOG.md](CHANGELOG.md)
-- [ ] Code comments follow the surrounding code (the existing comments are in Turkish; English is fine for new
-      code); identifiers and UI text are in English
+- [ ] Code comments, identifiers and UI text are in English
 
 By contributing you agree that your contributions are licensed under the [MIT License](LICENSE).

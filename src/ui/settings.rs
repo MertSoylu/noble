@@ -1,5 +1,5 @@
-//! Ayarlar sekmesi: tema kartları (her kart kendi renkleriyle önizlenir),
-//! aç/kapa anahtarları ve döngülü seçimler. Her satır tıklanabilir.
+//! Settings tab: theme cards (each previews its own colors), on/off toggles
+//! and cycling choices. Every row is clickable.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -10,10 +10,10 @@ use crate::app::{App, Hit, PROVIDER_KEYS, SettingItem, SettingKey};
 use crate::theme::THEMES;
 use crate::util;
 
-/// Tema kartı genişliği (1 sütun boşluk dahil).
+/// Theme card width (including 1 column of spacing).
 pub const THEME_CARD_W: u16 = 22;
 
-/// Ayarlar çerçevesinin dış genişliği.
+/// Outer width of the settings frame.
 pub fn settings_width(term_w: u16) -> u16 {
     term_w.saturating_sub(2).min(96)
 }
@@ -42,6 +42,7 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
         [SettingKey::Transparent, SettingKey::Boot, SettingKey::Animations, SettingKey::Clock24, SettingKey::Seconds]
             .map(key),
     );
+    v.push(key(SettingKey::Updates));
     v.push(Line::Blank);
     v.push(Line::Header("Terminal"));
     v.extend(
@@ -58,7 +59,7 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
     );
     v.push(Line::Blank);
     v.push(Line::Header("AI usage"));
-    // Kurulu olmayan sağlayıcıların satırı yok (`settings_items` süzer).
+    // Providers that are not installed get no row (`settings_items` filters them out).
     let present = |k: &SettingKey| items.contains(&SettingItem::Setting(*k));
     v.push(key(SettingKey::AiEnabled));
     v.extend(PROVIDER_KEYS.iter().filter(|k| present(k)).map(|k| key(*k)));
@@ -93,7 +94,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let cols = app.theme_columns();
     let lines = build_lines(&items, cols);
 
-    // Seçili satır görünür kalsın.
+    // Keep the selected row visible.
     let rows = inner.height.saturating_sub(2) as usize;
     let sel_line = lines.iter().position(|l| line_has(l, sel)).unwrap_or(0);
     let offset = (sel_line + 2).saturating_sub(rows);
@@ -117,7 +118,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 }
             }
             Line::Item(i) => {
-                // Satırın etiketi ve değeri: aç/kapa (Some(bool)) ya da döngülü metin.
+                // The row's label and value: on/off (Some(bool)) or cycling text.
                 let (label, toggle, text) = match items[*i] {
                     SettingItem::Setting(key) => {
                         let toggle = key.is_toggle().then(|| app.setting_on(key));
@@ -173,8 +174,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     hud::put_right(buf, inner.right() - 1, inner.bottom() - 1, hint, th.dim());
 }
 
-/// Seçili terminal şeması: kendi zemin/metin rengi ve üç renk örneğiyle bir
-/// çip; solunda seçiciyi açma ipucu.
+/// The selected terminal scheme: a chip with its own background/text colors and
+/// three color swatches, with a hint to open the selector on its left.
 fn scheme_chip(buf: &mut Buffer, left: u16, right: u16, y: u16, app: &App, row_bg: Color) {
     let th = &app.theme;
     let (label, bg, fg, dots) = scheme_look(app, &app.cfg.terminal.colors);
@@ -205,7 +206,7 @@ fn scheme_chip(buf: &mut Buffer, left: u16, right: u16, y: u16, app: &App, row_b
     );
 }
 
-/// Şemanın görünümü: ad, zemin, metin ve renk örnekleri (kırmızı, yeşil, mavi, …).
+/// How a scheme looks: name, background, text and color swatches (red, green, blue, …).
 pub(super) fn scheme_look(app: &App, name: &str) -> (String, Color, Color, Vec<Color>) {
     let th = &app.theme;
     match crate::theme::find_scheme(&app.term_schemes, name) {
@@ -214,7 +215,7 @@ pub(super) fn scheme_look(app: &App, name: &str) -> (String, Color, Color, Vec<C
     }
 }
 
-/// Tema kartı: temanın kendi zemin, metin ve vurgu renkleriyle çizilir.
+/// Theme card: drawn with the theme's own background, text and accent colors.
 fn theme_card(buf: &mut Buffer, card: Rect, app: &App, ti: usize, selected: bool) {
     let t = &THEMES[ti];
     let active = t.name == app.theme.name;

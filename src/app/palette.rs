@@ -1,4 +1,4 @@
-//! Komut paleti: eylemler, sekmeler, projeler, başlatıcılar, temalar, çalışma alanları.
+//! Command palette: actions, tabs, projects, launchers, themes, workspaces.
 
 use std::path::PathBuf;
 
@@ -90,7 +90,7 @@ impl App {
             if !relevant {
                 continue;
             }
-            // Sekmeler aşağıda adlarıyla listelenir.
+            // Tabs are listed below by name.
             if matches!(a, Action::GoTab(_)) {
                 continue;
             }

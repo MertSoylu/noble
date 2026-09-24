@@ -1,5 +1,5 @@
-//! Sağlayıcı bağdaştırıcıları. Her biri: algılama (senkron, dosya/PATH) ve
-//! kullanım çekme (ağ/CLI). Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code ve Command Code desteklenir.
+//! Provider adapters. Each one: detection (sync, file/PATH) and
+//! usage fetching (network/CLI). Supports Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -166,9 +166,9 @@ fn codex_fetch(env: &Env) -> Result<Usage, String> {
 
 // ─── Antigravity ─────────────────────────────────────────────────────────────
 // `agy --print /usage --output-format json` → command.data.groups[].buckets[]
-// (remaining_fraction, reset_time, window). Kimlik bilgisine dokunulmaz: CLI
-// kendi oturumunu kullanır. Oturum yokken agy tarayıcıda giriş açabileceği için
-// yalnızca kayıtlı bir oturum varken çalıştırılır (varlık kontrolü, içerik okunmaz).
+// (remaining_fraction, reset_time, window). Credentials are never touched: the
+// CLI uses its own session. Since agy could open a browser login when signed out,
+// it only runs when a session already exists (existence check, no content read).
 
 fn agy_bin(env: &Env) -> Option<PathBuf> {
     util::which("agy").or_else(|| {
@@ -185,8 +185,8 @@ fn agy_signed_in(env: &Env) -> bool {
     files.iter().any(|f| f.is_file()) || agy_credential_exists()
 }
 
-/// Windows'ta agy oturumu Credential Manager'da durur; `cmdkey /list` yalnızca
-/// hedef adlarını listeler, sırrı döndürmez.
+/// On Windows the agy session lives in the Credential Manager; `cmdkey /list` only
+/// lists target names and never returns the secret.
 #[cfg(windows)]
 fn agy_credential_exists() -> bool {
     util::command_for(std::path::Path::new("cmdkey"))
@@ -213,8 +213,8 @@ fn agy_detect(env: &Env) -> Presence {
     }
 }
 
-/// Her pencere türü (5 saat, hafta) için model grupları (Gemini, Claude/GPT…)
-/// arasında en dolu olanı gösterilir: hangi havuz önce biterse o önemli.
+/// For each window kind (5 hours, weekly) the fullest of the model groups
+/// (Gemini, Claude/GPT…) is shown: whichever pool runs dry first is what matters.
 pub fn parse_agy(v: &Value) -> Result<Usage, String> {
     if v.get("status").and_then(Value::as_str) != Some("SUCCESS") {
         return Err("usage command failed".into());
@@ -242,15 +242,15 @@ fn agy_fetch(env: &Env) -> Result<Usage, String> {
     let bin = agy_bin(env).ok_or("agy not on PATH")?;
     let args = ["--print", "/usage", "--output-format", "json", "--print-timeout", "20s"];
     let out = run_capture(&bin, &args, bin.parent(), Duration::from_secs(25))?;
-    // Olası uyarı satırlarını atla: JSON ilk '{' ile başlar.
+    // Skip possible warning lines: the JSON starts at the first '{'.
     let json = out.find('{').map(|i| &out[i..]).ok_or("unexpected response")?;
     parse_agy(&serde_json::from_str(json.trim()).map_err(|_| "unexpected response".to_string())?)
 }
 
 // ─── OpenCode Go ─────────────────────────────────────────────────────────────
-// ~/.local/share/opencode/auth.json → "opencode-go" (yoksa Zen: "opencode") API anahtarı
+// ~/.local/share/opencode/auth.json → "opencode-go" (else Zen: "opencode") API key
 // GET https://opencode.ai/zen/go/v1/usage → usage.{rolling,weekly,monthly}
-// Go aboneliği olmayan anahtar 403 alır → "oturum yok" sayılır, panelde görünmez.
+// A key without a Go subscription gets 403 → counted as "not signed in", hidden from the panel.
 
 fn opencode_auth(env: &Env) -> PathBuf {
     let data = env.var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| env.at(&[".local", "share"]));
@@ -303,16 +303,16 @@ fn ocgo_fetch(env: &Env) -> Result<Usage, String> {
 }
 
 // ─── Kilo Code ───────────────────────────────────────────────────────────────
-// ~/.local/share/kilo/auth.json → "kilo" (api: key, oauth: access + accountId=organizasyon)
+// ~/.local/share/kilo/auth.json → "kilo" (api: key, oauth: access + accountId=organization)
 // GET https://api.kilo.ai/api/trpc/kiloPass.getState → subscription.{currentPeriod*Usd, nextBillingAt}
-// (Kilo CLI'nın kendi kullandığı uç nokta). Kilo Pass yoksa sağlayıcı gizlenir.
+// (The endpoint the Kilo CLI itself uses). Without Kilo Pass the provider is hidden.
 
 fn kilo_auth(env: &Env) -> PathBuf {
     let data = env.var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| env.at(&[".local", "share"]));
     data.join("kilo").join("auth.json")
 }
 
-/// Token ve (varsa) organizasyon kimliği.
+/// The token and (optionally) the organization id.
 fn kilo_token(env: &Env) -> Option<(String, Option<String>)> {
     let entry = read_json(&kilo_auth(env))?.get("kilo")?.clone();
     match entry.get("type").and_then(Value::as_str)? {
@@ -332,8 +332,8 @@ fn kilo_detect(env: &Env) -> Presence {
     }
 }
 
-/// tRPC toplu yanıtından Kilo Pass dönemi: kullanılan / (taban + bonus) kredi.
-/// Etkin abonelik yoksa `None`.
+/// The Kilo Pass period from a tRPC batch response: used / (base + bonus) credits.
+/// `None` when there is no active subscription.
 pub fn parse_kilo_pass(v: &Value) -> Option<Window> {
     let item = v.as_array().and_then(|a| a.first()).unwrap_or(v);
     let data = item.pointer("/result/data")?;
@@ -373,8 +373,8 @@ fn kilo_fetch(env: &Env) -> Result<Usage, String> {
 // ─── Command Code ────────────────────────────────────────────────────────────
 // ~/.commandcode/auth.json → apiKey
 // GET https://api.commandcode.ai/alpha/billing/credits → credits.windowLimits.{fiveHour,weekly}
-// (CLI'ın kendi /usage ekranının kullandığı uç nokta; limitler sunucudan gelir).
-// Pencere limiti olmayan hesap (yalnızca kredi) gizlenir.
+// (The endpoint the CLI's own /usage screen uses; limits come from the server).
+// Accounts with no window limit (credits only) are hidden.
 
 fn cmdc_key(env: &Env) -> Option<String> {
     string(&read_json(&env.at(&[".commandcode", "auth.json"]))?, &["apiKey"])
@@ -462,7 +462,7 @@ mod tests {
                 {"id": "bad", "window": "5h", "remaining_fraction": 2.0}]}]}}});
         let u = parse_agy(&v).unwrap();
         assert_eq!(u.windows.len(), 2);
-        // 5 saatte Claude/GPT havuzu daha dolu (%60), haftada Gemini (%15).
+        // At 5h the Claude/GPT pool is fuller (60%), weekly Gemini (15%).
         assert_eq!((u.windows[0].label.as_str(), u.windows[0].used), ("5H", 60));
         assert_eq!(u.windows[0].resets_at, Some(1_790_190_000));
         assert_eq!((u.windows[1].label.as_str(), u.windows[1].used), ("WEEK", 15));
@@ -507,7 +507,7 @@ mod tests {
         let w = parse_kilo_pass(&v).unwrap();
         assert_eq!((w.label.as_str(), w.used), ("MONTH", 25));
         assert_eq!(w.resets_at, Some(1_790_812_800));
-        // İptal edilmiş ya da hiç olmayan abonelik.
+        // Canceled or missing subscription.
         let canceled = json!([{"result": {"data": {"json": {"subscription": {
             "status": "canceled", "currentPeriodBaseCreditsUsd": 19, "currentPeriodUsageUsd": 5}}}}}]);
         assert!(parse_kilo_pass(&canceled).is_none());
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(u.windows[0].resets_at, Some(1_790_272_800));
         assert_eq!(u.windows[1].resets_at, Some(1_790_812_800));
         assert_eq!(u.plan.as_deref(), Some("PRO"));
-        // Limitsiz (yalnızca kredi) hesap.
+        // Unlimited (credits only) account.
         assert!(parse_cmdc(&json!({"credits": {"windowLimits": null}})).windows.is_empty());
     }
 

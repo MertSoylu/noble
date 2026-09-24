@@ -1,4 +1,4 @@
-//! Klavye ve fare girdisinin yorumlanması.
+//! Interpreting keyboard and mouse input.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use crate::term::layout::{PaneId, ratio_from_point};
 use crate::term::pane::Selection;
 
 impl App {
-    /// Filtrelenmiş ve sıralanmış süreç listesi.
+    /// Filtered and sorted process list.
     pub fn visible_procs(&self) -> Vec<ProcInfo> {
         let Some(s) = &self.sensors.last else { return Vec::new() };
         let q = self.system.filter.trim().to_lowercase();
@@ -121,7 +121,7 @@ impl App {
             let parser = p.parser();
             (parser.screen().application_cursor(), parser.screen().alternate_screen())
         };
-        // Shell'de Enter bir komut başlatır: bitişini (prompt dönüşü) ölçmek için.
+        // In a shell Enter starts a command: we time its end (prompt return).
         if k.code == KeyCode::Enter && !alt {
             p.command_started = Some(Instant::now());
         }
@@ -142,7 +142,7 @@ impl App {
                     if let Some(item) = st.current().cloned() {
                         self.run_palette(item.cmd);
                     }
-                    // Komut yeni bir overlay açmış olabilir (ör. yeniden adlandırma).
+                    // The command may have opened a new overlay (e.g. rename).
                     return;
                 }
                 KeyCode::Up => {
@@ -195,7 +195,7 @@ impl App {
                 }
                 _ => true,
             },
-            // Menü tuşları `menu_key`'de işlenir; buraya gelmez.
+            // Menu keys are handled in `menu_key`; they never reach here.
             Overlay::Menu(_) => true,
             Overlay::Welcome { prefix } => {
                 let n = super::settings::PREFIXES.len();
@@ -225,7 +225,7 @@ impl App {
                 };
                 match k.code {
                     KeyCode::Esc => {
-                        // Önizlemeyi geri al.
+                        // Undo the preview.
                         self.cfg.terminal.colors = p.original.clone();
                         false
                     }
@@ -369,7 +369,7 @@ impl App {
         self.bridge.proj_sel = (self.bridge.proj_sel as i32 + delta).clamp(0, n as i32 - 1) as usize;
     }
 
-    /// Seçili projenin dizini (başlatıcılar ve "klasörü aç" için).
+    /// Directory of the selected project (for launchers and "open folder").
     fn bridge_target_dir(&self) -> Option<PathBuf> {
         self.selected_project().map(|p| p.path.clone())
     }
@@ -616,7 +616,7 @@ impl App {
         self.last_click = Some((Instant::now(), x, y));
         let Some(hit) = self.hit_at(x, y) else { return };
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
-        // Sağ tık: sekme, pane başlığı ve projede bağlam menüsü.
+        // Right click: context menu for a tab, a pane title and a project.
         if btn == MouseButton::Right && self.overlay.is_none() {
             match &hit {
                 Hit::Tab(i) => return self.open_tab_menu(*i, x, y + 1),
@@ -659,6 +659,8 @@ impl App {
                 }
             }
             Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
+            Hit::Update => self.start_update(),
+            Hit::UpdateDismiss => self.dismiss_update(),
             Hit::TabClose(i) => self.remove_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Pane { pane, inner } => {
@@ -881,7 +883,7 @@ impl App {
                     (parser.screen().alternate_screen(), parser.screen().application_cursor())
                 };
                 if alt {
-                    // Alternatif ekranda (less, man…) tekerlek ok tuşu olur.
+                    // On the alternate screen (less, man…) the wheel becomes arrow keys.
                     let code = if dir > 0 { KeyCode::Up } else { KeyCode::Down };
                     let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), app_cursor);
                     for _ in 0..3 {

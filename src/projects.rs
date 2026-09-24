@@ -1,5 +1,5 @@
-//! Proje keşfi: kök klasörlerde git depolarını bulur, branch ve son etkinliği
-//! dosya sisteminden okur, değişiklik sayısını arka planda `git` ile toplar.
+//! Project discovery: finds git repos under the root folders, reads the branch
+//! and last activity from the file system and collects change counts with `git` in the background.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -19,18 +19,18 @@ pub struct Project {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GitInfo {
-    /// Commit edilmemiş toplam değişiklik (yeni dosyalar dahil).
+    /// Total uncommitted changes (new files included).
     pub dirty: u32,
-    /// Bunlardan git'in henüz izlemediği yeni dosyalar.
+    /// Of those, the new files git does not track yet.
     pub untracked: u32,
     pub ahead: u32,
     pub behind: u32,
     pub branch: Option<String>,
     pub last_subject: Option<String>,
     pub last_commit: Option<i64>,
-    /// Son commit'ler, en yenisi önce (Home'daki proje kartı için).
+    /// Recent commits, newest first (for the project card on Home).
     pub commits: Vec<Commit>,
-    /// Değişen dosyalar: iki harflik porcelain durumu ve yol (en fazla `MAX_CHANGES`).
+    /// Changed files: two-letter porcelain status and path (at most `MAX_CHANGES`).
     pub changes: Vec<(String, String)>,
 }
 
@@ -42,7 +42,7 @@ pub struct Commit {
     pub subject: String,
 }
 
-/// Proje kartı için tutulan en fazla commit ve dosya sayısı.
+/// How many commits and files are kept for the project card.
 pub const MAX_COMMITS: usize = 8;
 pub const MAX_CHANGES: usize = 40;
 
@@ -64,7 +64,7 @@ const SKIP_DIRS: &[&str] = &[
     "My Videos",
 ];
 
-/// Varsayılan kök klasörler: var olanlar.
+/// Default root folders: the ones that exist.
 pub fn default_roots() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let mut roots: Vec<PathBuf> = [
@@ -86,7 +86,7 @@ pub fn default_roots() -> Vec<PathBuf> {
     .map(|p| home.join(p))
     .filter(|p| p.is_dir())
     .collect();
-    // Windows'ta büyük/küçük harf farkı aynı klasörü iki kez eklemesin.
+    // On Windows, a case difference must not add the same folder twice.
     roots.dedup_by(|a, b| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
     roots
 }
@@ -110,7 +110,7 @@ pub fn roots_from(cfg: &ProjectsCfg) -> Vec<PathBuf> {
         .collect()
 }
 
-/// `.git` bir klasör ya da (worktree/submodule için) `gitdir:` içeren bir dosya olabilir.
+/// `.git` may be a directory or a file containing `gitdir:` (for worktrees/submodules).
 pub fn git_dir(repo: &Path) -> Option<PathBuf> {
     let dot = repo.join(".git");
     if dot.is_dir() {
@@ -125,7 +125,7 @@ pub fn git_dir(repo: &Path) -> Option<PathBuf> {
     None
 }
 
-/// `HEAD` dosyasından branch adı (ayrık HEAD'de kısa hash).
+/// Branch name from the `HEAD` file (short hash on a detached HEAD).
 pub fn read_branch(git_dir: &Path) -> Option<String> {
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
@@ -144,7 +144,7 @@ fn last_active(git_dir: &Path) -> Option<SystemTime> {
         .max()
 }
 
-/// Kök klasörleri tarar (derinlik sınırlı, en fazla `limit` proje).
+/// Scans the root folders (depth limited, at most `limit` projects).
 pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usize) -> Vec<Project> {
     let mut out: Vec<Project> = Vec::new();
     let mut visited = 0usize;
@@ -198,7 +198,7 @@ pub fn sort_projects(list: &mut [Project]) {
     });
 }
 
-/// `git status --porcelain=v1 -b` çıktısını çözer.
+/// Parses `git status --porcelain=v1 -b` output.
 pub fn parse_status(output: &str) -> GitInfo {
     let mut info = GitInfo::default();
     for line in output.lines() {
@@ -225,7 +225,7 @@ pub fn parse_status(output: &str) -> GitInfo {
                 info.untracked += 1;
             }
             if info.changes.len() < MAX_CHANGES && line.len() > 3 {
-                // "XY yol" ya da yeniden adlandırmada "XY eski -> yeni".
+                // "XY path", or "XY old -> new" for a rename.
                 let path = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]).trim_matches('"');
                 info.changes.push((line[..2].to_string(), path.to_string()));
             }
@@ -262,7 +262,7 @@ fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
     Some(info)
 }
 
-/// `git log --format=%h%x1f%ct%x1f%an%x1f%s` çıktısını çözer.
+/// Parses `git log --format=%h%x1f%ct%x1f%an%x1f%s` output.
 pub fn parse_log(output: &str) -> Vec<Commit> {
     output
         .lines()
@@ -278,22 +278,22 @@ pub fn parse_log(output: &str) -> Vec<Commit> {
         .collect()
 }
 
-/// Proje iş parçacığına istekler.
+/// Requests to the project thread.
 pub enum ProjectReq {
-    /// Kök klasörleri baştan tara.
+    /// Rescan the root folders from scratch.
     Rescan,
-    /// Tek bir deponun git durumunu hemen yenile (komut bitti, liste kaydırıldı…).
+    /// Refresh one repo's git status right away (command finished, list scrolled…).
     Refresh(PathBuf),
 }
 
-/// Otomatik yeniden tarama aralığı. Git durumu komut bitince ve Home açılınca
-/// ayrıca istenir; bu tarama yalnızca yeni/silinen repoları yakalar.
+/// Automatic rescan interval. Git status is also requested when a command
+/// finishes and when Home opens; this scan only catches new/deleted repos.
 const RESCAN_EVERY: Duration = Duration::from_secs(300);
-/// Taramadan hemen sonra git durumu alınan (en son kullanılan) proje sayısı;
-/// kalanlar listede göründükçe `Refresh` ile istenir.
+/// How many projects (the most recently used) get their git status right after
+/// a scan; the rest are requested with `Refresh` as they appear in the list.
 pub const EAGER_GIT: usize = 40;
 
-/// `cwd`'yi içeren en derin proje (ör. `repo/src/x` → `repo`).
+/// The deepest project containing `cwd` (e.g. `repo/src/x` → `repo`).
 pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Project> {
     let norm = |p: &Path| {
         let s = p.to_string_lossy().replace('\\', "/");
@@ -309,13 +309,13 @@ pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Pro
         .max_by_key(|p| p.path.as_os_str().len())
 }
 
-/// Tarama + git durumu iş parçacığı. `Rescan` gelince ya da süre dolunca
-/// yeniden tarar; `Refresh` tek bir deponun durumunu arada günceller.
+/// Scan + git status thread. Rescans when `Rescan` arrives or the interval is
+/// up; `Refresh` updates a single repo's status in between.
 pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: std::sync::mpsc::Receiver<ProjectReq>) {
     use std::sync::mpsc::RecvTimeoutError;
     let _ = std::thread::Builder::new().name("projects".into()).spawn(move || {
         let git = util::which("git");
-        // Önceki taramadaki son etkinlik zamanları: değişmeyen repo için git çalıştırılmaz.
+        // Last activity times from the previous scan: no git run for unchanged repos.
         let mut seen: std::collections::HashMap<PathBuf, Option<SystemTime>> = Default::default();
         loop {
             let cfg = cfg.lock().map(|c| c.clone()).unwrap_or_default();
@@ -332,7 +332,7 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: st
                 return;
             }
             if let Some(git) = &git {
-                // Birkaç paralel işçi; en son kullanılan projeler önce.
+                // A few parallel workers; the most recently used projects first.
                 let chunks: Vec<Vec<PathBuf>> = targets.chunks(4).map(|c| c.to_vec()).collect();
                 let handles: Vec<_> = chunks
                     .into_iter()
@@ -367,7 +367,7 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: st
                         }
                     }
                     Ok(ProjectReq::Rescan) | Err(RecvTimeoutError::Timeout) => {
-                        // Aynı anda gelen fazladan tarama isteklerini yut.
+                        // Swallow extra rescan requests arriving at the same time.
                         while let Ok(ProjectReq::Rescan) = req.try_recv() {}
                         break;
                     }

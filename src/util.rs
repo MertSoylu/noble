@@ -1,12 +1,12 @@
-//! Küçük, saf yardımcılar: biçimlendirme, bulanık eşleşme, PATH araması.
+//! Small, pure helpers: formatting, fuzzy matching, PATH lookup.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Geliştirme kurulumu mu: `install.cmd` ikiliyi `noble-dev` adıyla kurar ki
-/// kararlı `noble` ile yan yana çalışsın.
+/// Is this a dev install: `install.cmd` installs the binary as `noble-dev` so it
+/// runs side by side with the stable `noble`.
 pub fn is_dev_build() -> bool {
     static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEV.get_or_init(|| {
@@ -17,7 +17,7 @@ pub fn is_dev_build() -> bool {
     })
 }
 
-/// Bayt sayısını kısa insan okunur biçime çevirir: 1536 → "1.5K".
+/// Turns a byte count into a short human readable form: 1536 → "1.5K".
 pub fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
     let mut value = bytes as f64;
@@ -35,12 +35,12 @@ pub fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
-/// Saniye başına bayt: "1.2M/s".
+/// Bytes per second: "1.2M/s".
 pub fn fmt_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", fmt_bytes(bytes_per_sec.max(0.0) as u64))
 }
 
-/// Süreyi en büyük iki birimle yazar: "2h 14m", "4d 3h", "45s".
+/// Writes a duration with its two largest units: "2h 14m", "4d 3h", "45s".
 pub fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
     let (days, hours, mins) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
@@ -55,7 +55,7 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// Geçmiş zamanı tek birimle, kompakt yazar: "now", "5m", "2h", "3d", "6w".
+/// Writes a past time in one compact unit: "now", "5m", "2h", "3d", "6w".
 pub fn fmt_ago(d: Duration) -> String {
     let s = d.as_secs();
     if s < 60 {
@@ -73,12 +73,12 @@ pub fn fmt_ago(d: Duration) -> String {
     }
 }
 
-/// Ekran genişliği (sütun) hesabı.
+/// Display width (column) calculation.
 pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Metni `max` sütuna sığdırır; taşarsa sonuna "…" koyar.
+/// Fits text into `max` columns; appends "…" when it overflows.
 pub fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -100,7 +100,7 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-/// Metnin başını kırpar (yollar için): "…\Desktop\noble".
+/// Cuts the start of text (for paths): "…\Desktop\noble".
 pub fn truncate_left(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -123,20 +123,20 @@ pub fn truncate_left(s: &str, max: usize) -> String {
     out.iter().rev().collect()
 }
 
-/// Metni sağa hizalı olarak `w` sütuna doldurur.
+/// Fills text right-aligned into `w` columns.
 pub fn pad_left(s: &str, w: usize) -> String {
     let cur = width(s);
     if cur >= w { s.to_string() } else { format!("{}{s}", " ".repeat(w - cur)) }
 }
 
-/// Metni sola hizalı olarak `w` sütuna doldurur (taşarsa kırpar).
+/// Fills text left-aligned into `w` columns (truncates when it overflows).
 pub fn pad_right(s: &str, w: usize) -> String {
     let t = truncate(s, w);
     let cur = width(&t);
     format!("{t}{}", " ".repeat(w.saturating_sub(cur)))
 }
 
-/// Ev dizinini "~" ile kısaltır.
+/// Shortens the home directory to "~".
 pub fn tilde(path: &Path) -> String {
     let text = path.display().to_string();
     if let Some(home) = dirs::home_dir() {
@@ -148,8 +148,8 @@ pub fn tilde(path: &Path) -> String {
     text
 }
 
-/// Bulanık alt-dizi eşleşmesi. Eşleşmezse `None`; eşleşirse skor (büyük = iyi).
-/// Ardışık harfler, kelime başları ve baştan eşleşme ödüllendirilir.
+/// Fuzzy substring match. `None` when there is no match; otherwise a score
+/// (higher is better). Consecutive letters, word starts and an exact prefix are rewarded.
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     let q: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if q.is_empty() {
@@ -185,12 +185,12 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     if qi < q.len() {
         return None;
     }
-    // Kısa metinler hafifçe öne çıkar.
+    // Short texts get a slight edge.
     score -= (t.len() as i32) / 8;
     Some(score)
 }
 
-/// PATH üzerinde çalıştırılabilir dosyayı bulur (Windows'ta PATHEXT'e bakar).
+/// Finds an executable on PATH (checks PATHEXT on Windows).
 pub fn which(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
@@ -218,8 +218,8 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Bir programı arka planda çalıştırmak için `Command` hazırlar: Windows'ta
-/// `.cmd/.bat` shim'leri `cmd /C` üzerinden çalıştırılır ve konsol penceresi açılmaz.
+/// Prepares a `Command` to run a program in the background: on Windows the
+/// `.cmd/.bat` shims run through `cmd /C` and no console window is opened.
 pub fn command_for(program: &Path) -> std::process::Command {
     #[allow(unused_mut)]
     let mut cmd = {
@@ -242,7 +242,7 @@ pub fn command_for(program: &Path) -> std::process::Command {
     cmd
 }
 
-/// Basit base64 çözücü (OSC 52 pano istekleri için).
+/// Simple base64 decoder (for OSC 52 clipboard requests).
 pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         Some(match c {

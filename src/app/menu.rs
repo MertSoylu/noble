@@ -1,4 +1,4 @@
-//! Sağ tık menüleri (sekme, pane başlığı, proje) ve fareyle proje eylemleri.
+//! Right-click menus (tab, pane title, project) and mouse project actions.
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,7 @@ pub struct MenuItem {
     pub enabled: bool,
 }
 
-/// Açık sağ tık menüsü; tıklanan noktanın yanında çizilir.
+/// An open right-click menu, drawn next to the clicked point.
 pub struct Menu {
     pub title: String,
     pub x: u16,
@@ -43,7 +43,7 @@ pub struct Menu {
     pub selected: usize,
 }
 
-/// Proje satırının üzerine gelince görünen hızlı eylemler.
+/// Quick actions shown when a project row is hovered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectAct {
     Pin,
@@ -174,7 +174,7 @@ impl App {
         }
     }
 
-    /// Pane'in sekmesine geçip onu odaklar.
+    /// Switches to the pane's tab and focuses it.
     pub(super) fn focus_pane(&mut self, pane: PaneId) -> bool {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else { return false };
         self.tabs[ti].focus = pane;
@@ -188,7 +188,7 @@ impl App {
             Some(Overlay::Prompt(Prompt { title: "RENAME TAB".into(), value, purpose: PromptPurpose::RenameTab(i) }));
     }
 
-    /// Sekmeyi `from` sırasından `to` sırasına taşır; görünen sekme takip edilir.
+    /// Moves a tab from order `from` to order `to`; the visible tab follows.
     pub fn move_tab(&mut self, from: usize, to: usize) {
         if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
             return;
@@ -226,7 +226,7 @@ impl App {
         }
     }
 
-    /// `git pull`'u yeni sekmede çalıştırır (çıktı görünür kalsın diye).
+    /// Runs `git pull` in a new tab (so the output stays visible).
     pub fn git_pull(&mut self, path: &Path) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.new_tab(path.to_path_buf(), Some("git pull"), Some(format!("{name} · pull")));
@@ -239,7 +239,7 @@ impl App {
         self.toast(ToastLevel::Ok, if pinned { format!("pinned {name}") } else { format!("unpinned {name}") });
     }
 
-    /// Sabitlenmiş projeleri (kendi sıralarını koruyarak) başa alır; seçim korunur.
+    /// Moves pinned projects (keeping their own order) to the top; the selection is kept.
     pub(super) fn sort_pinned(&mut self) {
         let selected = self.selected_project().map(|p| p.path.clone());
         let pins: Vec<bool> = self.projects.iter().map(|p| self.ui_state.is_pinned(&p.path)).collect();
@@ -254,7 +254,7 @@ impl App {
         }
     }
 
-    /// Proje satırındaki hızlı eylem düğmesi.
+    /// A quick-action button on a project row.
     pub fn project_action(&mut self, row: usize, act: ProjectAct, x: u16, y: u16) {
         let Some(path) = self.visible_projects().get(row).map(|i| self.projects[*i].path.clone()) else { return };
         self.bridge.proj_sel = row;

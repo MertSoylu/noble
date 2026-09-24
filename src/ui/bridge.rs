@@ -1,5 +1,5 @@
-//! Ana ekran (Home): solda saat + projeler, sağda AI kullanımı ve sistem özeti.
-//! Sade tutulur: her panelin tek bir işi vardır ve her şey tıklanabilir.
+//! Home screen: clock + projects on the left, AI usage and system summary on the
+//! right. Kept simple: every panel has a single job and everything is clickable.
 
 use std::time::{Duration, SystemTime};
 
@@ -47,7 +47,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let room = right.height.saturating_sub(hero_h + 10);
     let shown = !signed_in.is_empty() || !sessions.is_empty();
     let ai_h = if shown { ai_height(app, &signed_in, sessions.len()).min(room + hero_h) } else { 0 };
-    // Sağ sütun saatin altından başlar: soldaki proje paneliyle aynı hizada.
+    // The right column starts under the clock: in line with the project panel on the left.
     let top = right.y + hero_h;
     let avail = right.height.saturating_sub(hero_h);
     if ai_h >= 5 {
@@ -84,7 +84,7 @@ fn session_line(app: &App) -> String {
     }
 }
 
-/// Büyük saat + selamlama (5 satır).
+/// Big clock + greeting (5 rows).
 fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     use chrono::Timelike;
     let th = &app.theme;
@@ -115,7 +115,7 @@ fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     hud::put(buf, tx, y + 2, &session_line(app), th.dim(), w);
 }
 
-/// Tek satırlık saat + selamlama (dar pencereler).
+/// One-line clock + greeting (narrow windows).
 fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     use chrono::Timelike;
     let th = &app.theme;
@@ -191,7 +191,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let gaps = 1 + u16::from(status_w > 0) + u16::from(branch_w > 0);
     let name_w = w.saturating_sub(2 + branch_w + status_w + ago_w + gaps);
     let header = list_h >= 6 && branch_w > 0;
-    // Liste kısa kalıyorsa altındaki boşluğa seçili projenin kartı gelir.
+    // If the list stays short, the selected project's card fills the space below.
     let needed = u16::from(header) + vis.len() as u16;
     let card_h = if app.projects_loaded && !vis.is_empty() && footer_h == 3 && w >= 40 && list_h >= needed + CARD_MIN {
         list_h - needed
@@ -221,7 +221,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     } else if vis.is_empty() {
         hud::put(buf, x, y, &format!("Nothing matches “{}”", app.bridge.filter), th.dim(), w);
     } else {
-        // Sütun başlıkları: yer varsa listenin üstünde, silik.
+        // Column headers above the list when there is room, dimmed.
         if header {
             let mut hx = x + 1;
             hud::put(buf, hx, y, "PROJECT", th.dim(), name_w);
@@ -250,7 +250,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let st = |s: Style| s.bg(bgc);
             let mut cx = x + 1;
             let name_style = if selected { th.accent_bold() } else { th.text() };
-            // Projede açık Claude/Codex oturumu: adın yanında, dikkat istiyorsa ◆, çalışıyorsa ●.
+            // Open Claude/Codex session in the project: next to the name, ◆ when it needs attention, ● while running.
             let sessions = app.agent_sessions(&p.path);
             let marker =
                 sessions.iter().map(|(_, st)| *st).max_by_key(|st| state_rank(*st)).map(|st| state_glyph(st, th));
@@ -299,8 +299,8 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let a = p.last_active.map(ago).unwrap_or_default();
             hud::put(buf, cx, ry, &util::pad_left(&a, ago_w as usize), st(th.dim()), ago_w);
             hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Project(row)));
-            // Fare üzerindeyse sağ uçta hızlı eylemler. Yalnızca "LAST" sütununun
-            // (ve iki yanındaki boşluğun) yerini kaplar; git durumu görünür kalır.
+            // Quick actions on the right end while hovered. They only cover the
+            // "LAST" column (and the padding beside it); the git status stays visible.
             let hovered = app.hover.is_some_and(|(hx, hy)| hy == ry && hx >= inner.x && hx < inner.right());
             if hovered && app.overlay.is_none() && w >= 40 {
                 let acts = [(if pinned { " ★ " } else { " ☆ " }, ProjectAct::Pin), (" ⋯ ", ProjectAct::More)];
@@ -326,8 +326,8 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     }
     let by = inner.bottom() - 1;
     if footer_h == 3 {
-        // Seçili proje: açık AI oturumları, git durumu cümlesi ve son commit
-        // (kart açıksa son commit orada yazdığı için klasör yolu).
+        // Selected project: open AI sessions, the git status sentence and the last
+        // commit (or the folder path when the card is open, since the card shows it).
         if let Some(p) = app.selected_project() {
             let detail = match p.git.as_ref().and_then(|g| g.last_subject.clone().map(|s| (s, g.last_commit))) {
                 _ if card_h > 0 => util::tilde(&p.path),
@@ -372,17 +372,17 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     }
 }
 
-/// Proje kartının en az yüksekliği (ayraç + başlık + birkaç satır).
+/// Minimum height of a project card (separator + title + a few rows).
 const CARD_MIN: u16 = 6;
 
-/// Seçili projenin kartı: son commit'ler ve değişen dosyalar. Veriler proje
-/// taramasının zaten çalıştırdığı `git status` / `git log` çıktısından gelir.
+/// The selected project's card: recent commits and changed files. The data comes
+/// from the `git status` / `git log` output the project scan already runs.
 fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Project) {
     let th = &app.theme;
     let x = area.x + 1;
     let w = area.width.saturating_sub(2);
     let mut y = area.y;
-    // Ayraç: "── noble-rs ─────────".
+    // Separator: "── noble-rs ─────────".
     hud::hline(buf, area.x, y, area.width, "─", Style::default().fg(th.line));
     hud::put(buf, x + 1, y, &format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize)), th.dim(), w);
     y += 1;
@@ -391,14 +391,14 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
         hud::put(buf, x, y + 1, "checking git status…", th.dim(), w);
         return;
     };
-    // Dosyalar sütunlar hâlinde; sütun genişliği en uzun yola göre.
+    // Files in columns; the column width follows the longest path.
     let longest = g.changes.iter().map(|(_, f)| util::width(f)).max().unwrap_or(0) as u16;
     let col_w = (longest + 5).clamp(16, w.max(16));
     let cols = (w / col_w).clamp(1, 4) as usize;
-    // Listede olmayan dosyalar (ör. `MAX_CHANGES` sınırı) için bir "+N more" hücresi.
+    // A "+N more" cell for files missing from the list (e.g. the `MAX_CHANGES` cap).
     let entries = g.changes.len() + usize::from(g.dirty as usize > g.changes.len());
     let change_want = entries.div_ceil(cols).max(1) as u16;
-    // Önce commit'lere yer ver, dosyalara en az 3 satır (ya da gereken kadarı) kalsın.
+    // Give commits room first; files keep at least 3 rows (or as many as needed).
     let commit_rows = (g.commits.len() as u16).min(rows.saturating_sub(4 + change_want.min(3)));
     let change_rows = rows.saturating_sub(if commit_rows > 0 { commit_rows + 2 } else { 0 } + 2).min(change_want);
 
@@ -450,7 +450,7 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
     }
 }
 
-/// Porcelain durum kodundan tek harf ve renk: M değişti, A eklendi, D silindi, ? yeni.
+/// Single letter and color from a porcelain status code: M changed, A added, D deleted, ? new.
 fn change_mark(code: &str, th: &Theme) -> (&'static str, ratatui::style::Color) {
     match code.trim().chars().next().unwrap_or(' ') {
         '?' => ("?", th.accent),
@@ -466,8 +466,8 @@ fn plural(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Proje satırındaki kısa git durumu: "● 3 changed ↑1 ↓2", "✓ clean". Dar
-/// sütunda kelimeler atılır ("● 3 ↑1").
+/// Short git status on a project row: "● 3 changed ↑1 ↓2", "✓ clean". In a
+/// narrow column the words are dropped ("● 3 ↑1").
 fn git_badge(git: Option<&GitInfo>, wide: bool, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
     let Some(g) = git else { return vec![("…".into(), th.dim)] };
     let mut v = Vec::new();
@@ -487,7 +487,7 @@ fn git_badge(git: Option<&GitInfo>, wide: bool, th: &Theme) -> Vec<(String, rata
     v
 }
 
-/// Seçili projenin git durumu, cümle olarak.
+/// The selected project's git status, as a sentence.
 fn git_summary(git: Option<&GitInfo>, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
     let Some(g) = git else { return vec![("checking git status…".into(), th.dim)] };
     let mut v = Vec::new();
@@ -509,7 +509,7 @@ fn git_summary(git: Option<&GitInfo>, th: &Theme) -> Vec<(String, ratatui::style
     v
 }
 
-/// Oturumu açık (kimlik bilgisi bulunan) sağlayıcılar.
+/// Providers with a live session (credentials found).
 fn signed_in(app: &App) -> Vec<&ProviderState> {
     if !app.cfg.ai.enabled {
         return Vec::new();
@@ -517,7 +517,7 @@ fn signed_in(app: &App) -> Vec<&ProviderState> {
     app.ai.iter().filter(|p| p.presence == Presence::Ready && p.status != Status::SignIn).collect()
 }
 
-/// Durum işareti ve rengi: dikkat isteyen ◆, sıra sende ○, çalışıyor ●.
+/// State marker and color: ◆ needs attention, ○ your turn, ● running.
 fn state_glyph(state: AgentState, th: &crate::theme::Theme) -> (&'static str, ratatui::style::Color) {
     match state {
         AgentState::NeedsYou => ("◆", th.warn),
@@ -535,7 +535,7 @@ fn state_rank(state: AgentState) -> u8 {
     }
 }
 
-/// Oturum listesinde gösterilen en fazla satır.
+/// Maximum rows shown in the session list.
 const MAX_SESSION_ROWS: usize = 4;
 
 fn ai_height(app: &App, list: &[&ProviderState], sessions: usize) -> u16 {
@@ -560,8 +560,8 @@ fn reset_in(ts: i64) -> String {
     util::fmt_duration(Duration::from_secs((ts - now) as u64)).replace(' ', "")
 }
 
-/// "Bu hızla 5h 1h20m'de dolar": 5 saatlik pencere sıfırlanmadan önce
-/// dolacaksa uyarı metni. Haftalık pencere için tahmin yapılmaz.
+/// "At this pace 5h fills in 1h20m": the warning text shown when the 5 hour
+/// window would fill before it resets. No estimate is made for the weekly window.
 fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
     let u = p.usage.as_ref()?;
     let now = chrono::Utc::now().timestamp();
@@ -596,7 +596,7 @@ fn ai_panel(
     let w = inner.width.saturating_sub(2);
     let bottom = inner.bottom();
     let mut y = inner.y;
-    // Açık AI oturumları: tıklayınca o sekmeye gidilir.
+    // Open AI sessions: clicking one jumps to that tab.
     if !sessions.is_empty() {
         for sess in sessions.iter().take(MAX_SESSION_ROWS) {
             if y >= bottom {
@@ -686,7 +686,7 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
     }
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
-    // Pil en altta; diğer satırlar onun üstünde kalır.
+    // Battery at the very bottom; the other rows stay above it.
     let bat_h = super::battery_rows(app, inner.height);
     if bat_h > 0 {
         let by = inner.bottom() - bat_h;
@@ -711,9 +711,9 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
         hud::bar(buf, x + 5, y, bar_w, pct, th.level(pct), th);
         hud::put_right(buf, x + w, y, &format!("{pct:.0}%"), Style::default().fg(th.level(pct)));
     };
-    // Grafikler boş kalan yüksekliği paylaşır: CPU en fazla 10, RAM (az değiştiği
-    // için ince) en fazla 3 satır. Sabit satırlar: CPU, boşluk, RAM, bilgi, boşluk,
-    // diskler, boşluk, NET, UP. Yer darsa 1-2 satırlık CPU grafiği NET/UP'tan önce gelir.
+    // The graphs share the remaining height: CPU up to 10 rows, RAM (thin, since it
+    // barely changes) up to 3. Fixed rows: CPU, gap, RAM, info, gap, disks, gap, NET,
+    // UP. In tight spaces a 1-2 row CPU graph comes before NET/UP.
     let disks = last.disks.len().min(2) as u16;
     let avail = bottom.saturating_sub(y);
     let spare = avail.saturating_sub(8 + disks);

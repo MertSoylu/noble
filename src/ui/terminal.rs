@@ -1,4 +1,4 @@
-//! Terminal sekmesi: bölme ağacındaki her pane, vt100 ekranından hücre hücre çizilir.
+//! Terminal tab: every pane of the split tree is drawn cell by cell from the vt100 screen.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,7 +11,7 @@ use crate::term::pane::Pane;
 use crate::theme::{TermPalette, Theme};
 use crate::util;
 
-/// Görünen sekmeyi çizer; odaktaki pane'in imleç konumunu döndürür.
+/// Draws the visible tab; returns the focused pane's cursor position.
 pub fn draw(
     buf: &mut Buffer,
     area: Rect,
@@ -21,7 +21,7 @@ pub fn draw(
 ) -> Option<(u16, u16)> {
     let tab = app.tabs.get(tab_idx)?;
     let th = &app.theme;
-    // Tam ekran animasyonu sırasında arka planda normal düzen görünür.
+    // During the fullscreen animation the normal layout stays visible behind it.
     let anim = app.zoom_anim.as_ref().filter(|z| tab.root.contains(z.pane));
     let (rects, dividers) =
         if tab.zoomed && anim.is_none() { (vec![(tab.focus, area)], Vec::new()) } else { tab.root.layout(area) };
@@ -50,7 +50,7 @@ pub fn draw(
         }
     }
     if let Some(z) = anim {
-        // Büyüyen/küçülen pane: bulunduğu yerle tam ekran arasında ara dikdörtgen.
+        // The growing/shrinking pane: an intermediate rect between its place and fullscreen.
         let t = crate::app::ease(z.started, crate::app::ZOOM_DURATION);
         let rect = lerp_rect(z.from, z.to, t);
         if let Some(pane) = app.panes.get(&z.pane) {
@@ -94,9 +94,9 @@ fn pane_frame(
         String::new()
     };
     let inner = hud::frame(buf, rect, &title, "", focused, th);
-    // Başlık satırı: tıklayınca odak, sağ tıkla menü (düğmeler üstte kalır).
+    // Title row: click to focus, right click for the menu (buttons stay on top).
     hits.push((Rect::new(rect.x, rect.y, rect.width, 1), Hit::PaneTitle(pane.id)));
-    // Sağ üst köşe düğmeleri: böl (sağa / aşağı), büyüt, kapat.
+    // Top-right corner buttons: split (right / down), zoom, close.
     let y = rect.y;
     let style = if focused { th.accent() } else { th.dim() };
     let mut buttons: Vec<(&str, Hit)> = Vec::new();
@@ -128,7 +128,7 @@ fn pane_frame(
     inner
 }
 
-/// Pane üzerine bindirilen işaretler: arama eşleşmeleri ve bağlantı.
+/// Marks overlaid on a pane: search matches and the link.
 #[derive(Default)]
 struct Marks<'a> {
     search: Option<&'a SearchState>,
@@ -144,14 +144,14 @@ fn pane_content(
     focused: bool,
     marks: &Marks<'_>,
 ) -> Option<(u16, u16)> {
-    // Şemalı zemin, ekranın kaplamadığı kenar hücrelerde de görünsün.
+    // The themed background also shows in the edge cells the screen does not cover.
     hud::fill(buf, inner, Style::default().bg(pal.bg).fg(pal.fg));
     let parser = pane.parser();
     let screen = parser.screen();
     let (rows, cols) = screen.size();
     let selection = pane.selection;
     let default_bg = pal.bg;
-    // Görünen satırlardaki eşleşmeler: (ekran satırı, başlangıç, bitiş, seçili mi).
+    // Matches in the visible rows: (screen row, start, end, selected).
     let found: Vec<(u16, u16, u16, bool)> = match marks.search {
         Some(s) => {
             let top = s.history.saturating_sub(screen.scrollback());
@@ -228,7 +228,7 @@ fn pane_content(
     (cr < inner.height && cc < inner.width).then(|| (inner.x + cc, inner.y + cr))
 }
 
-/// Pane'in alt satırına bindirilen arama çubuğu: sorgu, sayaç ve ipuçları.
+/// Search bar overlaid on the pane's bottom row: query, counter and hints.
 fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
     if inner.height < 2 || inner.width < 12 {
         return;
@@ -257,7 +257,7 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
     hud::put_right(buf, rx, y, &count, Style::default().fg(color).bg(th.raised));
 }
 
-/// İki dikdörtgen arasında doğrusal ara değer.
+/// Linear interpolation between two rectangles.
 pub fn lerp_rect(a: Rect, b: Rect, t: f64) -> Rect {
     let l = |x: u16, y: u16| (x as f64 + (y as f64 - x as f64) * t).round() as u16;
     Rect::new(l(a.x, b.x), l(a.y, b.y), l(a.width, b.width), l(a.height, b.height))

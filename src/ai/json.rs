@@ -1,5 +1,5 @@
-//! Esnek JSON okuma yardımcıları. Sağlayıcı uç noktaları zamanla değişir;
-//! buradaki her şey hata fırlatmak yerine "pencere yok"a düşer.
+//! Flexible JSON reading helpers. Provider endpoints change over time;
+//! everything here falls back to "no window" instead of panicking.
 
 use serde_json::Value;
 
@@ -26,7 +26,7 @@ pub fn clamp_pct(x: f64) -> u8 {
     x.round().clamp(0.0, 100.0) as u8
 }
 
-/// Sıfırlanma zamanını unix saniyesine çevirir: ISO metni, saniye ya da milisaniye.
+/// Converts a reset time to unix seconds: ISO text, seconds or milliseconds.
 pub fn reset_at(v: &Value, keys: &[&str]) -> Option<i64> {
     let obj = v.as_object()?;
     for key in keys {
@@ -57,7 +57,7 @@ fn unix(n: f64, key: &str) -> i64 {
     if key.ends_with("Ms") || n > 1e12 { (n / 1000.0) as i64 } else { n as i64 }
 }
 
-/// Sağlayıcı anahtarından pencere etiketi: five_hour → 5H, seven_day → WEEK.
+/// Window label from a provider key: five_hour → 5H, seven_day → WEEK.
 pub fn normalize_label(key: &str) -> String {
     let k: String = key.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     if k.contains("fivehour") || k == "hourly" || k == "5h" || k == "primary" || k.contains("session") {
@@ -73,7 +73,7 @@ pub fn normalize_label(key: &str) -> String {
     }
 }
 
-/// Süreden etiket (Codex pencereleri süreyle adlandırır).
+/// Label from a duration (Codex windows are named by duration).
 pub fn label_for_duration(seconds: f64) -> String {
     if seconds >= 28.0 * 86_400.0 {
         "MONTH".into()
@@ -93,9 +93,9 @@ pub fn label_for_duration(seconds: f64) -> String {
 const RESET_KEYS: &[&str] =
     &["resets_at", "resetsAt", "until", "reset_date", "resetsAtMs", "resetTime", "reset_time", "quota_reset_date"];
 
-/// Tek bir pencere biçimli nesneyi `Window`'a çevirir. Desteklenen biçimler:
+/// Converts a single window-shaped object into a `Window`. Supported shapes:
 /// `{utilization}`, `{usedPercent}`, `{percent_remaining}`, `{used, limit}`,
-/// `{remaining, entitlement}`; isteğe bağlı ad/süre ve sıfırlanma zamanı.
+/// `{remaining, entitlement}`; optional name/duration and reset time.
 pub fn window_from(v: &Value, fallback: &str) -> Option<Window> {
     let obj = v.as_object()?;
     if obj.get("unlimited").and_then(Value::as_bool) == Some(true) {
@@ -126,8 +126,8 @@ pub fn window_from(v: &Value, fallback: &str) -> Option<Window> {
     Some(Window { label, used: clamp_pct(used / limit * 100.0), resets_at })
 }
 
-/// Belirtilen anahtarlardaki pencereler; yoksa `rateLimits`/`limits` gibi
-/// kapsayıcıların içine bakar. En fazla `max` pencere.
+/// Windows under the given keys; otherwise it looks inside containers
+/// such as `rateLimits`/`limits`. At most `max` windows.
 pub fn extract_windows(root: &Value, keys: &[&str], max: usize) -> Vec<Window> {
     let mut out: Vec<Window> = Vec::new();
     let add = |w: Window, out: &mut Vec<Window>| {

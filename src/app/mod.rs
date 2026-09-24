@@ -1,5 +1,5 @@
-//! Uygulama durumu ve olay yönlendirme. Çizim `ui` modülündedir; buradaki
-//! her şey durumu değiştirir, hiçbir şey ekrana doğrudan yazmaz.
+//! Application state and event dispatch. Drawing lives in the `ui` module;
+//! everything here mutates state and nothing writes to the screen directly.
 
 mod input;
 mod menu;
@@ -83,7 +83,7 @@ pub struct Confirm {
 pub enum PromptPurpose {
     RenameTab(usize),
     SaveWorkspace,
-    /// Projelerin aranacağı yeni kök klasör.
+    /// New root folder to scan projects in.
     AddRoot,
 }
 
@@ -103,20 +103,20 @@ pub struct Prompt {
     pub purpose: PromptPurpose,
 }
 
-/// Terminal renk şeması seçicisi: gezinirken önizler, esc ile geri alır.
+/// Terminal color scheme selector: previews while navigating, esc reverts.
 pub struct SchemePicker {
     pub selected: usize,
     pub original: String,
 }
 
 pub enum Overlay {
-    /// İlk açılış: kısa tanıtım ve prefix tuşu seçimi (`PREFIXES` sırası).
+    /// First launch: short intro and prefix key choice (`PREFIXES` order).
     Welcome {
         prefix: usize,
     },
     Palette(PaletteState),
     Schemes(SchemePicker),
-    /// Hızlı başlatma ayarları: `selected`, kurulu başlatıcılar listesindeki satır.
+    /// Quick launch settings: `selected`, the row in the installed launchers list.
     Launchers {
         selected: usize,
     },
@@ -142,11 +142,11 @@ pub struct Toast {
     pub until: Instant,
 }
 
-/// Fareyle tıklanabilir bölgeler; her karede çizim sırasında yeniden kurulur.
+/// Mouse hit targets; rebuilt on every frame while drawing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
     Backdrop,
-    /// Overlay kutusu: tıklama arka plana geçmesin.
+    /// Overlay box: clicks must not fall through to the background.
     Inert,
     TabBridge,
     TabSystem,
@@ -173,9 +173,9 @@ pub enum Hit {
     Launcher(usize),
     AiRefresh,
     Setting(usize),
-    /// Şema seçicideki satır (`scheme_options` sırası).
+    /// Row in the scheme selector (`scheme_options` order).
     TermScheme(usize),
-    /// Hızlı başlatma penceresi: göster/gizle ve kısayol (`launchers` sırası).
+    /// Quick launch popup: show/hide and shortcut (`launchers` order).
     LaunchShow(usize),
     LaunchKey(usize),
     OpenFiles,
@@ -187,10 +187,13 @@ pub enum Hit {
     WelcomePrefix(usize),
     WelcomeDone,
     MenuItem(usize),
-    /// Pane çerçevesinin üst satırı (sağ tık menüsü için).
+    /// Top row of the pane frame (for the right-click menu).
     PaneTitle(PaneId),
-    /// Proje satırındaki hızlı eylem düğmesi (satır, eylem).
+    /// Quick-action button on a project row (row, action).
     ProjectAct(usize, ProjectAct),
+    /// Update notice at the bottom right: update / dismiss.
+    Update,
+    UpdateDismiss,
 }
 
 pub(crate) enum Drag {
@@ -198,7 +201,7 @@ pub(crate) enum Drag {
         tab: usize,
         div: Divider,
     },
-    /// Sekme sürükleyerek yeniden sıralama.
+    /// Tab drag reordering.
     Tab {
         index: usize,
     },
@@ -212,18 +215,18 @@ pub(crate) enum Drag {
     },
 }
 
-/// Terminal geçmişinde arama (odaktaki pane'de, alt kenarda arama çubuğu).
+/// Scrollback search (in the focused pane, search bar on the bottom edge).
 pub struct SearchState {
     pub pane: PaneId,
     pub query: String,
     pub matches: Vec<crate::term::pane::Match>,
-    /// Seçili eşleşme (`matches` içindeki sıra).
+    /// Selected match (index within `matches`).
     pub current: Option<usize>,
-    /// Eşleşmeler hesaplanırken geçmişin uzunluğu (mutlak satır → ekran satırı).
+    /// Scrollback length when the matches were computed (absolute line → screen line).
     pub history: usize,
 }
 
-/// ctrl basılıyken fare altındaki bağlantı: pane, ekran satırı, sütun aralığı.
+/// Link under the mouse while ctrl is held: pane, screen row, column span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkHover {
     pub pane: PaneId,
@@ -240,15 +243,15 @@ pub const BOOT_DURATION: Duration = Duration::from_millis(1900);
 pub const SLIDE_DURATION: Duration = Duration::from_millis(240);
 pub const ZOOM_DURATION: Duration = Duration::from_millis(200);
 
-/// Sayfa geçişi: önceki sayfanın gövde görüntüsü yana kayarak çıkar.
+/// Page transition: the previous page's body slides out sideways.
 pub struct Slide {
     pub from: ratatui::buffer::Buffer,
-    /// +1: yeni sayfa sağdan gelir, -1: soldan.
+    /// +1: the new page comes from the right, -1: from the left.
     pub dir: i32,
     pub started: Instant,
 }
 
-/// Pane tam ekran animasyonu: `from` → `to` dikdörtgeni arasında büyür/küçülür.
+/// Pane fullscreen animation: grows/shrinks between the `from` and `to` rectangles.
 pub struct ZoomAnim {
     pub pane: PaneId,
     pub from: Rect,
@@ -256,23 +259,23 @@ pub struct ZoomAnim {
     pub started: Instant,
 }
 
-/// Yumuşak yavaşlama (ease-out cubic), 0..1.
+/// Smooth easing (ease-out cubic), 0..1.
 pub fn ease(started: Instant, dur: Duration) -> f64 {
     let t = (started.elapsed().as_secs_f64() / dur.as_secs_f64()).clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Bir AI oturumunun durumu. Hook kuruluysa Claude'un kendi olaylarından,
-/// değilse pane başlığı/komutundan tahmin edilir (`Running`).
+/// State of an AI session. With the hook installed it comes from Claude's own
+/// events, otherwise it is guessed from the pane title/command (`Running`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentState {
-    /// İstem gönderildi, Claude çalışıyor.
+    /// Prompt sent, Claude is working.
     Working,
-    /// İzin ya da girdi bekliyor.
+    /// Waiting for permission or input.
     NeedsYou,
-    /// Cevabını bitirdi; sıra sende.
+    /// Finished its answer; it is your turn.
     Idle,
-    /// Açık ama durumu bilinmiyor (hook yok).
+    /// Open but the state is unknown (no hook).
     Running,
 }
 
@@ -287,7 +290,7 @@ impl AgentState {
     }
 }
 
-/// Oturum listesi satırı.
+/// A row of the session list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSession {
     pub tab: usize,
@@ -297,19 +300,19 @@ pub struct AgentSession {
     pub state: AgentState,
 }
 
-/// Bir pane'den tek karede toplanan sinyaller.
+/// Signals collected from a pane in a single frame.
 struct PaneSignal {
     id: PaneId,
     visible: bool,
     bell: bool,
     notice: Option<String>,
-    /// Prompt geri geldiyse ve kullanıcı bir komut başlatmışsa, komutun süresi.
+    /// If the prompt returned and the user started a command, that command's duration.
     finished: Option<Duration>,
     /// Prompt geri geldiyse pane'in dizini.
     cwd: Option<PathBuf>,
 }
 
-/// Arka plan hizmetlerine giden kanallar (başsız testlerde yok).
+/// Channels to the background services (absent in headless tests).
 pub struct Services {
     pub sensor_req: Sender<SensorRequest>,
     pub rescan: Sender<ProjectReq>,
@@ -344,59 +347,63 @@ pub struct App {
     pub toasts: Vec<Toast>,
     pub boot: Option<Boot>,
     pub hits: Vec<(Rect, Hit)>,
-    /// Fare imlecinin konumu (hover efekti için).
+    /// Mouse cursor position (for hover effects).
     pub hover: Option<(u16, u16)>,
     pub slide: Option<Slide>,
     pub zoom_anim: Option<ZoomAnim>,
-    /// Son çizilen sayfa ve gövde görüntüsü (geçiş başlatmak için).
+    /// Last drawn page and body image (to start a transition).
     pub drawn_view: Option<View>,
     pub last_body: Option<ratatui::buffer::Buffer>,
     pub(crate) drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
     pub size: (u16, u16),
     tx: Tx,
-    /// Başsız modda olay alıcısı (testler `pump` ile boşaltır).
+    /// Event receiver in headless mode (tests drain it with `pump`).
     rx: Option<std::sync::mpsc::Receiver<AppEvent>>,
     services: Option<Services>,
-    /// Başlatıcılar ve PATH'te bulunup bulunmadıkları.
+    /// Launchers and whether they are on PATH.
     pub launchers: Vec<(Launcher, bool)>,
-    /// Bu sistemde kurulu AI sağlayıcıları (Settings yalnızca bunları listeler).
+    /// AI providers installed on this machine (Settings lists only these).
     pub ai_installed: Vec<&'static str>,
     pub quit: bool,
     pub started: Instant,
     pub restored_tabs: usize,
-    /// `noble-dev` olarak çalışıyor: üst çubukta işaretlenir, oturum ayrı dosyada.
+    /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
     pub operator: String,
-    /// Git durumu istenen depolar ve istek zamanı (tekrarları seyreltmek için).
+    /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
     pub search: Option<SearchState>,
     pub link_hover: Option<LinkHover>,
     pub usage_history: UsageHistory,
     pub ui_state: crate::store::UiState,
-    /// Claude Code hook'larından gelen son olaylar (pane → kayıt).
+    /// Latest events from the Claude Code hooks (pane → record).
     pub agent_hooks: HashMap<PaneId, crate::hooks::HookRecord>,
     last_hook_scan: Instant,
-    /// `~/.claude/settings.json`'da NOBLE hook'ları kurulu mu (Settings'te gösterilir).
+    /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
     pub hooks_installed: bool,
-    /// Sensör iş parçacığına en son bildirilen mod (görünen ekrana göre).
+    /// Last mode reported to the sensor thread (based on the visible screen).
     sensor_mode: Option<SensorMode>,
-    /// Önceki karedeki görünüm (Home'a dönüşü yakalamak için).
+    /// The previous frame's view (to catch the return to Home).
     last_view: Option<View>,
-    /// Sensörlere en son bildirilen güç durumu (pilde mi).
+    /// Last power state reported to the sensors (on battery or not).
     sensor_on_battery: bool,
-    /// Her bildirimde artar; yeniden çizim gerekip gerekmediğini anlamak için.
+    /// Incremented on every notification; tells us whether a redraw is needed.
     toast_serial: u64,
-    /// Olay dışı yollarla (tick, config yeniden yükleme) ekran değişti.
+    /// The screen changed through a non-event path (tick, config reload).
     dirty: bool,
-    /// Seçilebilir terminal renk şemaları (Windows Terminal'den okunanlar + yerleşikler).
+    /// Selectable terminal color schemes (read from Windows Terminal + built-ins).
     pub term_schemes: Vec<crate::theme::TermScheme>,
-    /// Düşük pil uyarısı verilen en son eşik (%20, %10); şarja takılınca sıfırlanır.
+    /// Last low-battery threshold warned (20%, 10%); reset when plugged in.
     battery_warned: u8,
-    /// Uyarısı verilmiş kota pencereleri (sağlayıcı, pencere, sıfırlanma zamanı).
+    /// Quota windows already warned about (provider, window, reset time).
     quota_warned: std::collections::HashSet<(String, String, Option<i64>)>,
-    /// Dış terminale bir kez BEL gönderilecek (görev çubuğu yanıp söner).
+    /// Send BEL once to the outer terminal (flashes the taskbar).
     pub outer_bell: bool,
+    /// A newer published release (announced bottom right).
+    pub update_available: Option<String>,
+    /// Next update check (`None`: no checking, e.g. headless mode, `noble-dev`).
+    next_update_check: Option<Instant>,
 }
 
 fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
@@ -409,13 +416,13 @@ fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
 }
 
 impl App {
-    /// Home'da gösterilecek başlatıcılar: PATH'te bulunan ve gizlenmemiş olanlar
-    /// (`launchers` içindeki sırasıyla birlikte).
+    /// Launchers to show on Home: the ones found on PATH and not hidden
+    /// (in their `launchers` order).
     pub fn quick_launchers(&self) -> impl Iterator<Item = (usize, &Launcher)> {
         self.launchers.iter().enumerate().filter(|(_, (l, ok))| *ok && l.show).map(|(i, (l, _))| (i, l))
     }
 
-    /// Arka plan hizmetleri olmadan (testler ve ekran görüntüleri için).
+    /// Without background services (for tests and screenshots).
     pub fn headless(cfg: Config, size: (u16, u16)) -> App {
         let (tx, rx) = std::sync::mpsc::channel();
         let paths = Paths { config: PathBuf::from("config.toml"), data: std::env::temp_dir().join("noble-headless") };
@@ -425,7 +432,7 @@ impl App {
         app
     }
 
-    /// Başsız modda bekleyen olayları işler (PTY çıktısı vb.).
+    /// Handles pending events in headless mode (PTY output etc.).
     pub fn pump(&mut self) {
         let events: Vec<AppEvent> = match &self.rx {
             Some(rx) => rx.try_iter().collect(),
@@ -436,7 +443,7 @@ impl App {
         }
     }
 
-    /// Gerçek uygulama: config'i yükler, geçmişi okur, hizmetleri başlatır.
+    /// The real app: loads config, reads history, starts the services.
     pub fn start(paths: Paths, tx: Tx, size: (u16, u16)) -> App {
         let loaded = config::load(&paths.config);
         let cfg = loaded.config;
@@ -462,6 +469,8 @@ impl App {
         app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
         crate::hooks::prune(&app.paths.data);
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| crate::hooks::is_installed(&p));
+        crate::update::cleanup_old();
+        app.init_updates();
         if !app.ui_state.data.welcomed {
             app.show_welcome();
         }
@@ -563,6 +572,8 @@ impl App {
             battery_warned: 100,
             quota_warned: Default::default(),
             outer_bell: false,
+            update_available: None,
+            next_update_check: None,
             cfg,
         }
     }
@@ -583,22 +594,22 @@ impl App {
         }
     }
 
-    /// Terminal gövdesi: üst şerit ve durum çubuğu arasındaki alan.
+    /// Terminal body: the area between the top strip and the status bar.
     pub fn body(&self) -> Rect {
         Rect::new(0, 1, self.size.0, self.size.1.saturating_sub(2))
     }
 
-    /// Animasyon için sık yeniden çizim gerekiyor mu?
+    /// Does an animation need frequent redraws?
     pub fn animating(&self) -> bool {
         self.boot.is_some() || self.slide.is_some() || self.zoom_anim.is_some()
     }
 
-    /// Olayı işler; ekranda görünen bir şey değiştiyse `true` (yeniden çizim).
-    /// Görünmeyen verideki değişiklikler (ör. terminaldeyken sensörler) ekranı
-    /// uyandırmaz: pil dostu.
+    /// Handles the event; `true` when something visible changed (redraw).
+    /// Changes in invisible data (e.g. sensors while in a terminal) never wake
+    /// the screen: battery friendly.
     pub fn handle(&mut self, ev: AppEvent) -> bool {
         let shown = match &ev {
-            AppEvent::Input(_) | AppEvent::PtyExit(_) | AppEvent::KillResult { .. } => true,
+            AppEvent::Input(_) | AppEvent::PtyExit(_) | AppEvent::KillResult { .. } | AppEvent::Update(_) => true,
             AppEvent::PtyOutput => false,
             AppEvent::SensorStatic(_) | AppEvent::Sensors(_) => matches!(self.view, View::Bridge | View::System),
             AppEvent::Projects(_) | AppEvent::Git(..) | AppEvent::Ai(_) => {
@@ -610,17 +621,17 @@ impl App {
         shown || pty_shown || self.ui_fingerprint() != before
     }
 
-    /// Son çizimden beri olay dışı bir değişiklik oldu mu (bir kez okunur).
+    /// Whether a non-event change happened since the last draw (read once).
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
 
-    /// Ekranın her görünümde gösterdiği ortak durum: bildirimler ve sekme işaretleri.
+    /// State shown by every screen: notifications and tab markers.
     fn ui_fingerprint(&self) -> (u64, usize, Vec<(bool, bool)>) {
         (self.toast_serial, self.toasts.len(), self.tabs.iter().map(|t| (t.activity, t.alert)).collect())
     }
 
-    /// Olayın durum değişikliği. `true`: görünen bir pane'e çıktı geldi.
+    /// The event's state change. `true`: output arrived in a visible pane.
     fn apply(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::Input(e) => self.on_input(e),
@@ -669,13 +680,25 @@ impl App {
                     |id: &str| crate::ai::providers::registry().iter().position(|d| d.id == id).unwrap_or(usize::MAX);
                 self.ai.sort_by_key(|s| order(s.id));
             }
+            AppEvent::Update(Ok(version)) => {
+                self.ui_state.data.update_checked = chrono::Utc::now().timestamp();
+                self.ui_state.data.update_latest = version.clone();
+                self.ui_state.save();
+                self.set_latest_version(&version);
+            }
+            // No network or GitHub did not answer: retry in an hour.
+            AppEvent::Update(Err(_)) => {
+                if self.next_update_check.is_some() {
+                    self.next_update_check = Some(Instant::now() + Duration::from_secs(3600));
+                }
+            }
         }
         false
     }
 
-    /// Hiçbir olay olmasa da ekranın ne zaman değişeceği: saat, animasyon,
-    /// yükleme göstergesi, bildirimin süresinin dolması… `None`: değişmez.
-    /// Ana döngü yalnızca bu an gelince (ya da bir olay olunca) çizer.
+    /// When the screen changes even with no events: clock, animation,
+    /// loading indicator, notification timeout… `None`: never changes.
+    /// The main loop draws only when that moment arrives (or an event fires).
     pub fn redraw_after(&self) -> Option<Duration> {
         use chrono::Timelike;
         if self.animating() {
@@ -687,9 +710,9 @@ impl App {
         let into_sec = now.timestamp_subsec_millis().min(999) as u64;
         let to_second = Duration::from_millis(1000 - into_sec + 5);
         match self.view {
-            // Home: büyük saatin saniyesi ve yanıp sönen iki noktası (pildeyken yok).
+            // Home: seconds of the big clock and its two blinking dots (absent on battery).
             View::Bridge if self.live_clock() => want(to_second),
-            // Diğer ekranlarda yalnızca üst şeritteki HH:MM.
+            // On other screens only HH:MM in the top strip.
             _ => want(to_second + Duration::from_secs(59 - now.second().min(59) as u64)),
         }
         let loading = match self.view {
@@ -720,7 +743,49 @@ impl App {
         best
     }
 
-    /// Pilde %20 ve %10'a inilince birer kez uyarır.
+    /// Sets up the update check: the previous check's result shows right away,
+    /// and if it is older than a day the first `tick` performs a new one.
+    fn init_updates(&mut self) {
+        if !crate::update::check_allowed() {
+            return;
+        }
+        let latest = self.ui_state.data.update_latest.clone();
+        self.set_latest_version(&latest);
+        let age = chrono::Utc::now().timestamp() - self.ui_state.data.update_checked;
+        let wait = (crate::update::CHECK_INTERVAL - age).clamp(0, crate::update::CHECK_INTERVAL);
+        self.next_update_check = Some(Instant::now() + Duration::from_secs(wait as u64));
+    }
+
+    /// Latest known release: announced when newer than this one and not dismissed.
+    pub fn set_latest_version(&mut self, version: &str) {
+        let newer = crate::update::is_newer(version, crate::update::current());
+        let skipped = self.ui_state.data.update_skipped == version;
+        self.update_available = (newer && !skipped).then(|| version.to_string());
+    }
+
+    /// New version to show bottom right (none when the setting is off).
+    pub fn update_notice(&self) -> Option<&str> {
+        self.update_available.as_deref().filter(|_| self.cfg.general.check_updates)
+    }
+
+    /// Runs `noble update` in a new tab; the progress shows there.
+    pub fn start_update(&mut self) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let command = self.shell.invocation_of(&exe, "update");
+        let cwd = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        self.update_available = None;
+        self.new_tab(cwd, Some(&command), Some("NOBLE update".into()));
+    }
+
+    /// Dismisses the notice: never shown again for the same version.
+    pub fn dismiss_update(&mut self) {
+        if let Some(v) = self.update_available.take() {
+            self.ui_state.data.update_skipped = v;
+            self.ui_state.save();
+        }
+    }
+
+    /// Warns once each when dropping to 20% and 10% while on battery.
     fn check_battery(&mut self) {
         let Some((b, eta)) = self.sensors.battery() else { return };
         if b.state != crate::battery::PowerState::Discharging {
@@ -735,7 +800,7 @@ impl App {
         }
     }
 
-    /// Yeni kota verisi: geçmişe yazılır, eşiği aşan pencere için bir kez uyarılır.
+    /// New quota data: recorded in history, warns once per window over the threshold.
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
         let ts = state.fetched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -765,7 +830,7 @@ impl App {
         }
     }
 
-    /// Hook kayıtlarını işler: değişen durumlar arka plan sekmesindeyse bildirilir.
+    /// Processes the hook records: notifies when a changed state is in a background tab.
     pub fn apply_hook_records(&mut self, records: HashMap<PaneId, crate::hooks::HookRecord>) {
         let visible: Vec<PaneId> = match self.view {
             View::Term(i) => self.tabs.get(i).map(|t| t.panes()).unwrap_or_default(),
@@ -805,7 +870,7 @@ impl App {
         }
     }
 
-    /// Pane'de çalışan AI aracı ve durumu.
+    /// The AI agent running in a pane and its state.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         if let Some(rec) = self.agent_hooks.get(&pane) {
             let state = match rec.event.as_str() {
@@ -822,7 +887,7 @@ impl App {
         Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
     }
 
-    /// Tüm sekmelerdeki AI oturumları (sekme sırasıyla).
+    /// AI sessions across all tabs (in tab order).
     pub fn all_agent_sessions(&self) -> Vec<AgentSession> {
         let mut out = Vec::new();
         for (ti, tab) in self.tabs.iter().enumerate() {
@@ -839,8 +904,8 @@ impl App {
         out
     }
 
-    /// Projedeki açık AI oturumları: (araç, durum). Aynı araç birden çok
-    /// pane'deyse en çok dikkat isteyen durum gösterilir.
+    /// Open AI sessions in the project: (agent, state). If the same agent is in
+    /// several panes, the state needing most attention is shown.
     pub fn agent_sessions(&self, project: &std::path::Path) -> Vec<(&'static str, AgentState)> {
         let rank = |s: AgentState| match s {
             AgentState::NeedsYou => 3,
@@ -866,7 +931,7 @@ impl App {
     }
 
     fn set_projects(&mut self, mut list: Vec<Project>) {
-        // Önceki git bilgisini koru (yeniden taramada titremesin).
+        // Keep the previous git info (so a re-scan does not flicker).
         for p in &mut list {
             if let Some(old) = self.projects.iter().find(|o| o.path == p.path) {
                 p.git = old.git.clone();
@@ -932,7 +997,7 @@ impl App {
         let shown = signals.iter().any(|s| s.visible);
         for sig in signals {
             if let Some(cwd) = &sig.cwd {
-                // Komut bitti: depoda değişiklik olmuş olabilir.
+                // Command finished: the repo may have changed.
                 self.refresh_git_at(cwd);
                 if let Some(p) = self.panes.get_mut(&sig.id) {
                     p.command_started = None;
@@ -949,7 +1014,7 @@ impl App {
         shown
     }
 
-    /// Arka plan sekmelerinden gelen sinyalleri sekme işaretine ve bildirime çevirir.
+    /// Turns signals from background tabs into tab markers and notifications.
     fn notify(&mut self, sig: &PaneSignal) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(sig.id)) else { return };
         let title = self.tab_title(ti);
@@ -967,7 +1032,7 @@ impl App {
         };
         let tab = &mut self.tabs[ti];
         if sig.visible {
-            // Görünen sekmede yalnızca uygulamanın açık bildirimi gösterilir.
+            // On the visible tab only the app's own notice is shown.
             if let Some(n) = &sig.notice {
                 self.toast(ToastLevel::Info, n.clone());
             }
@@ -982,19 +1047,19 @@ impl App {
         }
     }
 
-    /// Dizüstü pilden mi çalışıyor (prizdeyse ya da pil yoksa `false`).
+    /// Running on laptop battery (`false` when plugged in or without a battery).
     pub fn on_battery(&self) -> bool {
         self.sensors.battery().is_some_and(|(b, _)| b.state == crate::battery::PowerState::Discharging)
     }
 
-    /// Home'daki saat saniyeleri ve yanıp sönen iki nokta: pildeyken durur
-    /// (ekran dakikada bir çizilsin diye).
+    /// Seconds and the two blinking dots of the Home clock: they stop on battery
+    /// (so the screen draws only once a minute).
     pub fn live_clock(&self) -> bool {
         !self.on_battery()
     }
 
-    /// Görünen ekrana göre arka plan işlerini ayarlar: sensör sıklığı ve Home'a
-    /// dönünce görünen projelerin git durumunun (en fazla dakikada bir) tazelenmesi.
+    /// Tunes background work to the visible screen: sensor rate and refreshing
+    /// (at most once a minute) the git status of the projects shown on Home.
     fn sync_power_state(&mut self) {
         let want = match self.view {
             View::System => SensorMode::Detail,
@@ -1009,7 +1074,7 @@ impl App {
             self.sensor_mode = Some(want);
             self.sensor_on_battery = on_battery;
         }
-        // Kota paneli yalnızca Home'da: yenileme yalnızca orada, girişte hemen.
+        // The quota panel only exists on Home: refresh only there, immediately on entry.
         let home = self.view == View::Bridge;
         if home != (self.last_view == Some(View::Bridge))
             && let Some(s) = &self.services
@@ -1027,7 +1092,7 @@ impl App {
         self.last_view = Some(self.view);
     }
 
-    /// `cwd`'nin bulunduğu projenin git durumunu (sık değilse) yeniden ister.
+    /// Re-requests the git status of the project containing `cwd` (unless too frequent).
     pub fn refresh_git_at(&mut self, cwd: &std::path::Path) {
         if let Some(path) = crate::projects::project_containing(&self.projects, cwd).map(|p| p.path.clone()) {
             self.request_git(path, Duration::from_secs(2));
@@ -1044,8 +1109,8 @@ impl App {
         }
     }
 
-    /// Home'da görünen ama henüz git durumu olmayan projeleri ister (ilk
-    /// taramada yalnızca en son kullanılanların durumu alınır).
+    /// Requests git status for projects shown on Home that do not have one yet
+    /// (the first scan only fetches the most recently used ones).
     fn request_visible_git(&mut self) {
         if self.view != View::Bridge || self.services.is_none() {
             return;
@@ -1062,7 +1127,7 @@ impl App {
             .map(|p| p.path.clone())
             .collect();
         for path in wanted {
-            // Başarısız depolar (git yok vb.) tekrar tekrar istenmesin.
+            // Do not keep re-requesting failed repos (no git etc.).
             self.request_git(path, Duration::MAX);
         }
     }
@@ -1079,11 +1144,11 @@ impl App {
         }
     }
 
-    /// Periyodik işler: açılış animasyonu, bildirimler, config izleme.
+    /// Periodic work: boot animation, notifications, config watching.
     pub fn tick(&mut self) {
         let before = (self.ui_fingerprint(), self.animating());
         self.tick_inner();
-        // Animasyon bittiyse son (durağan) kare de çizilmeli.
+        // When the animation ends, the final (static) frame must draw too.
         if (self.ui_fingerprint(), self.animating()) != before {
             self.dirty = true;
         }
@@ -1115,11 +1180,16 @@ impl App {
             t.activity = false;
             t.alert = false;
         }
-        // Arama, pane kapanır ya da odak başka yere geçerse kapanır.
+        // The search closes when the pane closes or focus moves elsewhere.
         if let Some(s) = &self.search
             && self.focused_pane() != Some(s.pane)
         {
             self.search = None;
+        }
+        if self.services.is_some() && self.cfg.general.check_updates && self.next_update_check.is_some_and(|t| now >= t)
+        {
+            self.next_update_check = Some(now + Duration::from_secs(crate::update::CHECK_INTERVAL as u64));
+            crate::update::spawn_check(self.tx.clone());
         }
         if self.services.is_some() && self.last_cfg_check.elapsed() >= Duration::from_secs(2) {
             self.last_cfg_check = now;
@@ -1131,7 +1201,7 @@ impl App {
         }
     }
 
-    /// Windows Terminal ayarlarını yeniden okur (başsız modda dokunulmaz).
+    /// Re-reads the Windows Terminal settings (untouched in headless mode).
     pub fn reload_schemes(&mut self) {
         if self.services.is_some() {
             self.term_schemes = crate::wt::all_schemes(crate::wt::load().as_ref());
@@ -1185,12 +1255,12 @@ impl App {
         }
     }
 
-    /// Oturum dosyası: `noble-dev` kararlı sürümün sekmelerini ezmesin diye ayrı.
+    /// Session file: separate so `noble-dev` does not overwrite the stable build's tabs.
     fn session_file(&self) -> &'static str {
         if self.dev { "session-dev.json" } else { "session.json" }
     }
 
-    /// Çıkışta: oturumu kaydet.
+    /// On exit: save the session.
     pub fn shutdown(&mut self) {
         if self.cfg.terminal.restore_session {
             let ws = self.snapshot("last session");
@@ -1199,7 +1269,7 @@ impl App {
         self.panes.clear();
     }
 
-    /// Süren sürükleme türü (hover efekti için).
+    /// The ongoing drag kind (for hover effects).
     pub fn drag_kind(&self) -> Option<&'static str> {
         self.drag.as_ref().map(|d| match d {
             Drag::Divider { .. } => "divider",

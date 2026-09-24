@@ -1,4 +1,4 @@
-//! Terminal motoru: PTY panelleri, bölme ağacı ve girdi kodlama.
+//! Terminal engine: PTY panes, split tree and input encoding.
 
 pub mod input;
 pub mod layout;
@@ -7,19 +7,19 @@ pub mod pane;
 
 use layout::{Node, PaneId};
 
-/// Bir terminal sekmesi: bölme ağacı + odak + büyütme durumu.
+/// A terminal tab: split tree + focus + maximized state.
 #[derive(Clone, Debug)]
 pub struct Tab {
     pub root: Node,
     pub focus: PaneId,
     pub zoomed: bool,
-    /// Kullanıcının verdiği isim; yoksa odaktaki pane'den türetilir.
+    /// User-given name; derived from the focused pane when absent.
     pub name: Option<String>,
-    /// Sekmenin açıldığı proje/dizin adı (otomatik başlık için).
+    /// Project/directory name the tab was opened in (for the automatic title).
     pub origin: String,
-    /// Arka planda çıktı geldi mi (sekme şeridinde nokta).
+    /// Did output arrive in the background (dot on the tab strip).
     pub activity: bool,
-    /// Dikkat istiyor: uzun komut bitti, zil çaldı ya da uygulama bildirim gönderdi.
+    /// Needs attention: a long command finished, the bell rang or the app sent a notification.
     pub alert: bool,
 }
 

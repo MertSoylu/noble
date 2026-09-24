@@ -1,6 +1,6 @@
-//! Uçtan uca: derlenmiş `noble` gerçek bir sözde terminalde çalıştırılır,
-//! tuşlar gönderilir ve ekran vt100 ile okunur. Kullanıcının config'ine
-//! dokunmamak için `NOBLE_HOME` geçici bir klasöre yönlendirilir.
+//! End to end: the compiled `noble` runs in a real pseudo-terminal, keys are
+//! sent and the screen is read with vt100. `NOBLE_HOME` is pointed at a temp
+//! folder so the user's config is never touched.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -25,6 +25,7 @@ impl Harness {
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_noble"));
         cmd.arg("--no-boot");
         cmd.env("NOBLE_HOME", home);
+        cmd.env("NOBLE_NO_UPDATE_CHECK", "1");
         cmd.cwd(home);
         let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
@@ -113,7 +114,7 @@ fn full_session_lifecycle() {
     std::fs::create_dir_all(&home).unwrap();
 
     let mut h = Harness::start(&home, 34, 120);
-    // İlk açılış: karşılama kartı; esc ile geçilir ve bir daha çıkmaz.
+    // First launch: welcome card; esc dismisses it for good.
     let s = h.wait_for("WELCOME TO NOBLE", 20);
     save("welcome", &s);
     h.send(b"");
@@ -127,7 +128,7 @@ fn full_session_lifecycle() {
     let s = h.wait_for("Projects", 20);
     save("bridge", &s);
     assert!(s.contains("Settings"));
-    // Config şablonu ilk açılışta yazılır.
+    // The config template is written on the first run.
     assert!(home.join("config.toml").exists());
 
     // Yeni sekme + komut.
@@ -139,7 +140,7 @@ fn full_session_lifecycle() {
     let s = h.wait_for("e2e-marker-42", 20);
     save("terminal", &s);
 
-    // Bölme: prefix + v.
+    // Split: prefix + v.
     h.send(b"\x01");
     h.send(b"v");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -153,18 +154,18 @@ fn full_session_lifecycle() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // Köprüye dönüş: SESSIONS paneli sekmeyi göstermeli.
+    // Back to the bridge: the SESSIONS panel must show the tab.
     h.send(b"\x1b0");
     let s = h.wait_for("2 terminals open", 10);
     save("bridge-with-session", &s);
 
-    // Palette açılır, kapanır.
+    // The palette opens and closes.
     h.send(b"\x1bp");
     h.wait_for("COMMAND", 5);
     h.send(b"\x1b");
     std::thread::sleep(Duration::from_millis(300));
 
-    // Çıkış: onay penceresi, sonra oturum kaydı.
+    // Quit: confirmation window, then the session is saved.
     h.send(b"q");
     let s = h.wait_for("QUIT NOBLE", 5);
     save("quit", &s);
@@ -176,7 +177,7 @@ fn full_session_lifecycle() {
     assert!(text.contains("\"split\""), "split layout not saved: {text}");
     drop(h);
 
-    // Yeniden açılış: sekme geri gelir.
+    // Restart: the tab comes back.
     let mut h = Harness::start(&home, 34, 120);
     let s = h.wait_for("2 terminals open", 25);
     save("restored", &s);
@@ -193,11 +194,11 @@ fn full_session_lifecycle() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Boşta kaynak kullanımı: bridge açıkken ortalama CPU düşük kalmalı.
+/// Idle resource use: with the bridge open the average CPU must stay low.
 /// `cargo test --release --test e2e idle -- --ignored --nocapture`
-/// Süreç `secs` saniye boyunca ne kadar CPU harcadı: (dakika başına ms, bellek).
-/// Toplam CPU süresi farkı kullanılır; anlık yüzdelerden çok daha az gürültülü.
-/// Süre `NOBLE_IDLE_SECS` ile uzatılabilir (periyodik işleri yakalamak için ≥100).
+/// How much CPU the process used over `secs` seconds: (ms per minute, memory).
+/// The total CPU time difference is used; far less noisy than instant percentages.
+/// The duration can be extended with `NOBLE_IDLE_SECS` (≥100 to catch periodic work).
 fn measure(h: &Harness, secs: u64) -> (f64, u64) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let secs = std::env::var("NOBLE_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(secs);
@@ -219,12 +220,12 @@ fn measure(h: &Harness, secs: u64) -> (f64, u64) {
 fn idle_home(tag: &str) -> PathBuf {
     let home = std::env::temp_dir().join(format!("noble-idle-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
-    // Tipik boşta durum ölçülür: karşılama kartı daha önce geçilmiş.
+    // A typical idle state is measured: the welcome card was already dismissed.
     std::fs::write(home.join("state.json"), r#"{"welcomed": true}"#).unwrap();
     home
 }
 
-/// Boşta kaynak kullanımı: Home açıkken ortalama CPU düşük kalmalı.
+/// Idle resource use: with Home open the average CPU must stay low.
 #[test]
 #[ignore]
 fn idle_cpu_is_low() {
@@ -239,7 +240,7 @@ fn idle_cpu_is_low() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Boşta terminal sekmesi: shell bekliyor, NOBLE neredeyse hiç iş yapmamalı.
+/// Idle terminal tab: the shell is waiting, NOBLE must do almost no work.
 #[test]
 #[ignore]
 fn idle_terminal_cpu_is_low() {

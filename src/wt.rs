@@ -1,6 +1,6 @@
-//! Windows Terminal ayarlarından renk şemalarını okur: kullanıcının kendi
-//! şemaları ve PowerShell profilinin kullandığı şema (profildeki zemin/metin
-//! ezmeleriyle birlikte). Dosya yoksa ya da bozuksa sessizce boş döner.
+//! Reads color schemes from the Windows Terminal settings: the user's own
+//! schemes and the one the PowerShell profile uses (including the profile's
+//! background/text overrides). Returns empty silently when the file is missing or broken.
 
 use std::path::{Path, PathBuf};
 
@@ -13,15 +13,15 @@ use crate::theme::{self, TermScheme, WINDOWS_TERMINAL};
 pub struct WtImport {
     /// `settings.json` → `schemes` (kimlikleri "wt:<ad>").
     pub schemes: Vec<TermScheme>,
-    /// PowerShell profilinin (yoksa varsayılan profilin) şemasının adı.
+    /// Name of the PowerShell profile's scheme (or the default profile's).
     pub profile_scheme: Option<String>,
-    /// Profilin şemayı ezen zemin/metin renkleri.
+    /// The profile's background/text colors overriding the scheme.
     pub background: Option<String>,
     pub foreground: Option<String>,
     pub profile_name: Option<String>,
 }
 
-/// Windows Terminal'in (kararlı, önizleme, paketsiz) ayar dosyası konumları.
+/// Windows Terminal settings file locations (stable, preview, unpackaged).
 pub fn settings_paths() -> Vec<PathBuf> {
     let Some(local) = dirs::data_local_dir() else { return Vec::new() };
     vec![
@@ -39,14 +39,14 @@ pub fn load_from(path: &Path) -> Option<WtImport> {
     parse(&std::fs::read_to_string(path).ok()?)
 }
 
-/// Seçicide gösterilecek tüm şemalar: Windows Terminal'deki PowerShell şeması,
-/// kullanıcının kendi şemaları, sonra yerleşikler.
+/// All schemes to show in the selector: the PowerShell scheme from Windows
+/// Terminal, the user's own schemes, then the built-ins.
 pub fn all_schemes(import: Option<&WtImport>) -> Vec<TermScheme> {
     let builtins = theme::builtin_schemes();
     let mut out = Vec::new();
     if let Some(wt) = import {
         let name = wt.profile_scheme.clone().unwrap_or_else(|| "Campbell".into());
-        // Kullanıcı şeması yerleşikle aynı adı taşıyorsa kullanıcınınki geçerlidir.
+        // When a user scheme carries the same name as a built-in, the user's wins.
         let base = wt
             .schemes
             .iter()
@@ -80,7 +80,7 @@ pub fn parse(text: &str) -> Option<WtImport> {
         .unwrap_or_default();
     let profiles = root.get("profiles");
     let defaults = profiles.and_then(|p| p.get("defaults"));
-    // `profiles` eski sürümlerde doğrudan bir dizi olabilir.
+    // `profiles` may be a plain array in older versions.
     let list: Vec<&Value> = match profiles {
         Some(Value::Array(a)) => a.iter().collect(),
         Some(p) => p.get("list").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default(),
@@ -98,7 +98,7 @@ pub fn parse(text: &str) -> Option<WtImport> {
         })
     };
     let visible = |p: &&Value| !p.get("hidden").and_then(Value::as_bool).unwrap_or(false);
-    // Varsayılan profil PowerShell ise o; değilse görünen ilk PowerShell profili; o da yoksa varsayılan.
+    // The default profile if it is PowerShell, else the first visible PowerShell profile, else the default.
     let profile = list
         .iter()
         .find(|p| is_default(p) && is_pwsh(p))
@@ -110,7 +110,7 @@ pub fn parse(text: &str) -> Option<WtImport> {
     };
     let profile_scheme = field("colorScheme").and_then(|v| match v {
         Value::String(s) => Some(s.clone()),
-        // {"dark": "...", "light": "..."}: NOBLE koyu olanı kullanır.
+        // {"dark": "...", "light": "..."}: NOBLE uses the dark one.
         Value::Object(o) => o.get("dark").or_else(|| o.get("light")).and_then(Value::as_str).map(str::to_string),
         _ => None,
     });
@@ -157,10 +157,10 @@ fn scheme_from(v: &Value) -> Option<TermScheme> {
     })
 }
 
-/// JSONC → JSON: `//` ve `/* */` yorumlarını ve sondaki virgülleri atar
-/// (dizgelerin içine dokunmadan).
+/// JSONC → JSON: drops `//` and `/* */` comments and trailing commas
+/// (without touching the inside of strings).
 pub fn strip_jsonc(text: &str) -> String {
-    // Önce yorumlar gider; ardından ikinci geçişte virgülden sonra yalnızca boşluk kalır.
+    // Comments go first; then a second pass keeps only whitespace after a comma.
     strip_pass(&strip_pass(text, true), false)
 }
 
@@ -203,7 +203,7 @@ fn strip_pass(text: &str, comments: bool) -> String {
                 i += 2;
             }
             (',', _) if !comments => {
-                // Sonraki anlamlı karakter kapanışsa virgül fazladır.
+                // The comma is redundant when the next meaningful character closes.
                 let mut j = i + 1;
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
@@ -237,7 +237,7 @@ mod tests {
                 { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}", "name": "Command Prompt", "colorScheme": "Vintage" },
             ]
         },
-        /* kendi şemam */
+        /* my own scheme */
         "schemes": [
             { "name": "Soft Gray", "background": "#B8B8B8", "foreground": "#202020",
               "black": "#000000", "red": "#AA0000", "green": "#00AA00", "yellow": "#AA5500",

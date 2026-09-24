@@ -1,4 +1,4 @@
-//! Terminal geçmişinde arama ve ctrl+tık bağlantıları.
+//! Scrollback search and ctrl+click links.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
@@ -9,7 +9,7 @@ use crate::term::link;
 use crate::term::pane::find_matches;
 
 impl App {
-    /// Odaktaki pane'de arama çubuğunu açar (açıksa sorguyu korur).
+    /// Opens the search bar in the focused pane (keeps the query if already open).
     pub fn open_search(&mut self) {
         let Some(pane) = self.focused_pane() else {
             self.toast(ToastLevel::Info, "open a terminal tab first");
@@ -29,8 +29,8 @@ impl App {
         }
     }
 
-    /// Eşleşmeleri yeniden hesaplar; seçili eşleşme mümkünse yerinde kalır,
-    /// yoksa en yeni (en alttaki) eşleşme seçilir.
+    /// Recomputes the matches; the selected match stays put if possible,
+    /// otherwise the newest (bottom-most) match is selected.
     pub fn refresh_search(&mut self) {
         let Some(s) = &self.search else { return };
         let Some(p) = self.panes.get(&s.pane) else {
@@ -39,8 +39,8 @@ impl App {
         };
         let (lines, history) = p.all_lines();
         let matches = find_matches(&lines, &s.query);
-        let s = self.search.as_mut().expect("arama açık");
-        // Geçmiş dolup eski satırlar düştüyse mutlak satır numaraları kayar.
+        let s = self.search.as_mut().expect("search open");
+        // When the scrollback fills up and old lines drop, absolute line numbers shift.
         let shift = history as isize - s.history as isize;
         let previous = s.current.and_then(|i| s.matches.get(i)).copied();
         s.current = match previous {
@@ -55,7 +55,7 @@ impl App {
         s.history = history;
     }
 
-    /// Önceki (daha eski, `-1`) ya da sonraki (daha yeni, `+1`) eşleşmeye gider.
+    /// Goes to the previous (older, `-1`) or next (newer, `+1`) match.
     fn search_step(&mut self, dir: i32) {
         let Some(s) = self.search.as_mut() else { return };
         let n = s.matches.len();
@@ -75,7 +75,7 @@ impl App {
         }
     }
 
-    /// Arama açıkken tuşlar. `false` dönerse tuş normal yoldan işlenir.
+    /// Keys while the search is open. `false` means the key is handled normally.
     pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
         let Some(s) = self.search.as_mut() else { return false };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -105,7 +105,7 @@ impl App {
                 self.refresh_search();
                 self.reveal_match();
             }
-            // Diğer kısayollar (ör. prefix, alt+1) aramayı kapatıp normal çalışır.
+            // Other shortcuts (e.g. prefix, alt+1) close the search and run normally.
             _ => {
                 self.search = None;
                 return false;
@@ -114,11 +114,11 @@ impl App {
         true
     }
 
-    /// Pane içinde (satır, sütun) altındaki bağlantı ve sütun aralığı.
+    /// The link and its column span below (row, col) inside the pane.
     fn link_under(&self, pane: PaneId, inner: Rect, x: u16, y: u16) -> Option<(link::Link, u16, u16, u16)> {
         let p = self.panes.get(&pane)?;
         let (row, col) = (y.checked_sub(inner.y)?, x.checked_sub(inner.x)?);
-        // Önce uygulamanın OSC 8 ile işaretlediği bağlantılar (metin adresten farklı olabilir).
+        // First the links the app marked with OSC 8 (their text may differ from the address).
         if let Some((url, from, to)) = p.hyperlink_at(row, col) {
             let target = if url.to_ascii_lowercase().starts_with("file://") {
                 link::classify(&url, &p.cwd())?
@@ -133,7 +133,7 @@ impl App {
         Some((target, row, from, to))
     }
 
-    /// ctrl+tık: bağlantıyı açar. Bağlantı yoksa `false`.
+    /// ctrl+click: opens the link. `false` if there is none.
     pub(super) fn open_link_at(&mut self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
         let Some((target, ..)) = self.link_under(pane, inner, m.column, m.row) else { return false };
         let label = match &target {
@@ -150,7 +150,7 @@ impl App {
         true
     }
 
-    /// Fare hareketinde ctrl basılıysa altındaki bağlantıyı işaretler.
+    /// Highlights the link under the pointer while ctrl is held during mouse movement.
     pub(super) fn update_link_hover(&mut self, pane: Option<(PaneId, Rect)>, m: &MouseEvent) {
         self.link_hover = match pane {
             Some((pane, inner)) if m.modifiers.contains(KeyModifiers::CONTROL) => self

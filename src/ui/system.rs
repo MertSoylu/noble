@@ -1,4 +1,4 @@
-//! SYSTEM: CPU geçmişi ve çekirdekler, bellek/ağ/disk, sıralanabilir süreç tablosu.
+//! SYSTEM: CPU history and cores, memory/network/disks, sortable process table.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -84,7 +84,7 @@ fn memory(buf: &mut Buffer, area: Rect, app: &App) {
     let Some(last) = &s.last else { return };
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
-    // Pil en altta; bellek, ağ ve diskler onun üstünde kalır.
+    // Battery at the very bottom; memory, network and disks stay above it.
     let bat_h = super::battery_rows(app, inner.height + 4);
     if bat_h > 0 {
         let by = inner.bottom() - bat_h;
@@ -185,7 +185,7 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         );
         y += 1;
     }
-    // Sütunlar: PID | NAME | CPU% + çubuk | MEM
+    // Columns: PID | NAME | CPU% + bar | MEM
     let pid_w = 8u16;
     let cpu_w = 7u16;
     let bar_w = if w >= 70 { 12u16 } else { 0 };

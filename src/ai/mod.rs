@@ -1,9 +1,9 @@
-//! AI abonelik kotası takibi (Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code, Command Code).
+//! AI subscription quota tracking (Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code, Command Code).
 //!
-//! Kimlik bilgileri yalnızca makinedeki mevcut CLI oturumlarından okunur, sadece
-//! ilgili sağlayıcıya istek başlığında gönderilir; asla ekrana basılmaz ya da
-//! loglanmaz. Tokenlar yenilenmez (CLI'ların kendi yenileme akışıyla yarışmamak
-//! için); süresi dolan oturum "oturum aç" ipucuna düşer.
+//! Credentials are read only from CLI sessions already on this machine and are
+//! sent only to the matching provider in the request header; they are never
+//! printed or logged. Tokens are never refreshed (so we never race the CLIs' own
+//! refresh flow); an expired session falls back to a "sign in" hint.
 
 pub mod json;
 pub mod providers;
@@ -25,9 +25,9 @@ use crate::util;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Window {
     pub label: String,
-    /// Kullanılan yüzde (0..100).
+    /// Percentage used (0..100).
     pub used: u8,
-    /// Sıfırlanma zamanı (unix saniye).
+    /// Reset time (unix seconds).
     pub resets_at: Option<i64>,
 }
 
@@ -47,7 +47,7 @@ pub enum Presence {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
-    /// Henüz kontrol edilmedi (açılışta önbellekten gösterilir).
+    /// Not checked yet (shown from the cache at startup).
     Pending,
     Loading,
     Ok,
@@ -67,18 +67,18 @@ pub struct ProviderState {
 }
 
 impl ProviderState {
-    /// Kullanım verisi son başarılı çekimden mi (önbellek/eskimiş)?
+    /// Is the usage data from the last successful fetch (cached/stale)?
     pub fn is_stale(&self) -> bool {
         !matches!(self.status, Status::Ok)
     }
 
-    /// En dolu pencerenin yüzdesi (durum çubuğu için).
+    /// Percent of the fullest window (for the status bar).
     pub fn peak(&self) -> Option<u8> {
         self.usage.as_ref()?.windows.iter().map(|w| w.used).max()
     }
 }
 
-/// Kota penceresinin okunur adı ("5H" → "5h", "WEEK" → "week").
+/// Readable name of a quota window ("5H" → "5h", "WEEK" → "week").
 pub fn window_name(label: &str) -> String {
     match label {
         "5H" => "5h".into(),
@@ -88,10 +88,10 @@ pub fn window_name(label: &str) -> String {
     }
 }
 
-/// Pane'de çalışan AI aracı: başlatıcı komutundan ya da pencere başlığından.
+/// AI agent running in a pane: from the launcher command or the window title.
 pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
-    // Başlatıcıdan açıldıysa komutun dosya adı kesin bilgi verir.
-    // Yol her iki ayırıcıyla da bölünür: Linux'ta `Path` ters bölüyü ayırıcı saymaz.
+    // When opened from a launcher the command's file name is authoritative.
+    // The path is split on both separators: on Linux `Path` does not treat `\` as a separator.
     let stem = command
         .and_then(|c| c.trim().trim_matches(['&', ' ', '\'', '"']).rsplit(['/', '\\']).next())
         .and_then(|name| std::path::Path::new(name).file_stem())
@@ -116,12 +116,12 @@ pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
     {
         return Some(kind);
     }
-    // Elle yazılan komutlar için pencere başlığı: yalnızca ayırt edici adlar.
+    // Window title for hand-typed commands: only distinctive names.
     let hay = format!("{} {}", command.unwrap_or(""), label).to_lowercase();
     ["claude", "codex", "opencode", "copilot", "antigravity", "freebuff"].into_iter().find(|k| hay.contains(k))
 }
 
-/// Sağlayıcıların çalışma ortamı (testte sahte ev dizini verilebilir).
+/// Working environment of the providers (tests can pass a fake home directory).
 pub struct Env {
     pub home: PathBuf,
     pub agent: ureq::Agent,
@@ -155,7 +155,7 @@ pub enum Method<'a> {
     Post(&'a str),
 }
 
-/// JSON isteği; ağ/durum/ayrıştırma hatalarını kısa bir mesaja çevirir.
+/// JSON request; turns network/status/parse failures into a short message.
 pub fn http_json(env: &Env, method: Method<'_>, url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
     let result = match method {
         Method::Get => {
@@ -189,7 +189,7 @@ pub fn http_json(env: &Env, method: Method<'_>, url: &str, headers: &[(&str, &st
     }
 }
 
-/// Satır tabanlı JSON-RPC (codex app-server): initialize el sıkışması, tek çağrı.
+/// Line-based JSON-RPC (codex app-server): initialize handshake, single call.
 pub fn stdio_rpc(
     program: &Path,
     args: &[&str],
@@ -254,8 +254,8 @@ pub fn stdio_rpc(
     result
 }
 
-/// Programı çalıştırıp stdout'unu döndürür; süre aşılırsa süreç sonlandırılır.
-/// Çıktı 1 MiB ile sınırlıdır, stderr okunmaz (hata metni loglanmaz).
+/// Runs a program and returns its stdout; the process is killed on timeout.
+/// Output is capped at 1 MiB, stderr is not read (error text is never logged).
 pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String, String> {
     use std::io::Read;
     const CAP: u64 = 1 << 20;
@@ -282,7 +282,7 @@ pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>, timeout: D
     result
 }
 
-// ─── Önbellek ────────────────────────────────────────────────────────────────
+// ─── Cache ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
@@ -303,14 +303,14 @@ fn save_cache(file: &Path, cache: &HashMap<String, CacheEntry>) {
     }
 }
 
-/// Bu sistemde kurulu (oturum açılmamış olsa da) sağlayıcıların kimlikleri.
+/// Ids of the providers installed on this machine (even if not signed in).
 pub fn installed_providers() -> Vec<&'static str> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let env = Env::new(home);
     providers::registry().into_iter().filter(|d| (d.detect)(&env) != Presence::NotInstalled).map(|d| d.id).collect()
 }
 
-/// Açılışta gösterilecek ilk durumlar: önbellekte verisi olanlar.
+/// First states to show at startup: those that have cached data.
 pub fn initial_states(cfg: &AiCfg, cache: &HashMap<String, CacheEntry>) -> Vec<ProviderState> {
     providers::registry()
         .into_iter()
@@ -330,25 +330,25 @@ pub fn initial_states(cfg: &AiCfg, cache: &HashMap<String, CacheEntry>) -> Vec<P
         .collect()
 }
 
-/// Toplayıcıya istekler.
+/// Requests to the collector.
 pub enum AiReq {
-    /// Elle yenile (R, ayar değişikliği): hemen çek.
+    /// Manual refresh (R, settings change): fetch right away.
     Refresh,
-    /// Kota panelinin görünürlüğü. Görünmüyorken hiç istek atılmaz (pil dostu);
-    /// görünür olunca veri eskiyse hemen çekilir.
+    /// Quota panel visibility. While hidden nothing is requested (battery friendly);
+    /// when it becomes visible and the data is stale it is fetched immediately.
     Visible(bool),
 }
 
-/// Home'a dönüşte bundan yeni veri tekrar çekilmez (hızlı sekme geçişleri).
+/// Data younger than this is not re-fetched when returning to Home (fast tab switches).
 const FRESH_ENOUGH: Duration = Duration::from_secs(30);
 
-/// Bir sonraki çekimin zamanı geldi mi?
+/// Is it time for the next fetch?
 pub fn fetch_due(visible: bool, last: Option<Instant>, every: Duration, now: Instant) -> bool {
     visible && last.is_none_or(|t| now.duration_since(t) >= every)
 }
 
-/// Toplayıcı iş parçacığı: algıla → çek → gönder → önbelleğe yaz → bekle.
-/// Yalnızca kota paneli görünürken çalışır.
+/// Collector thread: detect → fetch → send → write cache → wait.
+/// Runs only while the quota panel is visible.
 pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, tx: Tx, requests: Receiver<AiReq>) {
     let _ = std::thread::Builder::new().name("ai".into()).spawn(move || {
         let Some(home) = dirs::home_dir() else { return };
@@ -358,7 +358,7 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, 
         loop {
             let cfg = cfg.lock().map(|c| c.clone()).unwrap_or_default();
             let every = Duration::from_secs(cfg.refresh_minutes.clamp(1, 240) * 60);
-            // Bekle: görünmüyorken süresiz, görünürken bir sonraki yenilemeye kadar.
+            // Wait: indefinitely while hidden, until the next refresh while visible.
             let msg = if visible {
                 let left = last_fetch.map_or(Duration::ZERO, |t| every.saturating_sub(t.elapsed()));
                 requests.recv_timeout(left)
@@ -366,7 +366,7 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, 
                 requests.recv().map_err(|_| RecvTimeoutError::Disconnected)
             };
             let mut manual = false;
-            // Panel yeni göründü: veri 30 sn'den eskiyse hemen çekilir.
+            // Panel just appeared: fetch immediately if the data is older than 30 s.
             let mut entered = false;
             let mut handle = |m: AiReq, visible: &mut bool| match m {
                 AiReq::Refresh => manual = true,
@@ -455,7 +455,7 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, 
                         name: def.name,
                         login_hint: def.login_hint,
                         presence: Presence::Ready,
-                        // "no plan": giriş var ama kotalı abonelik yok → panelde gösterilmez.
+                        // "no plan": signed in but no metered plan → hidden from the panel.
                         status: if e == "session expired" || e == "no plan" {
                             Status::SignIn
                         } else {

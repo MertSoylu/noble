@@ -6,6 +6,11 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Update check: once a day NOBLE looks for a new GitHub release and shows it at the bottom right. Click
+  **update** or run `noble update` to download the prebuilt binary and replace the installed one
+  (`noble update --check` only reports). Can be turned off in Settings or with `check_updates = false`.
+
 ## [1.0.0]
 
 First public release.

@@ -146,6 +146,11 @@ cargo install --path .
 Then run `noble`. On the first launch a short welcome card shows what NOBLE found, the four keys worth knowing
 and a choice of prefix key, so it doesn't clash with your shell.
 
+**Updating:** NOBLE checks GitHub for a new release once a day and shows it at the bottom right. Click
+**update** there, or run `noble update` (`noble update --check` only reports). It downloads the prebuilt
+binary for your platform and replaces the installed one; restart NOBLE afterwards. Turn the check off with
+`check_updates = false` or in Settings.
+
 <details>
 <summary><b>Terminal requirements and a Windows Terminal profile</b></summary>
 
@@ -231,6 +236,7 @@ boot_animation = true
 clock_24h = true
 show_seconds = true
 operator = ""            # name in the greeting; empty = your user name
+check_updates = true     # look for a new release once a day and show it at the bottom right
 
 [terminal]
 shell = ""               # empty = pwsh → powershell → cmd on Windows, $SHELL elsewhere

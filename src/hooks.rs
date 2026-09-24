@@ -1,8 +1,8 @@
-//! Claude Code entegrasyonu: Claude'un hook'ları `noble hook <olay>` çalıştırır,
-//! bu komut pane'in durumunu veri klasörüne küçük bir dosya olarak yazar; açık
-//! NOBLE bu dosyaları okuyup oturumun gerçek durumunu (çalışıyor, seni
-//! bekliyor, bitti) gösterir. Hook'lar yalnızca kullanıcı Settings'ten açınca
-//! `~/.claude/settings.json`'a eklenir; eklenirken dosyanın yedeği alınır.
+//! Claude Code integration: Claude's hooks run `noble hook <event>`, which
+//! writes the pane's state to a small file in the data folder; an open NOBLE
+//! reads those files and shows the session's real state (running, waiting for
+//! you, done). Hooks are added to `~/.claude/settings.json` only when the user
+//! turns them on in Settings; the file is backed up when that happens.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::term::layout::PaneId;
 
-/// Claude Code olayı → `noble hook` argümanı.
+/// Claude Code event → `noble hook` argument.
 pub const EVENTS: [(&str, &str); 5] = [
     ("UserPromptSubmit", "prompt"),
     ("Stop", "stop"),
@@ -21,10 +21,10 @@ pub const EVENTS: [(&str, &str); 5] = [
     ("SessionEnd", "session-end"),
 ];
 
-/// Hook komutlarını tanımak için ortak parça.
+/// The shared marker used to recognize our hook commands.
 const MARKER: &str = " hook ";
 
-/// Bir pane için son olay.
+/// The last event for a pane.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HookRecord {
     pub event: String,
@@ -37,7 +37,7 @@ pub fn settings_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("settings.json"))
 }
 
-/// Hook komutunun başı: PATH'te `noble` varsa o, yoksa çalışan dosyanın tam yolu.
+/// Base of the hook command: `noble` from PATH if present, else the running file's full path.
 pub fn command_base() -> String {
     if crate::util::which("noble").is_some() {
         return "noble".into();
@@ -81,7 +81,7 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-/// Tüm olayların hook'u kurulu mu?
+/// Are the hooks installed for every event?
 pub fn is_installed(path: &Path) -> bool {
     let Ok(v) = read_settings(path) else { return false };
     EVENTS.iter().all(|(event, _)| {
@@ -89,7 +89,7 @@ pub fn is_installed(path: &Path) -> bool {
     })
 }
 
-/// Eksik hook'ları ekler; diğer ayarlara ve başka hook'lara dokunmaz.
+/// Adds the missing hooks; touches neither other settings nor other hooks.
 pub fn install(path: &Path, base: &str) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let root = v.as_object_mut().ok_or("settings.json is not a JSON object")?;
@@ -105,7 +105,7 @@ pub fn install(path: &Path, base: &str) -> Result<(), String> {
     write_settings(path, &v)
 }
 
-/// NOBLE'ın eklediği hook'ları kaldırır; boş kalan listeleri de siler.
+/// Removes the hooks NOBLE added; also deletes lists left empty.
 pub fn uninstall(path: &Path) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let Some(hooks) = v.get_mut("hooks").and_then(Value::as_object_mut) else { return Ok(()) };
@@ -129,9 +129,9 @@ pub fn agents_dir(data: &Path) -> PathBuf {
     data.join("agents")
 }
 
-/// `noble hook <olay>`: Claude'un stdin'e verdiği JSON'dan mesajı alır ve
-/// pane'in durum dosyasını yazar. NOBLE dışında çalışırsa hiçbir şey yapmaz.
-/// Hata asla Claude'a yansımaz (her zaman sessiz).
+/// `noble hook <event>`: takes the message from the JSON Claude passes on stdin
+/// and writes the pane's state file. Does nothing when run outside NOBLE.
+/// Errors never surface to Claude (always silent).
 pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pane: Option<&str>) {
     let (Some(instance), Some(pane)) = (instance, pane) else { return };
     if !instance.bytes().all(|b| b.is_ascii_digit()) || !pane.bytes().all(|b| b.is_ascii_digit()) {
@@ -152,7 +152,7 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     }
 }
 
-/// Bu NOBLE örneğine ait kayıtlar (pane → son olay).
+/// Records belonging to this NOBLE instance (pane → last event).
 pub fn read_records(data: &Path, instance: u32) -> HashMap<PaneId, HookRecord> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir(agents_dir(data)) else { return out };
@@ -170,7 +170,7 @@ pub fn read_records(data: &Path, instance: u32) -> HashMap<PaneId, HookRecord> {
     out
 }
 
-/// Bir günden eski (kapanmış NOBLE örneklerinden kalan) kayıtları siler.
+/// Deletes records older than a day (left behind by closed NOBLE instances).
 pub fn prune(data: &Path) {
     let Ok(entries) = std::fs::read_dir(agents_dir(data)) else { return };
     for e in entries.flatten() {
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert!(v["hooks"].get("Notification").is_none());
         assert!(!is_installed(&file));
-        // Bozuk dosyaya asla yazılmaz.
+        // Never writes to a corrupt file.
         std::fs::write(&file, "{ not json").unwrap();
         assert!(install(&file, "noble").is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json");

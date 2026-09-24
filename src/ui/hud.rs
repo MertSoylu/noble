@@ -1,5 +1,5 @@
-//! HUD çizim primitifleri. Hepsi tampon sınırlarına karşı güvenlidir:
-//! küçük pencerelerde hiçbir şey taşmaz ya da panik yaratmaz.
+//! HUD drawing primitives. All of them are bounds-safe against the buffer:
+//! nothing overflows or panics in small windows.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::theme::Theme;
 use crate::util;
 
-/// Alanı zemin rengiyle doldurur.
+/// Fills an area with the background color.
 pub fn clear(buf: &mut Buffer, area: Rect, th: &Theme) {
     fill(buf, area, Style::default().bg(th.bg).fg(th.fg));
 }
@@ -25,7 +25,7 @@ pub fn fill(buf: &mut Buffer, area: Rect, style: Style) {
     }
 }
 
-/// Metni yazar, en fazla `max` sütun; bittiği x'i döndürür.
+/// Writes text, at most `max` columns; returns the x where it ends.
 pub fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, max: u16) -> u16 {
     let area = buf.area;
     if y < area.top() || y >= area.bottom() || x >= area.right() || x < area.left() || max == 0 {
@@ -36,7 +36,7 @@ pub fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, max: u16) ->
     nx
 }
 
-/// Parçaları art arda yazar.
+/// Writes the parts one after another.
 pub fn put_spans(buf: &mut Buffer, x: u16, y: u16, spans: &[(&str, Style)], max: u16) -> u16 {
     let end = x.saturating_add(max);
     let mut cx = x;
@@ -49,7 +49,7 @@ pub fn put_spans(buf: &mut Buffer, x: u16, y: u16, spans: &[(&str, Style)], max:
     cx
 }
 
-/// Metni `right` (hariç) sütununda bitecek şekilde sağa yaslar; başladığı x'i döndürür.
+/// Right-aligns text to end at column `right` (exclusive); returns the x it starts at.
 pub fn put_right(buf: &mut Buffer, right: u16, y: u16, s: &str, style: Style) -> u16 {
     let w = util::width(s) as u16;
     let x = right.saturating_sub(w);
@@ -57,7 +57,7 @@ pub fn put_right(buf: &mut Buffer, right: u16, y: u16, s: &str, style: Style) ->
     x
 }
 
-/// Metni alanın ortasına yazar.
+/// Writes text in the middle of the area.
 pub fn put_center(buf: &mut Buffer, area: Rect, y: u16, s: &str, style: Style) {
     let w = (util::width(s) as u16).min(area.width);
     let x = area.x + (area.width - w) / 2;
@@ -78,7 +78,7 @@ pub fn set_bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, color: Color) {
     }
 }
 
-/// Yuvarlak köşeli HUD paneli. Başlık solda, etiket sağda. İç alanı döndürür.
+/// Rounded-corner HUD panel. Title on the left, label on the right. Returns the inner area.
 pub fn frame(buf: &mut Buffer, area: Rect, title: &str, tag: &str, focused: bool, th: &Theme) -> Rect {
     if area.width < 4 || area.height < 2 {
         return Rect::new(area.x, area.y, 0, 0);
@@ -113,7 +113,7 @@ pub fn frame(buf: &mut Buffer, area: Rect, title: &str, tag: &str, focused: bool
     Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
 }
 
-/// İnce iz üzerinde doluluk çubuğu: dolu kısım renkli `━`, kalan iz silik.
+/// Fill bar on a thin track: the filled part is a colored `━`, the rest of the track is dim.
 pub fn bar(buf: &mut Buffer, x: u16, y: u16, w: u16, pct: f64, color: Color, th: &Theme) {
     if w == 0 {
         return;
@@ -135,14 +135,14 @@ pub fn bar(buf: &mut Buffer, x: u16, y: u16, w: u16, pct: f64, color: Color, th:
 
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// 0..1 değerlerden kıvılcım çizgisi.
+/// Sparkline from 0..1 values.
 pub fn spark_char(v: f64) -> char {
     let i = (v.clamp(0.0, 1.0) * 7.0).round() as usize;
     SPARK[i.min(7)]
 }
 
-/// Braille alan grafiği: her hücre 2 örnek × 4 seviye. `values` 0..1, en yenisi sonda.
-/// Grafik sağa yaslanır; eski örnekler soldan akar.
+/// Braille area chart: 2 samples × 4 levels per cell. `values` are 0..1, newest last.
+/// The chart is right-aligned; old samples flow away to the left.
 pub fn braille_area(buf: &mut Buffer, area: Rect, values: &[f64], low: Color, high: Color) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -158,7 +158,7 @@ pub fn braille_area(buf: &mut Buffer, area: Rect, values: &[f64], low: Color, hi
             let mut bits = 0u32;
             for (side, table) in [(0usize, &LEFT), (1, &RIGHT)] {
                 let col = cx * 2 + side;
-                // Sağa yaslı: son örnek son sütunda.
+                // Right-aligned: the newest sample in the last column.
                 let idx = (n as isize) - (cols as isize - col as isize);
                 if idx < 0 {
                     continue;
@@ -186,19 +186,20 @@ pub fn braille_area(buf: &mut Buffer, area: Rect, values: &[f64], low: Color, hi
     }
 }
 
-/// Sekizlik dolgu blokları (1/8 … 7/8).
+/// Eighth fill blocks (1/8 … 7/8).
 const EIGHTHS: [&str; 7] = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
-/// Pil simgesi: gövde + sağda kutup; iç kısım yüzdeye göre sekizlik bloklarla,
-/// koyudan parlağa renk geçişiyle dolar. 3 satırda çerçeveli, daha azında tek
-/// satır. `shimmer`: dolgunun içinde parlatılacak hücre (şarj animasyonu).
+/// Battery icon: body + terminal on the right; the inside fills with eighth
+/// blocks according to the percentage, with a dark-to-bright color transition.
+/// Framed in 3 rows, a single row in less space. `shimmer`: the cell to shine
+/// inside the fill (charging animation).
 pub fn battery_icon(buf: &mut Buffer, area: Rect, pct: f64, color: Color, th: &Theme, shimmer: Option<u16>) {
     if area.width < 6 || area.height == 0 {
         return;
     }
     let tall = area.height >= 3;
     let y = if tall { area.y + 1 } else { area.y };
-    // Son sütun kutba ayrılır; gövdenin iki kenarı çerçeve.
+    // The last column is the terminal; two edges of the body are the frame.
     let body_w = area.width - 1;
     let inner_w = body_w - 2;
     let edge = Style::default().fg(Theme::mix(th.line, th.fg, 0.35));
@@ -235,7 +236,7 @@ pub fn battery_icon(buf: &mut Buffer, area: Rect, pct: f64, color: Color, th: &T
         let (sym, st) = if i < full {
             ("█", Style::default().fg(c))
         } else if i == full && frac >= 3 {
-            // 1/8 ve 2/8'lik dilimler çerçeve çizgisiyle karışır; çizilmez.
+            // The 1/8 and 2/8 slices blend into the frame line; they are not drawn.
             (EIGHTHS[frac - 1], Style::default().fg(c))
         } else {
             ("░", th.line())
@@ -244,7 +245,7 @@ pub fn battery_icon(buf: &mut Buffer, area: Rect, pct: f64, color: Color, th: &T
     }
 }
 
-/// 3 satırlık kutu çizgisi rakamları (büyük saat için).
+/// 3-row box drawing digits (for the big clock).
 fn glyph(c: char) -> [&'static str; 3] {
     match c {
         '0' => ["┏━┓", "┃ ┃", "┗━┛"],
@@ -266,7 +267,7 @@ pub fn big_width(s: &str) -> u16 {
     s.chars().map(|c| util::width(glyph(c)[0]) as u16 + 1).sum::<u16>().saturating_sub(1)
 }
 
-/// Büyük metni yazar; `colon_style` iki noktalar için (yanıp sönme).
+/// Writes the big text; `colon_style` for the colons (blinking).
 pub fn big_text(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, colon_style: Style) {
     let mut cx = x;
     for c in s.chars() {
@@ -279,16 +280,16 @@ pub fn big_text(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, colon_s
     }
 }
 
-/// Açılış logosu (3 satır blok harfler).
+/// Boot logo (3 rows of block letters).
 pub const LOGO: [&str; 3] = ["█▄ █ █▀▀█ █▀▀▄ █    █▀▀▀", "█ ▀█ █  █ █▀▀▄ █    █▀▀ ", "▀  ▀ ▀▀▀▀ ▀▀▀  ▀▀▀▀ ▀▀▀▀"];
 
-/// Döner gösterge karesi.
+/// Spinning indicator square.
 pub fn spinner(ms: u128) -> &'static str {
     const FRAMES: [&str; 4] = ["◜", "◝", "◞", "◟"];
     FRAMES[((ms / 120) % 4) as usize]
 }
 
-/// Tıklanabilir düğme: " ⏎ Open " — tuş vurgu renginde, zemin hafif yükseltilmiş.
+/// Clickable button: " ⏎ Open " — the key in the accent color, background slightly raised.
 pub fn button(buf: &mut Buffer, x: u16, y: u16, key: &str, label: &str, th: &Theme, enabled: bool) -> u16 {
     let bg = th.sel_bg;
     let key_style = if enabled { th.accent_bold().bg(bg) } else { th.dim().bg(bg) };
@@ -302,7 +303,7 @@ pub fn button(buf: &mut Buffer, x: u16, y: u16, key: &str, label: &str, th: &The
     )
 }
 
-/// Kısa tuş rozeti: " c " vurgulu zemin üzerinde.
+/// Short key badge: " c " on an accent background.
 #[allow(clippy::too_many_arguments)]
 pub fn key_chip(buf: &mut Buffer, x: u16, y: u16, key: &str, label: &str, th: &Theme, enabled: bool, max: u16) -> u16 {
     let key_style = if enabled {
@@ -336,7 +337,7 @@ mod tests {
         let th = crate::theme::Theme::by_name("amber", false);
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         braille_area(&mut buf, Rect::new(0, 0, 1, 1), &[1.0, 0.25], th.accent, th.accent);
-        // Sol sütun tam dolu (4 nokta), sağ sütun 1 nokta.
+        // Left column full (4 dots), right column 1 dot.
         assert_eq!(buf[(0, 0)].symbol(), char::from_u32(0x2800 + 0x47 + 0x80).unwrap().to_string());
     }
 
@@ -344,7 +345,7 @@ mod tests {
     fn battery_icon_fills_by_percent() {
         let th = crate::theme::Theme::by_name("amber", false);
         let mut buf = Buffer::empty(Rect::new(0, 0, 14, 3));
-        // 12 geniş: 1 kutup + 2 kenar → 9 iç hücre; %50 = 4.5 hücre.
+        // Width 12: 1 terminal + 2 edges → 9 inner cells; 50% = 4.5 cells.
         battery_icon(&mut buf, Rect::new(0, 0, 12, 3), 50.0, th.ok, &th, None);
         let row: String = (0..12).map(|x| buf[(x, 1)].symbol().to_string()).collect();
         assert_eq!(row, "│████▌░░░░│▌");
@@ -353,7 +354,7 @@ mod tests {
         battery_icon(&mut one, Rect::new(0, 0, 8, 1), 100.0, th.ok, &th, Some(2));
         let row: String = (0..8).map(|x| one[(x, 0)].symbol().to_string()).collect();
         assert_eq!(row, "▕█████▏▍");
-        // Taşma yok.
+        // No overflow.
         battery_icon(&mut one, Rect::new(5, 0, 30, 5), 70.0, th.ok, &th, None);
     }
 

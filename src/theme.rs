@@ -1,4 +1,4 @@
-//! HUD temaları. Her tema; zemin, metin, çizgi ve üç vurgu renginden oluşur.
+//! HUD themes. Each theme consists of a background, text, line and three accent colors.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -6,13 +6,13 @@ use ratatui::style::{Color, Modifier, Style};
 pub struct Theme {
     pub name: &'static str,
     pub label: &'static str,
-    /// Uygulama zemini (şeffaf modda `Reset`).
+    /// App background (`Reset` in transparent mode).
     pub bg: Color,
-    /// Panel içi hafif yükseltilmiş zemin.
+    /// Slightly raised background inside panels.
     pub raised: Color,
     pub fg: Color,
     pub dim: Color,
-    /// Çerçeve/çizgi rengi.
+    /// Frame / line color.
     pub line: Color,
     pub accent: Color,
     pub accent_dim: Color,
@@ -21,7 +21,7 @@ pub struct Theme {
     pub warn: Color,
     pub crit: Color,
     pub sel_bg: Color,
-    /// Vurgu zemini üzerindeki metin rengi.
+    /// Text color on top of the accent background.
     pub on_accent: Color,
 }
 
@@ -373,7 +373,7 @@ pub const THEMES: [Theme; 20] = [
 ];
 
 impl Theme {
-    /// Adıyla tema bulur; bilinmeyen adlar Amber'e düşer.
+    /// Finds a theme by name; unknown names fall back to Amber.
     pub fn by_name(name: &str, transparent: bool) -> Theme {
         let mut theme = THEMES.iter().find(|t| t.name.eq_ignore_ascii_case(name.trim())).unwrap_or(&THEMES[0]).clone();
         if transparent {
@@ -411,7 +411,7 @@ impl Theme {
         Style::default().bg(self.sel_bg)
     }
 
-    /// Fare üzerindeyken tıklanabilir öğenin zemini.
+    /// Background of a clickable item while it is hovered.
     pub fn hover(&self) -> Color {
         match self.bg {
             Color::Rgb(..) => Theme::mix(self.sel_bg, self.accent, 0.22),
@@ -419,7 +419,7 @@ impl Theme {
         }
     }
 
-    /// Doluluk oranına göre renk: normal → uyarı → kritik.
+    /// Color by fill level: normal → warning → critical.
     pub fn level(&self, pct: f64) -> Color {
         if pct >= 85.0 {
             self.crit
@@ -430,7 +430,7 @@ impl Theme {
         }
     }
 
-    /// İki renk arasında doğrusal geçiş (yalnızca RGB renkler için).
+    /// Linear blend between two colors (RGB colors only).
     pub fn mix(a: Color, b: Color, t: f64) -> Color {
         match (a, b) {
             (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
@@ -449,38 +449,38 @@ impl Theme {
     }
 }
 
-/// Temaların sıralı ad listesi.
+/// The ordered list of theme names.
 pub fn theme_names() -> Vec<&'static str> {
     THEMES.iter().map(|t| t.name).collect()
 }
 
-/// Sıradaki tema adı (döngüsel).
+/// The next theme name (wraps around).
 pub fn next_theme(current: &str) -> &'static str {
     let idx = THEMES.iter().position(|t| t.name == current).unwrap_or(0);
     THEMES[(idx + 1) % THEMES.len()].name
 }
 
-/// Terminal pane'lerinin renk şeması: arayüz temasından bağımsız zemin, metin ve
-/// 16 ANSI rengi. Hazır şemalar + Windows Terminal'den okunanlar (`crate::wt`).
+/// Color scheme of the terminal panes: background, text and 16 ANSI colors,
+/// independent of the UI theme. Built-ins + the ones read from Windows Terminal (`crate::wt`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermScheme {
-    /// Config'te kullanılan kimlik ("dark-plus", "windows-terminal", "wt:Benim şemam").
+    /// The id used in the config ("dark-plus", "windows-terminal", "wt:My scheme").
     pub name: String,
     pub label: String,
     pub bg: Color,
     pub fg: Color,
-    /// ANSI 0–15: siyah, kırmızı, yeşil, sarı, mavi, mor, camgöbeği, beyaz; sonra parlakları.
+    /// ANSI 0–15: black, red, green, yellow, blue, magenta, cyan, white; then the bright ones.
     pub ansi: [Color; 16],
 }
 
-/// "Arayüz temasını izle" seçeneğinin kimliği.
+/// The id of the "follow the UI theme" option.
 pub const FOLLOW_THEME: &str = "theme";
-/// Windows Terminal'deki varsayılan (PowerShell) profilinin şemasını izleyen seçenek.
+/// The option that follows the default (PowerShell) profile's scheme in Windows Terminal.
 pub const WINDOWS_TERMINAL: &str = "windows-terminal";
 
 type SchemeRow = (&'static str, &'static str, u32, u32, [u32; 16]);
 
-/// Windows Terminal ile gelen şemalar (aynı değerler) + NOBLE'ın kendi grileri.
+/// Schemes that ship with Windows Terminal (same values) + NOBLE's own grays.
 const BUILTIN_SCHEMES: [SchemeRow; 14] = [
     ("campbell", "Campbell", 0x0c0c0c, 0xcccccc, CAMPBELL),
     ("campbell-powershell", "Campbell Powershell", 0x012456, 0xcccccc, CAMPBELL),
@@ -538,7 +538,7 @@ const BUILTIN_SCHEMES: [SchemeRow; 14] = [
             0x55ff55, 0xffff55, 0x5555ff, 0xff55ff, 0x55ffff, 0xffffff,
         ],
     ),
-    // Gri zeminde "beyaz" metin görünmez kalmasın diye beyazlar koyu gri.
+    // Whites become dark gray so "white" text does not disappear on a gray background.
     (
         "light-gray",
         "Light Gray",
@@ -584,7 +584,7 @@ const TANGO: [u32; 16] = [
     0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec,
 ];
 
-/// Yerleşik şemalar.
+/// The built-in schemes.
 pub fn builtin_schemes() -> Vec<TermScheme> {
     BUILTIN_SCHEMES
         .iter()
@@ -598,8 +598,8 @@ pub fn builtin_schemes() -> Vec<TermScheme> {
         .collect()
 }
 
-/// Şema listesinde ada göre arama; Windows Terminal'deki görünen adlar
-/// ("Dark+", "Campbell Powershell") da kabul edilir.
+/// Searches the scheme list by name; the display names used in Windows Terminal
+/// ("Dark+", "Campbell Powershell") are accepted too.
 pub fn find_scheme<'a>(list: &'a [TermScheme], name: &str) -> Option<&'a TermScheme> {
     let n = name.trim();
     list.iter()
@@ -616,20 +616,20 @@ pub fn parse_hex(text: &str) -> Option<Color> {
     u32::from_str_radix(h, 16).ok().map(rgb)
 }
 
-/// Pane çizimi için çözülmüş renkler.
+/// Resolved colors for drawing panes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermPalette {
     pub bg: Color,
     pub fg: Color,
-    /// `None`: ANSI renkleri dış terminalin paletine bırakılır (tema modu).
+    /// `None`: ANSI colors are left to the outer terminal's palette (theme mode).
     pub ansi: Option<[Color; 16]>,
     pub sel_bg: Color,
     pub match_bg: Color,
 }
 
 impl TermPalette {
-    /// Config'teki şema + isteğe bağlı zemin/metin rengi. Bilinmeyen şema adı
-    /// ya da geçersiz renk sessizce temaya düşer.
+    /// The config's scheme + optional background/text color. An unknown scheme
+    /// name or an invalid color silently falls back to the theme.
     pub fn resolve(
         schemes: &[TermScheme],
         scheme: &str,
@@ -664,7 +664,7 @@ impl TermPalette {
         pal
     }
 
-    /// vt100 rengini çizim rengine çevirir; `default` zemin ya da metin varsayılanı.
+    /// Turns a vt100 color into a drawing color; `default` is the background/text default.
     pub fn color(&self, c: vt100::Color, default: Color) -> Color {
         match c {
             vt100::Color::Default => default,
@@ -694,7 +694,7 @@ mod term_tests {
         assert_eq!((custom.bg, custom.fg), (rgb(0xd0d0d0), rgb(0x112233)));
         assert_eq!(TermPalette::resolve(&list, "bogus", "nope", "", &th).bg, th.bg);
         assert_eq!(parse_hex("#abc"), None);
-        // Windows Terminal'deki görünen adla da bulunur.
+        // Also found by the display name used in Windows Terminal.
         assert_eq!(find_scheme(&list, "Dark+").map(|s| s.name.as_str()), Some("dark-plus"));
         assert_eq!(find_scheme(&list, "campbell powershell").map(|s| s.bg), Some(rgb(0x012456)));
     }

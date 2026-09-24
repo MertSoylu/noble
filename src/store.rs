@@ -1,4 +1,4 @@
-//! Kalıcı küçük veri: son dizinler (frecency), oturum ve kayıtlı çalışma alanları.
+//! Small persistent data: recent dirs (frecency), session and saved workspaces.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
-/// Atomik yazım: önce geçici dosya, sonra yeniden adlandırma.
+/// Atomic write: temp file first, then rename.
 fn write_json<T: Serialize>(file: &Path, value: &T) {
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -36,7 +36,7 @@ pub struct RecentEntry {
 }
 
 impl RecentEntry {
-    /// Sıklık × yakınlık: bir gün önceki kullanım yarı ağırlıkta sayılır.
+    /// Frequency × recency: a use from a day ago counts at half weight.
     pub fn score(&self, now: i64) -> f64 {
         let hours = ((now - self.last).max(0) as f64) / 3600.0;
         self.count as f64 / (1.0 + hours / 24.0)
@@ -46,7 +46,7 @@ impl RecentEntry {
 pub struct Recent {
     file: Option<PathBuf>,
     pub entries: Vec<RecentEntry>,
-    /// Var olan dizinlerin skor sıralı listesi (her karede diske gitmemek için).
+    /// Score-sorted list of existing directories (to avoid hitting the disk every frame).
     cache: Vec<RecentEntry>,
 }
 
@@ -83,7 +83,7 @@ impl Recent {
             }
             None => self.entries.push(RecentEntry { path: key, count: 1, last: t }),
         }
-        // En düşük skorlu girdileri at.
+        // Drop the lowest scoring entries.
         if self.entries.len() > 60 {
             self.entries.sort_by(|a, b| b.score(t).total_cmp(&a.score(t)));
             self.entries.truncate(50);
@@ -98,7 +98,7 @@ impl Recent {
         self.save();
     }
 
-    /// Var olan dizinler, skora göre.
+    /// Existing directories, by score.
     pub fn top(&self, n: usize) -> Vec<RecentEntry> {
         self.cache.iter().take(n).cloned().collect()
     }
@@ -115,7 +115,7 @@ pub struct SavedTab {
     pub name: Option<String>,
     pub origin: String,
     pub layout: SavedNode,
-    /// Odaktaki pane'in yaprak sırasındaki indeksi.
+    /// Index of the focused pane in leaf order.
     pub focus: usize,
 }
 
@@ -165,7 +165,7 @@ impl Workspaces {
         Workspaces { file: None, list: Vec::new() }
     }
 
-    /// Aynı isimli kaydı değiştirir, yoksa en başa ekler.
+    /// Replaces the entry with the same name, or inserts it at the top.
     pub fn upsert(&mut self, mut ws: Workspace) {
         ws.saved_at = now();
         self.list.retain(|w| !w.name.eq_ignore_ascii_case(&ws.name));
@@ -186,12 +186,17 @@ impl Workspaces {
     }
 }
 
-/// Arayüz durumu: karşılama ekranı görüldü mü, sabitlenmiş projeler.
+/// UI state: whether the welcome screen was seen, pinned projects.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct UiStateData {
     pub welcomed: bool,
     pub pins: Vec<String>,
+    /// Last update check (unix seconds) and the version found.
+    pub update_checked: i64,
+    pub update_latest: String,
+    /// The version whose notice was dismissed: hidden until the next release.
+    pub update_skipped: String,
 }
 
 pub struct UiState {
@@ -219,7 +224,7 @@ impl UiState {
         self.data.pins.iter().any(|p| p.eq_ignore_ascii_case(&key))
     }
 
-    /// Sabitlemeyi çevirir; yeni durumu döndürür.
+    /// Toggles the pin; returns the new state.
     pub fn toggle_pin(&mut self, path: &Path) -> bool {
         let key = path.to_string_lossy().into_owned();
         let pinned = if self.is_pinned(path) {
@@ -234,14 +239,14 @@ impl UiState {
     }
 }
 
-/// AI kota kullanım geçmişi: "sağlayıcı/pencere" → (zaman, yüzde) örnekleri.
-/// Home'daki küçük grafik için tutulur; birkaç günden eskisi atılır.
+/// AI quota usage history: "provider/window" → (time, percent) samples.
+/// Kept for the small graph on Home; anything older than a few days is dropped.
 pub struct UsageHistory {
     file: Option<PathBuf>,
     pub series: std::collections::BTreeMap<String, Vec<(i64, u8)>>,
 }
 
-/// Geçmişin saklandığı süre.
+/// How long the history is kept.
 const HISTORY_KEEP_SECS: i64 = 8 * 86_400;
 
 impl UsageHistory {
@@ -258,7 +263,7 @@ impl UsageHistory {
         format!("{provider}/{window}")
     }
 
-    /// Örnek ekler. Bir dakikadan yakın örnekler birleşir (el ile yenilemeler şişirmesin).
+    /// Adds a sample. Samples within a minute are merged (so manual refreshes do not bloat it).
     pub fn record(&mut self, key: &str, ts: i64, used: u8) {
         let list = self.series.entry(key.to_string()).or_default();
         match list.last_mut() {
@@ -275,8 +280,8 @@ impl UsageHistory {
         }
     }
 
-    /// Bu hızla pencerenin ne zaman dolacağı (saniye): pencere başından (ya da
-    /// son 2 saatten) beri kullanım en az 15 dakikadır artıyorsa.
+    /// When the window fills at this pace (seconds): only while usage has been
+    /// rising for at least 15 minutes (since the window start or the last 2 hours).
     pub fn pace_eta(&self, key: &str, window_start: i64, now: i64, used: u8) -> Option<u64> {
         let list = self.series.get(key)?;
         let since = window_start.max(now - 2 * 3600);
@@ -289,8 +294,8 @@ impl UsageHistory {
         Some(((100 - used) as f64 / per_sec) as u64)
     }
 
-    /// `[from, to]` aralığını `buckets` eşit parçaya böler; her parçanın değeri o
-    /// ana kadarki son örnektir (ölçüm yoksa `None`).
+    /// Splits the `[from, to]` range into `buckets` equal parts; each part takes
+    /// the last sample up to that moment (`None` when there is no measurement).
     pub fn resample(&self, key: &str, from: i64, to: i64, buckets: usize) -> Vec<Option<u8>> {
         let Some(list) = self.series.get(key) else { return vec![None; buckets] };
         if buckets == 0 || to <= from {

@@ -1,4 +1,4 @@
-//! Eylemler: sekme/pane işlemleri, başlatıcılar, oturum ve çalışma alanları.
+//! Actions: tab/pane operations, launchers, session and workspaces.
 
 use std::path::{Path, PathBuf};
 
@@ -150,7 +150,7 @@ impl App {
         }
         let label = self.panes.get(&t.focus).map(|p| (p.label(), p.shell_label.clone()));
         match label {
-            // Başlatıcı sekmeleri ("proje · claude") zaten ne çalıştığını söyler.
+            // Launcher tabs ("project · claude") already say what is running.
             _ if t.origin.contains(" · ") => t.origin.clone(),
             Some((l, shell)) if !l.eq_ignore_ascii_case(&shell) && !l.is_empty() => {
                 format!("{} · {}", t.origin, crate::util::truncate(&l, 16))
@@ -184,7 +184,7 @@ impl App {
         self.go_tab(next as usize + 1);
     }
 
-    /// Terminal gövdesinde yeni bir pane'in alacağı yaklaşık boyut.
+    /// Approximate size a new pane gets in the terminal body.
     fn fresh_size(&self) -> (u16, u16) {
         let b = self.body();
         (b.height.saturating_sub(2).max(4), b.width.saturating_sub(2).max(10))
@@ -213,7 +213,7 @@ impl App {
         }
     }
 
-    /// Yeni terminal sekmesi açar; `command` verilirse shell önce onu çalıştırır.
+    /// Opens a new terminal tab; if `command` is given the shell runs it first.
     pub fn new_tab(&mut self, cwd: PathBuf, command: Option<&str>, origin: Option<String>) {
         let (rows, cols) = self.fresh_size();
         if let Some(id) = self.spawn_pane(&cwd, command, rows, cols) {
@@ -305,7 +305,7 @@ impl App {
         }
     }
 
-    /// Pane'i tam ekrana alır ya da geri döndürür; yerinden büyüyerek/küçülerek.
+    /// Maximizes a pane or restores it; grows/shrinks in place.
     pub fn toggle_zoom(&mut self, ti: usize, pane: PaneId) {
         let body = self.body();
         let Some(tab) = self.tabs.get_mut(ti) else { return };
@@ -349,7 +349,7 @@ impl App {
         }
     }
 
-    /// Görünen sekmedeki pane'leri çizimden önce yeni boyutlarına getirir.
+    /// Brings the visible tab's panes to their new size before drawing.
     pub fn sync_layout(&mut self) {
         let body = self.body();
         let Some(tab) = self.current_tab() else { return };
@@ -362,9 +362,9 @@ impl App {
         }
     }
 
-    // ─── Başlatıcılar ───────────────────────────────────────────────────────
+    // ─── Launchers ───────────────────────────────────────────────────────
 
-    /// Seçili projede (ya da verilen dizinde) başlatıcı komutunu yeni sekmede çalıştırır.
+    /// Runs a launcher command in a new tab in the selected project (or a given directory).
     pub fn launch(&mut self, idx: usize, dir: Option<PathBuf>) {
         let Some((launcher, available)) = self.launchers.get(idx).cloned() else { return };
         if !available {
@@ -515,7 +515,7 @@ impl App {
         }
     }
 
-    // ─── Oturum / çalışma alanı ─────────────────────────────────────────────
+    // ─── Session / workspace ─────────────────────────────────────────────
 
     fn save_node(&self, n: &Node) -> SavedNode {
         match n {
@@ -569,7 +569,7 @@ impl App {
         }
     }
 
-    /// Kayıtlı sekmeleri açar; açılan sekme sayısını döndürür.
+    /// Reopens the saved tabs; returns how many were opened.
     pub fn open_workspace(&mut self, ws: &Workspace) -> usize {
         let (rows, cols) = self.fresh_size();
         let mut opened = 0;

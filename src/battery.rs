@@ -1,6 +1,6 @@
-//! Pil durumu: yüzde, şarj durumu ve kalan süre. Windows'ta `GetSystemPowerStatus`,
-//! Linux'ta `/sys/class/power_supply`, macOS'ta `pmset -g batt`. Pili olmayan
-//! makinelerde `None` döner ve arayüz pil satırını hiç göstermez.
+//! Battery state: percentage, charging state and time left. Windows uses `GetSystemPowerStatus`,
+//! Linux `/sys/class/power_supply`, macOS `pmset -g batt`. Machines without a
+//! battery return `None` and the UI never shows a battery row.
 
 use std::collections::VecDeque;
 
@@ -9,7 +9,7 @@ pub enum PowerState {
     Discharging,
     Charging,
     Full,
-    /// Prizde ama şarj olmuyor (ör. pil koruma modu %80'de durdurur).
+    /// Plugged in but not charging (e.g. battery protection stops at 80%).
     PluggedIn,
 }
 
@@ -17,13 +17,13 @@ pub enum PowerState {
 pub struct Battery {
     pub percent: f32,
     pub state: PowerState,
-    /// İşletim sisteminin kalan süre tahmini (saniye, pildeyken).
+    /// The OS estimate of time left (seconds, while on battery).
     pub secs_left: Option<u64>,
-    /// İşletim sisteminin dolma süresi tahmini (saniye, şarjdayken).
+    /// The OS estimate of time to full (seconds, while charging).
     pub secs_to_full: Option<u64>,
 }
 
-/// Anlık pil durumu; pil yoksa ya da okunamazsa `None`.
+/// The current battery state; `None` when there is no battery or it cannot be read.
 pub fn read() -> Option<Battery> {
     #[cfg(windows)]
     {
@@ -61,14 +61,14 @@ fn read_windows() -> Option<Battery> {
         fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
     }
     let mut s = SystemPowerStatus::default();
-    // SAFETY: yapı Win32 SYSTEM_POWER_STATUS ile birebir aynı düzende; çağrı yalnızca onu doldurur.
+    // SAFETY: the struct matches the Win32 SYSTEM_POWER_STATUS layout exactly; the call only fills it.
     if unsafe { GetSystemPowerStatus(&mut s) } == 0 {
         return None;
     }
     from_windows(s.ac_line_status, s.battery_flag, s.battery_life_percent, s.battery_life_time)
 }
 
-/// `SYSTEM_POWER_STATUS` alanlarını yorumlar (ayrı fonksiyon: test edilebilir).
+/// Interprets the `SYSTEM_POWER_STATUS` fields (separate function: testable).
 pub fn from_windows(ac: u8, flag: u8, percent: u8, life_secs: u32) -> Option<Battery> {
     // 128 = sistem pili yok, 255 = bilinmiyor.
     if flag & 128 != 0 || flag == 255 || percent > 100 {
@@ -103,7 +103,7 @@ pub fn read_linux(root: &std::path::Path) -> Option<Battery> {
             "Not charging" => PowerState::PluggedIn,
             _ => PowerState::Discharging,
         };
-        // Enerji (µWh/µW) ya da yük (µAh/µA) üzerinden süre.
+        // Time from energy (µWh/µW) or charge (µAh/µA).
         let (now, full, rate) = match (num("energy_now"), num("energy_full"), num("power_now")) {
             (Some(n), Some(f), Some(r)) => (n, f, r),
             _ => {
@@ -121,7 +121,7 @@ pub fn read_linux(root: &std::path::Path) -> Option<Battery> {
     None
 }
 
-/// macOS `pmset -g batt` çıktısı: "-InternalBattery-0 (id=…)\t85%; discharging; 4:12 remaining present: true".
+/// macOS `pmset -g batt` output: "-InternalBattery-0 (id=…)\t85%; discharging; 4:12 remaining present: true".
 pub fn parse_pmset(text: &str) -> Option<Battery> {
     let line = text.lines().find(|l| l.contains("InternalBattery"))?;
     let tail = line.split('\t').nth(1).unwrap_or(line);
@@ -146,21 +146,21 @@ pub fn parse_pmset(text: &str) -> Option<Battery> {
     })
 }
 
-/// İşletim sistemi süre vermediğinde yüzdenin değişim hızından tahmin.
-/// Yalnızca aynı durumdaki (pilde / şarjda) son örneklere bakar.
+/// Estimates from the rate of change of the percentage when the OS gives no time.
+/// Only looks at recent samples in the same state (on battery / charging).
 #[derive(Default)]
 pub struct Trend {
     samples: VecDeque<(f64, f32)>,
     state: Option<PowerState>,
 }
 
-/// Tahmin için gereken en kısa gözlem süresi ve en az değişim.
+/// Minimum observation span and change needed for an estimate.
 const MIN_SPAN_SECS: f64 = 180.0;
 const MIN_DELTA: f32 = 1.0;
 const WINDOW_SECS: f64 = 20.0 * 60.0;
 
 impl Trend {
-    /// `t` saniye cinsinden artan bir zaman damgası.
+    /// An increasing timestamp in seconds.
     pub fn push(&mut self, t: f64, b: &Battery) {
         if self.state != Some(b.state) {
             self.samples.clear();
@@ -172,7 +172,7 @@ impl Trend {
         }
     }
 
-    /// Tahmini kalan süre (pilde) ya da dolma süresi (şarjda), saniye.
+    /// Estimated time left (on battery) or time to full (charging), in seconds.
     pub fn estimate(&self) -> Option<u64> {
         let (&(t0, p0), &(t1, p1)) = (self.samples.front()?, self.samples.back()?);
         let (span, delta) = (t1 - t0, p1 - p0);
@@ -185,12 +185,12 @@ impl Trend {
             PowerState::Charging if per_sec > 0.0 => (100.0 - p1 as f64) / per_sec,
             _ => return None,
         };
-        // 2 günden uzun tahminler anlamsız (neredeyse boşta).
+        // Estimates beyond 2 days are meaningless (nearly empty).
         (secs < 48.0 * 3600.0).then_some(secs as u64)
     }
 }
 
-/// Kalan süre: işletim sisteminin değeri, yoksa eğilim tahmini.
+/// Time left: the OS value, or the trend estimate when it is missing.
 pub fn eta(b: &Battery, trend: &Trend) -> Option<u64> {
     match b.state {
         PowerState::Discharging => b.secs_left.or_else(|| trend.estimate()),
@@ -199,7 +199,7 @@ pub fn eta(b: &Battery, trend: &Trend) -> Option<u64> {
     }
 }
 
-/// Pil bloğundaki en kısa durum: "3h 12m left", "full in 45m", "estimating…".
+/// Shortest status in the battery block: "3h 12m left", "full in 45m", "estimating…".
 pub fn short(b: &Battery, eta: Option<u64>) -> String {
     let dur = |s: u64| crate::util::fmt_duration(std::time::Duration::from_secs(s));
     match (b.state, eta) {
@@ -212,7 +212,7 @@ pub fn short(b: &Battery, eta: Option<u64>) -> String {
     }
 }
 
-/// Kısa durum metni: "3h 12m left", "charging · full in 45m", "plugged in".
+/// Short status text: "3h 12m left", "charging · full in 45m", "plugged in".
 pub fn describe(b: &Battery, eta: Option<u64>) -> String {
     let dur = |s: u64| crate::util::fmt_duration(std::time::Duration::from_secs(s));
     match (b.state, eta) {
@@ -285,7 +285,7 @@ mod tests {
         // %1 / 5 dk → %75 kalan ≈ 375 dk.
         t.push(300.0, &bat(79.0, PowerState::Discharging));
         assert_eq!(t.estimate(), Some(79 * 300));
-        // Şarja geçince geçmiş sıfırlanır.
+        // The history resets when switching to charging.
         t.push(400.0, &bat(79.0, PowerState::Charging));
         assert_eq!(t.estimate(), None);
         t.push(700.0, &bat(81.0, PowerState::Charging));

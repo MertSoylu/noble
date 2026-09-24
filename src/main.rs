@@ -1,4 +1,4 @@
-//! NOBLE giriş noktası: terminal kurulumu, girdi iş parçacığı ve kare döngüsü.
+//! NOBLE entry point: terminal setup, input thread and the frame loop.
 
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -16,13 +16,16 @@ use noble::config::Paths;
 use noble::event::AppEvent;
 
 const FRAME: Duration = Duration::from_millis(16);
-/// Olay yokken en uzun uyku: config ve hook denetimleri bu aralıkla yapılır.
+/// Longest sleep without events: config and hook checks run on this interval.
 const IDLE_TICK: Duration = Duration::from_secs(2);
 
 fn usage() {
     println!(
         "NOBLE {} — retro-futurist HUD terminal workspace\n\n\
-         USAGE: noble [--config <path>] [--no-boot]\n\n\
+         USAGE: noble [--config <path>] [--no-boot]\n       \
+                noble update [--check]\n\n\
+         COMMANDS:\n  \
+           update            download and install the latest release\n\n\
          OPTIONS:\n  \
            --config <path>   use an alternate config file\n  \
            --no-boot         skip the boot sequence\n  \
@@ -43,8 +46,8 @@ fn restore_terminal() {
 }
 
 fn main() -> anyhow::Result<()> {
-    // `noble hook <olay>`: Claude Code hook'undan çağrılır; terminale dokunmaz,
-    // her durumda sessizce başarıyla çıkar.
+    // `noble hook <event>`: called from a Claude Code hook; it never touches the
+    // terminal and always exits silently with success.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("hook") {
         use std::io::Read;
@@ -55,6 +58,9 @@ fn main() -> anyhow::Result<()> {
         let (instance, pane) = (std::env::var("NOBLE_INSTANCE").ok(), std::env::var("NOBLE_PANE").ok());
         noble::hooks::run_cli(event, &input, &data, instance.as_deref(), pane.as_deref());
         return Ok(());
+    }
+    if argv.first().map(String::as_str) == Some("update") {
+        std::process::exit(noble::update::run_cli(&argv[1..]));
     }
     let mut config_override: Option<PathBuf> = None;
     let mut no_boot = false;
@@ -95,8 +101,8 @@ fn main() -> anyhow::Result<()> {
     )?;
     #[cfg(not(windows))]
     execute!(out, crossterm::event::EnableBracketedPaste)?;
-    // Ana iş parçacığı paniklerse terminali geri yükle; arka plan panikleri
-    // ekranı bozmasın diye yalnızca log dosyasına yazılır.
+    // Restore the terminal if the main thread panics; background panics are
+    // written only to the log file so they never corrupt the screen.
     let default_hook = std::panic::take_hook();
     let log_file = paths.data_file("noble.log");
     std::panic::set_hook(Box::new(move |info| {
@@ -137,10 +143,10 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
         app.boot = None;
     }
 
-    // Çizim yalnızca iki durumda yapılır: görünen bir şeyi değiştiren bir olay
-    // geldiğinde (`pending`, en fazla FRAME sıklığında) ya da ekranda zamanla
-    // değişen bir şeyin (saat, animasyon, bildirim süresi) anı geldiğinde.
-    // Aksi halde süreç uyur; boştaki terminal dakikada bir çizilir.
+    // Drawing happens in only two cases: when an event arrives that changed
+    // something visible (`pending`, at most at FRAME rate) or when the moment
+    // comes for something that changes over time (clock, animation, notification
+    // timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
     let mut last_draw = Instant::now() - FRAME;
     let mut pending = true;
     loop {
@@ -152,7 +158,7 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        // Birikmiş olayları topla ama çizimi aç bırakma.
+        // Drain the accumulated events but keep drawing disabled.
         let drain_start = Instant::now();
         while drain_start.elapsed() < Duration::from_millis(8) {
             match rx.try_recv() {
@@ -167,12 +173,12 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
         }
         let due = pending || timed.is_some_and(|t| Instant::now() >= t);
         if due && last_draw.elapsed() < FRAME {
-            // Kare sınırı: bir sonraki turda çizilir.
+            // Frame limit: draw on the next round.
             pending = true;
         } else if due {
             terminal.draw(|f| noble::ui::draw(f, &mut app))?;
             if std::mem::take(&mut app.outer_bell) {
-                // Dış terminale zil: Windows Terminal sekmeyi işaretler, görev çubuğu yanıp söner.
+                // Bell to the outer terminal: Windows Terminal marks the tab, the taskbar flashes.
                 let mut out = stdout();
                 let _ = out.write_all(b"\x07");
                 let _ = out.flush();

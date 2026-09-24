@@ -1,4 +1,4 @@
-//! Üst katmanlar: komut paleti, klavye referansı, onay ve metin girişi.
+//! Overlays: command palette, key reference, confirmation and text input.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,7 +13,7 @@ use crate::util;
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let Some(ov) = &app.overlay else { return };
     let th = &app.theme;
-    // Sağ tık menüsü ekranı karartmaz; dışına tıklamak yine de kapatır.
+    // The right-click menu does not dim the screen; clicking outside still closes it.
     if !matches!(ov, Overlay::Menu(_)) {
         dim_backdrop(buf, area, th);
     }
@@ -97,7 +97,7 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, th: &Theme) {
     }
 }
 
-/// Sağ tık menüsü: tıklanan noktanın yanında, ekrana sığacak şekilde.
+/// Right-click menu: next to the clicked point, kept inside the screen.
 fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let label_w = m.items.iter().map(|i| util::width(&i.label)).max().unwrap_or(4) as u16;
@@ -105,7 +105,7 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
     let title_w = util::width(&m.title) as u16 + 6;
     let w = (label_w + hint_w + 8).max(title_w).clamp(16, 44).min(area.width);
     let h = (m.items.len() as u16 + 2).min(area.height);
-    // Sağa/alta taşacaksa sola/yukarı kayar.
+    // Slides left/up when it would overflow right/bottom.
     let x = m.x.min(area.right().saturating_sub(w));
     let y = if m.y + h > area.bottom() { m.y.saturating_sub(h + 1).max(area.y) } else { m.y };
     let rect = Rect::new(x, y, w, h);
@@ -134,7 +134,7 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
     }
 }
 
-/// Prefix seçeneklerinin kısa açıklamaları (`PREFIXES` sırası).
+/// Short descriptions of the prefix options (`PREFIXES` order).
 const PREFIX_NOTES: [&str; 4] = [
     "tmux style · shell's ctrl+a (line start) takes 2 presses",
     "tmux default · shell's ctrl+b (char back) takes 2 presses",
@@ -142,7 +142,7 @@ const PREFIX_NOTES: [&str; 4] = [
     "rarely used by shells · stays out of your way",
 ];
 
-/// İlk açılış kartı: ne bulundu, en önemli tuşlar ve prefix seçimi.
+/// First launch card: what was found, the most important keys and the prefix choice.
 fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let w = 66.min(area.width.saturating_sub(2));
@@ -212,8 +212,8 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(
     }
 }
 
-/// Terminal renk şeması seçicisi: her satır şemanın kendi zemininde, adı ve
-/// 16 ANSI rengiyle çizilir; gezinirken açık terminaller de önizlenir.
+/// Terminal color scheme selector: each row is drawn on the scheme's own background
+/// with its name and 16 ANSI colors; open terminals preview as you navigate.
 fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let options = app.scheme_options();
@@ -277,7 +277,7 @@ fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker
         }
         hits.push((line, Hit::TermScheme(i)));
     }
-    // Alt satır: sayaç solda, ipucu sağda; dar kutuda kısalır, sığmazsa atlanır.
+    // Bottom row: counter left, hint right; shortened in narrow boxes, skipped when it does not fit.
     let by = inner.bottom() - 1;
     let count = format!("{}/{}", p.selected + 1, options.len());
     let counter_w = if options.len() > list_h { util::width(&count) as u16 + 2 } else { 0 };
@@ -292,8 +292,8 @@ fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker
     }
 }
 
-/// Hızlı başlatma penceresi: kurulu her başlatıcı için Home'da görünürlük ve
-/// kısayol tuşu. Satıra tıklamak gösterir/gizler, tuş çipine tıklamak değiştirir.
+/// Quick launch popup: for each installed launcher its Home visibility and shortcut
+/// key. Clicking a row toggles it, clicking the key chip changes it.
 fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let list = app.installed_launchers();
@@ -331,7 +331,7 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
         let name = util::truncate(&super::bridge::capitalize(&l.name), name_w as usize);
         hud::put(buf, cx, y, &name, name_st, name_w);
         cx += name_w;
-        // Tuş çipi sağda; komut adı arada (yer varsa).
+        // The key chip on the right; the command name in between (when there is room).
         let chip = format!(" ‹ {} › ", l.key);
         let chip_w = util::width(&chip) as u16;
         let chip_x = (x + iw).saturating_sub(chip_w);
@@ -358,11 +358,11 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 3, w, h)
 }
 
-/// Dolgulu, vurgu renkli çerçeveli kutu.
+/// A filled box with an accent-colored frame.
 fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui::style::Color) -> Rect {
     hud::fill(buf, rect, Style::default().bg(th.raised).fg(th.fg));
     let inner = hud::frame(buf, rect, title, "", true, th);
-    // Çerçeveyi kutu vurgusuyla boya.
+    // Paint the frame with the box accent.
     for x in rect.left()..rect.right() {
         for y in [rect.top(), rect.bottom().saturating_sub(1)] {
             if let Some(c) = buf.cell_mut((x, y)) {
@@ -468,7 +468,7 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
         keys.sort_by_key(|k| (k.len(), k.clone()));
         by_action.push((a, keys));
     }
-    // Sekme numaralarını tek satırda topla.
+    // Collect the tab numbers on a single line.
     let mut tabs_done = false;
     for (a, keys) in &by_action {
         if matches!(a, Action::GoTab(_)) {

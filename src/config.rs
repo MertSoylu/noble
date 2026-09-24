@@ -1,4 +1,4 @@
-//! `config.toml`: yükleme, varsayılanlar, yol çözümü ve küçük yerinde düzenlemeler.
+//! `config.toml`: loading, defaults, path resolution and small in-place edits.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,32 +23,34 @@ pub struct General {
     pub theme: String,
     pub transparent: bool,
     pub boot_animation: bool,
-    /// Sayfa kaydırma ve pane büyütme animasyonları.
+    /// Page transition and pane zoom animations.
     pub animations: bool,
     pub clock_24h: bool,
     pub show_seconds: bool,
-    /// Karşılama metnindeki isim; boşsa kullanıcı adı kullanılır.
+    /// Name in the greeting text; the user name is used when empty.
     pub operator: String,
+    /// Check GitHub once a day for a new release.
+    pub check_updates: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TerminalCfg {
-    /// Boşsa otomatik: pwsh → powershell → cmd (Windows), $SHELL (Unix).
+    /// Empty = automatic: pwsh → powershell → cmd (Windows), $SHELL (Unix).
     pub shell: String,
     pub shell_args: Vec<String>,
     pub scrollback: usize,
     pub restore_session: bool,
     pub copy_on_select: bool,
-    /// Pane renk şeması: "windows-terminal" (PowerShell profilinin şeması), "theme"
-    /// (arayüz temasını izle) ya da bir şema adı ("dark-plus", "light-gray", "wt:<ad>"…).
+    /// Pane color scheme: "windows-terminal" (the PowerShell profile's scheme), "theme"
+    /// (follow the UI theme) or a scheme name ("dark-plus", "light-gray", "wt:<name>"…).
     pub colors: String,
-    /// Şemanın zeminini/metnini ezen "#rrggbb" renkleri (boş = şemanınki).
+    /// "#rrggbb" colors overriding the scheme's background/text (empty = the scheme's own).
     pub background: String,
     pub foreground: String,
-    /// Arka plandaki sekme dikkat isteyince bildirim göster (+ dış terminale zil).
+    /// Show a notification when a background tab needs attention (+ bell to the outer terminal).
     pub notify: bool,
-    /// Arka plandaki bir komut en az bu kadar saniye sürdüyse bitişi bildirilir (0 = kapalı).
+    /// Report the end of a background command that ran at least this many seconds (0 = off).
     pub notify_after: u64,
 }
 
@@ -56,16 +58,16 @@ pub struct TerminalCfg {
 #[serde(default)]
 pub struct KeysCfg {
     pub prefix: String,
-    /// Prefix'ten sonra basılan tuş → eylem (varsayılanların üzerine yazar).
+    /// Key pressed after the prefix → action (overrides the defaults).
     pub prefix_bindings: BTreeMap<String, String>,
-    /// Prefix'siz genel kısayollar → eylem.
+    /// Global shortcuts without the prefix → action.
     pub direct_bindings: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ProjectsCfg {
-    /// Boşsa yaygın klasörler otomatik taranır.
+    /// Empty = common folders are scanned automatically.
     pub roots: Vec<String>,
     pub max_depth: usize,
     pub exclude: Vec<String>,
@@ -77,7 +79,7 @@ pub struct AiCfg {
     pub enabled: bool,
     pub refresh_minutes: u64,
     pub providers: Vec<String>,
-    /// Bir kota penceresi bu yüzdeye ulaşınca uyar (0 = kapalı).
+    /// Warn when a quota window reaches this percent (0 = off).
     pub warn_at: u8,
 }
 
@@ -86,7 +88,7 @@ pub struct Launcher {
     pub key: String,
     pub name: String,
     pub command: String,
-    /// Home'da düğme/kısayol olarak görünsün mü (yüklü değilse zaten gizlenir).
+    /// Whether it shows as a button/shortcut on Home (already hidden when not installed).
     #[serde(default = "yes")]
     pub show: bool,
 }
@@ -105,6 +107,7 @@ impl Default for General {
             clock_24h: true,
             show_seconds: true,
             operator: String::new(),
+            check_updates: true,
         }
     }
 }
@@ -152,11 +155,11 @@ impl Default for AiCfg {
     }
 }
 
-/// Başlatıcılara atanabilecek Home tuşları: Home'un kendi kısayollarıyla
-/// (k j t m s p q w r a o) çakışmayanlar.
+/// Home keys assignable to launchers: those that do not clash with Home's own
+/// shortcuts (k j t m s p q w r a o).
 pub const LAUNCH_KEYS: [&str; 15] = ["c", "x", "l", "g", "d", "e", "f", "b", "n", "u", "v", "y", "z", "i", "h"];
 
-/// Varsayılan başlatıcılar (tuş, ad, komut). Kurulu olmayanlar Home'da görünmez.
+/// Default launchers (key, name, command). Those not installed stay hidden on Home.
 const DEFAULT_LAUNCHERS: [(&str, &str, &str); 13] = [
     ("c", "claude", "claude"),
     ("x", "codex", "codex"),
@@ -168,7 +171,7 @@ const DEFAULT_LAUNCHERS: [(&str, &str, &str); 13] = [
     ("f", "freebuff", "freebuff"),
     ("z", "grok build", "grok"),
     ("u", "cursor", "cursor-agent"),
-    // `cmd` takma adı Windows'un cmd.exe'siyle çakışır.
+    // The `cmd` alias clashes with Windows' own cmd.exe.
     ("d", "command code", "command-code"),
     ("l", "cline", "cline"),
     ("n", "kilo code", "kilo"),
@@ -194,52 +197,53 @@ impl Default for Config {
     }
 }
 
-/// İlk çalıştırmada yazılan, açıklamalı şablon.
-pub const DEFAULT_CONFIG: &str = r#"# NOBLE yapılandırması — dosya kaydedildiğinde uygulama kendini yeniden yükler.
+/// The commented template written on the first run.
+pub const DEFAULT_CONFIG: &str = r#"# NOBLE configuration — the app reloads itself when the file is saved.
 
 [general]
-theme = "amber"          # Ayarlar sekmesinden seçilebilir (20 tema)
-transparent = false      # true: terminalin kendi arka planı (şeffaflık) görünür
+theme = "amber"          # pickable from the Settings tab (20 themes)
+transparent = false      # true: the terminal's own background (transparency) shows
 boot_animation = true
-animations = true        # sayfa geçişi ve tam ekran animasyonları
+animations = true        # page transition and fullscreen animations
 clock_24h = true
 show_seconds = true
-operator = ""            # karşılama ismi; boşsa kullanıcı adı
+operator = ""            # greeting name; empty = user name
+check_updates = true     # check once a day for a new release; notice appears bottom right
 
 [terminal]
-shell = ""               # boş = otomatik (pwsh → powershell → cmd | $SHELL)
+shell = ""               # empty = automatic (pwsh → powershell → cmd | $SHELL)
 shell_args = []
 scrollback = 5000
-restore_session = true   # çıkışta sekmeleri kaydet, açılışta geri yükle
-copy_on_select = true    # fareyle seçilen metni panoya kopyala
-colors = "windows-terminal"  # pane renkleri: windows-terminal (PowerShell şeman) | theme | dark-plus | campbell | light-gray …
-background = ""          # şema zeminini ez, ör. '#c8c8c8' (boş = şemanınki)
-foreground = ""          # şema metin rengini ez, ör. '#2e2e2e'
-notify = true            # arka plan sekmesi dikkat isteyince bildir (zil, uygulama bildirimi)
-notify_after = 10        # arka planda en az bu kadar saniye süren komutun bitişini bildir (0 = kapalı)
+restore_session = true   # save tabs on exit, restore them at startup
+copy_on_select = true    # copy mouse-selected text to the clipboard
+colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme) | theme | dark-plus | campbell | light-gray …
+background = ""          # override the scheme background, e.g. '#c8c8c8' (empty = the scheme's own)
+foreground = ""          # override the scheme text color, e.g. '#2e2e2e'
+notify = true            # notify when a background tab needs attention (bell, app notification)
+notify_after = 10        # report the end of a background command that took at least this many seconds (0 = off)
 
 [keys]
-prefix = "ctrl+a"        # prefix tuşu; iki kez basınca shell'e gönderilir
-# Prefix'ten sonra basılan tuş → eylem. Örnek:
+prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell
+# Key pressed after the prefix → action. Example:
 # [keys.prefix_bindings]
 # "%" = "split_right"
-# Prefix'siz kısayollar. Örnek:
+# Shortcuts without the prefix. Example:
 # [keys.direct_bindings]
 # "alt+enter" = "zoom"
 
 [projects]
-roots = []               # boş = Desktop, Documents, source/repos, projects, code, dev ...
+roots = []               # empty = Desktop, Documents, source/repos, projects, code, dev ...
 max_depth = 4
 exclude = []
 
 [ai]
 enabled = true
-refresh_minutes = 5      # yalnızca Home açıkken; Home'a dönünce hemen yenilenir
+refresh_minutes = 5      # only while Home is open; refreshed immediately when Home opens
 providers = ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
-warn_at = 90             # bir kota penceresi bu yüzdeye ulaşınca uyar (0 = kapalı)
+warn_at = 90             # warn when a quota window reaches this percent (0 = off)
 
-# Home'da seçili projede tek tuşla çalışan komutlar. Yalnızca PATH'te bulunanlar
-# görünür; `show = false` gizler (Settings → Quick launch).
+# One-key commands for the selected project on Home. Only those found on PATH
+# are visible; `show = false` hides one (Settings → Quick launch).
 [[launchers]]
 key = "c"
 name = "claude"
@@ -306,7 +310,7 @@ name = "kilo code"
 command = "kilo"
 "#;
 
-/// Uygulamanın dosya yolları. `NOBLE_HOME` ortam değişkeni hepsini tek klasöre alır.
+/// The app's file paths. The `NOBLE_HOME` env var puts them all in one folder.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub config: PathBuf,
@@ -331,7 +335,7 @@ impl Paths {
     }
 }
 
-/// Yükleme sonucu: config ve (varsa) hata mesajı. Hata ölümcül değildir.
+/// Load result: the config and (optionally) an error message. The error is not fatal.
 pub struct Loaded {
     pub config: Config,
     pub error: Option<String>,
@@ -340,7 +344,7 @@ pub struct Loaded {
 
 pub fn parse(text: &str) -> Result<Config, String> {
     let mut cfg: Config = toml::from_str(text).map_err(|e| e.message().to_string())?;
-    // Desteği kaldırılan sağlayıcılar sessizce düşer.
+    // Removed providers are dropped silently.
     cfg.ai.providers.retain(|p| {
         matches!(
             p.to_ascii_lowercase().as_str(),
@@ -355,9 +359,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(cfg)
 }
 
-/// Eski config'lerde olmayan varsayılan başlatıcıları sona ekler (komutu
-/// listede olmayanlar). Tuşu doluysa boştaki ilk tuş verilir. Gizlemek için
-/// silmek yerine `show = false` kullanılır; o yüzden geri eklenmeleri sorun değil.
+/// Appends the default launchers missing from older configs (those whose command
+/// is not in the list). A busy key gets the first free one. To hide a launcher you
+/// use `show = false` instead of deleting it, so re-adding them is harmless.
 fn add_missing_launchers(list: &mut Vec<Launcher>) {
     for d in default_launchers() {
         if list.iter().any(|l| l.command.eq_ignore_ascii_case(&d.command)) {
@@ -374,7 +378,7 @@ fn add_missing_launchers(list: &mut Vec<Launcher>) {
     }
 }
 
-/// Config'i okur; dosya yoksa açıklamalı şablonu yazar.
+/// Reads the config; writes the commented template when the file is missing.
 pub fn load(path: &Path) -> Loaded {
     if !path.exists() {
         if let Some(parent) = path.parent() {
@@ -396,8 +400,9 @@ pub fn mtime_of(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Bir bölümdeki `key = value` satırını yorumları koruyarak günceller; satır
-/// yoksa bölümün sonuna ekler, bölüm yoksa dosyanın sonuna oluşturur.
+/// Updates a `key = value` line in a section preserving its comments; appends the
+/// line at the end of the section when missing, and creates the section at the end
+/// of the file when it does not exist.
 pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> String {
     let header = format!("[{section}]");
     let mut out: Vec<String> = Vec::new();
@@ -408,7 +413,7 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             if in_section && !done {
-                // Bölümün sonuna ekle (sondaki boş satırların önüne).
+                // Append at the end of the section (before the trailing blank lines).
                 let mut tail = Vec::new();
                 while out.last().is_some_and(|l: &String| l.trim().is_empty()) {
                     tail.push(out.pop().unwrap());
@@ -451,8 +456,8 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
     s
 }
 
-/// Tüm `[[launchers]]` bloklarını verilen listeyle değiştirir; diğer her şey
-/// (yorumlar dahil) korunur. Bloklar ilk bloğun olduğu yere, yoksa sona yazılır.
+/// Replaces every `[[launchers]]` block with the given list; everything else
+/// (comments included) is preserved. The blocks go where the first one was, or at the end.
 pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut insert_at = None;
@@ -462,7 +467,7 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
         if trimmed.starts_with('[') {
             in_block = trimmed == "[[launchers]]";
             if in_block {
-                // Blok içeriği (sondaki boş satırlar dahil) atlanır.
+                // The block content (trailing blank lines included) is skipped.
                 insert_at.get_or_insert(out.len());
                 continue;
             }
@@ -491,7 +496,7 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
         }
         out.len()
     });
-    // Sonrasında başka bölüm varsa araya boş satır.
+    // Leave a blank line when another section follows.
     if at < out.len() && !out[at].trim().is_empty() {
         blocks.push(String::new());
     }
@@ -532,8 +537,8 @@ mod tests {
         let cfg = parse(&out).unwrap();
         assert_eq!(cfg.launchers, list);
         assert_eq!(out.matches("[[launchers]]").count(), list.len());
-        assert!(out.contains("show = false") && out.contains("# Home'da seçili projede"));
-        // Başka bölümle arada kalan bloklar da doğru değişir.
+        assert!(out.contains("show = false") && out.contains("# One-key commands for the selected project"));
+        // Blocks sitting before another section are changed correctly too.
         let text = "[[launchers]]\nkey = \"c\"\nname = \"a\"\ncommand = \"a\"\n\n[general]\ntheme = \"ice\"\n";
         let cfg = parse(&set_launchers(text, &list)).unwrap();
         assert_eq!(cfg.launchers, list);
@@ -542,7 +547,7 @@ mod tests {
 
     #[test]
     fn old_config_gets_new_launchers() {
-        // Eski config: yalnızca claude/codex, "e" tuşu başka komutta, codex gizli.
+        // Old config: only claude/codex, "e" on another command, codex hidden.
         let text = "[[launchers]]
 key = \"c\"
 name = \"claude\"
@@ -563,13 +568,13 @@ command = \"aider\"
         let names: Vec<_> = cfg.launchers.iter().map(|l| (l.key.as_str(), l.name.as_str())).collect();
         assert_eq!(names[..5], [("c", "claude"), ("x", "codex"), ("e", "aider"), ("l", "opencode"), ("i", "copilot")]);
         assert_eq!(cfg.launchers.len(), DEFAULT_LAUNCHERS.len() + 1);
-        // Tuşlar çakışmaz.
+        // The keys do not clash.
         let mut keys: Vec<_> = cfg.launchers.iter().map(|l| l.key.clone()).collect();
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), cfg.launchers.len());
         assert!(!cfg.launchers[1].show);
-        // Sağlayıcı listesi kullanıcının seçimi olarak kalır.
+        // The provider list stays as the user chose it.
         let cfg = parse(
             "[ai]
 providers = [\"claude\", \"gemini\"]
@@ -588,7 +593,7 @@ providers = [\"claude\", \"gemini\"]
     fn set_value_keeps_comments() {
         let out = set_value(DEFAULT_CONFIG, "general", "theme", "\"synth\"");
         assert!(out.contains("theme = \"synth\""));
-        assert!(out.contains("# Ayarlar sekmesinden"));
+        assert!(out.contains("# pickable from the Settings tab"));
         assert_eq!(parse(&out).unwrap().general.theme, "synth");
         let added = set_value("[general]\nclock_24h = true\n\n[ai]\n", "general", "theme", "\"ice\"");
         assert_eq!(parse(&added).unwrap().general.theme, "ice");

@@ -1,4 +1,4 @@
-//! Arka plan iş parçacıklarından ana döngüye gelen olaylar.
+//! Events arriving from the background threads into the main loop.
 
 use std::path::PathBuf;
 
@@ -9,7 +9,7 @@ use crate::term::layout::PaneId;
 
 pub enum AppEvent {
     Input(crossterm::event::Event),
-    /// Bir veya daha fazla pane'e çıktı geldi (pane başına `dirty` bayrağı tutulur).
+    /// Output arrived in one or more panes (a per-pane `dirty` flag is kept).
     PtyOutput,
     PtyExit(PaneId),
     SensorStatic(Box<StaticInfo>),
@@ -22,6 +22,8 @@ pub enum AppEvent {
     Projects(Vec<Project>),
     Git(PathBuf, GitInfo),
     Ai(Box<ProviderState>),
+    /// Update check: the latest published release or an error.
+    Update(Result<String, String>),
 }
 
 pub type Tx = std::sync::mpsc::Sender<AppEvent>;

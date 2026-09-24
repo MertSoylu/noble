@@ -1,4 +1,4 @@
-//! Tek bir terminal paneli: gerçek PTY (ConPTY/Unix pty) + vt100 emülatörü.
+//! A single terminal panel: a real PTY (ConPTY/Unix pty) + the vt100 emulator.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,26 +14,26 @@ use crate::event::AppEvent;
 use crate::term::layout::PaneId;
 use crate::util;
 
-/// vt100 geri çağrıları: başlık, çalışma dizini, terminal sorgu yanıtları, pano.
+/// vt100 callbacks: title, working directory, terminal query replies, clipboard.
 #[derive(Default)]
 pub struct Callbacks {
     pub title: String,
     pub cwd: Option<String>,
-    /// Emülatörün PTY'ye geri yazması gereken yanıtlar (DSR, DA).
+    /// Replies the emulator must write back to the PTY (DSR, DA).
     pub responses: Vec<u8>,
     pub clipboard: Option<String>,
     pub bell: bool,
-    /// Shell yeni bir prompt çizdi (OSC 7 / 9;9 / 133): önceki komut bitti.
+    /// The shell drew a new prompt (OSC 7 / 9;9 / 133): the previous command finished.
     pub prompt: bool,
-    /// Uygulamanın gönderdiği masaüstü bildirimi (OSC 9 metni, OSC 777;notify).
+    /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
-    /// OSC 8 bağlantıları (en yenisi sonda, sınırlı sayıda).
+    /// OSC 8 links (newest last, capped in number).
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
-    /// Açılmış ama henüz kapanmamış OSC 8 bağlantısı: (mutlak satır, sütun, adres).
+    /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
     open_link: Option<(usize, u16, String)>,
 }
 
-/// OSC 8 ile işaretlenmiş metin: mutlak satır (0 = en eski geçmiş satırı) ve sütun aralığı.
+/// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hyperlink {
     pub line: usize,
@@ -42,10 +42,10 @@ pub struct Hyperlink {
     pub url: String,
 }
 
-/// Saklanan en fazla OSC 8 bağlantısı.
+/// Maximum number of OSC 8 links kept.
 const MAX_HYPERLINKS: usize = 1000;
 
-/// Geçmişin uzunluğu (görünen kaydırmayı bozmadan).
+/// Scrollback length (without disturbing the visible scroll position).
 fn history_len(screen: &mut vt100::Screen) -> usize {
     let current = screen.scrollback();
     screen.set_scrollback(usize::MAX);
@@ -84,18 +84,18 @@ impl vt100::Callbacks for Callbacks {
                 self.cwd = Some(join(rest).trim_matches('"').to_string());
                 self.prompt = true;
             }
-            // OSC 9;<metin>: iTerm2 tarzı bildirim. Sayısal alt kodlar (9;4 ilerleme
-            // gibi ConEmu uzantıları) bildirim değildir.
+            // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
+            // extensions such as 9;4 progress) are not notifications.
             [b"9", rest @ ..] if !rest.is_empty() && !rest[0].iter().all(u8::is_ascii_digit) => {
                 self.set_notice(join(rest));
             }
-            // OSC 777;notify;başlık;gövde (rxvt / Ghostty / WezTerm).
+            // OSC 777;notify;title;body (rxvt / Ghostty / WezTerm).
             [b"777", b"notify", rest @ ..] => {
                 let parts: Vec<String> = rest.iter().map(|p| String::from_utf8_lossy(p).trim().to_string()).collect();
                 self.set_notice(parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · "));
             }
-            // OSC 8;parametreler;adres … OSC 8;; — adres boşsa bağlantı kapanır.
-            // Adres ";" içerebilir, bu yüzden kalan parçalar birleştirilir.
+            // OSC 8;params;address … OSC 8;; — an empty address closes the link.
+            // The address may contain ";", so the remaining parts are joined.
             [b"8", _params, uri @ ..] => {
                 let url = join(uri);
                 let (row, col) = screen.cursor_position();
@@ -105,7 +105,7 @@ impl vt100::Callbacks for Callbacks {
                     if line == l0 {
                         self.push_link(Hyperlink { line, from: c0, to: col, url: open });
                     } else {
-                        // Satır atlayan bağlantı: ilk satırın sonu ve son satırın başı.
+                        // Line-spanning link: end of the first line and start of the last.
                         self.push_link(Hyperlink { line: l0, from: c0, to: cols, url: open.clone() });
                         self.push_link(Hyperlink { line, from: 0, to: col, url: open });
                     }
@@ -114,7 +114,7 @@ impl vt100::Callbacks for Callbacks {
                     self.open_link = Some((line, col, url));
                 }
             }
-            // OSC 133: FinalTerm/VS Code prompt işaretleri. A = prompt başladı, D = komut bitti.
+            // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished.
             [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.prompt = true,
             _ => {}
         }
@@ -134,15 +134,15 @@ impl vt100::Callbacks for Callbacks {
     ) {
         let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
         match (i1, c) {
-            // DSR: imleç konumu. ConPTY açılışta bunu sorar ve yanıt bekler.
+            // DSR: cursor position. ConPTY asks for this at startup and waits for the answer.
             (None, 'n') if first == 6 => {
                 let (row, col) = screen.cursor_position();
                 self.responses.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
             }
             (None, 'n') if first == 5 => self.responses.extend_from_slice(b"\x1b[0n"),
-            // Birincil cihaz özellikleri.
+            // Primary device attributes.
             (None, 'c') if first == 0 => self.responses.extend_from_slice(b"\x1b[?1;2c"),
-            // İkincil cihaz özellikleri.
+            // Secondary device attributes.
             (Some(b'>'), 'c') => self.responses.extend_from_slice(b"\x1b[>0;10;1c"),
             _ => {}
         }
@@ -167,7 +167,7 @@ impl Callbacks {
     }
 }
 
-/// OSC 7 URL'sini yerel yola çevirir: `file://host/C:/x` → `C:/x`.
+/// Turns an OSC 7 URL into a local path: `file://host/C:/x` → `C:/x`.
 pub fn parse_cwd_url(raw: &str) -> String {
     let mut p = raw.trim().to_string();
     if let Some(after) = p.strip_prefix("file://") {
@@ -203,15 +203,15 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Pane başlığı: shell'in OSC başlığından süreç adı. `C:\WINDOWS\system32\cmd.exe`
-/// → `cmd`, `vim - notes.md` → `vim`. Başlık yoksa `fallback`.
+/// Pane title: the process name from the shell's OSC title. `C:\WINDOWS\system32\cmd.exe`
+/// → `cmd`, `vim - notes.md` → `vim`. `fallback` when there is no title.
 pub fn process_label(title: &str, fallback: &str) -> String {
     let source = if title.trim().is_empty() { fallback.trim() } else { title.trim() };
     if source.is_empty() {
         return "shell".into();
     }
     let head = source.split(" - ").next().unwrap_or(source).split(" | ").next().unwrap_or(source).trim();
-    // Yol gibi görünüyorsa son parçayı al.
+    // If it looks like a path, take the last segment.
     let leaf = if head.contains('\\') || head.contains('/') {
         head.replace('\\', "/").trim_end_matches('/').rsplit('/').next().unwrap_or(head).to_string()
     } else {
@@ -249,9 +249,9 @@ impl ShellSpec {
         }
     }
 
-    /// Shell'i, önce `command`'ı çalıştırıp sonra etkileşimli kalacak şekilde
-    /// başlatacak argümanlar. PowerShell'e çalışma dizinini bildiren prompt
-    /// kancası da eklenir (bölme ve oturum kaydı gerçek dizini bilsin diye).
+    /// Arguments that start the shell so it runs `command` first and then stays
+    /// interactive. A prompt hook reporting the working directory to PowerShell is
+    /// added as well (so the split and the session record know the real directory).
     pub fn args_with_command(&self, command: Option<&str>) -> Vec<String> {
         let mut args = self.args.clone();
         let cmd = command.filter(|c| !c.trim().is_empty());
@@ -264,8 +264,8 @@ impl ShellSpec {
                 args.extend(["-NoExit".into(), "-Command".into(), script]);
             }
             ShellKind::Cmd => {
-                // Komut `NOBLE_LAUNCH` değişkeninden açılır (bkz. `extra_env`): cmd.exe
-                // `\"` kaçışını tanımadığı için tırnaklı yollar argüman olarak bozulurdu.
+                // The command is launched via the `NOBLE_LAUNCH` variable (see `extra_env`):
+                // cmd.exe does not recognize the `\"` escape, so quoted paths would break.
                 if cmd.is_some() {
                     args.extend(["/K".into(), "%NOBLE_LAUNCH%".into()]);
                 }
@@ -279,9 +279,9 @@ impl ShellSpec {
         args
     }
 
-    /// Başlatıcı komutunu bu shell için hazırlar: Windows'ta program PATH'te
-    /// `.exe`/`.cmd` olarak çözülür ve tam yolla çağrılır; böylece PowerShell
-    /// betik politikasına takılan `.ps1` shim'leri devreye girmez.
+    /// Prepares a launcher command for this shell: on Windows the program is
+    /// resolved on PATH as `.exe`/`.cmd` and invoked with its full path, so the
+    /// `.ps1` shims that trip PowerShell's script policy never come into play.
     pub fn invocation(&self, command: &str) -> String {
         let command = command.trim();
         if !cfg!(windows) {
@@ -304,8 +304,19 @@ impl ShellSpec {
         }
     }
 
-    /// Shell'e özel ortam değişkenleri: cmd için dizin bildiren PROMPT ve
-    /// çalıştırılacak komut (`NOBLE_LAUNCH`; tırnaklar olduğu gibi kalsın diye).
+    /// A command line that runs a program (given by full path) with its arguments
+    /// (paths with spaces are quoted per the shell).
+    pub fn invocation_of(&self, program: &Path, args: &str) -> String {
+        let path = program.display().to_string();
+        match self.kind() {
+            ShellKind::PowerShell => format!("& '{}' {args}", path.replace('\'', "''")),
+            ShellKind::Cmd => format!("\"{path}\" {args}"),
+            ShellKind::Posix => format!("'{}' {args}", path.replace('\'', r"'\''")),
+        }
+    }
+
+    /// Shell-specific environment variables: for cmd a directory-reporting PROMPT
+    /// and the command to run (`NOBLE_LAUNCH`, so the quotes stay untouched).
     pub fn extra_env(&self, command: Option<&str>) -> Vec<(String, String)> {
         let mut env = Vec::new();
         if let ShellKind::Cmd = self.kind() {
@@ -320,8 +331,9 @@ impl ShellSpec {
     }
 }
 
-/// Her prompt'ta OSC 9;9 ile çalışma dizinini bildirir; mevcut prompt'u (oh-my-posh
-/// dahil) sarmalar. Çift tırnak içermez ki komut satırı alıntılaması bozulmasın.
+/// Reports the working directory with OSC 9;9 on every prompt, wrapping the current
+/// prompt (oh-my-posh included). It contains no double quotes so command line
+/// quoting never breaks.
 pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function global:prompt { [Console]::Write([char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); & $global:__nobleP }";
 
 enum ShellKind {
@@ -330,7 +342,7 @@ enum ShellKind {
     Posix,
 }
 
-/// Kullanılacak shell'i belirler.
+/// Decides which shell to use.
 pub fn resolve_shell(cfg: &TerminalCfg) -> ShellSpec {
     let program = if !cfg.shell.trim().is_empty() {
         cfg.shell.trim().to_string()
@@ -350,7 +362,7 @@ pub fn resolve_shell(cfg: &TerminalCfg) -> ShellSpec {
     spec
 }
 
-/// Fareyle seçim; pane içi (satır, sütun) koordinatları.
+/// Mouse selection; (row, col) coordinates inside the pane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Selection {
     pub anchor: (u16, u16),
@@ -379,15 +391,15 @@ pub struct Pane {
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub dirty: Arc<AtomicBool>,
-    /// (satır, sütun)
+    /// (row, col)
     pub size: (u16, u16),
     pub start_cwd: PathBuf,
     pub shell_label: String,
     pub command: Option<String>,
     pub selection: Option<Selection>,
     pub pid: Option<u32>,
-    /// Kullanıcının son Enter'a bastığı an: komut süresini ölçmek için
-    /// (prompt geri gelince sıfırlanır).
+    /// When the user last pressed Enter: to time the command
+    /// (reset when the prompt comes back).
     pub command_started: Option<std::time::Instant>,
 }
 
@@ -424,7 +436,7 @@ impl Pane {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "NOBLE");
         cmd.env("NOBLE_PANE", id.to_string());
-        // Claude Code hook'ları durumu doğru NOBLE örneğine yazsın diye.
+        // So the Claude Code hooks write the state to the right NOBLE instance.
         cmd.env("NOBLE_INSTANCE", std::process::id().to_string());
         for (k, v) in spec.shell.extra_env(spec.command) {
             cmd.env(k, v);
@@ -454,7 +466,7 @@ impl Pane {
                         Ok(n) => {
                             let responses = {
                                 let mut p = lock(&parser);
-                                // Emülatör hatası tüm pane'i öldürmesin: bu parçayı atla.
+                                // An emulator error must not kill the whole pane: skip this chunk.
                                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(&buf[..n])));
                                 std::mem::take(&mut p.callbacks_mut().responses)
                             };
@@ -505,7 +517,7 @@ impl Pane {
         let _ = w.flush();
     }
 
-    /// Metni yapıştırır; uygulama istiyorsa bracketed paste ile sarar.
+    /// Pastes text; wraps it in bracketed paste when the app wants that.
     pub fn paste(&self, text: &str) {
         let bracketed = lock(&self.parser).screen().bracketed_paste();
         let body = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -531,7 +543,7 @@ impl Pane {
         lock(&self.parser)
     }
 
-    /// Geçmişte kaydırır; pozitif = yukarı (daha eski).
+    /// Scrolls the scrollback; positive = up (older).
     pub fn scroll(&self, delta: i32) {
         let mut p = lock(&self.parser);
         let cur = p.screen().scrollback() as i32;
@@ -559,7 +571,7 @@ impl Pane {
         p.callbacks().cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| self.start_cwd.clone())
     }
 
-    /// Uygulamanın OSC 52 ile istediği pano içeriği (bir kez).
+    /// Clipboard content the app requested via OSC 52 (once).
     pub fn take_clipboard(&self) -> Option<String> {
         lock(&self.parser).callbacks_mut().clipboard.take()
     }
@@ -593,8 +605,8 @@ impl Pane {
         let _ = self.killer.kill();
     }
 
-    /// Geçmiş dahil tüm satırlar (0 = en eski) ve geçmiş uzunluğu. Görünen
-    /// kaydırma konumu korunur.
+    /// All lines including the scrollback (0 = oldest) and the scrollback length.
+    /// The visible scroll position is preserved.
     pub fn all_lines(&self) -> (Vec<String>, usize) {
         let mut p = lock(&self.parser);
         let screen = p.screen_mut();
@@ -623,7 +635,7 @@ impl Pane {
         (lines, history)
     }
 
-    /// Mutlak satırı (0 = en eski) ekranın ortasına getirecek şekilde kaydırır.
+    /// Scrolls so the absolute line (0 = oldest) lands in the middle of the screen.
     pub fn scroll_to_line(&self, line: usize, history: usize) {
         let rows = self.size.0 as usize;
         let top = line.saturating_sub(rows / 2);
@@ -631,7 +643,7 @@ impl Pane {
         lock(&self.parser).screen_mut().set_scrollback(offset);
     }
 
-    /// Ekrandaki (satır, sütun) konumundaki OSC 8 bağlantısı: adres ve sütun aralığı.
+    /// The OSC 8 link at on-screen (row, col): address and column span.
     pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<(String, u16, u16)> {
         let mut p = lock(&self.parser);
         let offset = p.screen().scrollback();
@@ -644,7 +656,7 @@ impl Pane {
             .map(|h| (h.url.clone(), h.from, h.to))
     }
 
-    /// Görünen satır metni (bağlantı tespiti için).
+    /// Visible line text (for link detection).
     pub fn visible_row(&self, row: u16) -> Option<String> {
         let p = lock(&self.parser);
         let cols = p.screen().size().1;
@@ -652,7 +664,7 @@ impl Pane {
     }
 }
 
-/// Aramada bir eşleşme: mutlak satır (0 = en eski geçmiş satırı) ve sütun aralığı.
+/// A search match: absolute line (0 = oldest scrollback line) and column span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
     pub line: usize,
@@ -660,7 +672,7 @@ pub struct Match {
     pub width: u16,
 }
 
-/// Büyük/küçük harf duyarsız düz metin araması; sütunlar görüntü genişliğiyle hesaplanır.
+/// Case-insensitive plain text search; columns are computed with display width.
 pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
     let q: Vec<char> = query.chars().map(fold).collect();
@@ -739,7 +751,7 @@ mod tests {
     #[test]
     fn launcher_invocation() {
         let pwsh = ShellSpec { program: "powershell.exe".into(), args: vec![] };
-        // PATH'te olmayan komut olduğu gibi kalır.
+        // A command that is not on PATH stays as it is.
         assert_eq!(pwsh.invocation("definitely-not-a-real-tool --x"), "definitely-not-a-real-tool --x");
         if cfg!(windows) {
             let inv = pwsh.invocation("cmd /c echo hi");
@@ -770,7 +782,7 @@ mod tests {
         let links = &parser.callbacks().hyperlinks;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0], Hyperlink { line: 0, from: 4, to: 8, url: "https://example.com/a;b".into() });
-        // Ekran kaydıkça mutlak satır numarası sabit kalır.
+        // The absolute line number stays fixed while the screen scrolls.
         parser.process(b"\r\n\n\n\n\n\n\x1b]8;;file:///tmp/x.rs\x07x.rs\x1b]8;;\x07");
         let last = parser.callbacks().hyperlinks.back().unwrap().clone();
         assert_eq!((last.from, last.to), (0, 4));
@@ -780,7 +792,7 @@ mod tests {
     #[test]
     fn notifications_and_prompt_marks() {
         let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
-        // İlerleme çubuğu (9;4) bildirim değildir.
+        // A progress bar (9;4) is not a notification.
         parser.process(b"]9;4;1;50");
         assert_eq!(parser.callbacks().notice, None);
         assert!(!parser.callbacks().prompt);

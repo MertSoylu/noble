@@ -1,5 +1,5 @@
-//! Sistem sensörleri: CPU, bellek, ağ, disk ve süreçler. Ayrı bir iş
-//! parçacığında örneklenir; ana döngü yalnızca anlık görüntüleri alır.
+//! System sensors: CPU, memory, network, disks and processes. Sampled in a
+//! separate thread; the main loop only receives the snapshots.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -22,7 +22,7 @@ pub struct StaticInfo {
 pub struct ProcInfo {
     pub pid: u32,
     pub name: String,
-    /// Tüm çekirdeklere göre normalize (0..100).
+    /// Normalized across all cores (0..100).
     pub cpu: f32,
     pub mem: u64,
 }
@@ -57,19 +57,19 @@ pub enum SensorRequest {
     Kill {
         pid: u32,
     },
-    /// Ekranda ne görünüyorsa ona göre örnekleme sıklığı; ikinci alan: pilde mi.
+    /// Sampling rate based on what is on screen; second field: on battery or not.
     Mode(SensorMode, bool),
 }
 
-/// Örnekleme modu: yalnızca görünen veriler sık okunur.
+/// Sampling mode: only visible data is read often.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SensorMode {
-    /// System ekranı: her saniye, süreç listesi dahil.
+    /// System screen: every second, including the process list.
     Detail,
-    /// Home: her saniye CPU/bellek/ağ; süreç listesi okunmaz.
+    /// Home: CPU/memory/network every second; the process list is not read.
     Summary,
-    /// Sensörler görünmüyor (terminal, ayarlar): 5 saniyede bir, yalnızca
-    /// geçmiş grafikleri ve pil uyarısı için.
+    /// Sensors not visible (terminal, settings): every 5 seconds, only for
+    /// the history graphs and the battery warning.
     Background,
 }
 
@@ -77,7 +77,7 @@ impl SensorMode {
     fn interval(self, on_battery: bool) -> Duration {
         match self {
             SensorMode::Detail => Duration::from_secs(1),
-            // Pildeyken Home'un özeti iki saniyede bir (ekran da o sıklıkta çizilir).
+            // On battery the Home summary runs every two seconds (the screen draws at that rate too).
             SensorMode::Summary if on_battery => Duration::from_secs(2),
             SensorMode::Summary => Duration::from_secs(1),
             SensorMode::Background => Duration::from_secs(5),
@@ -85,7 +85,7 @@ impl SensorMode {
     }
 }
 
-/// Uygulama tarafında tutulan geçmiş + son örnek.
+/// History + last sample held on the app side.
 #[derive(Default)]
 pub struct Sensors {
     pub info: StaticInfo,
@@ -95,7 +95,7 @@ pub struct Sensors {
     pub rx_hist: VecDeque<f64>,
     pub tx_hist: VecDeque<f64>,
     pub core_hist: Vec<VecDeque<f32>>,
-    /// Pil yüzdesinin değişim hızı (işletim sistemi süre vermezse tahmin için).
+    /// Rate of change of the battery percent (to estimate when the OS gives no time).
     pub battery_trend: crate::battery::Trend,
     trend_base: Option<Instant>,
 }
@@ -129,7 +129,7 @@ impl Sensors {
         self.last = Some(s);
     }
 
-    /// Pil ve (varsa) kalan / dolma süresi.
+    /// The battery and (optionally) time left / time to full.
     pub fn battery(&self) -> Option<(&crate::battery::Battery, Option<u64>)> {
         let b = self.last.as_ref()?.battery.as_ref()?;
         Some((b, crate::battery::eta(b, &self.battery_trend)))
@@ -143,10 +143,10 @@ impl Sensors {
         self.mem_hist.back().copied().unwrap_or(0.0)
     }
 
-    /// HUD durum satırı: NOMINAL / ELEVATED / CRITICAL.
+    /// HUD status line: NOMINAL / ELEVATED / CRITICAL.
     pub fn status(&self) -> SysStatus {
         let Some(_) = &self.last else { return SysStatus::Warming };
-        // Anlık sıçramalara değil son birkaç saniyeye bakılır.
+        // It looks at the last few seconds, not momentary spikes.
         let recent: Vec<f32> = self.cpu_hist.iter().rev().take(5).copied().collect();
         let cpu = recent.iter().sum::<f32>() / recent.len().max(1) as f32;
         let mem = self.mem_pct();
@@ -179,7 +179,7 @@ impl SysStatus {
     }
 }
 
-/// Örnekleme iş parçacığını başlatır.
+/// Starts the sampling thread.
 pub fn spawn(tx: Tx, requests: Receiver<SensorRequest>) {
     let _ = std::thread::Builder::new().name("sensors".into()).spawn(move || run(tx, requests));
 }
@@ -208,7 +208,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
     let mut mode = SensorMode::Summary;
     let mut on_battery = false;
     let mut last_tick = Instant::now();
-    // Süreç listesi, diskler ve pil kendi aralıklarıyla okunur.
+    // Process list, disks and battery are read on their own intervals.
     let mut last_procs: Option<Instant> = None;
     let mut last_disks: Option<Instant> = None;
     let mut last_battery: Option<Instant> = None;
@@ -218,12 +218,12 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
     let mut battery = None;
 
     loop {
-        // İstekleri bekle; aralık dolunca örnekle.
+        // Wait for requests; sample when the interval is up.
         let wait = mode.interval(on_battery).saturating_sub(last_tick.elapsed());
         match requests.recv_timeout(wait) {
             Ok(SensorRequest::Mode(m, battery)) => {
                 on_battery = battery;
-                // Mod değişince (ör. System açıldı) beklemeden yeni örnek al.
+                // When the mode changes (e.g. System opened) take a fresh sample without waiting.
                 if m == mode {
                     continue;
                 }
@@ -252,7 +252,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             networks.list().values().fold((0u64, 0u64), |(r, t), n| (r + n.received(), t + n.transmitted()));
 
         let due = |last: Option<Instant>, every: Duration| last.is_none_or(|t| t.elapsed() >= every);
-        // Süreç listesi en pahalı okuma: yalnızca System ekranı açıkken.
+        // The process list is the most expensive read: only while the System screen is open.
         if mode == SensorMode::Detail && due(last_procs, Duration::from_millis(1900)) {
             last_procs = Some(Instant::now());
             sys.refresh_processes_specifics(ProcessesToUpdate::All, true, proc_kind);
@@ -303,8 +303,8 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             rx_rate: rx as f64 / elapsed,
             tx_rate: txb as f64 / elapsed,
             disks: disk_list.clone(),
-            // Süreç listesi yalnızca System ekranında gösterilir; diğer modlarda
-            // her saniye kopyalanıp gönderilmez.
+            // The process list is only shown on the System screen; in other modes
+            // it is not copied and sent every second.
             procs: if mode == SensorMode::Detail { procs.clone() } else { Vec::new() },
             proc_count,
             uptime: System::uptime(),

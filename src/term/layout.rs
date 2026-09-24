@@ -1,5 +1,5 @@
-//! Saf ikili bölme ağacı: pane yerleşimi, bölme, kapatma, yeniden boyutlandırma
-//! ve yöne göre odak geçişi. PTY ya da UI bilmez; tamamen test edilebilir.
+//! Pure binary split tree: pane placement, splitting, closing, resizing and
+//! directional focus moves. It knows nothing about PTYs or the UI; fully testable.
 
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
@@ -8,9 +8,9 @@ pub type PaneId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dir {
-    /// Yan yana (dikey ayırıcı).
+    /// Side by side (vertical divider).
     Row,
-    /// Üst üste (yatay ayırıcı).
+    /// Stacked (horizontal divider).
     Col,
 }
 
@@ -28,14 +28,14 @@ pub enum Node {
     Split { dir: Dir, ratio: f32, a: Box<Node>, b: Box<Node> },
 }
 
-/// Fareyle sürüklenebilir ayırıcı: ağaçtaki yolu ve bölmenin kapladığı alan.
+/// A mouse-draggable divider: its path in the tree and the area the split covers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Divider {
     pub path: Vec<bool>,
     pub dir: Dir,
-    /// Bölmenin (iki çocuğun toplamı) alanı; oran bu alana göre hesaplanır.
+    /// Area of the split (sum of both children); the ratio is computed against it.
     pub area: Rect,
-    /// Tıklanabilir ince şerit.
+    /// The thin clickable strip.
     pub hit: Rect,
 }
 
@@ -66,7 +66,7 @@ impl Node {
         }
     }
 
-    /// `target` yaprağını ikiye böler; yeni pane `b` tarafına gelir.
+    /// Splits the `target` leaf in two; the new pane goes to side `b`.
     pub fn split(&mut self, target: PaneId, new: PaneId, dir: Dir) -> bool {
         match self {
             Node::Leaf(id) if *id == target => {
@@ -78,8 +78,8 @@ impl Node {
         }
     }
 
-    /// `target` yaprağını kaldırır, kardeşini ebeveynin yerine koyar.
-    /// Kök yaprak kaldırılamaz (çağıran sekmeyi kapatmalı); `false` döner.
+    /// Removes the `target` leaf and puts its sibling in the parent's place.
+    /// The root leaf cannot be removed (the caller should close the tab); returns `false`.
     pub fn remove(&mut self, target: PaneId) -> bool {
         match self {
             Node::Leaf(_) => false,
@@ -99,7 +99,7 @@ impl Node {
         }
     }
 
-    /// Her pane'in dikdörtgenini ve ayırıcıları hesaplar.
+    /// Computes every pane's rectangle and the dividers.
     pub fn layout(&self, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
         let mut panes = Vec::new();
         let mut dividers = Vec::new();
@@ -119,9 +119,9 @@ impl Node {
             Node::Split { dir, ratio, a, b } => {
                 let (ra, rb) = split_rect(area, *dir, *ratio);
                 let hit = match dir {
-                    // Ayırıcı: iki pane çerçevesinin birleştiği iki sütun/satır.
+                    // Divider: the two columns/rows where the pane frames meet.
                     Dir::Row => Rect::new(ra.right().saturating_sub(1), area.y, 2.min(area.width), area.height),
-                    // Yalnız üst pane'in alt kenarı: alttaki pane'in başlık düğmeleri tıklanabilir kalsın.
+                    // Only the top pane's bottom edge, so the lower pane's title buttons stay clickable.
                     Dir::Col => Rect::new(area.x, ra.bottom().saturating_sub(1), area.width, 1.min(area.height)),
                 };
                 dividers.push(Divider { path: path.clone(), dir: *dir, area, hit });
@@ -157,8 +157,8 @@ impl Node {
         }
     }
 
-    /// Hedef pane'i çevreleyen, verilen eksendeki en derin bölmenin ayırıcısını
-    /// `delta` kadar kaydırır. Uygun bölme yoksa `false`.
+    /// Moves the divider of the deepest split surrounding the target pane along
+    /// the given axis by `delta`. `false` when there is no suitable split.
     pub fn nudge(&mut self, target: PaneId, dir: Dir, delta: f32) -> bool {
         match self {
             Node::Leaf(_) => false,
@@ -183,7 +183,7 @@ impl Node {
     }
 }
 
-/// Alanı orana göre ikiye böler; her iki taraf en az 1 hücre alır.
+/// Splits an area by ratio; each side gets at least 1 cell.
 pub fn split_rect(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
     match dir {
         Dir::Row => {
@@ -201,7 +201,7 @@ pub fn split_rect(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
     }
 }
 
-/// Ayırıcı sürüklenirken fare konumundan yeni oranı hesaplar.
+/// Computes the new ratio from the mouse position while a divider is dragged.
 pub fn ratio_from_point(div: &Divider, x: u16, y: u16) -> f32 {
     match div.dir {
         Dir::Row => {
@@ -215,7 +215,7 @@ pub fn ratio_from_point(div: &Divider, x: u16, y: u16) -> f32 {
     }
 }
 
-/// Odak geçişi: verilen yöndeki, dik eksende örtüşen en yakın pane.
+/// Focus move: the nearest pane in the given direction that overlaps on the perpendicular axis.
 pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dir: Direction) -> Option<PaneId> {
     let cur = rects.iter().find(|(id, _)| *id == from)?.1;
     let overlap = |a0: u16, a1: u16, b0: u16, b1: u16| a1.min(b1) as i32 - a0.max(b0) as i32;
@@ -244,7 +244,7 @@ pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dir: Direction) -> Optio
         .map(|(id, _, _)| id)
 }
 
-/// Kalıcı (serileştirilebilir) ağaç: yapraklar pane yerine başlangıç bilgisini taşır.
+/// Persistable (serializable) tree: leaves carry launch info instead of a pane.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SavedNode {
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(r1, Rect::new(0, 0, 50, 40));
         assert_eq!(r2, Rect::new(50, 0, 50, 20));
         assert_eq!(r3, Rect::new(50, 20, 50, 20));
-        // Alan tamamen kaplanır.
+        // The area is fully covered.
         let total: u32 = panes.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
         assert_eq!(total, 100 * 40);
     }

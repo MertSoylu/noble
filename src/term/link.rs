@@ -1,5 +1,5 @@
-//! Terminal çıktısındaki bağlantılar: URL'ler ve `dosya.rs:42:7` biçimindeki yollar.
-//! ctrl+tık ile açılır; ctrl basılıyken fare altındaki bağlantının altı çizilir.
+//! Links in terminal output: URLs and paths like `file.rs:42:7`.
+//! Opened with ctrl+click; while ctrl is held the link under the mouse is underlined.
 
 use std::path::{Path, PathBuf};
 
@@ -9,10 +9,10 @@ pub enum Link {
     File { path: PathBuf, line: Option<u32>, col: Option<u32> },
 }
 
-/// Satırda `col` sütunundaki "kelime": sınırlayıcılar arasında kalan metin ve
-/// kapladığı sütun aralığı (bitiş hariç).
+/// The "word" at column `col` of a line: the text between delimiters and the
+/// column span it covers (exclusive end).
 pub fn token_at(line: &str, col: u16) -> Option<(String, u16, u16)> {
-    // Her karakterin başladığı sütun (geniş karakterler iki sütun kaplar).
+    // The column each character starts at (wide characters take two columns).
     let mut cells: Vec<(char, u16, u16)> = Vec::new();
     let mut x = 0u16;
     for ch in line.chars() {
@@ -36,7 +36,7 @@ pub fn token_at(line: &str, col: u16) -> Option<(String, u16, u16)> {
     while end < cells.len() && !is_delim(cells[end].0) {
         end += 1;
     }
-    // Cümle sonu noktalaması ve eşlenmemiş kapanış parantezleri bağlantıya dahil değil.
+    // End-of-sentence punctuation and unmatched closing brackets are not part of the link.
     loop {
         let text: String = cells[start..end].iter().map(|c| c.0).collect();
         let last = cells[end - 1].0;
@@ -61,8 +61,8 @@ pub fn token_at(line: &str, col: u16) -> Option<(String, u16, u16)> {
     (col >= c0 && col < c1).then_some((text, c0, c1))
 }
 
-/// Metnin bağlantı olup olmadığını belirler; yollar `cwd`'ye göre çözülür ve
-/// yalnızca gerçekten varsa kabul edilir.
+/// Decides whether text is a link; paths are resolved against `cwd` and are
+/// only accepted when they actually exist.
 pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     let lower = token.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -72,7 +72,7 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
         let path = crate::term::pane::parse_cwd_url(&format!("file://{}", &token[token.len() - rest.len()..]));
         return classify(&path, cwd);
     }
-    // Sondaki ":satır" ve ":satır:sütun" ya da "(satır,sütun)" eklerini ayır.
+    // Strip the trailing ":line", ":line:col" or "(line,col)" suffixes.
     let (mut path_part, mut nums) = (token, Vec::new());
     for _ in 0..2 {
         match path_part.rsplit_once(':') {
@@ -103,7 +103,7 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
         let p = PathBuf::from(path_part);
         if p.is_absolute() { p } else { cwd.join(path_part.trim_start_matches("./").trim_start_matches(".\\")) }
     };
-    // Tek kelimelik metinler ("make", "done") ancak gerçekten dosyaysa bağlantıdır.
+    // Single-word texts ("make", "done") are links only if they are real files.
     let looks_like_path = path_part.contains(['/', '\\', '.']) || !nums.is_empty();
     if !looks_like_path || !candidate.exists() {
         return None;
@@ -111,8 +111,8 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     Some(Link::File { path: candidate, line: nums.first().copied(), col: nums.get(1).copied() })
 }
 
-/// Bağlantıyı dış uygulamada açar: URL tarayıcıda, dosya `code -g` (varsa) ya da
-/// sistemin varsayılan uygulamasında.
+/// Opens a link in an external app: URLs in the browser, files with `code -g`
+/// (if present) or with the system's default application.
 pub fn open(link: &Link) -> Result<(), String> {
     use std::process::{Command, Stdio};
     let spawn = |mut c: Command| {
@@ -125,7 +125,7 @@ pub fn open(link: &Link) -> Result<(), String> {
     };
     let system = |target: &std::ffi::OsStr| {
         let mut c = if cfg!(windows) {
-            // `start` bir URL'deki & işaretlerini yorumlar; rundll32 metni olduğu gibi alır.
+            // `start` interprets '&' inside a URL; rundll32 takes the text as it is.
             let mut c = Command::new("rundll32");
             c.arg("url.dll,FileProtocolHandler");
             c
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(at(3), None);
         let (_, c0, c1) = token_at(line, 6).unwrap();
         assert_eq!((c0, c1), (4, 29));
-        // Geniş karakterler sütun hesabını kaydırmaz.
+        // Wide characters do not shift the column count.
         let wide = "日本 x.rs";
         assert_eq!(token_at(wide, 5).map(|t| (t.0, t.1)), Some(("x.rs".into(), 5)));
         assert_eq!(token_at("(see foo.rs)", 6).map(|t| t.0).as_deref(), Some("foo.rs"));

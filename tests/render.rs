@@ -1,5 +1,5 @@
-//! Başsız render testleri: her ekran birçok boyutta panik olmadan çizilir ve
-//! metin dökümleri `target/audit/` altına yazılır (görsel denetim için).
+//! Headless render tests: every screen is drawn at many sizes without panicking
+//! and text dumps are written under `target/audit/` (for visual review).
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -51,7 +51,7 @@ fn save(name: &str, text: &str) {
 }
 
 fn demo_app(w: u16, h: u16) -> App {
-    // Anlık görüntüler ara kareye denk gelmesin; animasyonların kendi testleri var.
+    // Snapshots must not land on an in-between frame; the animations have their own tests.
     let mut cfg = Config::default();
     cfg.general.animations = false;
     let mut app = App::headless(cfg, (w, h));
@@ -230,26 +230,26 @@ fn bridge_renders_at_all_sizes() {
                 "{w}x{h}
 {text}"
             );
-            // Eski süreç listesi kaldırıldı.
+            // The old process list was removed.
             assert!(!text.contains("code.exe"));
         }
     }
     let wide = render(&mut demo_app(160, 45), 160, 45);
     assert!(wide.contains("● 3 changed ↑1") && wide.contains("✓ clean") && wide.contains("● 1 changed ↓2"), "{wide}");
-    // Liste kısa: altında seçili projenin kartı (commit'ler + değişen dosyalar).
+    // The list is short: below it the selected project's card (commits + changed files).
     assert!(wide.contains("RECENT COMMITS") && wide.contains("9f8e7d6 fix: hover buttons"), "{wide}");
     assert!(wide.contains("M src/ui/bridge.rs") && wide.contains("? tests/new.rs"), "{wide}");
-    // Yer genişken System'de CPU grafiği büyür (en az 4 satır braille).
+    // With room to spare the System CPU graph grows (at least 4 rows of braille).
     let braille_rows = wide.lines().filter(|l| l.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))).count();
     assert!(braille_rows >= 5, "{wide}");
-    // Kartta yer yoksa gösterilmez; kirli ama dosya listesi boş proje "clean" demez.
+    // No room for the card = not shown; a dirty project with no file list still does not say "clean".
     let small = render(&mut demo_app(56, 18), 56, 18);
     assert!(!small.contains("RECENT COMMITS"), "{small}");
     let mut app = demo_app(160, 45);
     app.bridge.proj_sel = app.visible_projects().iter().position(|i| app.projects[*i].name == "Noble").unwrap();
     let text = render(&mut app, 160, 45);
     assert!(text.contains("+54 more") && !text.contains("working tree clean"), "{text}");
-    // Sığmayan dosyalar sütunlara dağılır, kalanı "+N more" olur; hiçbir boyutta taşma yok.
+    // Files that do not fit spread across columns, the rest become "+N more"; no overflow at any size.
     let idx = app.visible_projects()[app.bridge.proj_sel];
     if let Some(g) = app.projects[idx].git.as_mut() {
         g.changes = (0..40).map(|i| (" M".to_string(), format!("src/module_{i}.rs"))).collect();
@@ -263,7 +263,7 @@ fn bridge_renders_at_all_sizes() {
     app.bridge.proj_sel = 1;
     let text = render(&mut app, 160, 45);
     assert!(text.contains("✓ working tree clean"), "{text}");
-    // Ekran taşmaları: çok küçük boyutlarda da panik yok.
+    // Screen overflows: no panic even at very small sizes.
     for (w, h) in [(1, 1), (5, 3), (20, 4), (200, 3), (3, 60)] {
         let mut app = demo_app(w, h);
         render(&mut app, w, h);
@@ -320,18 +320,18 @@ fn bridge_keyboard_flow() {
     save("bridge-filter-120x34", &render(&mut app, 120, 34));
     key(&mut app, KeyCode::Esc);
     assert!(app.bridge.filter.is_empty());
-    // Prefix + bilinmeyen tuş: uyarı, çökme yok.
+    // Prefix + unknown key: a warning, no crash.
     app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
     assert!(app.prefix_armed);
     let text = render(&mut app, 120, 34);
     save("bridge-prefix-120x34", &text);
-    // Home'da terminale özgü (bölme, büyütme) ipuçları gösterilmez.
+    // Terminal-only hints (split, zoom) are not shown on Home.
     let bar = text.lines().last().unwrap_or_default();
     assert!(bar.contains("new tab") && bar.contains("commands"), "{bar}");
     assert!(!bar.contains("split") && !bar.contains("zoom"), "{bar}");
     key(&mut app, KeyCode::Char('y'));
     assert!(!app.prefix_armed);
-    // Tema döngüsü.
+    // Theme cycling.
     let before = app.theme.name;
     app.run(Action::CycleTheme);
     assert_ne!(before, app.theme.name);
@@ -341,8 +341,8 @@ fn bridge_keyboard_flow() {
     }
 }
 
-/// Gerçek bir PTY: shell başlar, komut çalışır, çıktı emülatöre ulaşır,
-/// bölme ve kapatma sekme ağacını doğru günceller.
+/// A real PTY: the shell starts, a command runs, the output reaches the
+/// emulator, splitting and closing update the tab tree correctly.
 #[test]
 fn real_terminal_session() {
     let mut app = demo_app(110, 30);
@@ -389,7 +389,7 @@ fn real_terminal_session() {
     assert_eq!(app.pane_count(), 0);
 }
 
-/// Shell entegrasyonu: `cd` sonrası pane gerçek dizini bilir (OSC 9;9 / OSC 7).
+/// Shell integration: after `cd` the pane knows the real directory (OSC 9;9 / OSC 7).
 #[test]
 fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
@@ -426,7 +426,7 @@ fn check_cwd_tracking(shell: &str) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    // Bölme yeni pane'i aynı dizinde açar.
+    // The split opens the new pane in the same directory.
     app.run(Action::SplitRight);
     let new = app.tabs[0].focus;
     assert_ne!(new, id);
@@ -447,7 +447,7 @@ fn boot_sequence_renders() {
     }
 }
 
-/// Başlatıcı: komut seçili dizinde yeni sekmede çalışır, shell açık kalır.
+/// Launcher: the command runs in a new tab in the selected directory, the shell stays open.
 #[test]
 fn launcher_runs_command_in_directory() {
     let mut app = demo_app(110, 30);
@@ -471,7 +471,7 @@ fn launcher_runs_command_in_directory() {
         std::thread::sleep(Duration::from_millis(100));
     }
     save("launcher-110x30", &render(&mut app, 110, 30));
-    // Komut bitince shell hâlâ açık (pane kapanmadı).
+    // The shell is still open after the command ends (the pane did not close).
     std::thread::sleep(Duration::from_millis(500));
     app.pump();
     assert_eq!(app.pane_count(), 1);
@@ -494,8 +494,8 @@ fn find_hit(app: &App, pred: impl Fn(&noble::app::Hit) -> bool) -> Option<ratatu
     app.hits.iter().rev().find(|(_, h)| pred(h)).map(|(r, _)| *r)
 }
 
-/// Kurulu olmayan başlatıcı Home'da görünmez ve çalışmaz; kurulu olan Settings'ten
-/// gizlenebilir ve kısayolu değiştirilebilir.
+/// A launcher that is not installed stays hidden and does nothing on Home; an
+/// installed one can be hidden from Settings and given a different shortcut.
 #[test]
 fn launchers_only_installed_and_configurable() {
     use noble::app::{Hit, Overlay, SettingItem, SettingKey};
@@ -512,11 +512,11 @@ fn launchers_only_installed_and_configurable() {
     save("bridge-launchers-110x30", &text);
     assert!(text.contains("c Claude") && !text.contains("x Codex"), "{text}");
     assert!(find_hit(&app, |h| *h == Hit::Launcher(1)).is_none());
-    // Kurulu olmayanın tuşu hiçbir şey açmaz.
+    // The key of a missing launcher opens nothing.
     app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 0);
 
-    // Settings: tek satır ("1 of 1 shown"), ayarlar açılır pencerede.
+    // Settings: a single row ("1 of 1 shown"), settings in a popup.
     let items = app.settings_items();
     let ql = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::QuickLaunch)).unwrap();
     app.run(Action::Settings);
@@ -528,21 +528,21 @@ fn launchers_only_installed_and_configurable() {
     assert!(matches!(app.overlay, Some(Overlay::Launchers { .. })));
     let text = render(&mut app, 110, 30);
     save("settings-launchers-110x30", &text);
-    // Yalnızca kurulu olan listelenir.
+    // Only the installed one is listed.
     assert!(text.contains("QUICK LAUNCH") && text.contains("Claude") && !text.contains("Codex"), "{text}");
     assert!(find_hit(&app, |h| *h == Hit::LaunchShow(1)).is_none());
-    // Kısayol: "x" başka başlatıcıda olduğu için atlanır.
+    // Shortcut: "x" is skipped because another launcher already has it.
     app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(app.cfg.launchers[0].key, "l");
     app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(app.cfg.launchers[0].key, "c");
-    // Tuş çipine tıklamak da değiştirir; pencere açık kalır.
+    // Clicking the key chip changes it too; the window stays open.
     render(&mut app, 110, 30);
     let chip = find_hit(&app, |h| *h == Hit::LaunchKey(0)).expect("key chip");
     click(&mut app, chip.x + 1, chip.y);
     assert_eq!(app.cfg.launchers[0].key, "l");
     assert!(app.overlay.is_some());
-    // Satıra tıklamak gizler.
+    // Clicking the row hides it.
     render(&mut app, 110, 30);
     let row = find_hit(&app, |h| *h == Hit::LaunchShow(0)).expect("launcher row");
     click(&mut app, row.x + 3, row.y);
@@ -555,7 +555,7 @@ fn launchers_only_installed_and_configurable() {
     app.run(Action::Bridge);
     let text = render(&mut app, 110, 30);
     assert!(!text.contains("l Claude") && !text.contains("c Claude"), "{text}");
-    // Kurulu olmayan AI sağlayıcısının ayarı yok.
+    // A provider that is not installed has no setting.
     app.ai_installed = vec!["claude"];
     let items = app.settings_items();
     assert!(items.contains(&SettingItem::Setting(SettingKey::Claude)));
@@ -572,7 +572,7 @@ fn launchers_only_installed_and_configurable() {
 fn settings_screen_mouse_and_keys() {
     use noble::app::Hit;
     let mut app = demo_app(110, 30);
-    // Üst şeritteki ⚙ Settings sekmesine tıkla.
+    // Click the ⚙ Settings tab in the top strip.
     render(&mut app, 110, 30);
     let tab = find_hit(&app, |h| *h == Hit::TabSettings).expect("settings tab");
     click(&mut app, tab.x + 1, tab.y);
@@ -582,12 +582,12 @@ fn settings_screen_mouse_and_keys() {
     }
     let text = render(&mut app, 110, 30);
     assert!(text.contains("Tokyo Night") && text.contains("Gruvbox"), "{text}");
-    // Tema kartına tıklamak temayı uygular.
+    // Clicking a theme card applies the theme.
     let idx = noble::theme::THEMES.iter().position(|t| t.name == "nord").unwrap();
     let card = find_hit(&app, |h| *h == Hit::Setting(idx)).expect("nord card");
     click(&mut app, card.x + 2, card.y);
     assert_eq!(app.theme.name, "nord");
-    // Klavye: aşağı inip bir anahtarı çevir.
+    // Keyboard: move down and flip a toggle.
     let before = app.cfg.general.clock_24h;
     let items = app.settings_items();
     let clock =
@@ -595,7 +595,7 @@ fn settings_screen_mouse_and_keys() {
     app.settings_sel = clock;
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_ne!(before, app.cfg.general.clock_24h);
-    // Sağlayıcı kapatılınca AI panelinden kalkar.
+    // Turning a provider off removes it from the AI panel.
     let claude =
         items.iter().position(|i| *i == noble::app::SettingItem::Setting(noble::app::SettingKey::Claude)).unwrap();
     app.settings_sel = claude;
@@ -603,7 +603,7 @@ fn settings_screen_mouse_and_keys() {
     assert!(!app.cfg.ai.providers.iter().any(|p| p == "claude"));
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, View::Bridge);
-    // Tema ızgarasında klavye gezinmesi taşmaz.
+    // Keyboard navigation in the theme grid does not overflow.
     app.run(Action::Settings);
     app.settings_sel = 0;
     for code in [
@@ -643,7 +643,7 @@ fn terminal_mouse_split_and_drag() {
     assert_eq!(app.tabs[0].panes().len(), 3);
     let text = render(&mut app, 110, 30);
     save("terminal-mouse-split-110x30", &text);
-    // Dikey bölücüyü sola sürükle.
+    // Drag the vertical divider to the left.
     let div = app.hits.iter().find_map(|(r, h)| match h {
         Hit::Divider { div, .. } if div.dir == noble::term::layout::Dir::Row => Some(*r),
         _ => None,
@@ -667,7 +667,7 @@ fn terminal_mouse_split_and_drag() {
     let after = app.tabs[0].root.layout(app.body()).0[0].1.width;
     assert!(after + 15 <= before, "divider did not move: {before} -> {after}");
     save("terminal-mouse-drag-110x30", &render(&mut app, 110, 30));
-    // Kapatma düğmesi.
+    // The close button.
     let close = find_hit(&app, |h| matches!(h, Hit::PaneClose(_))).unwrap();
     click(&mut app, close.x + 1, close.y);
     assert_eq!(app.tabs[0].panes().len(), 2);
@@ -687,11 +687,11 @@ fn page_slide_transition() {
     let mut app = animated_app();
     render(&mut app, 110, 30);
     app.run(Action::Settings);
-    // İlk kare: geçiş başlar, yeni sayfa henüz tam yerinde değildir.
+    // First frame: the transition starts, the new page is not fully in place yet.
     let first = render(&mut app, 110, 30);
     assert!(app.slide.is_some());
     save("slide-start-110x30", &first);
-    // Geçişi ortasına al.
+    // Move the transition to its middle.
     if let Some(s) = &mut app.slide {
         s.started = std::time::Instant::now() - Duration::from_millis(90);
     }
@@ -703,11 +703,11 @@ fn page_slide_transition() {
     let done = render(&mut app, 110, 30);
     assert!(done.contains("Tokyo Night"));
     assert_ne!(mid, done);
-    // Geri dönüş ters yönden kayar.
+    // The way back slides in the opposite direction.
     app.run(Action::Bridge);
     render(&mut app, 110, 30);
     assert_eq!(app.slide.as_ref().map(|s| s.dir), Some(-1));
-    // Boyut değişiminde geçiş güvenle iptal edilir.
+    // On a size change the transition is cancelled safely.
     render(&mut app, 80, 20);
     render(&mut app, 30, 8);
 }
@@ -731,7 +731,7 @@ fn zoom_animation_grows_from_tile() {
     std::thread::sleep(noble::app::ZOOM_DURATION + Duration::from_millis(20));
     app.tick();
     assert!(app.zoom_anim.is_none());
-    // Geri dönüş: tam ekrandan yerine küçülür.
+    // Coming back: it shrinks from fullscreen back to its place.
     app.run(Action::Zoom);
     let z = app.zoom_anim.as_ref().unwrap();
     assert_eq!(z.from, app.body());
@@ -778,8 +778,8 @@ fn wait_for(app: &mut App, pane: noble::term::layout::PaneId, needle: &str) {
     }
 }
 
-/// Geçmişte arama: eşleşmeler bulunur, seçili eşleşme görünür alana kaydırılır,
-/// arama çubuğu çizilir ve esc her şeyi eski haline getirir.
+/// Scrollback search: matches are found, the selected match is scrolled into
+/// view, the search bar is drawn and esc restores everything.
 #[test]
 fn terminal_search_finds_scrollback() {
     let mut app = demo_app(110, 30);
@@ -802,13 +802,13 @@ fn terminal_search_finds_scrollback() {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
     let s = app.search.as_ref().unwrap();
-    // "row 1", "row 10".."row 19" = 11 eşleşme (komut satırının yankısı hariç olabilir).
+    // "row 1", "row 10".."row 19" = 11 matches (the command line echo may be excluded).
     assert!(s.matches.len() >= 11, "{}", s.matches.len());
     assert!(app.panes[&id].scroll_offset() > 0, "should scroll to the newest match above the screen");
     let text = render(&mut app, 110, 30);
     save("terminal-search-110x30", &text);
     assert!(text.contains("find ROW 1"), "{text}");
-    // Önceki eşleşmeye git: sayaç azalır.
+    // Go to the previous match: the counter decreases.
     let before = app.search.as_ref().unwrap().current;
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.search.as_ref().unwrap().current, before.map(|i| i - 1));
@@ -823,7 +823,7 @@ fn terminal_search_finds_scrollback() {
     app.run(Action::CloseTab);
 }
 
-/// Arka plandaki sekme bildirim gönderince sekmede ◆ çıkar ve açılınca kalkar.
+/// When a background tab sends a notification a ◆ appears on it and clears when opened.
 #[test]
 fn background_tab_notification_marks_tab() {
     let mut app = demo_app(110, 30);
@@ -852,7 +852,7 @@ fn background_tab_notification_marks_tab() {
     app.run(Action::CloseTab);
 }
 
-/// Home: açık AI oturumu projede görünür, kullanım geçmişi grafik olarak çizilir.
+/// Home: an open AI session shows on the project, the usage history is drawn as a graph.
 #[test]
 fn bridge_shows_agent_sessions_and_usage_graph() {
     let mut app = demo_app(160, 45);
@@ -896,7 +896,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
     app.panes.clear();
 }
 
-/// Kota eşiği aşılınca bir kez uyarılır; aynı pencere için tekrar uyarılmaz.
+/// Warns once when a quota threshold is crossed; never again for the same window.
 #[test]
 fn quota_warning_fires_once() {
     let mut app = demo_app(110, 30);
@@ -924,7 +924,7 @@ fn quota_warning_fires_once() {
     assert!(app.toasts.is_empty());
 }
 
-/// Terminal renk şeması: pane zemini ve ANSI renkleri arayüz temasından bağımsız.
+/// Terminal color scheme: pane background and ANSI colors are independent of the UI theme.
 #[test]
 fn terminal_color_scheme_applies() {
     use ratatui::style::Color;
@@ -934,7 +934,7 @@ fn terminal_color_scheme_applies() {
     app.apply_config(cfg);
     app.new_tab(std::env::temp_dir(), None, Some("gray".into()));
     let id = app.tabs[0].focus;
-    // Kırmızı (ANSI 1) metin şemanın kırmızısıyla çizilir.
+    // Red (ANSI 1) text is drawn with the scheme's red.
     app.panes[&id].parser().process(b"\x1b[2J\x1b[H\x1b[31mRED\x1b[0m plain");
     let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
     term.draw(|f| noble::ui::draw(f, &mut app)).unwrap();
@@ -946,7 +946,7 @@ fn terminal_color_scheme_applies() {
     let empty = (inner.x + 20, inner.y + 10);
     assert_eq!(buf[empty].bg, Color::Rgb(0xc8, 0xc8, 0xc8));
     save("terminal-light-gray-110x30", &render(&mut app, 110, 30));
-    // Özel zemin rengi şemayı ezer.
+    // A custom background color overrides the scheme.
     let mut cfg = app.cfg.clone();
     cfg.terminal.background = "#d0d0d0".into();
     app.apply_config(cfg);
@@ -962,8 +962,8 @@ fn find_hit_inner(app: &App) -> Option<ratatui::layout::Rect> {
     })
 }
 
-/// Şema seçicisi: Windows Terminal'deki PowerShell şeması başta, tüm yerleşik
-/// şemalar listede; gezinmek önizler, esc geri alır, tıklamak seçer.
+/// Scheme selector: the Windows Terminal PowerShell scheme comes first and all
+/// built-ins are in the list; navigating previews, esc reverts, clicking picks.
 #[test]
 fn scheme_picker_previews_and_selects() {
     use noble::app::{Hit, Overlay, SettingItem, SettingKey};
@@ -992,12 +992,12 @@ fn scheme_picker_previews_and_selects() {
 {text}"
         );
     }
-    // Aşağı: önizleme uygulanır, esc geri alır.
+    // Down: the preview is applied, esc reverts it.
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.cfg.terminal.colors, "campbell");
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.cfg.terminal.colors, "windows-terminal");
-    // Satıra tıklamak seçer.
+    // Clicking a row picks it.
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     render(&mut app, 110, 30);
     let idx = app.scheme_options().iter().position(|n| n == "light-gray").unwrap();
@@ -1012,8 +1012,8 @@ fn scheme_picker_previews_and_selects() {
     }
 }
 
-/// Pil: Home ve System ekranında gösterilir, pilde %20 ve %10'da birer kez uyarır,
-/// pili olmayan makinede hiç görünmez.
+/// Battery: shown on Home and System, warns once each at 20% and 10% while on
+/// battery, never appears on a machine without a battery.
 #[test]
 fn battery_is_shown_and_warns_when_low() {
     use noble::battery::{Battery, PowerState};
@@ -1021,7 +1021,7 @@ fn battery_is_shown_and_warns_when_low() {
     let home = render(&mut app, 160, 45);
     save("bridge-battery-160x45", &home);
     assert!(home.contains("BATTERY") && home.contains("76%") && home.contains("3h 12m left"), "{home}");
-    // Pil, sistem panelinin en altında (panel çerçevesinin hemen üstünde).
+    // The battery sits at the very bottom of the system panel (right above its frame).
     let lines: Vec<&str> = home.lines().collect();
     let status_row = lines.iter().position(|l| l.contains("3h 12m left")).unwrap();
     assert!(lines[status_row + 1].contains('╰'), "{home}");
@@ -1032,7 +1032,7 @@ fn battery_is_shown_and_warns_when_low() {
     let sys_big = render(&mut app, 160, 45);
     save("system-battery-160x45", &sys_big);
     assert!(sys_big.contains("BATTERY"), "{sys_big}");
-    // Şarjda ↯ işareti.
+    // A ↯ mark while charging.
     let mut charging = app.sensors.last.clone().unwrap();
     charging.battery =
         Some(Battery { percent: 64.0, state: PowerState::Charging, secs_left: None, secs_to_full: Some(2700) });
@@ -1059,7 +1059,7 @@ fn battery_is_shown_and_warns_when_low() {
     let ev = sample(9.0, PowerState::Discharging);
     app.handle(ev);
     assert_eq!(app.toasts.len(), 2);
-    // Şarja takılıp tekrar düşünce yeniden uyarır.
+    // Plugging in and draining again re-arms the warning.
     let ev = sample(9.0, PowerState::Charging);
     app.handle(ev);
     app.toasts.clear();
@@ -1075,7 +1075,7 @@ fn battery_is_shown_and_warns_when_low() {
     assert!(!text.contains("BATTERY") && !text.contains("left"), "{text}");
 }
 
-/// İlk açılış kartı: tüm boyutlarda çizilir, prefix seçilip uygulanır.
+/// First launch card: drawn at every size, the prefix can be picked and applied.
 #[test]
 fn welcome_card_picks_prefix() {
     use noble::app::{Hit, Overlay};
@@ -1089,7 +1089,7 @@ fn welcome_card_picks_prefix() {
         save(&format!("welcome-{w}x{h}"), &render(&mut app, w, h));
     }
     render(&mut app, 110, 30);
-    // Arka plana tıklamak kartı kapatmaz; ctrl+g çipine tıklamak seçer.
+    // Clicking the background does not close the card; clicking the ctrl+g chip picks it.
     click(&mut app, 1, 29);
     assert!(matches!(app.overlay, Some(Overlay::Welcome { .. })));
     let chip = find_hit(&app, |h| *h == Hit::WelcomePrefix(3)).expect("ctrl+g chip");
@@ -1099,13 +1099,13 @@ fn welcome_card_picks_prefix() {
     assert!(app.overlay.is_none());
     assert_eq!(app.cfg.keys.prefix, "ctrl+g");
     assert!(app.ui_state.data.welcomed);
-    // Yeni prefix gerçekten çalışır.
+    // The new prefix actually works.
     app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     assert!(app.prefix_armed);
 }
 
-/// Proje klasörü ekleme: istem açılır, geçersiz yol reddedilir, geçerli yol
-/// varsayılan köklerle birlikte listeye eklenir.
+/// Adding a project folder: a prompt opens, an invalid path is rejected and a
+/// valid one joins the list along with the default roots.
 #[test]
 fn add_project_folder_flow() {
     use noble::app::Overlay;
@@ -1121,12 +1121,12 @@ fn add_project_folder_flow() {
     assert!(app.cfg.projects.roots.iter().any(|r| std::path::Path::new(r) == dir.as_path()));
     let defaults = noble::projects::default_roots().len();
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
-    // Aynı klasör ikinci kez eklenmez.
+    // The same folder is not added twice.
     app.add_project_root(&dir.display().to_string());
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
 }
 
-/// Geniş durum çubuğunda ipucu görünür, dar olanda yer kaplamaz.
+/// The hint shows on the wide status bar and takes no space on the narrow one.
 #[test]
 fn status_bar_shows_tips_when_wide() {
     let mut app = demo_app(200, 40);
@@ -1141,7 +1141,7 @@ fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) 
     app.handle(AppEvent::Input(Event::Mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE })));
 }
 
-/// Sağ tık menüleri: sekme ve pane başlığı; menüden seçilen komut çalışır.
+/// Right-click menus: tab and pane title; the command picked from the menu runs.
 #[test]
 fn context_menus_on_tabs_and_panes() {
     use crossterm::event::{MouseButton, MouseEventKind};
@@ -1169,7 +1169,7 @@ fn context_menus_on_tabs_and_panes() {
     click(&mut app, split.x + 2, split.y);
     assert!(app.overlay.is_none());
     assert_eq!(app.tabs[0].panes().len(), 2);
-    // Sekme menüsü: klavyeyle "Close tab".
+    // Tab menu: pick "Close tab" with the keyboard.
     render(&mut app, 110, 30);
     let tab = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
     mouse(&mut app, MouseEventKind::Down(MouseButton::Right), tab.x + 1, tab.y);
@@ -1183,7 +1183,7 @@ fn context_menus_on_tabs_and_panes() {
     }
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
-    // Menü küçük ekranda da taşmaz.
+    // The menu does not overflow even on a small screen.
     app.new_tab(std::env::temp_dir(), None, Some("tiny".into()));
     let id = app.tabs[0].focus;
     app.open_pane_menu(id, 28, 7);
@@ -1192,7 +1192,7 @@ fn context_menus_on_tabs_and_panes() {
     app.run(Action::CloseTab);
 }
 
-/// Sekmeyi sürükleyerek sıralama ve çift tıkla yeniden adlandırma.
+/// Reordering tabs by dragging and renaming them with a double click.
 #[test]
 fn tabs_drag_and_rename() {
     use crossterm::event::{MouseButton, MouseEventKind};
@@ -1219,7 +1219,7 @@ fn tabs_drag_and_rename() {
     app.run(Action::CloseTab);
 }
 
-/// Proje satırı: üzerine gelince hızlı eylemler; sabitlenen proje başa geçer.
+/// Project row: quick actions on hover; a pinned project moves to the top.
 #[test]
 fn project_row_actions_and_pins() {
     use crossterm::event::{MouseButton, MouseEventKind};
@@ -1238,7 +1238,7 @@ fn project_row_actions_and_pins() {
     assert_eq!(app.selected_project().unwrap().name, name, "selection follows");
     let text = render(&mut app, 110, 30);
     assert!(text.contains(&format!("★ {name}")), "{text}");
-    // Sağ tık proje menüsü.
+    // Right-click project menu.
     let first = find_hit(&app, |h| *h == Hit::Project(0)).unwrap();
     mouse(&mut app, MouseEventKind::Down(MouseButton::Right), first.x + 4, first.y);
     let text = render(&mut app, 110, 30);
@@ -1246,8 +1246,8 @@ fn project_row_actions_and_pins() {
     assert!(matches!(app.overlay, Some(Overlay::Menu(_))) && text.contains("Unpin"), "{text}");
 }
 
-/// Claude Code hook'u: arka plandaki oturum izin isteyince sekme işaretlenir,
-/// Home'daki oturum listesinde "needs you" görünür, satıra tıklamak sekmeyi açar.
+/// Claude Code hook: when a background session asks for permission the tab is
+/// marked, the session list on Home shows "needs you" and clicking the row opens the tab.
 #[test]
 fn claude_hook_states_drive_sessions() {
     use noble::app::{AgentState, Hit};
@@ -1273,12 +1273,12 @@ fn claude_hook_states_drive_sessions() {
     save("bridge-sessions-160x45", &text);
     assert!(text.contains("◆ claude") && text.contains("needs you"), "{text}");
     let row = find_hit(&app, |h| *h == Hit::Tab(0)).expect("session row");
-    // Oturum satırı (sağ sütun) — üst şeritteki sekmeden farklı bir satır olmalı.
+    // The session row (right column) must differ from the tab in the top strip.
     let session_row =
         app.hits.iter().filter(|(r, h)| *h == Hit::Tab(0) && r.y > 1).map(|(r, _)| *r).next().unwrap_or(row);
     click(&mut app, session_row.x + 2, session_row.y);
     assert_eq!(app.view, View::Term(0));
-    // Aynı olay tekrar okununca yeniden bildirilmez; bitince "your turn".
+    // Reading the same event again does not re-notify; when done it says "your turn".
     app.toasts.clear();
     let same = app.agent_hooks.clone();
     app.apply_hook_records(same);
@@ -1289,7 +1289,7 @@ fn claude_hook_states_drive_sessions() {
     assert!(app.agent_hooks.is_empty());
 }
 
-/// Kota bu hızla sıfırlanmadan dolacaksa AI panelinde uyarı satırı çıkar.
+/// A warning row appears in the AI panel when the quota would fill before it resets.
 #[test]
 fn quota_pace_warning_line() {
     let mut app = demo_app(160, 45);
@@ -1301,7 +1301,7 @@ fn quota_pace_warning_line() {
     let text = render(&mut app, 160, 45);
     save("bridge-pace-160x45", &text);
     assert!(text.contains("▲ 5h full in ~37m at this pace"), "{text}");
-    // Haftalık pencere hızla dolsa bile tahmin gösterilmez (yalnızca 5 saatlik).
+    // No estimate for the weekly window even when it fills fast (5 hour window only).
     let week = noble::store::UsageHistory::key("codex", "WEEK");
     app.usage_history = noble::store::UsageHistory::memory();
     app.usage_history.record(&week, now - 3600, 80);
@@ -1310,8 +1310,8 @@ fn quota_pace_warning_line() {
     assert!(!text.contains("at this pace"), "{text}");
 }
 
-/// `noble hook <olay>`: derlenmiş binary stdin'deki JSON'u okuyup durum dosyasını yazar;
-/// NOBLE dışında (ortam değişkeni yoksa) hiçbir şey yazmaz ve her zaman 0 ile çıkar.
+/// `noble hook <event>`: the compiled binary reads the JSON on stdin and writes
+/// the state file; outside NOBLE (no env var) it writes nothing and always exits 0.
 #[test]
 fn hook_cli_writes_state_file() {
     use std::io::Write;
@@ -1337,7 +1337,7 @@ fn hook_cli_writes_state_file() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Shell açılış çıktısı bitene kadar bekler (içerik 700 ms değişmeyince).
+/// Waits until the shell's startup output settles (content unchanged for 700 ms).
 fn wait_idle(app: &mut App, pane: noble::term::layout::PaneId) {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut last = String::new();
@@ -1355,9 +1355,9 @@ fn wait_idle(app: &mut App, pane: noble::term::layout::PaneId) {
     }
 }
 
-/// Terminal uyumluluğu: gerçek bir pane'de yaygın kaçış dizilerinin ekrana doğru
-/// yansıdığını denetler (renkler, stiller, geniş/birleşik karakterler, alternatif
-/// ekran, OSC 8 bağlantıları).
+/// Terminal compatibility: checks that common escape sequences render correctly
+/// in a real pane (colors, styles, wide/combined characters, the alternate
+/// screen, OSC 8 links).
 #[test]
 fn terminal_compatibility_basics() {
     use ratatui::style::{Color, Modifier};
@@ -1385,10 +1385,10 @@ fn terminal_compatibility_basics() {
     assert_eq!(cell(5, 1).symbol(), "e\u{301}", "combining mark stays with its base");
     assert_eq!(cell(7, 1).symbol(), "🙂");
     save("terminal-compat-110x30", &render(&mut app, 110, 30));
-    // OSC 8: bağlantı metnin üzerinde bulunur.
+    // OSC 8: the link sits on top of the text.
     assert_eq!(app.panes[&id].hyperlink_at(2, 5).map(|h| h.0).as_deref(), Some("https://example.com/docs"));
     assert_eq!(app.panes[&id].hyperlink_at(2, 9), None);
-    // Alternatif ekran: tam ekran uygulama çıkınca eski içerik geri gelir.
+    // Alternate screen: the old content returns when the fullscreen app exits.
     feed(&mut app, b"\x1b[?1049h\x1b[2J\x1b[HFULLSCREEN");
     assert!(render(&mut app, 110, 30).contains("FULLSCREEN"));
     feed(&mut app, b"\x1b[?1049l");
@@ -1397,8 +1397,8 @@ fn terminal_compatibility_basics() {
     app.run(Action::CloseTab);
 }
 
-/// Ağır çıktı altında verim: 50 bin satırlık bir dosya basılırken çıktı sürekli
-/// çizilir. Süre ve kare sayısını yazar (`--ignored --nocapture` ile çalıştır).
+/// Throughput under heavy output: while a 50 thousand line file is printed the
+/// output keeps drawing. Prints duration and frame count (run with `--ignored --nocapture`).
 const PERF_LINES: usize = 50_000;
 
 #[test]
@@ -1454,8 +1454,8 @@ fn heavy_output_throughput() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// cmd.exe'de tırnaklı komut (boşluklu yol) bozulmadan çalışır: başlatıcılar
-/// `"C:\...\claude.exe"` biçiminde çağrılır.
+/// A quoted command (path with spaces) runs intact in cmd.exe: launchers are
+/// invoked as `"C:\...\claude.exe"`.
 #[test]
 fn cmd_runs_quoted_commands() {
     if !cfg!(windows) {
@@ -1476,47 +1476,47 @@ fn cmd_runs_quoted_commands() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Pil dostu çizim: görünmeyen veriler ekranı uyandırmaz; boştaki terminal
-/// dakikada bir, Home saniyede bir, animasyon/palette daha sık yenilenir.
+/// Battery friendly drawing: invisible data never wakes the screen; an idle
+/// terminal redraws once a minute, Home once a second, animation/palette more often.
 #[test]
 fn redraw_only_when_something_visible_changes() {
     use noble::battery::{Battery, PowerState};
     let mut app = demo_app(110, 30);
     let mut sample = app.sensors.last.clone().unwrap();
-    // Prizde: Home'daki saniyeli saat için en geç 1 sn sonra çizilir.
+    // Plugged in: drawn within 1 s for Home's clock with seconds.
     sample.battery = Some(Battery { percent: 80.0, state: PowerState::Full, secs_left: None, secs_to_full: None });
     assert!(app.handle(AppEvent::Sensors(Box::new(sample.clone()))));
     assert!(app.live_clock());
     let home = app.redraw_after().unwrap();
     assert!(home <= Duration::from_millis(1005), "{home:?}");
-    // Pilde: saniyeler ve yanıp sönme durur, saat dakikada bir çizilir.
+    // On battery: seconds and blinking stop, the clock draws once a minute.
     sample.battery =
         Some(Battery { percent: 80.0, state: PowerState::Discharging, secs_left: None, secs_to_full: None });
     app.handle(AppEvent::Sensors(Box::new(sample.clone())));
     assert!(!app.live_clock());
     let home = app.redraw_after().unwrap();
     assert!(home > Duration::from_millis(1005) || chrono::Local::now().format("%S").to_string() == "59", "{home:?}");
-    // Terminal: sensör/proje olayları ekranı uyandırmaz, saat dakikada bir.
+    // Terminal: sensor/project events do not wake the screen, the clock draws once a minute.
     app.new_tab(std::env::temp_dir(), None, Some("quiet".into()));
     app.toasts.clear();
     assert!(!app.handle(AppEvent::Sensors(Box::new(sample))));
     assert!(!app.handle(AppEvent::Projects(app.projects.clone())));
     let term = app.redraw_after().unwrap();
     assert!(term <= Duration::from_secs(61), "{term:?}");
-    // Tuş her zaman çizer; palette imleci yarım saniyede bir yanıp söner.
+    // A key always redraws; the palette cursor blinks twice a second.
     assert!(
         app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))))
     );
     assert!(app.redraw_after().unwrap() <= Duration::from_millis(500));
     app.overlay = None;
-    // Bildirim süresi dolunca kaybolması için o ana uyanılır.
+    // We wake at the moment a notification must expire and disappear.
     app.toast(noble::app::ToastLevel::Info, "hello");
     assert!(app.take_dirty());
     assert!(app.redraw_after().unwrap() <= Duration::from_millis(3100));
     app.run(Action::CloseTab);
 }
 
-/// Pildeyken Home'daki büyük saat saniyesiz, prizdeyken saniyeli çizilir.
+/// The big Home clock draws without seconds on battery and with seconds plugged in.
 #[test]
 fn clock_hides_seconds_on_battery() {
     use noble::battery::{Battery, PowerState};
@@ -1530,7 +1530,7 @@ fn clock_hides_seconds_on_battery() {
     app.handle(AppEvent::Sensors(Box::new(sample)));
     let battery = render(&mut app, 160, 45);
     save("bridge-clock-battery-160x45", &battery);
-    // Büyük saatin sağındaki küçük saniye alanı (rakamların son satırı).
+    // The small seconds area right of the big clock (the digits' last row).
     let secs_row = |t: &str| t.lines().nth(4).unwrap_or("").chars().take(24).collect::<String>();
     let digits = |s: String| s.chars().filter(|c| c.is_ascii_digit()).count();
     assert_eq!(digits(secs_row(&plugged)), 2, "seconds shown when plugged in:\n{plugged}");
@@ -1542,15 +1542,57 @@ fn every_provider_is_configurable() {
     use noble::app::{PROVIDER_KEYS, SettingItem};
     let mut app = demo_app(110, 30);
     let ids: Vec<&str> = noble::ai::providers::registry().iter().map(|d| d.id).collect();
-    // Her sağlayıcının bir ayarı var ve varsayılan config hepsini tanıyor.
+    // Every provider has a setting and the default config knows them all.
     let keyed: Vec<&str> = PROVIDER_KEYS.iter().map(|k| k.provider_id()).collect();
     assert_eq!(keyed, ids);
     let parsed = noble::config::parse(noble::config::DEFAULT_CONFIG).unwrap();
     assert_eq!(parsed.ai.providers, ids);
-    // Aç/kapa gerçekten değişiyor.
+    // The toggle really changes something.
     for key in PROVIDER_KEYS {
         let before = app.setting_on(key);
         app.activate_setting(SettingItem::Setting(key), 1);
         assert_ne!(app.setting_on(key), before, "{key:?}");
     }
+}
+
+/// New release: a notice appears bottom right, drops to the status bar in a
+/// terminal and, once dismissed, is never shown again for the same version.
+#[test]
+fn update_notice_bottom_right() {
+    let mut app = demo_app(120, 32);
+    app.handle(AppEvent::Update(Ok(noble::update::current().into())));
+    assert!(app.update_notice().is_none(), "same version must not be announced");
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    assert_eq!(app.update_notice(), Some("99.0.0"));
+    let text = render(&mut app, 120, 32);
+    save("update-notice-120x32", &text);
+    let row = text.lines().nth(30).unwrap();
+    assert!(row.contains("NOBLE 99.0.0 is available") && row.trim_end().ends_with("update  ×"), "{text}");
+    let hit = find_hit(&app, |h| *h == noble::app::Hit::Update).expect("update hit");
+    assert_eq!((hit.y, hit.x + hit.width + 4), (30, 120));
+    for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
+        save(&format!("update-notice-{w}x{h}"), &render(&mut app, w, h));
+    }
+    // Not shown when the setting is off.
+    app.cfg.general.check_updates = false;
+    assert!(!render(&mut app, 120, 32).contains("99.0.0"));
+    app.cfg.general.check_updates = true;
+
+    // On a terminal tab the shell's last line stays clear: the notice sits in the status bar.
+    app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
+    let text = render(&mut app, 120, 32);
+    save("update-notice-terminal-120x32", &text);
+    let last = text.lines().last().unwrap();
+    assert!(last.contains("↑ 99.0.0") && !text.lines().nth(30).unwrap().contains("99.0.0"), "{text}");
+    app.run(Action::CloseTab);
+
+    render(&mut app, 120, 32);
+    let close = find_hit(&app, |h| *h == noble::app::Hit::UpdateDismiss).expect("dismiss hit");
+    click(&mut app, close.x, close.y);
+    assert!(app.update_notice().is_none());
+    assert!(!render(&mut app, 120, 32).contains("99.0.0"));
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    assert!(app.update_notice().is_none(), "dismissed version stays hidden");
+    app.handle(AppEvent::Update(Ok("99.0.1".into())));
+    assert_eq!(app.update_notice(), Some("99.0.1"));
 }

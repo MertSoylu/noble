@@ -1,10 +1,10 @@
-//! README ekran görüntülerini üretir: uygulama başsız (headless) kurulur, sahte
-//! verilerle doldurulur ve her kare renkli bir SVG'ye dönüştürülür.
+//! Generates the README screenshots: the app is built headless, filled with fake
+//! data and every frame is turned into a colorful SVG.
 //!
-//! Çalıştır: `cargo run --example screenshots` → `docs/assets/*.svg`
+//! Run: `cargo run --example screenshots` → `docs/assets/*.svg`
 //!
-//! Kutu çizgileri, blok ve braille karakterleri yazı tipine bırakılmaz, vektör
-//! olarak çizilir; böylece görüntü her tarayıcıda ve yazı tipinde aynı görünür.
+//! Box drawing, block and braille characters are not left to the font but drawn
+//! as vectors, so the image looks the same in every browser and font.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -24,26 +24,26 @@ use noble::projects::{Commit, GitInfo, Project};
 use noble::sensors::{DiskInfo, ProcInfo, SensorSample, StaticInfo};
 use noble::theme::THEMES;
 
-/// Hücre boyutu (piksel) ve yazı tipi.
+/// Cell size (pixels) and font.
 const CW: f64 = 8.4;
 const CH: f64 = 18.0;
 const FONT: &str = "ui-monospace,'Cascadia Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace";
 
 fn main() {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs").join("assets");
-    std::fs::create_dir_all(&out).expect("docs/assets oluşturulamadı");
+    std::fs::create_dir_all(&out).expect("docs/assets not created");
 
-    // Ana görsel: Home.
+    // The main image: Home.
     let (w, h) = (150, 42);
     let mut app = demo("amber", w, h);
     write(&out, "home", &window_svg(&snapshot(&mut app, w, h), &app, "noble"));
 
-    // System ekranı.
+    // The System screen.
     let mut app = demo("amber", w, h);
     app.run(Action::System);
     write(&out, "system", &window_svg(&snapshot(&mut app, w, h), &app, "noble — system"));
 
-    // Settings ekranı.
+    // The Settings screen.
     let (sw, sh) = (120, 40);
     let mut app = demo("amber", sw, sh);
     app.view = View::Settings;
@@ -55,18 +55,18 @@ fn main() {
     app.run(Action::Palette);
     write(&out, "palette", &window_svg(&snapshot(&mut app, pw, ph), &app, "noble — command palette"));
 
-    // Terminaller: bölünmüş iki pane, sahte içerik.
+    // Terminals: two split panes, fake content.
     let mut app = demo("amber", w, h);
     terminals(&mut app);
     let mut buf = snapshot(&mut app, w, h);
-    // Pane başlığındaki gerçek (geçici) klasör yerine sahte proje yolu.
+    // A fake project path instead of the real (temporary) folder in the pane title.
     let tmp = noble::util::tilde(&std::env::temp_dir());
     replace_in(&mut buf, &format!(" {tmp} "), r" D:\dev\noble ");
     replace_in(&mut buf, &format!(" {} ", tmp.trim_end_matches(['\\', '/'])), r" D:\dev\noble ");
     write(&out, "terminals", &window_svg(&buf, &app, "noble — terminals"));
     app.panes.clear();
 
-    // Tema galerisi: aynı Home ekranı altı temada.
+    // Theme gallery: the same Home screen in six themes.
     let (tw, th) = (110, 32);
     let tiles: Vec<(String, String)> = ["ice", "synth", "catppuccin", "gruvbox", "nord", "latte"]
         .iter()
@@ -82,12 +82,12 @@ fn main() {
 
 fn write(dir: &Path, name: &str, svg: &str) {
     let path = dir.join(format!("{name}.svg"));
-    std::fs::write(&path, svg).expect("svg yazılamadı");
+    std::fs::write(&path, svg).expect("could not write svg");
     println!("  {} ({} KB)", path.display(), svg.len() / 1024);
 }
 
-/// Buffer'da bir metni daha kısa bir metinle değiştirir; artan hücreler
-/// eski metnin hemen sağındaki hücreyle (çerçeve çizgisi) doldurulur.
+/// Replaces text in the buffer with a shorter one; the freed cells are
+/// filled from the cell right after the old text (the frame line).
 fn replace_in(buf: &mut Buffer, from: &str, to: &str) {
     let (w, h) = (buf.area.width, buf.area.height);
     let from: Vec<char> = from.chars().collect();
@@ -131,7 +131,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     cfg.general.theme = theme.into();
     let mut app = App::headless(cfg, (w, h));
     app.operator = "ada".into();
-    // Görüntü bu makinede hangi CLI'ların kurulu olduğuna bağlı olmasın.
+    // The image must not depend on which CLIs are installed on this machine.
     for (l, ok) in app.launchers.iter_mut() {
         *ok = matches!(l.command.as_str(), "claude" | "codex");
     }
@@ -276,11 +276,11 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     app
 }
 
-/// İki pane'li bir terminal sekmesi ve arka planda ikinci bir sekme. Gerçek bir
-/// kabuk açılır ama ekran içeriği sahte ANSI çıktısıyla değiştirilir.
+/// A terminal tab with two panes and a second tab in the background. A real
+/// shell is opened but its screen content is replaced with fake ANSI output.
 fn terminals(app: &mut App) {
     if cfg!(windows) {
-        // cmd.exe hızlı açılır ve kendi başına ekrana bir şey yazmaz.
+        // cmd.exe opens fast and writes nothing to the screen on its own.
         let mut cfg = app.cfg.clone();
         cfg.terminal.shell = "cmd.exe".into();
         app.apply_config(cfg);
@@ -290,8 +290,8 @@ fn terminals(app: &mut App) {
     app.new_tab(cwd.clone(), Some(idle), Some("api-gateway".into()));
     app.new_tab(cwd, Some(idle), Some("noble".into()));
     app.run(Action::SplitRight);
-    // İlk çizim pane'leri son boyutlarına getirir; ConPTY boyut değişince ekranı
-    // yeniden çizdiği için sahte içerik bundan sonra yazılır.
+    // The first draw brings the panes to their final size; since ConPTY redraws
+    // the screen when the size changes, the fake content is written afterwards.
     let (w, h) = app.size;
     snapshot(app, w, h);
     let deadline = Instant::now() + Duration::from_millis(2500);
@@ -301,7 +301,7 @@ fn terminals(app: &mut App) {
     }
     let tab = app.tabs.len() - 1;
     let ids = app.tabs[tab].panes();
-    // Sol pane'de Claude Code, sağda Codex: içerik pane'in gerçek boyutuna göre çizilir.
+    // Claude Code in the left pane, Codex on the right: content is drawn to the pane's real size.
     let screens: [(&str, Screen); 2] = [("claude", claude_screen), ("codex", codex_screen)];
     for (id, (title, screen)) in ids.iter().zip(screens) {
         let (rows, cols) = app.panes[id].parser().screen().size();
@@ -313,15 +313,15 @@ fn terminals(app: &mut App) {
         let seq = "\x1b]0;node\x07\x1b[2J\x1b[H";
         app.panes[&first].parser().process(seq.as_bytes());
     }
-    // Arka plan sekmesinde uzun komut bitti: ◆ işareti.
+    // The long command in the background tab finished: the ◆ marker.
     app.tabs[0].alert = true;
     app.tabs[tab].focus = ids[0];
 }
 
-/// Pane boyutundan (satır, sütun) ekran içeriği üreten fonksiyon.
+/// A function producing screen content from a pane size (rows, cols).
 type Screen = fn(u16, u16) -> String;
 
-/// 24 bit ön plan rengi.
+/// 24-bit foreground color.
 fn fg(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[38;2;{r};{g};{b}m")
 }
@@ -329,7 +329,7 @@ fn fg(r: u8, g: u8, b: u8) -> String {
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 
-/// Yuvarlak köşeli kutu: her satır `width` sütuna tamamlanır.
+/// Rounded-corner box: every row is padded to `width` columns.
 fn boxed(lines: &[String], width: usize, border: &str) -> String {
     let inner = width.saturating_sub(2);
     let mut out = format!("{border}╭{}╮{RESET}\n", "─".repeat(inner));
@@ -356,8 +356,8 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Üst içeriği yazar, alt bloğu ekranın dibine yerleştirir ve imleci alt bloğun
-/// içinde `cursor` (satır, sütun) konumuna taşır.
+/// Writes the top content, places the bottom block at the screen floor and moves
+/// the cursor to `cursor` (row, col) inside that bottom block.
 fn finish(top: String, bottom: String, rows: u16, cursor: (u16, u16)) -> String {
     let bottom_lines = bottom.lines().count() as u16;
     let at = rows.saturating_sub(bottom_lines) + 1;
@@ -370,7 +370,7 @@ fn finish(top: String, bottom: String, rows: u16, cursor: (u16, u16)) -> String 
     )
 }
 
-/// Claude Code oturumu: karşılama kutusu, bir istek, araç çağrıları ve giriş kutusu.
+/// Claude Code session: welcome box, one request, tool calls and the input box.
 fn claude_screen(rows: u16, cols: u16) -> String {
     let orange = fg(215, 119, 87);
     let gray = fg(153, 153, 153);
@@ -409,7 +409,7 @@ fn claude_screen(rows: u16, cols: u16) -> String {
     finish(top, bottom, rows, (1, 5))
 }
 
-/// Codex oturumu: başlık kutusu, başlangıç ipuçları, bir inceleme ve istem satırı.
+/// Codex session: title box, starting hints, a review and the prompt line.
 fn codex_screen(rows: u16, cols: u16) -> String {
     let dim = fg(128, 128, 128);
     let cyan = fg(86, 182, 194);
@@ -511,7 +511,7 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Kutu çizgisi kolları (yukarı, sağ, aşağı, sol): 0 yok, 1 ince, 2 kalın.
+/// Box drawing arms (up, right, down, left): 0 none, 1 thin, 2 thick.
 fn box_arms(c: char) -> Option<[u8; 4]> {
     Some(match c {
         '─' => [0, 1, 0, 1],
@@ -548,7 +548,7 @@ fn box_arms(c: char) -> Option<[u8; 4]> {
     })
 }
 
-/// Karakter vektör olarak çizilebiliyorsa SVG parçasını ekler.
+/// Appends an SVG piece when the character can be drawn as a vector.
 fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
     let (cx, cy) = (x + CW / 2.0, y + CH / 2.0);
     let stroke = |weight: u8| if weight == 2 { 2.6 } else { 1.2 };
@@ -565,7 +565,7 @@ fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
         }
         return true;
     }
-    // Yuvarlak köşeler: iki kol ve aradaki yay.
+    // Rounded corners: two arms and the arc between them.
     let r = CW / 2.0;
     let rounded = match c {
         '╭' => {
@@ -591,12 +591,12 @@ fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
         '▐' => rect(out, x + CW / 2.0, y, CW / 2.0, CH),
         '▔' => rect(out, x, y, CW, CH / 8.0),
         '▕' => rect(out, x + CW * 7.0 / 8.0, y, CW / 8.0, CH),
-        // ▁▂▃▄▅▆▇: alttan sekizde bir adımlarla dolu.
+        // ▁▂▃▄▅▆▇: filled from the bottom in eighth steps.
         _ if (0x2581..=0x2587).contains(&code) => {
             let hh = CH * (code - 0x2580) as f64 / 8.0;
             rect(out, x, y + CH - hh, CW, hh);
         }
-        // ▉▊▋▍▎▏: soldan dolu.
+        // ▉▊▋▍▎▏: filled from the left.
         _ if (0x2589..=0x258f).contains(&code) => rect(out, x, y, CW * (0x2590 - code) as f64 / 8.0, CH),
         '░' | '▒' | '▓' => {
             let op = match c {
@@ -609,7 +609,7 @@ fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
                 r#"<rect x="{x:.2}" y="{y:.2}" width="{CW}" height="{CH}" fill="{color}" fill-opacity="{op}"/>"#
             );
         }
-        // Çeyrek bloklar ▖▗▘▙▚▛▜▝▞▟: (sol üst, sağ üst, sol alt, sağ alt).
+        // Quarter blocks ▖▗▘▙▚▛▜▝▞▟: (top left, top right, bottom left, bottom right).
         _ if (0x2596..=0x259f).contains(&code) => {
             const Q: [[bool; 4]; 10] = [
                 [false, false, true, false],
@@ -631,7 +631,7 @@ fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
                 }
             }
         }
-        // Braille: 2×4 nokta.
+        // Braille: 2×4 dots.
         _ if (0x2801..=0x28ff).contains(&code) => {
             let bits = code - 0x2800;
             const DOTS: [(u32, f64, f64); 8] = [
@@ -657,7 +657,7 @@ fn draw_glyph(out: &mut String, c: char, x: f64, y: f64, color: &str) -> bool {
     true
 }
 
-/// Buffer'ı SVG gövdesine çevirir (0,0 kökenli, `w*CW × h*CH`).
+/// Turns the buffer into the SVG body (0,0 origin, `w*CW × h*CH`).
 fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
     let area = buf.area;
     let mut back = String::new();
@@ -666,7 +666,7 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
     let resolve = |c: Color, default: (u8, u8, u8)| if c == Color::Reset { default } else { rgb_of(c) };
     for y in 0..area.height {
         let py = y as f64 * CH;
-        // Zemin: aynı renkteki ardışık hücreler tek dikdörtgen.
+        // Background: consecutive cells of the same color become one rectangle.
         let mut run: Option<(u16, (u8, u8, u8))> = None;
         let flush = |back: &mut String, start: u16, end: u16, color: (u8, u8, u8)| {
             if color != bg {
@@ -696,7 +696,7 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
             flush(&mut back, s, area.width, c);
         }
 
-        // Metin: aynı stildeki ardışık karakterler tek <text>, her biri kendi hücresinde.
+        // Text: consecutive same-style characters become one <text>, each in its own cell.
         let mut x = 0;
         while x < area.width {
             let cell = &buf[(x, y)];
@@ -715,7 +715,7 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
                 x += width;
                 continue;
             }
-            // Aynı stildeki komşuları topla.
+            // Collect neighbors with the same style.
             let bold = cell.modifier.contains(Modifier::BOLD);
             let italic = cell.modifier.contains(Modifier::ITALIC);
             let under = cell.modifier.contains(Modifier::UNDERLINED);
@@ -735,7 +735,7 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
                 }
                 if !s2.trim().is_empty() {
                     chars.push_str(&esc(s2));
-                    // Birleşik karakterlerde tek konum yeter.
+                    // For combining characters a single position is enough.
                     xs.push(format!("{:.1}", cx as f64 * CW));
                     for _ in 1..s2.chars().count() {
                         xs.push(format!("{:.1}", cx as f64 * CW));
@@ -775,7 +775,7 @@ fn is_graphic(c: char) -> bool {
     matches!(c, '╭' | '╮' | '╯' | '╰') || (0x2580..=0x259f).contains(&code) || (0x2801..=0x28ff).contains(&code)
 }
 
-/// Kareyi başlık çubuklu, gölgeli bir pencere olarak tam SVG belgesine sarar.
+/// Wraps the frame into a full SVG document as a window with a title bar and shadow.
 fn window_svg(buf: &Buffer, app: &App, title: &str) -> String {
     let th = &app.theme;
     let bg = rgb_of(th.bg);
@@ -808,7 +808,7 @@ fn window_svg(buf: &Buffer, app: &App, title: &str) -> String {
     )
 }
 
-/// Pencereleri ızgara hâlinde tek SVG'de birleştirir (iç içe <svg> ile ölçekli).
+/// Combines the windows in a grid into a single SVG (scaled with nested <svg>).
 fn grid_svg(tiles: &[(String, String)], cols: usize) -> String {
     let dims = |svg: &str| -> (f64, f64) {
         let get = |key: &str| -> f64 {
@@ -827,7 +827,7 @@ fn grid_svg(tiles: &[(String, String)], cols: usize) -> String {
     );
     for (i, (svg, _)) in tiles.iter().enumerate() {
         let (x, y) = ((i % cols) as f64 * cw, (i / cols) as f64 * ch);
-        // Her karonun filtre/kırpma kimlikleri çakışmasın.
+        // So each tile's filter/clip ids do not collide.
         let inner = svg
             .replacen("<svg ", &format!(r#"<svg x="{x:.1}" y="{y:.1}" "#), 1)
             .replacen(
