@@ -118,14 +118,7 @@ impl App {
     pub fn run_menu(&mut self, cmd: MenuCmd) {
         self.overlay = None;
         match cmd {
-            MenuCmd::Paste(pane) => {
-                if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text())
-                    && let Some(p) = self.panes.get(&pane)
-                {
-                    p.scroll_reset();
-                    p.paste(&text);
-                }
-            }
+            MenuCmd::Paste(pane) => self.paste_clipboard(pane),
             MenuCmd::Split(pane, dir) => {
                 if self.focus_pane(pane) {
                     self.split(dir);

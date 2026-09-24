@@ -250,6 +250,24 @@ pub fn command_for(program: &Path) -> std::process::Command {
     cmd
 }
 
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Simple base64 encoder (to send OSC 52 to the outer terminal).
+pub fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let acc = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (*b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64[(acc >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Simple base64 decoder (for OSC 52 clipboard requests).
 pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
@@ -283,6 +301,16 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_round_trip() {
+        for text in ["", "f", "fo", "foo", "foob", "fooba", "foobar", "çğ ✓"] {
+            let encoded = base64_encode(text.as_bytes());
+            assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes(), "{encoded}");
+        }
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
 
     #[test]
     fn tilde_only_shortens_paths_under_home() {

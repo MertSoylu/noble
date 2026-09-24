@@ -698,11 +698,8 @@ impl App {
                     MouseButton::Right | MouseButton::Middle => {
                         if wants {
                             self.forward_mouse(pane, inner, m);
-                        } else if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text())
-                            && let Some(p) = self.panes.get(&pane)
-                        {
-                            p.scroll_reset();
-                            p.paste(&text);
+                        } else {
+                            self.paste_clipboard(pane);
                         }
                     }
                 }

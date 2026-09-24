@@ -118,6 +118,8 @@ pub fn asset_name() -> Option<&'static str> {
         Some("noble-windows-x86_64.zip")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("noble-linux-x86_64.tar.gz")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("noble-linux-aarch64.tar.gz")
     } else {
         None
     }

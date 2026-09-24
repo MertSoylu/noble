@@ -1,5 +1,7 @@
 # On a `v*` tag, builds ready-to-run Windows and Linux binaries and uploads them
 # to the GitHub release (so users don't need a Rust toolchain).
+# The Linux binaries are static (musl): they run on any distribution, old glibc included.
+# Archive names are what `noble update` looks for (`update::asset_name`); keep them stable.
 name: Release
 
 on:
@@ -21,16 +23,25 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: noble-windows-x86_64.zip
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive: noble-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: noble-linux-aarch64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        run: target/${{ matrix.target }}/release/noble --version
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

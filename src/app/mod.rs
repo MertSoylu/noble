@@ -329,6 +329,7 @@ pub struct App {
     pub theme: Theme,
     pub keymap: Keymap,
     pub shell: ShellSpec,
+    pub clipboard: crate::clipboard::Clipboard,
     pub view: View,
     pub tabs: Vec<Tab>,
     pub panes: HashMap<PaneId, Pane>,
@@ -519,6 +520,8 @@ impl App {
             theme,
             keymap,
             shell,
+            // OSC 52 goes to the real terminal only, never into test output.
+            clipboard: crate::clipboard::Clipboard::new(services.is_some()),
             view: View::Bridge,
             tabs: Vec::new(),
             panes: HashMap::new(),
@@ -1133,14 +1136,28 @@ impl App {
     }
 
     pub fn set_clipboard(&mut self, text: &str, announce: bool) {
-        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())) {
-            Ok(()) => {
+        match self.clipboard.set(text) {
+            Some(via) => {
                 if announce {
                     let n = text.chars().count();
-                    self.toast(ToastLevel::Ok, format!("copied {n} chars"));
+                    let how = if via == crate::clipboard::Copied::Terminal { " via the terminal" } else { "" };
+                    self.toast(ToastLevel::Ok, format!("copied {n} chars{how}"));
                 }
             }
-            Err(_) => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+        }
+    }
+
+    /// Pastes the system clipboard into a pane.
+    pub fn paste_clipboard(&mut self, pane: PaneId) {
+        match self.clipboard.get() {
+            Some(text) => {
+                if let Some(p) = self.panes.get(&pane) {
+                    p.scroll_reset();
+                    p.paste(&text);
+                }
+            }
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
         }
     }
 

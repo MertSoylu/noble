@@ -29,7 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Install zsh and fish
+        # The runner image has group-writable zsh function directories, which makes
+        # compinit stop at an "insecure directories" question in every new zsh.
+        run: |
+          sudo apt-get update && sudo apt-get install -y zsh fish
+          sudo chmod -R go-w /usr/local/share/zsh /usr/share/zsh 2>/dev/null || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -37,3 +42,16 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  linux-musl:
+    # The release builds static musl binaries (`release.yml`); make sure they still build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --target x86_64-unknown-linux-musl
+      - run: target/x86_64-unknown-linux-musl/debug/noble --version
