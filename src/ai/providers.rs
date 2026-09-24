@@ -1,7 +1,7 @@
 //! Sağlayıcı bağdaştırıcıları. Her biri: algılama (senkron, dosya/PATH) ve
 //! kullanım çekme (ağ/CLI). Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code ve Command Code desteklenir.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -189,7 +189,7 @@ fn agy_signed_in(env: &Env) -> bool {
 /// hedef adlarını listeler, sırrı döndürmez.
 #[cfg(windows)]
 fn agy_credential_exists() -> bool {
-    util::command_for(Path::new("cmdkey"))
+    util::command_for(std::path::Path::new("cmdkey"))
         .arg("/list:gemini:antigravity")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
