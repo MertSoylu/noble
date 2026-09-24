@@ -91,8 +91,10 @@ pub fn window_name(label: &str) -> String {
 /// Pane'de çalışan AI aracı: başlatıcı komutundan ya da pencere başlığından.
 pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
     // Başlatıcıdan açıldıysa komutun dosya adı kesin bilgi verir.
+    // Yol her iki ayırıcıyla da bölünür: Linux'ta `Path` ters bölüyü ayırıcı saymaz.
     let stem = command
-        .and_then(|c| std::path::Path::new(c.trim().trim_matches(['&', ' ', '\'', '"'])).file_stem())
+        .and_then(|c| c.trim().trim_matches(['&', ' ', '\'', '"']).rsplit(['/', '\\']).next())
+        .and_then(|name| std::path::Path::new(name).file_stem())
         .map(|s| s.to_string_lossy().to_lowercase());
     const BY_COMMAND: [(&str, &str); 13] = [
         ("claude", "claude"),
