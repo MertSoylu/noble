@@ -79,7 +79,7 @@ impl vt100::Callbacks for Callbacks {
                 self.cwd = Some(parse_cwd_url(&join(rest)));
                 self.prompt = true;
             }
-            // OSC 9;9: Windows Terminal'in cwd bildirimi.
+            // OSC 9;9: Windows Terminal's cwd report.
             [b"9", b"9", rest @ ..] if !rest.is_empty() => {
                 self.cwd = Some(join(rest).trim_matches('"').to_string());
                 self.prompt = true;
@@ -188,12 +188,14 @@ fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
+    let hex = |b: u8| (b as char).to_digit(16);
     while i < bytes.len() {
+        // Works on bytes: slicing the `str` could split a multi-byte character ("%aé").
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
         {
-            out.push(v);
+            out.push((hi * 16 + lo) as u8);
             i += 3;
             continue;
         }
@@ -217,10 +219,13 @@ pub fn process_label(title: &str, fallback: &str) -> String {
     } else {
         head.to_string()
     };
-    let lower = leaf.to_lowercase();
+    // Compared by bytes: `to_lowercase` can change the length ("İ", "K") and the cut would miss.
     let bare = [".exe", ".cmd", ".bat", ".com"]
         .iter()
-        .find_map(|ext| lower.strip_suffix(ext).map(|s| leaf[..s.len()].to_string()))
+        .find_map(|ext| {
+            let cut = leaf.len().checked_sub(ext.len())?;
+            leaf.get(cut..).filter(|tail| tail.eq_ignore_ascii_case(ext)).map(|_| leaf[..cut].to_string())
+        })
         .unwrap_or(leaf);
     let bare = bare.trim();
     let label = if bare.is_empty() { "shell" } else { bare };
@@ -721,6 +726,10 @@ mod tests {
         assert_eq!(process_label("", ""), "shell");
         assert_eq!(process_label("/bin/zsh", "x"), "zsh");
         assert_eq!(process_label("✳ Claude Code", "pwsh"), "✳ Claude Code");
+        assert_eq!(process_label("C:\\Tools\\NODE.EXE", "x"), "NODE");
+        // Titles whose lowercase form has a different byte length must not panic.
+        assert_eq!(process_label("\u{212A}x.exe", "x"), "\u{212A}x");
+        assert_eq!(process_label("İİİİİ.exe", "x"), "İİİİİ");
     }
 
     #[test]
@@ -728,6 +737,9 @@ mod tests {
         assert_eq!(parse_cwd_url("file://host/home/me/my%20dir"), "/home/me/my dir");
         assert_eq!(parse_cwd_url("file://DESKTOP/C:/Users/Mert"), "C:/Users/Mert");
         assert_eq!(parse_cwd_url("C:\\x"), "C:\\x");
+        // A '%' before a multi-byte character is kept as it is (used to panic).
+        assert_eq!(parse_cwd_url("file://h/tmp/%aé"), "/tmp/%aé");
+        assert_eq!(parse_cwd_url("file://h/tmp/%+a"), "/tmp/%+a");
     }
 
     #[test]

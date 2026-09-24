@@ -136,16 +136,24 @@ pub fn pad_right(s: &str, w: usize) -> String {
     format!("{t}{}", " ".repeat(w.saturating_sub(cur)))
 }
 
+/// Drops a UTF-8 byte order mark: JSON written by Windows tools (PowerShell 5
+/// `Set-Content -Encoding utf8`, Notepad) may start with one and serde rejects it.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Shortens the home directory to "~".
 pub fn tilde(path: &Path) -> String {
-    let text = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
-        let home = home.display().to_string();
-        if let Some(rest) = text.strip_prefix(&home) {
-            return format!("~{rest}");
+    // Compared by path components: "C:\Users\Mert2" is not under "C:\Users\Mert".
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".into();
         }
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
     }
-    text
+    path.display().to_string()
 }
 
 /// Fuzzy substring match. `None` when there is no match; otherwise a score
@@ -275,6 +283,17 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tilde_only_shortens_paths_under_home() {
+        let home = dirs::home_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(tilde(&home), "~");
+        assert_eq!(tilde(&home.join("src")), format!("~{sep}src"));
+        // A sibling that only shares the name as a text prefix stays as it is.
+        let sibling = PathBuf::from(format!("{}2", home.display())).join("x");
+        assert_eq!(tilde(&sibling), sibling.display().to_string());
+    }
 
     #[test]
     fn bytes_format() {

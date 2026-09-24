@@ -11,6 +11,18 @@ All notable changes to NOBLE are documented here. The format is based on
   **update** or run `noble update` to download the prebuilt binary and replace the installed one
   (`noble update --check` only reports). Can be turned off in Settings or with `check_updates = false`.
 
+### Fixed
+- Symbols typed with AltGr (`\`, `@`, `{`, `|` … on many European layouts) were dropped in the search bar,
+  project and process filters, the command palette and text prompts, so a path could not be typed.
+- A window title with certain Unicode letters (e.g. `İ`, the Kelvin sign) or an OSC 7 / `file://` link with a
+  `%` before a non-ASCII character could crash NOBLE.
+- `settings.json` files starting with a UTF-8 BOM (as written by PowerShell 5 or Notepad) are now read; the
+  Claude hooks setting no longer fails on them.
+- Paths next to the home folder that share its name (`C:\Users\me2`) are no longer shortened to `~`.
+- Turning the Claude hooks on or off keeps the key order of `~/.claude/settings.json`.
+- The Claude Code hooks setting is hidden when Claude Code is not installed (it stays visible while the
+  hooks are still set, so they can be removed).
+
 ## [1.0.0]
 
 First public release.

@@ -63,7 +63,10 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
     let present = |k: &SettingKey| items.contains(&SettingItem::Setting(*k));
     v.push(key(SettingKey::AiEnabled));
     v.extend(PROVIDER_KEYS.iter().filter(|k| present(k)).map(|k| key(*k)));
-    v.extend([SettingKey::AiRefresh, SettingKey::AiWarn, SettingKey::ClaudeHooks].map(key));
+    v.extend([SettingKey::AiRefresh, SettingKey::AiWarn].map(key));
+    if present(&SettingKey::ClaudeHooks) {
+        v.push(key(SettingKey::ClaudeHooks));
+    }
     v.push(Line::Blank);
     v.push(Line::Buttons(vec![pos(SettingItem::OpenConfig), pos(SettingItem::ReloadConfig)]));
     v

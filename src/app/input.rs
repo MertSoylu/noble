@@ -13,6 +13,13 @@ use crate::term::input::{encode_key, encode_mouse};
 use crate::term::layout::{PaneId, ratio_from_point};
 use crate::term::pane::Selection;
 
+/// Ctrl held as a shortcut modifier. A character typed with AltGr (Ctrl+Alt on
+/// Windows: '@', '\', '{' …) is text, not a shortcut.
+pub(super) fn ctrl_held(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL)
+        && !matches!(k.code, KeyCode::Char(c) if crate::term::input::is_altgr_char(k.modifiers, c))
+}
+
 impl App {
     /// Filtered and sorted process list.
     pub fn visible_procs(&self) -> Vec<ProcInfo> {
@@ -134,7 +141,7 @@ impl App {
             return;
         }
         let Some(mut ov) = self.overlay.take() else { return };
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = ctrl_held(&k);
         let keep = match &mut ov {
             Overlay::Palette(st) => match k.code {
                 KeyCode::Esc => false,
@@ -382,7 +389,7 @@ impl App {
     }
 
     fn bridge_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = ctrl_held(&k);
         if self.bridge.filtering {
             match k.code {
                 KeyCode::Esc => {
@@ -459,7 +466,7 @@ impl App {
     }
 
     fn system_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = ctrl_held(&k);
         if self.system.filtering {
             match k.code {
                 KeyCode::Esc => {

@@ -60,8 +60,9 @@ fn is_noble_hook(entry: &Value) -> bool {
 
 fn read_settings(path: &Path) -> Result<Value, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) if text.trim().is_empty() => Ok(json!({})),
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display())),
+        Ok(text) if crate::util::strip_bom(&text).trim().is_empty() => Ok(json!({})),
+        Ok(text) => serde_json::from_str(crate::util::strip_bom(&text))
+            .map_err(|e| format!("cannot parse {}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
@@ -216,6 +217,9 @@ mod tests {
         assert!(is_installed(&file));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(v["model"], "opus");
+        // The user's key order is kept (`model` stays before `hooks`).
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.find("\"model\"").unwrap() < text.find("\"hooks\"").unwrap(), "{text}");
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "user hook kept, ours added once");
         assert_eq!(stop[1]["hooks"][0]["command"], "noble hook stop");
@@ -225,6 +229,10 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert!(v["hooks"].get("Notification").is_none());
         assert!(!is_installed(&file));
+        // A UTF-8 BOM (PowerShell 5, Notepad) does not make the file unreadable.
+        std::fs::write(&file, "\u{feff}{ \"model\": \"opus\" }").unwrap();
+        install(&file, "noble").unwrap();
+        assert!(is_installed(&file));
         // Never writes to a corrupt file.
         std::fs::write(&file, "{ not json").unwrap();
         assert!(install(&file, "noble").is_err());

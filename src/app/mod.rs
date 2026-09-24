@@ -88,7 +88,7 @@ pub enum PromptPurpose {
 }
 
 impl PromptPurpose {
-    /// Girilebilecek en uzun metin (yollar uzun olabilir).
+    /// Maximum input length (paths can be long).
     pub fn max_len(&self) -> usize {
         match self {
             PromptPurpose::AddRoot => 260,
@@ -308,7 +308,7 @@ struct PaneSignal {
     notice: Option<String>,
     /// If the prompt returned and the user started a command, that command's duration.
     finished: Option<Duration>,
-    /// Prompt geri geldiyse pane'in dizini.
+    /// The pane's directory when its prompt came back.
     cwd: Option<PathBuf>,
 }
 
@@ -950,7 +950,7 @@ impl App {
         self.bridge.proj_sel = self.bridge.proj_sel.min(n.saturating_sub(1));
     }
 
-    /// Filtreye uyan projelerin indeksleri.
+    /// Indices of the projects that match the filter.
     pub fn visible_projects(&self) -> Vec<usize> {
         let q = self.bridge.filter.trim();
         if q.is_empty() {

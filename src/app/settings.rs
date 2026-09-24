@@ -154,7 +154,10 @@ impl App {
                 .filter(|k| self.ai_installed.contains(&k.provider_id()))
                 .map(|k| SettingItem::Setting(*k)),
         );
-        v.extend([SettingKey::AiRefresh, SettingKey::AiWarn, SettingKey::ClaudeHooks].map(SettingItem::Setting));
+        v.extend([SettingKey::AiRefresh, SettingKey::AiWarn].map(SettingItem::Setting));
+        if self.claude_hooks_available() {
+            v.push(SettingItem::Setting(SettingKey::ClaudeHooks));
+        }
         v.extend([SettingItem::OpenConfig, SettingItem::ReloadConfig]);
         v
     }
@@ -368,6 +371,12 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The hooks row is shown only when Claude Code is installed, or when our hooks
+    /// are still in its settings (so they can be removed after an uninstall).
+    pub fn claude_hooks_available(&self) -> bool {
+        self.hooks_installed || self.ai_installed.contains(&"claude")
     }
 
     /// Adds or removes the Claude Code hooks in `~/.claude/settings.json`.

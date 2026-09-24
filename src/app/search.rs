@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
+use super::input::ctrl_held;
 use super::{App, LinkHover, SearchState, ToastLevel};
 use crate::term::layout::PaneId;
 use crate::term::link;
@@ -78,7 +79,7 @@ impl App {
     /// Keys while the search is open. `false` means the key is handled normally.
     pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
         let Some(s) = self.search.as_mut() else { return false };
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = ctrl_held(&k);
         match k.code {
             KeyCode::Esc => self.close_search(),
             KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => self.search_step(1),
