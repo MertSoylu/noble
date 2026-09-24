@@ -1,2 +1,11 @@
 /target
 *.log
+
+# Yerel araç ve editör ayarları
+.claude/
+.freebuff/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

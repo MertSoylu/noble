@@ -18,13 +18,18 @@ config şeması için `README.md`.
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
 - CI: `.github/workflows/ci.yml` (Windows: fmt + clippy `-D warnings` + tüm testler; Linux: clippy + `--lib`),
   `release.yml` (`v*` etiketinde Windows/Linux ikilileri)
+- `cargo run --example screenshots` — README SVG ekran görüntülerini yeniden üretir
 - `cargo run -- --no-boot` — açılış animasyonu olmadan çalıştır; `--paths` config/veri konumlarını yazar
 - `NOBLE_HOME` config ve veri dizinini taşır (gerçek config'i bozmadan denemek için)
 
 ## Kurallar
-- **Her değişiklikten sonra uygulamayı güncelle:** `cmd /c install.cmd` çalıştır ki kullanıcı
-  herhangi bir terminalde `noble` yazarak son sürümü açabilsin. Bu adım atlanmaz. (Betik, açık
-  olan noble.exe'yi yeniden adlandırarak kurar; düz `cargo install` açıkken "Erişim engellendi" verir.)
+- **Her değişiklikten sonra geliştirme sürümünü güncelle:** `cmd /c "%CD%\install.cmd"` (PowerShell'den
+  tam yolla; göreli ad bulunamıyor) çalıştır ki kullanıcı `noble-dev` yazarak son hâli açabilsin. Bu adım
+  atlanmaz. Betik release derleyip `~/.cargo/bin/noble-dev.exe` olarak kurar; kararlı `noble`'a dokunmaz.
+  Açık olan noble-dev.exe'yi yeniden adlandırarak kurar. `noble-dev` üst çubukta "NOBLE dev" yazar ve
+  oturumu `session-dev.json`'a kaydeder (`util::is_dev_build`), config/veri ortak.
+- README görselleri `cargo run --example screenshots` ile üretilir (`docs/assets/*.svg`, sahte veri);
+  README'de görünen bir ekran değişirse yeniden üret. Banner (`docs/assets/banner.svg`) elle yazılmıştır.
 - Kod içi yorumlar Türkçe, tanımlayıcılar ve arayüz metinleri İngilizce.
 - UI değişikliğinden sonra `cargo test --test render` çalıştır ve `target/audit/*.txt`
   dökümlerini incele (taşma, hizalama, küçük boyutlar: 160×45 … 30×8).

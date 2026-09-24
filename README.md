@@ -1,70 +1,160 @@
-# NOBLE
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="NOBLE — a retro-futurist HUD terminal workspace" width="100%">
+</p>
 
-**A retro-futurist HUD terminal workspace.** Real shells in tabs and splits, your git projects one keystroke away, live system sensors, and the remaining quota of your AI coding subscriptions — all in one cockpit that runs inside any modern terminal.
+<p align="center">
+  <a href="https://github.com/MertSoylu/noble/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MertSoylu/noble/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/MertSoylu/noble/releases"><img src="https://img.shields.io/github/v/release/MertSoylu/noble?style=flat-square&color=ffb020" alt="Release"></a>
+  <a href="https://crates.io/crates/noble"><img src="https://img.shields.io/crates/v/noble?style=flat-square&color=5fd7d0" alt="crates.io"></a>
+  <img src="https://img.shields.io/badge/rust-1.88%2B-orange?style=flat-square&logo=rust" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platforms">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+</p>
 
-Single native binary (Rust + ratatui), ~22 MB RAM, and battery-friendly: an idle terminal tab costs about 0.05% of one core (it only redraws when something visible changes), the Home screen about 0.4%. On battery the Home clock drops its seconds and blinking colon and the summary sensors sample every 2 s.
+<p align="center">
+  <b>Real shells in tabs and splits, your git projects one keystroke away, live system sensors<br>
+  and the remaining quota of your AI coding subscriptions, all in one cockpit that runs inside your terminal.</b>
+</p>
 
-```
- NOBLE   Home  System  │ +                                                                 ⚙ Settings   22:22
+<p align="center">
+  <a href="#-install">Install</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-screens">Screens</a> ·
+  <a href="#-keys">Keys</a> ·
+  <a href="#-configuration">Configuration</a> ·
+  <a href="#-ai-quota">AI quota</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-  ╺━┓ ╺━┓ ▄ ╺━┓ ╺━┓       Good evening, Mert
-  ┏━┛ ┏━┛   ┏━┛ ┏━┛       Tuesday, 22 September
-  ┗━╸ ┗━╸ ▀ ┗━╸ ┗━╸ 20    no terminals open
+<p align="center">
+  <img src="docs/assets/home.svg" alt="NOBLE Home screen: projects, recent commits, AI usage and system sensors" width="100%">
+</p>
 
- ╭ Projects ────────────────────────────────────────────────────── 6 ─╮  ╭ AI usage ─────────────── 2m ago ─╮
- │▌ noble-rs                              main          ● 3       3m  │  │ Claude Code                  Max │
- │  api-server                            feature/auth… ✓         1h  │  │ 5h   ━━━━━━━━━━╸━━━━  71%  2h14m │
- │  dotfiles                              main          ● 1       1d  │  │ week ━━━━━━━━━━━━━━━  28%   4d2h │
- │  blog                                  master                  9d  │  │                                  │
- │  Noble                                 main          ● 54      5h  │  │ Codex                       Plus │
- │  scratch                               dev                     5w  │  │ 5h   ━━╸━━━━━━━━━━━━ ~18%  3h14m │
- │                                                                    │  │ week ━━━━━━━━━━━━━╸━ ~92%   1d2h │
- │                                                                    │  │ offline · showing data from 1h a │
- │                                                                    │  │                                  │
- │                                                                    │  ╰──────────────────────────────────╯
- │                                                                    │  ╭ System ────────────── details › ─╮
- │                                                                    │  │ CPU  ━━━━━━━━━━━━━━━━━━━━━━  65% │
- │                                                                    │  │       ⡀                        ⢀ │
- │                                                                    │  │ ⣶⣶⣶⣶⣶⣶⣷⣶⣤⣤⣄⣀⣀⣀⣰⣀⣀⣀⣀⣀⣀⣀⣤⣧⣴⣶⣶⣶⣶⣶⣶⣾ │
- │                                                                    │  │                                  │
- │                                                                    │  │ RAM  ━━━━━━━━━━━━━━━━━━━━━━  37% │
- │                                                                    │  │      11.8G of 32.0G              │
- │                                                                    │  │                                  │
- │  feat: HUD bridge · 2h                                             │  │ C:\  ━━━━━━━━━━━━━━━━━━━━━━  61% │
- │                                                                    │  │ D:\  ━━━━━━━━━━━━━━━━━━━━━━  88% │
- │  ⏎ Open   c Claude   x Codex   o Folder                   / search │  │                                  │
- ╰────────────────────────────────────────────────────────────────────╯  ╰──────────────────────────────────╯
- ⏎ open   c claude   / search   t terminal   s settings   ? help                               alt+p commands
-```
+NOBLE is a single native binary (Rust + [ratatui](https://ratatui.rs)) that turns your terminal into a
+workspace: open a project and its shell with one key, start Claude Code or Codex right there, and keep
+an eye on your git status, your CPU and how much of your 5-hour AI quota is left, without leaving the keyboard, or
+the mouse, since everything is clickable.
 
-## What it does
+It is also **light**: about 22 MB of RAM, and it only redraws when something visible changes. An idle terminal
+tab costs about 0.05% of one core and the Home screen about 0.4%.
 
-| Screen | |
-|---|---|
-| **Home** | A big clock and greeting, your git **projects** (branch, status — `● 3 changed`, `✓ clean`, `↑` commits to push, `↓` to pull — and last activity, refreshed as soon as a command finishes in that repo; the selected project's status is spelled out under the list), **AI usage** for the CLIs you are signed in to with a 24-hour usage graph, and a compact **system** summary. Projects with an open Claude/Codex session show `●` (running) or `◆` (waiting for you). Click a project twice (or press `⏎`) to open a terminal in it; the buttons under the list launch `claude` / `codex` there or open the folder. |
-| **Terminals** | Real shells (ConPTY on Windows) in tabs. Each pane has buttons to split right `┃`, split down `━`, zoom `⤢` and close `✕`; drag any border to resize. Drag to select text (copied), right-click to paste, wheel to scroll, `prefix /` to **search the scrollback**, `ctrl+click` to open **links and `file:line` paths**. A background tab gets a `◆` when a long command finishes, the bell rings or an app sends a notification (OSC 9 / 777). Full-screen apps like vim, htop and Claude Code work, including their mouse support. |
-| **System** | CPU history and per-core load, memory, network, disks, **battery** (laptops: charge, time left or time to full — from the OS, or estimated from the charge rate when the OS has none; warns at 20% and 10%) and a sortable process table with a confirmed "end task". |
-| **Settings** | Pick one of **20 themes** (each card previews its own colours), give terminal panes their own **color scheme** — by default the one your PowerShell profile uses in Windows Terminal (read from its `settings.json`, including your custom schemes), or any of Windows Terminal's built-in schemes (Campbell, Campbell Powershell, One Half, Solarized, Tango, Dark+, Vintage, CGA) plus Light Gray, Graphite and Paper — picked from a live-preview list, toggle display options, choose the shell and prefix key, and turn AI providers on or off. Every change is saved to `config.toml` instantly. |
+## ✨ Features
 
-The first launch shows a short welcome card: what NOBLE found, the four keys worth knowing and a choice of prefix key (so it doesn't fight your shell). Everything is clickable and lights up under the mouse; right-click a tab, a pane's title bar or a project for a context menu, drag tabs to reorder them, double-click one to rename it, and hover a project for quick `code` / `pull` / pin buttons (pinned projects stay on top); pages slide in from the side and zoomed panes grow out of (and shrink back into) their place — turn animations off in Settings if you prefer. The keyboard works too (`?` shows every shortcut). On quit your tabs, splits and each shell's folder are saved and restored next time.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Install
+**🖥 Real terminals**<br>
+ConPTY on Windows, a PTY on Linux. Tabs, splits, zoom, drag to resize, scrollback search, `ctrl+click` on URLs
+and `file:line` paths. vim, htop and Claude Code run full-screen with mouse support.
 
-Ready-made binaries for Windows and Linux are attached to each GitHub release. To build from source you need a Rust toolchain (1.88+, edition 2024):
+</td>
+<td width="50%" valign="top">
+
+**📁 Projects at a glance**<br>
+Finds your git repositories and shows branch, changes, commits to push or pull, recent commits and changed
+files. The status refreshes as soon as a command finishes in that repository.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🤖 AI quota and sessions**<br>
+5-hour and weekly limits for Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code, read
+from the logins the CLIs already keep. See which Claude session is working and which one is waiting for you.
+
+</td>
+<td valign="top">
+
+**🚀 Quick launch**<br>
+Start Claude Code, Codex, OpenCode, Copilot, Cursor, Cline and more in the selected project with a single
+key. Only the CLIs installed on your PATH are shown.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**📊 System monitor**<br>
+CPU history and per-core load, memory, network, disks, battery (with a time estimate when the OS has none)
+and a sortable process table.
+
+</td>
+<td valign="top">
+
+**🎨 20 themes, live config**<br>
+Amber, Ice, Synthwave, Catppuccin, Tokyo Night, Nord, Gruvbox… Terminal panes can follow your Windows
+Terminal color scheme. `config.toml` reloads live and a bad value never crashes the app.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🖱 Mouse first, keyboard too**<br>
+Every button, tab, row and chip is clickable, with context menus on right-click. A tmux-style prefix key and
+a command palette (`alt+p`) cover the keyboard side.
+
+</td>
+<td valign="top">
+
+**💾 Sessions and workspaces**<br>
+Tabs, splits and each shell's folder are restored on the next launch. Save named workspaces and reopen them
+from the palette.
+
+</td>
+</tr>
+</table>
+
+## 📸 Screens
+
+<p align="center">
+  <img src="docs/assets/terminals.svg" alt="Split terminal panes running cargo test and git log" width="100%">
+</p>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/system.svg" alt="System monitor"><p align="center"><sub><b>System:</b> CPU, cores, memory, network, disks, battery, processes</sub></p></td>
+<td width="50%"><img src="docs/assets/palette.svg" alt="Command palette"><p align="center"><sub><b>Command palette:</b> every action, project, tab and theme</sub></p></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/assets/settings.svg" alt="Settings"><p align="center"><sub><b>Settings:</b> saved to <code>config.toml</code> instantly</sub></p></td>
+<td width="50%"><img src="docs/assets/themes.svg" alt="Six of the twenty themes"><p align="center"><sub><b>Themes:</b> Ice, Synthwave, Catppuccin, Gruvbox, Nord, Latte</sub></p></td>
+</tr>
+</table>
+
+## 📦 Install
+
+**Prebuilt binaries:** download the archive for Windows or Linux from the
+[latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put `noble` on your PATH.
+
+**With Cargo** (Rust 1.88+):
 
 ```sh
-git clone <this repo> noble && cd noble
-cargo install --path .        # puts `noble` on your PATH (~/.cargo/bin)
-noble
+cargo install noble
 ```
 
-On Windows, reinstalling while NOBLE is open fails with "access denied" because the running `noble.exe` is locked; `install.cmd` renames it out of the way first, so use that instead of `cargo install` when updating.
+**From source:**
 
-Or build without installing: `cargo build --release` → `target/release/noble(.exe)`.
+```sh
+git clone https://github.com/MertSoylu/noble && cd noble
+cargo install --path .
+```
 
-**Terminal:** any truecolor terminal with a regular monospace font works (no Nerd Font needed) — Windows Terminal, WezTerm, Kitty, Alacritty, iTerm2. Cascadia Code / Cascadia Mono render every glyph NOBLE uses (box drawing, block elements, braille).
+Then run `noble`. On the first launch a short welcome card shows what NOBLE found, the four keys worth knowing
+and a choice of prefix key, so it doesn't clash with your shell.
 
-**Windows Terminal profile** (optional) — open NOBLE in its own tab from the dropdown:
+<details>
+<summary><b>Terminal requirements and a Windows Terminal profile</b></summary>
+
+<br>
+
+Any truecolor terminal with a regular monospace font works, no Nerd Font needed: Windows Terminal, WezTerm,
+Kitty, Alacritty, iTerm2. Cascadia Code / Cascadia Mono render every glyph NOBLE uses (box drawing, block
+elements, braille).
+
+To open NOBLE in its own tab from the Windows Terminal dropdown:
 
 ```json
 { "name": "NOBLE", "commandline": "noble.exe", "icon": "⌂", "font": { "face": "Cascadia Mono" } }
@@ -76,40 +166,61 @@ noble [--config <path>] [--no-boot]
       --version    print version
 ```
 
-## Keys
+</details>
 
-NOBLE uses a tmux-style **prefix** (default `ctrl+a`, press it twice to send a literal `ctrl+a` to the shell) plus a few direct shortcuts. Everything is rebindable, and `?` shows the live reference.
+> [!NOTE]
+> Windows is the primary platform and runs the full test suite in CI. Linux is built and unit-tested in CI.
+> macOS should build but is not tested yet. Reports and fixes are welcome.
+
+## ⌨ Keys
+
+NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
+plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference.
 
 | Direct | | Prefix, then | |
 |---|---|---|---|
 | `alt+1…9` | go to tab | `t` `c` | new tab |
-| `alt+0` | bridge | `v` `\|` | split right |
+| `alt+0` | Home | `v` `\|` | split right |
 | `alt+t` | new tab | `s` `-` | split down |
 | `alt+p` | command palette | `x` / `X` | close pane / tab |
 | `alt+m` | system monitor | `z` | zoom pane |
 | `alt+s` | settings | `S` | settings |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
-| `alt+.` / `alt+,` | next / previous tab | | |
-| `shift+pgup/pgdn` | scrollback | `n` `p` `1…9` `0` | tabs · bridge |
-| | | `/` `f` | search scrollback |
+| `alt+.` / `alt+,` | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
+| `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
-**Home:** `↑↓` select project · `⏎` open terminal · `c` Claude · `x` Codex · `/` search · `t` terminal at home · `o` open folder · `w` save workspace · `a` add a project folder · `r` rescan / `R` refresh AI · `m` system · `s` settings · `q` quit.
+<details>
+<summary><b>Per-screen keys and mouse</b></summary>
 
-**Settings:** `↑↓←→` move · `⏎`/space change · `←→` also cycles values · `esc` back.
+<br>
 
-**System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter · `K` or `del` terminate (asks first) · `esc` back.
+- **Home:** `↑↓` select project · `⏎` open terminal · `c` Claude · `x` Codex · other AI CLIs by their shortcut
+  (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
+  `a` add a project folder · `r` rescan / `R` refresh AI · `m` system · `s` settings · `q` quit.
+- **Settings:** `↑↓←→` move · `⏎`/space change · `←→` also cycles values · `esc` back.
+- **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
+  `K` or `del` terminate (asks first) · `esc` back.
+- **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
+- **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
+  VS Code · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename ·
+  drag dividers · drag to select text (copied on release) · right-click pastes · wheel scrolls ·
+  `shift+drag` selects even inside apps that capture the mouse.
 
-**Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close and jump back to the bottom.
+AltGr symbols (`@ { } [ ] \ | ~ €` on Turkish, German, Polish… layouts) are passed through as characters,
+not as `ctrl+alt` chords.
 
-**Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks printed by tools like `ls --hyperlink` or compilers) in the browser or a `path:line:col` in VS Code (`code -g`, otherwise the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder · click tabs, panes, rows and chips · drag dividers · drag to select text (copied on release) · right-click pastes · wheel scrolls history and lists · `shift+drag` selects even inside apps that capture the mouse.
+</details>
 
-AltGr symbols (`@ { } [ ] \ | ~ €` on Turkish, German, Polish… layouts) are passed through as characters, not as `ctrl+alt` chords.
+## 🔧 Configuration
 
-## Configuration
+`noble --paths` prints the locations (Windows: `%APPDATA%\noble\config.toml`, data in `%LOCALAPPDATA%\noble`;
+`NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
+Errors show up as a toast and never crash the app. Most options can also be changed from the Settings screen.
 
-`noble --paths` prints the locations (Windows: `%APPDATA%\noble\config.toml`, data in `%LOCALAPPDATA%\noble`; `NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved; errors show as a toast and never crash the app.
+<details>
+<summary><b>Full <code>config.toml</code> reference</b></summary>
 
 ```toml
 [general]
@@ -126,7 +237,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true
 copy_on_select = true
-colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
+colors = "windows-terminal"  # windows-terminal (your PowerShell scheme) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
 background = ""          # override the scheme's background, e.g. "#c8c8c8"
 foreground = ""          # override the scheme's text color
 notify = true            # toast + bell when a background tab needs attention
@@ -147,77 +258,90 @@ exclude = []
 [ai]
 enabled = true
 refresh_minutes = 5
-providers = ["claude", "codex"]
+providers = ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
 warn_at = 90             # warn once when a quota window reaches this percent (0 = off)
 
-[[launchers]]
+[[launchers]]            # Home quick launch; hidden when `command` is not on PATH
 key = "c"
 name = "claude"
 command = "claude"
+show = true              # false hides it from Home (Settings → Quick launch)
+# Defaults: claude c, codex x, opencode e, copilot i, agy g (Antigravity), pi v, omp b
+# (oh-my-pi), freebuff f, grok z (Grok Build), cursor-agent u, command-code d, cline l, kilo n.
 ```
 
-**Actions** for bindings: `bridge system new_tab close_tab next_tab prev_tab tab_1…tab_9 split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next resize_left resize_right resize_up resize_down palette help quit reload_config open_config cycle_theme refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search send_prefix`.
+**Actions** for bindings: `bridge system new_tab close_tab next_tab prev_tab tab_1…tab_9 split_right split_down
+close_pane zoom focus_left focus_right focus_up focus_down focus_next resize_left resize_right resize_up
+resize_down palette help quit reload_config open_config cycle_theme refresh_ai rescan_projects rename_tab
+save_workspace scroll_up scroll_down search send_prefix`.
 
-## AI quota sources
+</details>
 
-Usage is read from the logins that the official CLIs already keep on your machine. Tokens are sent only to their own provider, never displayed or logged, and never refreshed by NOBLE (so it cannot race the CLI's own token rotation). The last good numbers are cached and shown with `~` until the next successful fetch.
+## 🤖 AI quota
+
+Usage is read from the logins that the official CLIs already keep on your machine. **Tokens are sent only to
+their own provider, never displayed or logged, and never refreshed by NOBLE** (so it cannot race the CLI's
+own token rotation). The last good numbers are cached and shown with `~` until the next successful fetch.
 
 | Provider | Shown | Source |
 |---|---|---|
 | Claude Code | 5-hour and weekly limits, plan | `~/.claude/.credentials.json` → Anthropic OAuth usage endpoint |
 | Codex / ChatGPT | 5-hour and weekly limits, plan | `~/.codex/auth.json` + `codex app-server` (`account/rateLimits/read`) |
+| Antigravity | 5-hour and weekly limits (the fuller pool) | `agy --print /usage --output-format json`; only runs when an `agy` login exists |
+| OpenCode Go | 5-hour, weekly and monthly limits | `~/.local/share/opencode/auth.json` → `opencode.ai/zen/go/v1/usage` |
+| Kilo Code | Kilo Pass credits this billing period | `~/.local/share/kilo/auth.json` → `api.kilo.ai` `kiloPass.getState` |
+| Command Code | 5-hour and weekly limits, plan | `~/.commandcode/auth.json` → `api.commandcode.ai/alpha/billing/credits` |
 
-Only providers you are signed in to are shown. Quotas are fetched only while the Home screen is open — right away when you come back to it (unless the data is under 30 s old) and every `refresh_minutes` while it stays open — so NOBLE makes no network calls and starts no `codex` process while you work in a terminal. Each successful fetch is also appended to `ai-history.json` in the data folder (kept for 8 days) to draw the 24-hour graph and to warn when, at the current pace, a window would fill up before it resets.
+Only providers you are signed in to (and that have a quota plan) are shown. Quotas are fetched **only while
+the Home screen is open**: right away when you come back to it and then every `refresh_minutes`. While you work
+in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
+fill up before it resets.
 
-### Claude Code status (optional)
+<details>
+<summary><b>Claude Code session status (optional hooks)</b></summary>
 
-Without help NOBLE can only guess whether a Claude session is busy. Turn on **Settings → AI usage → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json` (a backup is written next to it; turning the setting off removes exactly those entries). Claude then runs `noble hook <event>` on prompt / stop / notification / session start / session end; the command writes one small file per pane into NOBLE's data folder and exits — outside NOBLE it does nothing. The Home screen then lists every Claude session as **working**, **needs you** or **your turn**, and a background tab lights up the moment Claude asks for permission.
+<br>
 
-## Shell integration
+Without help NOBLE can only guess whether a Claude session is busy. Turn on
+**Settings → AI usage → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
+(a backup is written next to it; turning the setting off removes exactly those entries). Claude then runs
+`noble hook <event>` on prompt / stop / notification / session start / session end. The command writes one
+small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing. The Home screen then
+lists every Claude session as **working**, **needs you** or **your turn**, and a background tab lights up the
+moment Claude asks for permission.
 
-NOBLE learns each pane's working directory from OSC 7 / OSC 9;9. For PowerShell it wraps your existing prompt (oh-my-posh included) to emit OSC 9;9; for `cmd.exe` it sets a `PROMPT` that does the same unless you already have one. Bash/zsh users whose prompt emits OSC 7 get it automatically. This is what lets splits open in the current directory and sessions restore to where you left off. Each prompt (OSC 7, OSC 9;9 or OSC 133 marks) also tells NOBLE that the previous command finished: it refreshes that repository's git status and, for background tabs, reports long-running commands.
+</details>
 
-## Architecture
+<details>
+<summary><b>Shell integration</b></summary>
 
-```
-src/
-  main.rs            terminal setup, panic safety, event-driven frame loop (≤60 fps under output, redraws only when something visible changes)
-  app/               state + input: mod.rs (events, notifications, agent state, config reload), input.rs (keys, mouse),
-                     menu.rs (context menus, tab/project actions),
-                     ops.rs (tabs, panes, launchers, sessions), search.rs (scrollback search, links),
-                     palette.rs, settings.rs
-  term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
-                     link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
-  ui/                hud.rs (bounds-safe primitives: frames, bars, buttons, braille graphs, big digits),
-                     bridge.rs (Home), terminal.rs, system.rs, settings.rs, overlay.rs, boot.rs
-  ai/                providers.rs (Claude, Codex), json.rs (tolerant window parsing), collector
-  sensors.rs         sysinfo sampler thread
-  projects.rs        repository scan + git status workers
-  store.rs           recent dirs (frecency), session, workspaces, AI usage history, UI state (atomic JSON writes)
-  hooks.rs           Claude Code hook install/remove and the `noble hook` state files
-  wt.rs battery.rs   Windows Terminal color schemes · battery readers (Windows, Linux, macOS)
-  config.rs keys.rs theme.rs util.rs event.rs
-```
+<br>
 
-Background threads (input, sensors, project scan, AI collector, one reader + waiter per shell) talk to the main loop through a single channel; only the main thread touches UI state. PTY output marks a pane dirty and the loop coalesces redraws. A panic in a background thread is written to `noble.log` instead of tearing down the screen.
+NOBLE learns each pane's working directory from OSC 7 / OSC 9;9. For PowerShell it wraps your existing prompt
+(oh-my-posh included) to emit OSC 9;9; for `cmd.exe` it sets a `PROMPT` that does the same unless you already
+have one. Bash/zsh prompts that emit OSC 7 work automatically. This is what lets splits open in the current
+directory and sessions restore where you left off. Each prompt (OSC 7, OSC 9;9 or OSC 133) also tells NOBLE
+that the previous command finished: it refreshes that repository's git status and, for background tabs,
+reports long-running commands. OSC 9 / OSC 777 notifications and the bell mark a background tab with `◆`.
 
-## Development
+</details>
 
-```sh
-cargo test                     # unit + headless render + real-PTY + end-to-end tests
-cargo clippy --all-targets     # kept warning-free
-cargo fmt
-cargo test --release --test e2e idle -- --ignored --nocapture   # idle CPU/RAM check
-```
+## 🔋 Performance
 
-- `tests/render.rs` draws every screen at seven terminal sizes (160×45 down to 30×8) with a headless backend, asserts nothing panics or overflows, and writes text snapshots to `target/audit/` — open them to review layout changes without launching the app. It also drives real shells: output, splits, zoom, `cd` tracking (PowerShell and cmd), launchers.
-- `tests/e2e.rs` runs the compiled binary inside a pseudo-terminal, types into it and reads the screen back: open tab → run command → split → palette → quit → session restored on relaunch.
-- New AI provider: add `detect`/`fetch` functions and a `ProviderDef` in `src/ai/providers.rs`, plus a payload test.
-- New action: add it to `Action` (+ `ALL`, `id`, `title`, `group`) in `src/keys.rs`, handle it in `App::run`, optionally bind a default key.
-- New theme: append to `THEMES` in `src/theme.rs` — it appears in Settings automatically.
-- After every change: `install.cmd` (Windows) or `cargo install --path .` so `noble` runs the latest build.
-- CI (`.github/workflows/ci.yml`) runs fmt, clippy and the full test suite on Windows, and clippy + unit tests on Linux; pushing a `v*` tag builds release binaries (`release.yml`).
+There is no fixed frame rate. NOBLE redraws when an event changes something visible, at most 60 times a second
+under heavy output. Everything else runs only while it is on screen:
 
-## License
+- System sensors: every second on the System screen and on Home (every 2 s on battery), every 5 s elsewhere.
+- Git status: when a command finishes, when Home opens, or when a repository changes.
+- AI quota: only while Home is open.
+- On battery the Home clock drops its seconds and the blinking colon.
 
-MIT
+## 🤝 Contributing
+
+Bug reports, ideas and pull requests are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the development
+setup, the architecture overview and the test suite (headless render snapshots at seven terminal sizes, real
+PTY sessions and end-to-end tests of the compiled binary). Security issues: see [SECURITY.md](SECURITY.md).
+
+## 📄 License
+
+[MIT](LICENSE) © NOBLE contributors
