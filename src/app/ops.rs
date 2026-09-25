@@ -42,7 +42,7 @@ impl App {
             }
             Action::CloseTab => {
                 if let View::Term(i) = self.view {
-                    self.remove_tab(i);
+                    self.request_close_tab(i);
                 }
             }
             Action::NextTab => self.cycle_tab(1),
@@ -52,7 +52,7 @@ impl App {
             Action::SplitDown => self.split(Dir::Col),
             Action::ClosePane => {
                 if let Some(id) = self.focused_pane() {
-                    self.close_pane(id);
+                    self.request_close_pane(id);
                 }
             }
             Action::Zoom => {
@@ -175,7 +175,7 @@ impl App {
         };
         let key = self.keymap.hint(Action::Passthrough).unwrap_or_else(|| "passthrough".into());
         if self.pass_once() {
-            self.pass_next = true;
+            self.pass_next = Some(id);
             self.toast(ToastLevel::Info, "the next key goes to the app");
             return;
         }
@@ -348,6 +348,36 @@ impl App {
             tab.focus = new;
             tab.zoomed = false;
         }
+    }
+
+    /// Closes a pane the user asked to close; asks first while something still runs in it.
+    pub fn request_close_pane(&mut self, id: PaneId) {
+        match self.panes.get(&id).and_then(Pane::busy) {
+            Some(what) => {
+                self.overlay = Some(Overlay::Confirm(Confirm {
+                    title: "CLOSE PANE".into(),
+                    body: format!("{what} is still running — close it?"),
+                    action: ConfirmAction::ClosePane(id),
+                }));
+            }
+            None => self.close_pane(id),
+        }
+    }
+
+    /// Closes a tab the user asked to close; asks first while something still runs in one of its panes.
+    pub fn request_close_tab(&mut self, i: usize) {
+        let Some(tab) = self.tabs.get(i) else { return };
+        let ids = tab.panes();
+        let busy: Vec<String> = ids.iter().filter_map(|id| self.panes.get(id).and_then(Pane::busy)).collect();
+        if busy.is_empty() {
+            return self.remove_tab(i);
+        }
+        let what = if busy.len() == 1 { busy[0].clone() } else { format!("{} programs", busy.len()) };
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "CLOSE TAB".into(),
+            body: format!("{what} still running — close the tab?"),
+            action: ConfirmAction::CloseTab(ids[0]),
+        }));
     }
 
     pub fn close_pane(&mut self, id: PaneId) {
@@ -579,6 +609,18 @@ impl App {
     pub fn confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::Quit => self.quit = true,
+            ConfirmAction::ClosePane(id) => self.close_pane(id),
+            ConfirmAction::CloseTab(id) => {
+                if let Some(ti) = self.tab_of(id) {
+                    self.remove_tab(ti);
+                }
+            }
+            ConfirmAction::Paste { pane, text } => {
+                if let Some(p) = self.panes.get(&pane) {
+                    p.scroll_reset();
+                    p.paste(&text);
+                }
+            }
             ConfirmAction::Kill { pid, name } => match &self.services {
                 Some(s) => {
                     let _ = s.sensor_req.send(SensorRequest::Kill { pid });

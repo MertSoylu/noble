@@ -65,6 +65,8 @@ pub struct KeysCfg {
     /// How keys NOBLE uses reach the app in a pane: "lock" (prefix i toggles a per-pane lock that sends every
     /// shortcut to the app) or "once" (prefix + a shortcut sends that key to the app, prefix i the next key).
     pub passthrough: String,
+    /// In a terminal pane the shell keys among the direct shortcuts (`keys::SHELL_KEYS`) go to the app.
+    pub shell_first: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -142,6 +144,7 @@ impl Default for KeysCfg {
             prefix_bindings: BTreeMap::new(),
             direct_bindings: BTreeMap::new(),
             passthrough: PASSTHROUGH_MODES[0].into(),
+            shell_first: true,
         }
     }
 }
@@ -239,6 +242,9 @@ prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell
 # "lock" = prefix i locks the pane, every shortcut goes to the app until prefix i again
 # "once" = prefix + a shortcut (e.g. ctrl+a alt+p) sends just that key; prefix i sends the next key
 passthrough = "lock"
+# alt+. alt+, alt+t alt+s alt+p are shell keys (last argument, transpose, sudo …): in a terminal
+# they go to the shell/app, elsewhere they stay NOBLE's. false = NOBLE takes them everywhere.
+shell_first = true
 # Key pressed after the prefix → action. Example:
 # [keys.prefix_bindings]
 # "%" = "split_right"

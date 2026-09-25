@@ -508,6 +508,8 @@ pub struct Pane {
     pub command_started: Option<std::time::Instant>,
     /// Key lock: NOBLE's direct shortcuts go to the app in this pane instead (prefix still works).
     pub passthrough: bool,
+    /// A prompt signal arrived at least once: the shell integration works, so `command_started` is reliable.
+    pub prompted: bool,
 }
 
 pub struct SpawnSpec<'a> {
@@ -614,6 +616,7 @@ impl Pane {
             pid,
             command_started: None,
             passthrough: false,
+            prompted: false,
         })
     }
 
@@ -766,6 +769,16 @@ impl Pane {
     }
 
     /// Visible line text (for link detection).
+    /// What is still running in the pane (its label), if closing it would stop something:
+    /// a full-screen app, a command started at the prompt, or a launcher command before its first prompt.
+    pub fn busy(&self) -> Option<String> {
+        let alt = lock(&self.parser).screen().alternate_screen();
+        let command = if self.prompted { self.command_started.is_some() } else { self.command.is_some() };
+        // The shell rarely names the command it runs (no title): say "a command" rather than the shell.
+        let label = self.label();
+        (alt || command).then(|| if label == self.shell_label { "a command".into() } else { label })
+    }
+
     pub fn visible_row(&self, row: u16) -> Option<String> {
         let p = lock(&self.parser);
         let cols = p.screen().size().1;

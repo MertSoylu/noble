@@ -69,9 +69,8 @@ impl App {
             Some(_) => return,
             None => {}
         }
-        if let Some(p) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
-            p.scroll_reset();
-            p.paste(text);
+        if let Some(id) = self.focused_pane().filter(|id| self.panes.contains_key(id)) {
+            self.paste_into(id, text.to_string());
         } else if self.view == View::Bridge && self.bridge.filtering {
             self.bridge.filter.push_str(text.lines().next().unwrap_or(""));
             self.bridge.proj_sel = 0;
@@ -90,7 +89,8 @@ impl App {
             return;
         }
         let in_term = matches!(self.view, View::Term(_));
-        if std::mem::take(&mut self.pass_next) && in_term {
+        // Only while the same pane is focused in a terminal; anything else drops it.
+        if self.pass_next.take().is_some_and(|id| in_term && self.focused_pane() == Some(id)) {
             self.term_key(k);
             return;
         }
@@ -117,7 +117,7 @@ impl App {
             return;
         }
         if let Some(a) = self.keymap.direct_map.get(&chord).copied()
-            && !(in_term && self.focused_locked())
+            && !(in_term && (self.focused_locked() || self.keymap.shell_first.contains(&chord)))
         {
             self.run(a);
             return;
@@ -597,7 +597,7 @@ impl App {
         self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())
     }
 
-    fn tab_of(&self, pane: PaneId) -> Option<usize> {
+    pub(super) fn tab_of(&self, pane: PaneId) -> Option<usize> {
         self.tabs.iter().position(|t| t.root.contains(pane))
     }
 
@@ -719,7 +719,7 @@ impl App {
             Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
             Hit::Update => self.start_update(),
             Hit::UpdateDismiss => self.dismiss_update(),
-            Hit::TabClose(i) => self.remove_tab(i),
+            Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Pane { pane, inner } => {
                 if let Some(ti) = self.tab_of(pane) {
@@ -760,7 +760,7 @@ impl App {
                     self.toggle_zoom(ti, id);
                 }
             }
-            Hit::PaneClose(id) => self.close_pane(id),
+            Hit::PaneClose(id) => self.request_close_pane(id),
             Hit::Divider { tab, div } => self.drag = Some(Drag::Divider { tab, div }),
             Hit::Project(i) => {
                 if self.bridge.proj_sel == i && double {

@@ -73,7 +73,17 @@ impl Default for SystemState {
 
 pub enum ConfirmAction {
     Quit,
-    Kill { pid: u32, name: String },
+    ClosePane(PaneId),
+    /// The tab holding this pane.
+    CloseTab(PaneId),
+    Paste {
+        pane: PaneId,
+        text: String,
+    },
+    Kill {
+        pid: u32,
+        name: String,
+    },
 }
 
 pub struct Confirm {
@@ -337,8 +347,8 @@ pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     next_id: PaneId,
     pub prefix_armed: bool,
-    /// The next key goes straight to the focused pane (`passthrough = "once"`, prefix i).
-    pub pass_next: bool,
+    /// The next key goes straight to this pane while it is focused (`passthrough = "once"`, prefix i).
+    pub pass_next: Option<PaneId>,
     pub sensors: Sensors,
     pub projects: Vec<Project>,
     pub projects_loaded: bool,
@@ -531,7 +541,7 @@ impl App {
             panes: HashMap::new(),
             next_id: 1,
             prefix_armed: false,
-            pass_next: false,
+            pass_next: None,
             sensors: Sensors::default(),
             projects: Vec::new(),
             projects_loaded: false,
@@ -1009,6 +1019,7 @@ impl App {
                 self.refresh_git_at(cwd);
                 if let Some(p) = self.panes.get_mut(&sig.id) {
                     p.command_started = None;
+                    p.prompted = true;
                 }
             }
             if self.search.as_ref().is_some_and(|s| s.pane == sig.id) {
@@ -1156,14 +1167,28 @@ impl App {
     /// Pastes the system clipboard into a pane.
     pub fn paste_clipboard(&mut self, pane: PaneId) {
         match self.clipboard.get() {
-            Some(text) => {
-                if let Some(p) = self.panes.get(&pane) {
-                    p.scroll_reset();
-                    p.paste(&text);
-                }
-            }
+            Some(text) => self.paste_into(pane, text),
             None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
         }
+    }
+
+    /// Pastes text into a pane. Text with a line break would run as commands in an app without bracketed paste
+    /// (cmd, older PowerShell, a plain `sh`): that asks first.
+    pub fn paste_into(&mut self, pane: PaneId, text: String) {
+        let Some(p) = self.panes.get(&pane) else { return };
+        let bracketed = p.parser().screen().bracketed_paste();
+        if !bracketed && text.contains(['\n', '\r']) {
+            let lines = text.lines().count().max(1);
+            let s = if lines == 1 { "" } else { "s" };
+            self.overlay = Some(Overlay::Confirm(Confirm {
+                title: "PASTE".into(),
+                body: format!("{lines} line{s} — each may run as a command. Paste?"),
+                action: ConfirmAction::Paste { pane, text },
+            }));
+            return;
+        }
+        p.scroll_reset();
+        p.paste(&text);
     }
 
     /// Periodic work: boot animation, notifications, config watching.

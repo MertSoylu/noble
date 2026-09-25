@@ -1,6 +1,6 @@
 //! Key chords, actions and the key map (prefix + direct shortcuts).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -384,10 +384,17 @@ impl Action {
     }
 }
 
+/// Default direct shortcuts that bash, zsh and fish (and readline in general) use at the prompt:
+/// alt+. last argument, alt+t transpose words, alt+s sudo (fish) / spelling (zsh), alt+p pager (fish) /
+/// history search (bash). With `keys.shell_first` they reach the app in a pane; elsewhere they still work.
+pub const SHELL_KEYS: [&str; 5] = ["alt+.", "alt+,", "alt+t", "alt+s", "alt+p"];
+
 pub struct Keymap {
     pub prefix: Chord,
     pub prefix_map: HashMap<Chord, Action>,
     pub direct_map: HashMap<Chord, Action>,
+    /// Direct shortcuts left to the app in a terminal pane (`SHELL_KEYS` not rebound by the user).
+    pub shell_first: HashSet<Chord>,
     /// Invalid entries in the config (shown to the user).
     pub warnings: Vec<String>,
 }
@@ -499,13 +506,34 @@ impl Keymap {
         }
         // The prefix chord cannot be in the direct map, or the prefix could never be set.
         direct_map.remove(&prefix);
-        Keymap { prefix, prefix_map, direct_map, warnings }
+        // A shell key the user bound on purpose stays NOBLE's in terminals too.
+        let user: HashSet<Chord> = cfg.direct_bindings.keys().filter_map(|k| Chord::parse(k)).collect();
+        let shell_first = if cfg.shell_first {
+            SHELL_KEYS.iter().map(|k| c(k)).filter(|k| !user.contains(k)).collect()
+        } else {
+            HashSet::new()
+        };
+        Keymap { prefix, prefix_map, direct_map, shell_first, warnings }
     }
 
     /// The shortest shortcut of an action (for the palette hint).
     pub fn hint(&self, action: Action) -> Option<String> {
-        let direct =
-            self.direct_map.iter().filter(|(_, a)| **a == action).map(|(k, _)| k.to_string()).min_by_key(|s| s.len());
+        self.hint_where(action, |_| true)
+    }
+
+    /// The shortest shortcut that works in a terminal pane: no shell key, and with the pane's keys
+    /// `locked` no direct shortcut at all.
+    pub fn term_hint(&self, action: Action, locked: bool) -> Option<String> {
+        self.hint_where(action, |k| !locked && !self.shell_first.contains(k))
+    }
+
+    fn hint_where(&self, action: Action, direct_ok: impl Fn(&Chord) -> bool) -> Option<String> {
+        let direct = self
+            .direct_map
+            .iter()
+            .filter(|(k, a)| **a == action && direct_ok(k))
+            .map(|(k, _)| k.to_string())
+            .min_by_key(|s| s.len());
         if let Some(d) = direct {
             return Some(d);
         }

@@ -19,6 +19,7 @@ pub enum SettingKey {
     Notify,
     Prefix,
     Passthrough,
+    ShellFirst,
     AiEnabled,
     Claude,
     Codex,
@@ -72,6 +73,7 @@ impl SettingKey {
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
             SettingKey::Passthrough => "Pass shortcuts to apps",
+            SettingKey::ShellFirst => "Leave shell keys to the shell",
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
             SettingKey::Codex => "Codex",
@@ -150,6 +152,7 @@ impl App {
                 SettingKey::Shell,
                 SettingKey::Prefix,
                 SettingKey::Passthrough,
+                SettingKey::ShellFirst,
                 SettingKey::Restore,
                 SettingKey::CopySelect,
                 SettingKey::TermColors,
@@ -186,6 +189,7 @@ impl App {
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
+            SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
             SettingKey::ClaudeHooks => self.hooks_installed,
             SettingKey::AiEnabled => c.ai.enabled,
@@ -383,6 +387,10 @@ impl App {
                         let cur = c.keys.prefix.clone();
                         c.keys.prefix = cycle(&PREFIXES.map(String::from), &cur, dir);
                         ("keys", "prefix", format!("\"{}\"", c.keys.prefix))
+                    }
+                    SettingKey::ShellFirst => {
+                        c.keys.shell_first ^= true;
+                        ("keys", "shell_first", c.keys.shell_first.to_string())
                     }
                     SettingKey::Passthrough => {
                         let cur = if self.pass_once() { "once" } else { "lock" }.to_string();

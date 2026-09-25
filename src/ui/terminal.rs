@@ -84,11 +84,14 @@ fn pane_frame(
     }
     let label = pane.label();
     let cwd = util::tilde(&pane.cwd());
-    let title = format!("{label} · {}", util::truncate_left(&cwd, (rect.width as usize).saturating_sub(24).max(8)));
+    // The lock leads the title so it shows even when the pane is too narrow for the corner tag.
+    let lock = if pane.passthrough { "🔒 " } else { "" };
+    let title =
+        format!("{lock}{label} · {}", util::truncate_left(&cwd, (rect.width as usize).saturating_sub(24).max(8)));
     let scroll = pane.scroll_offset();
     let tag = if pane.passthrough {
         // Key lock: NOBLE's shortcuts go to the app (`keys.passthrough = "lock"`).
-        "🔒 KEYS".to_string()
+        "KEYS".to_string()
     } else if scroll > 0 {
         format!("↑{scroll}")
     } else if zoomed {

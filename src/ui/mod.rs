@@ -396,7 +396,9 @@ fn hints(app: &App) -> Vec<(String, String)> {
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]
         }
-        View::Term(_) if app.pass_next => vec![h("any key", "goes to the app")],
+        View::Term(_) if app.pass_next.is_some() && app.pass_next == app.focused_pane() => {
+            vec![h("any key", "goes to the app")]
+        }
         View::Term(_) if app.focused_locked() => {
             let key = app.keymap.hint(Action::Passthrough).unwrap_or_default();
             vec![(key, "unlock keys".into()), (app.keymap.prefix.to_string(), "menu".into())]
@@ -418,7 +420,7 @@ const TIPS: [&str; 10] = [
     "right-click a tab, a pane title or a project for more",
     "a background tab shows ◆ when it needs you",
     "press a on Home to add a folder with your projects",
-    "alt+. and alt+, switch to the next / previous tab",
+    "alt+1…9 or prefix n / p switch tabs",
     "Settings → Terminal colors: pick any Windows Terminal scheme",
     "w on Home saves your open tabs as a workspace",
     "prefix z zooms the focused pane",
@@ -433,15 +435,9 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
     let th = &app.theme;
     hud::fill(buf, area, Style::default().bg(th.raised));
     let y = area.y;
-    // While a pane's keys are locked the direct shortcut goes to the app: show the prefix one.
-    let palette = if matches!(app.view, View::Term(_)) && app.focused_locked() {
-        app.keymap
-            .prefix_map
-            .iter()
-            .filter(|(_, a)| **a == Action::Palette)
-            .map(|(k, _)| k.to_string())
-            .min()
-            .map(|k| format!("{} {k}", app.keymap.prefix))
+    // In a terminal a shell key or a locked pane's shortcut goes to the app: show one that works there.
+    let palette = if matches!(app.view, View::Term(_)) {
+        app.keymap.term_hint(Action::Palette, app.focused_locked())
     } else {
         app.keymap.hint(Action::Palette)
     };

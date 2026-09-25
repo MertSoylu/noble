@@ -146,12 +146,12 @@ impl App {
                     self.run(crate::keys::Action::Passthrough);
                 }
             }
-            MenuCmd::ClosePane(pane) => self.close_pane(pane),
+            MenuCmd::ClosePane(pane) => self.request_close_pane(pane),
             MenuCmd::CopyText(text) => self.set_clipboard(&text, true),
             MenuCmd::OpenFolder(path) => self.open_in_explorer(&path),
             MenuCmd::OpenCode(path) => self.open_in_code(&path),
             MenuCmd::RenameTab(i) => self.rename_tab_prompt(i),
-            MenuCmd::CloseTab(i) => self.remove_tab(i),
+            MenuCmd::CloseTab(i) => self.request_close_tab(i),
             MenuCmd::MoveTab(i, d) => {
                 let to = (i as i32 + d).clamp(0, self.tabs.len() as i32 - 1) as usize;
                 self.move_tab(i, to);
