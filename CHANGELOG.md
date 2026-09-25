@@ -6,15 +6,17 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
-### Changed
-- The pin (★) and more (⋯) buttons now also show on the selected project, not only under the mouse. Press `→`
-  to reach them from the keyboard, `←`/`→` to choose and `⏎` to pin the project or open its menu.
+## [1.2.0]
 
 ### Added
 - Keyboard ways to do what needed the mouse: prefix `<` / `>` moves the current tab, prefix `.` opens the pane
   menu (copy path, open folder, VS Code …), and the command palette offers **Update NOBLE** and **Dismiss
   Update Notice** while an update is shown. New bindable actions: `move_tab_left`, `move_tab_right`,
   `pane_menu`, `update`, `dismiss_update`.
+
+### Changed
+- The pin (★) and more (⋯) buttons now also show on the selected project, not only under the mouse. Press `→`
+  to reach them from the keyboard, `←`/`→` to choose and `⏎` to pin the project or open its menu.
 
 ### Fixed
 - A `git status` line starting with a non-ASCII character could crash NOBLE while reading a project's changes.
@@ -84,6 +86,7 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/MertSoylu/noble/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/MertSoylu/noble/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/MertSoylu/noble/releases/tag/v1.0.0
