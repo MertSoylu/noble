@@ -51,8 +51,27 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: tar -czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release noble -C "$GITHUB_WORKSPACE" README.md LICENSE
+      # The release text is this version's CHANGELOG.md section. GitHub's generated notes only list the
+      # merged PRs and call the maintainer a "new contributor"; a missing section fails the release.
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The section's lines, without the `[x.y.z]: <url>` link definitions at the end of the file.
+          awk -v h="## [$version]" '
+            index($0, "## [") == 1 { on = (index($0, h) == 1); next }
+            /^\[[^]]*\]: / { next }
+            on' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          # The compare link from `[x.y.z]: <url>`; the whole CHANGELOG.md if there is none.
+          link=$(awk -v p="[$version]: " 'index($0, p) == 1 { print substr($0, length(p) + 1) }' CHANGELOG.md)
+          echo "**Full changelog:** ${link:-https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md}" >> notes.md
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ matrix.archive }}
-          generate_release_notes: true
+          body_path: notes.md
