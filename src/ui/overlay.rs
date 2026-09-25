@@ -501,6 +501,7 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
     for (k, d) in [
         ("↑ ↓  j k", "select project"),
         ("⏎  double-click", "open a terminal in the project"),
+        ("→  ⏎", "pin to top ★ · more actions ⋯ (← → choose)"),
         ("/", "search projects"),
         ("● 3  ✓  ↑ ↓  …", "uncommitted changes · clean · commits to push / pull · checking"),
         ("t", "terminal in home folder"),

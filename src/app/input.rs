@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, SortKey, ToastLevel, View};
+use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -419,6 +419,39 @@ impl App {
             }
             return;
         }
+        // The focused quick action lasts only while ←/→/⏎ act on it; any other key leaves it.
+        let act = self.bridge.proj_act.take();
+        match (k.code, act) {
+            (KeyCode::Right, None) if self.selected_project().is_some() => {
+                self.bridge.proj_act = Some(ProjectAct::Pin);
+                return;
+            }
+            (KeyCode::Right, Some(_)) => {
+                self.bridge.proj_act = Some(ProjectAct::More);
+                return;
+            }
+            (KeyCode::Left, Some(ProjectAct::More)) => {
+                self.bridge.proj_act = Some(ProjectAct::Pin);
+                return;
+            }
+            (KeyCode::Left | KeyCode::Esc, Some(_)) => return,
+            (KeyCode::Enter, Some(ProjectAct::Pin)) => {
+                if let Some(p) = self.bridge_target_dir() {
+                    self.toggle_pin(&p);
+                }
+                self.bridge.proj_act = Some(ProjectAct::Pin);
+                return;
+            }
+            (KeyCode::Enter, Some(ProjectAct::More)) => {
+                let row = self.bridge.proj_sel;
+                // The menu opens under the ⋯ button, as with a click.
+                let at = self.hits.iter().find(|(_, h)| *h == Hit::ProjectAct(row, ProjectAct::More)).map(|(r, _)| r);
+                let (x, y) = at.map(|r| (r.x, r.y)).unwrap_or((0, 0));
+                self.project_action(row, ProjectAct::More, x, y + 1);
+                return;
+            }
+            _ => {}
+        }
         let launcher = match k.code {
             KeyCode::Char(c) if !ctrl && !k.modifiers.contains(KeyModifiers::ALT) => {
                 self.quick_launchers().find(|(_, l)| l.key.starts_with(c)).map(|(i, _)| i)
@@ -621,6 +654,8 @@ impl App {
         let double =
             self.last_click.is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
         self.last_click = Some((Instant::now(), x, y));
+        // A click ends the keyboard focus on a project's quick actions.
+        self.bridge.proj_act = None;
         let Some(hit) = self.hit_at(x, y) else { return };
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
         // Right click: context menu for a tab, a pane title and a project.

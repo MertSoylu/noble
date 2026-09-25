@@ -374,7 +374,17 @@ fn hints(app: &App) -> Vec<(String, String)> {
             if app.bridge.filtering {
                 return vec![h("type", "search"), h("↑↓", "select"), h("esc", "clear")];
             }
-            vec![h("t", "terminal"), h("a", "add folder"), h("r", "rescan"), h("s", "settings"), h("?", "help")]
+            if app.bridge.proj_act.is_some() {
+                return vec![h("←→", "choose"), h("⏎", "apply"), h("esc", "back")];
+            }
+            vec![
+                h("→", "pin / more"),
+                h("t", "terminal"),
+                h("a", "add folder"),
+                h("r", "rescan"),
+                h("s", "settings"),
+                h("?", "help"),
+            ]
         }
         View::System => {
             if app.system.filtering {

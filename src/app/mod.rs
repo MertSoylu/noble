@@ -45,6 +45,8 @@ pub struct BridgeState {
     pub proj_sel: usize,
     pub filter: String,
     pub filtering: bool,
+    /// Quick-action button of the selected row focused with → (★ pin, ⋯ menu).
+    pub proj_act: Option<ProjectAct>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

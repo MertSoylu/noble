@@ -6,6 +6,10 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- The pin (★) and more (⋯) buttons now also show on the selected project, not only under the mouse. Press `→`
+  to reach them from the keyboard, `←`/`→` to choose and `⏎` to pin the project or open its menu.
+
 ## [1.1.0]
 
 ### Added

@@ -210,7 +210,7 @@ plus a few direct shortcuts. Everything can be rebound, and `?` shows the live r
 
 <br>
 
-- **Home:** `↑↓` select project · `⏎` open terminal · `c` Claude · `x` Codex · other AI CLIs by their shortcut
+- **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
   `a` add a project folder · `r` rescan / `R` refresh AI · `m` system · `s` settings · `q` quit.
 - **Settings:** `↑↓←→` move · `⏎`/space change · `←→` also cycles values · `esc` back.

@@ -299,16 +299,23 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let a = p.last_active.map(ago).unwrap_or_default();
             hud::put(buf, cx, ry, &util::pad_left(&a, ago_w as usize), st(th.dim()), ago_w);
             hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Project(row)));
-            // Quick actions on the right end while hovered. They only cover the
+            // Quick actions on the right end of the selected or hovered row. They only cover the
             // "LAST" column (and the padding beside it); the git status stays visible.
+            // → focuses them from the keyboard (`BridgeState::proj_act`).
             let hovered = app.hover.is_some_and(|(hx, hy)| hy == ry && hx >= inner.x && hx < inner.right());
-            if hovered && app.overlay.is_none() && w >= 40 {
+            if (hovered || selected) && app.overlay.is_none() && w >= 40 {
                 let acts = [(if pinned { " ★ " } else { " ☆ " }, ProjectAct::Pin), (" ⋯ ", ProjectAct::More)];
                 let total: u16 = acts.iter().map(|(l, _)| util::width(l) as u16).sum();
                 let mut ax = (x + w).saturating_sub(total).max(inner.x);
                 for (label, act) in acts {
                     let lw = util::width(label) as u16;
-                    hud::put(buf, ax, ry, label, Style::default().fg(th.fg).bg(th.raised), lw);
+                    let focused = selected && app.bridge.proj_act == Some(act);
+                    let style = if focused {
+                        Style::default().fg(th.bg).bg(th.accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(th.fg).bg(th.raised)
+                    };
+                    hud::put(buf, ax, ry, label, style, lw);
                     hits.push((Rect::new(ax, ry, lw, 1), Hit::ProjectAct(row, act)));
                     ax += lw;
                 }

@@ -1281,6 +1281,48 @@ fn project_row_actions_and_pins() {
     assert!(matches!(app.overlay, Some(Overlay::Menu(_))) && text.contains("Unpin"), "{text}");
 }
 
+/// Project row from the keyboard: the selected row shows ★ ⋯ without the mouse, → focuses
+/// them, ⏎ pins the project or opens its menu, any other key leaves them.
+#[test]
+fn project_actions_from_keyboard() {
+    use noble::app::{Overlay, ProjectAct};
+    let mut app = demo_app(110, 30);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains(" ☆  ⋯ "), "buttons visible on the selected row without hover: {text}");
+    let name = app.selected_project().unwrap().name.clone();
+    key(&mut app, KeyCode::Right);
+    assert_eq!(app.bridge.proj_act, Some(ProjectAct::Pin));
+    save("project-keys-110x30", &render(&mut app, 110, 30));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.projects[0].name, name, "pinned project moves to the top");
+    assert_eq!(app.selected_project().unwrap().name, name, "selection follows");
+    assert_eq!(app.bridge.proj_act, Some(ProjectAct::Pin), "focus stays on the star");
+    assert!(app.tabs.is_empty(), "⏎ on the star does not open a terminal");
+    // ⏎ again unpins.
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.ui_state.is_pinned(&app.selected_project().unwrap().path));
+    // → ⋯ ⏎ opens the project menu; ← goes back; esc leaves the buttons.
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Left);
+    assert_eq!(app.bridge.proj_act, Some(ProjectAct::Pin));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.bridge.proj_act, None);
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Right);
+    render(&mut app, 110, 30);
+    key(&mut app, KeyCode::Enter);
+    let text = render(&mut app, 110, 30);
+    assert!(matches!(app.overlay, Some(Overlay::Menu(_))) && text.contains("Pin to top"), "{text}");
+    // Moving the selection leaves the buttons.
+    app.overlay = None;
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.bridge.proj_act, None);
+}
+
 /// Claude Code hook: when a background session asks for permission the tab is
 /// marked, the session list on Home shows "needs you" and clicking the row opens the tab.
 #[test]
