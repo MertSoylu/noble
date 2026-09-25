@@ -6,6 +6,12 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Apps in a pane can get NOBLE's own shortcuts (`alt+p`, `alt+m` …). Prefix `i` locks the pane's keys to its
+  app (🔒 KEYS on the pane, prefix `i` again to unlock; the prefix keeps working). With `keys.passthrough =
+  "once"` (Settings → Pass shortcuts to apps) prefix + a shortcut sends just that key and prefix `i` the next
+  key. Also in the pane menu; new bindable action `passthrough`.
+
 ## [1.2.0]
 
 ### Added

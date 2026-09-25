@@ -13,6 +13,7 @@ pub enum MenuCmd {
     Split(PaneId, Dir),
     Zoom(PaneId),
     Search(PaneId),
+    Passthrough(PaneId),
     ClosePane(PaneId),
     CopyText(String),
     OpenFolder(PathBuf),
@@ -83,6 +84,11 @@ impl App {
         let Some(p) = self.panes.get(&pane) else { return };
         let cwd = p.cwd();
         let label = p.label();
+        let pass_label = match (self.pass_once(), p.passthrough) {
+            (true, _) => "Send next key to the app",
+            (false, false) => "Lock keys to the app",
+            (false, true) => "Unlock keys",
+        };
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
         use crate::keys::Action as A;
         let items = vec![
@@ -91,6 +97,7 @@ impl App {
             item("Split right", &hint(A::SplitRight), MenuCmd::Split(pane, Dir::Row)),
             item("Split down", &hint(A::SplitDown), MenuCmd::Split(pane, Dir::Col)),
             item("Zoom / restore", &hint(A::Zoom), MenuCmd::Zoom(pane)),
+            item(pass_label, &hint(A::Passthrough), MenuCmd::Passthrough(pane)),
             item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())),
             item("Open folder", "", MenuCmd::OpenFolder(cwd.clone())),
             item("Open in VS Code", "", MenuCmd::OpenCode(cwd)),
@@ -132,6 +139,11 @@ impl App {
             MenuCmd::Search(pane) => {
                 if self.focus_pane(pane) {
                     self.open_search();
+                }
+            }
+            MenuCmd::Passthrough(pane) => {
+                if self.focus_pane(pane) {
+                    self.run(crate::keys::Action::Passthrough);
                 }
             }
             MenuCmd::ClosePane(pane) => self.close_pane(pane),

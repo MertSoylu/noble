@@ -191,6 +191,11 @@ noble [--config <path>] [--no-boot]
 NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
 plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference.
 
+When an app in a pane needs one of NOBLE's own shortcuts (e.g. `alt+p`, `alt+m`), **prefix `i`** locks the
+pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
+working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there is no lock: prefix + a shortcut
+(e.g. `ctrl+a alt+p`) sends just that key, and prefix `i` sends the next key.
+
 | Direct | | Prefix, then | |
 |---|---|---|---|
 | `alt+1…9` | go to tab | `t` `c` | new tab |
@@ -204,6 +209,7 @@ plus a few direct shortcuts. Everything can be rebound, and `?` shows the live r
 | `alt+.` / `alt+,` | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
+| | | `i` | pass shortcuts to the app (lock / next key) |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
 <details>
@@ -261,6 +267,7 @@ notify_after = 10        # report background commands that ran at least this man
 
 [keys]
 prefix = "ctrl+a"
+passthrough = "lock"     # "lock": prefix i locks a pane's keys to its app · "once": prefix + shortcut sends it
 [keys.prefix_bindings]   # key after the prefix → action ("none" unbinds)
 "%" = "split_right"
 [keys.direct_bindings]   # global chords
@@ -290,7 +297,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder send_prefix
-update dismiss_update`.
+passthrough update dismiss_update`.
 
 </details>
 

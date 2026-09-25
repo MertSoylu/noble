@@ -62,6 +62,9 @@ pub struct KeysCfg {
     pub prefix_bindings: BTreeMap<String, String>,
     /// Global shortcuts without the prefix → action.
     pub direct_bindings: BTreeMap<String, String>,
+    /// How keys NOBLE uses reach the app in a pane: "lock" (prefix i toggles a per-pane lock that sends every
+    /// shortcut to the app) or "once" (prefix + a shortcut sends that key to the app, prefix i the next key).
+    pub passthrough: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -129,9 +132,17 @@ impl Default for TerminalCfg {
     }
 }
 
+/// `keys.passthrough` values; the first is the default.
+pub const PASSTHROUGH_MODES: [&str; 2] = ["lock", "once"];
+
 impl Default for KeysCfg {
     fn default() -> Self {
-        Self { prefix: "ctrl+a".into(), prefix_bindings: BTreeMap::new(), direct_bindings: BTreeMap::new() }
+        Self {
+            prefix: "ctrl+a".into(),
+            prefix_bindings: BTreeMap::new(),
+            direct_bindings: BTreeMap::new(),
+            passthrough: PASSTHROUGH_MODES[0].into(),
+        }
     }
 }
 
@@ -224,6 +235,10 @@ notify_after = 10        # report the end of a background command that took at l
 
 [keys]
 prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell
+# Sending NOBLE's own shortcuts (alt+p, alt+m …) to the app in a pane:
+# "lock" = prefix i locks the pane, every shortcut goes to the app until prefix i again
+# "once" = prefix + a shortcut (e.g. ctrl+a alt+p) sends just that key; prefix i sends the next key
+passthrough = "lock"
 # Key pressed after the prefix → action. Example:
 # [keys.prefix_bindings]
 # "%" = "split_right"

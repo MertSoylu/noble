@@ -1186,6 +1186,56 @@ fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) 
 
 /// Right-click menus: tab and pane title; the command picked from the menu runs.
 #[test]
+fn passthrough_sends_shortcuts_to_the_app() {
+    let key = |c: char, m: KeyModifiers| KeyEvent::new(KeyCode::Char(c), m);
+    let prefix = || KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let term = app.view;
+    // Default: alt+p opens the palette.
+    app.on_key(key('p', KeyModifiers::ALT));
+    assert!(app.overlay.is_some());
+    app.overlay = None;
+
+    // "lock" (default): prefix i locks the pane, alt+p / alt+m go to the app.
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(app.focused_locked());
+    let text = render(&mut app, 110, 30);
+    save("term-keys-locked-110x30", &text);
+    assert!(text.contains("KEYS") && text.contains("unlock keys"), "{text}");
+    app.on_key(key('p', KeyModifiers::ALT));
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.view, term);
+    // The prefix still works while locked; prefix i unlocks.
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(!app.focused_locked());
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+
+    // "once": prefix + a shortcut sends only that key; prefix i passes the next key.
+    use noble::app::{SettingItem, SettingKey};
+    assert_eq!(noble::config::parse(noble::config::DEFAULT_CONFIG).unwrap().keys.passthrough, "lock");
+    assert_eq!(app.setting_value(SettingKey::Passthrough), "lock (ctrl+a i)");
+    app.activate_setting(SettingItem::Setting(SettingKey::Passthrough), 1);
+    assert_eq!(app.setting_value(SettingKey::Passthrough), "once (ctrl+a + key)");
+    app.view = term;
+    app.toasts.clear();
+    app.on_key(prefix());
+    app.on_key(key('p', KeyModifiers::ALT));
+    assert!(app.overlay.is_none() && app.toasts.is_empty(), "sent to the app, no 'not bound' warning");
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(!app.focused_locked() && app.pass_next);
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, term);
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+}
+
+#[test]
 fn context_menus_on_tabs_and_panes() {
     use crossterm::event::{MouseButton, MouseEventKind};
     use noble::app::{Hit, Overlay};

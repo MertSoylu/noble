@@ -396,6 +396,11 @@ fn hints(app: &App) -> Vec<(String, String)> {
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]
         }
+        View::Term(_) if app.pass_next => vec![h("any key", "goes to the app")],
+        View::Term(_) if app.focused_locked() => {
+            let key = app.keymap.hint(Action::Passthrough).unwrap_or_default();
+            vec![(key, "unlock keys".into()), (app.keymap.prefix.to_string(), "menu".into())]
+        }
         View::Term(_) => vec![
             (app.keymap.prefix.to_string(), "menu".into()),
             h("alt+0", "home"),
@@ -428,7 +433,19 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
     let th = &app.theme;
     hud::fill(buf, area, Style::default().bg(th.raised));
     let y = area.y;
-    let right = format!("{} commands ", app.keymap.hint(Action::Palette).unwrap_or_else(|| "ctrl+a :".into()));
+    // While a pane's keys are locked the direct shortcut goes to the app: show the prefix one.
+    let palette = if matches!(app.view, View::Term(_)) && app.focused_locked() {
+        app.keymap
+            .prefix_map
+            .iter()
+            .filter(|(_, a)| **a == Action::Palette)
+            .map(|(k, _)| k.to_string())
+            .min()
+            .map(|k| format!("{} {k}", app.keymap.prefix))
+    } else {
+        app.keymap.hint(Action::Palette)
+    };
+    let right = format!("{} commands ", palette.unwrap_or_else(|| "ctrl+a :".into()));
     let right_w = util::width(&right) as u16;
     let limit = area.right().saturating_sub(right_w + 1);
     let mut x = area.x + 1;

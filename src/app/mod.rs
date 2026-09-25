@@ -337,6 +337,8 @@ pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     next_id: PaneId,
     pub prefix_armed: bool,
+    /// The next key goes straight to the focused pane (`passthrough = "once"`, prefix i).
+    pub pass_next: bool,
     pub sensors: Sensors,
     pub projects: Vec<Project>,
     pub projects_loaded: bool,
@@ -529,6 +531,7 @@ impl App {
             panes: HashMap::new(),
             next_id: 1,
             prefix_armed: false,
+            pass_next: false,
             sensors: Sensors::default(),
             projects: Vec::new(),
             projects_loaded: false,

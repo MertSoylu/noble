@@ -118,6 +118,7 @@ impl App {
                     purpose: PromptPurpose::AddRoot,
                 }));
             }
+            Action::Passthrough => self.passthrough(),
             Action::SendPrefix => {
                 let bytes = crate::term::input::encode_key(
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
@@ -154,6 +155,39 @@ impl App {
     }
 
     // ─── Sekmeler ───────────────────────────────────────────────────────────
+
+    /// `keys.passthrough = "once"` (otherwise "lock").
+    pub fn pass_once(&self) -> bool {
+        self.cfg.keys.passthrough.trim().eq_ignore_ascii_case("once")
+    }
+
+    /// Is the focused pane's key lock on (direct shortcuts go to the app)?
+    pub fn focused_locked(&self) -> bool {
+        self.focused_pane().and_then(|id| self.panes.get(&id)).is_some_and(|p| p.passthrough)
+    }
+
+    /// Sends NOBLE's shortcuts to the app in the focused pane: toggles the pane's key lock ("lock"),
+    /// or passes just the next key ("once").
+    fn passthrough(&mut self) {
+        let Some(id) = self.focused_pane().filter(|_| matches!(self.view, View::Term(_))) else {
+            self.toast(ToastLevel::Warn, "open a terminal tab to pass keys to its app");
+            return;
+        };
+        let key = self.keymap.hint(Action::Passthrough).unwrap_or_else(|| "passthrough".into());
+        if self.pass_once() {
+            self.pass_next = true;
+            self.toast(ToastLevel::Info, "the next key goes to the app");
+            return;
+        }
+        let Some(p) = self.panes.get_mut(&id) else { return };
+        p.passthrough ^= true;
+        let msg = if p.passthrough {
+            format!("keys locked to the app · {key} to unlock")
+        } else {
+            "keys unlocked · NOBLE shortcuts are back".to_string()
+        };
+        self.toast(ToastLevel::Info, msg);
+    }
 
     pub fn current_tab(&self) -> Option<&Tab> {
         match self.view {

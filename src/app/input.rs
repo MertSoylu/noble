@@ -89,6 +89,11 @@ impl App {
         if self.search.is_some() && !self.prefix_armed && self.search_key(k) {
             return;
         }
+        let in_term = matches!(self.view, View::Term(_));
+        if std::mem::take(&mut self.pass_next) && in_term {
+            self.term_key(k);
+            return;
+        }
         let chord = Chord::from_event(&k);
         if self.prefix_armed {
             self.prefix_armed = false;
@@ -97,6 +102,10 @@ impl App {
             } else if k.code != KeyCode::Esc {
                 match self.keymap.prefix_map.get(&chord).copied() {
                     Some(a) => self.run(a),
+                    // "once": prefix + a direct shortcut sends that key to the app.
+                    None if in_term && self.pass_once() && self.keymap.direct_map.contains_key(&chord) => {
+                        self.term_key(k)
+                    }
                     None => self
                         .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for help", self.keymap.prefix)),
                 }
@@ -107,7 +116,9 @@ impl App {
             self.prefix_armed = true;
             return;
         }
-        if let Some(a) = self.keymap.direct_map.get(&chord).copied() {
+        if let Some(a) = self.keymap.direct_map.get(&chord).copied()
+            && !(in_term && self.focused_locked())
+        {
             self.run(a);
             return;
         }

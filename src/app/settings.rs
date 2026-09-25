@@ -18,6 +18,7 @@ pub enum SettingKey {
     TermColors,
     Notify,
     Prefix,
+    Passthrough,
     AiEnabled,
     Claude,
     Codex,
@@ -44,7 +45,7 @@ pub const PREFIXES: [&str; 4] = ["ctrl+a", "ctrl+b", "ctrl+space", "ctrl+g"];
 pub const REFRESH_MINUTES: [u64; 4] = [1, 5, 15, 30];
 /// Quota warning thresholds (0 = off).
 pub const WARN_PERCENTS: [u8; 4] = [0, 80, 90, 95];
-pub use crate::config::LAUNCH_KEYS;
+pub use crate::config::{LAUNCH_KEYS, PASSTHROUGH_MODES};
 
 /// AI provider ids (Settings order).
 pub const PROVIDER_KEYS: [SettingKey; 6] = [
@@ -70,6 +71,7 @@ impl SettingKey {
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
+            SettingKey::Passthrough => "Pass shortcuts to apps",
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
             SettingKey::Codex => "Codex",
@@ -103,6 +105,7 @@ impl SettingKey {
             self,
             SettingKey::Shell
                 | SettingKey::Prefix
+                | SettingKey::Passthrough
                 | SettingKey::TermColors
                 | SettingKey::QuickLaunch
                 | SettingKey::AiRefresh
@@ -146,6 +149,7 @@ impl App {
                 SettingKey::Updates,
                 SettingKey::Shell,
                 SettingKey::Prefix,
+                SettingKey::Passthrough,
                 SettingKey::Restore,
                 SettingKey::CopySelect,
                 SettingKey::TermColors,
@@ -210,6 +214,10 @@ impl App {
                 }
             }
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
+            SettingKey::Passthrough => {
+                let key = self.keymap.hint(crate::keys::Action::Passthrough).unwrap_or_default();
+                if self.pass_once() { format!("once ({} + key)", self.keymap.prefix) } else { format!("lock ({key})") }
+            }
             SettingKey::AiRefresh => format!("{} min", self.cfg.ai.refresh_minutes),
             SettingKey::TermColors => self.scheme_label(&self.cfg.terminal.colors),
             SettingKey::QuickLaunch => {
@@ -375,6 +383,15 @@ impl App {
                         let cur = c.keys.prefix.clone();
                         c.keys.prefix = cycle(&PREFIXES.map(String::from), &cur, dir);
                         ("keys", "prefix", format!("\"{}\"", c.keys.prefix))
+                    }
+                    SettingKey::Passthrough => {
+                        let cur = if self.pass_once() { "once" } else { "lock" }.to_string();
+                        c.keys.passthrough = cycle(&PASSTHROUGH_MODES.map(String::from), &cur, dir);
+                        // A lock would stay on with no way to see it change back: release them all.
+                        for p in self.panes.values_mut() {
+                            p.passthrough = false;
+                        }
+                        ("keys", "passthrough", format!("\"{}\"", c.keys.passthrough))
                     }
                 };
                 self.apply_config(c);

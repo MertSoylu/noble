@@ -185,10 +185,11 @@ pub enum Action {
     PaneMenu,
     Update,
     DismissUpdate,
+    Passthrough,
 }
 
 impl Action {
-    pub const ALL: [Action; 49] = [
+    pub const ALL: [Action; 50] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -238,6 +239,7 @@ impl Action {
         Action::PaneMenu,
         Action::Update,
         Action::DismissUpdate,
+        Action::Passthrough,
     ];
 
     pub fn id(&self) -> String {
@@ -285,6 +287,7 @@ impl Action {
                     Action::PaneMenu => "pane_menu",
                     Action::Update => "update",
                     Action::DismissUpdate => "dismiss_update",
+                    Action::Passthrough => "passthrough",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -341,6 +344,7 @@ impl Action {
             Action::PaneMenu => "Pane Menu (copy path, open folder…)".into(),
             Action::Update => "Update NOBLE".into(),
             Action::DismissUpdate => "Dismiss Update Notice".into(),
+            Action::Passthrough => "Pass Keys to the App".into(),
         }
     }
 
@@ -373,7 +377,8 @@ impl Action {
             | Action::ScrollDown
             | Action::Search
             | Action::SendPrefix
-            | Action::PaneMenu => "PANE",
+            | Action::PaneMenu
+            | Action::Passthrough => "PANE",
             _ => "SYS",
         }
     }
@@ -437,6 +442,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("]"), Action::ScrollDown),
         (c("/"), Action::Search),
         (c("f"), Action::Search),
+        (c("i"), Action::Passthrough),
     ];
     for n in 1..=9u8 {
         v.push((Chord::new(KeyCode::Char((b'0' + n) as char), KeyModifiers::NONE), Action::GoTab(n)));

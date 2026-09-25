@@ -506,6 +506,8 @@ pub struct Pane {
     /// When the user last pressed Enter: to time the command
     /// (reset when the prompt comes back).
     pub command_started: Option<std::time::Instant>,
+    /// Key lock: NOBLE's direct shortcuts go to the app in this pane instead (prefix still works).
+    pub passthrough: bool,
 }
 
 pub struct SpawnSpec<'a> {
@@ -611,6 +613,7 @@ impl Pane {
             selection: None,
             pid,
             command_started: None,
+            passthrough: false,
         })
     }
 
