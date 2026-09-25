@@ -16,6 +16,9 @@ All notable changes to NOBLE are documented here. The format is based on
   Update Notice** while an update is shown. New bindable actions: `move_tab_left`, `move_tab_right`,
   `pane_menu`, `update`, `dismiss_update`.
 
+### Fixed
+- A `git status` line starting with a non-ASCII character could crash NOBLE while reading a project's changes.
+
 ## [1.1.0]
 
 ### Added

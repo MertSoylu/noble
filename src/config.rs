@@ -415,8 +415,8 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
             if in_section && !done {
                 // Append at the end of the section (before the trailing blank lines).
                 let mut tail = Vec::new();
-                while out.last().is_some_and(|l: &String| l.trim().is_empty()) {
-                    tail.push(out.pop().unwrap());
+                while let Some(l) = out.pop_if(|l| l.trim().is_empty()) {
+                    tail.push(l);
                 }
                 out.push(format!("{key} = {value_toml}"));
                 out.extend(tail);

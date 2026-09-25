@@ -204,7 +204,7 @@ pub fn parse_status(output: &str) -> GitInfo {
     for line in output.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             let (branch_part, tracking) = match header.find(" [") {
-                Some(i) => (&header[..i], &header[i + 2..header.len().saturating_sub(1).max(i + 2)]),
+                Some(i) => (&header[..i], header[i + 2..].trim_end_matches(']')),
                 None => (header, ""),
             };
             let branch = branch_part.split("...").next().unwrap_or(branch_part);
@@ -224,10 +224,14 @@ pub fn parse_status(output: &str) -> GitInfo {
             if line.starts_with("??") {
                 info.untracked += 1;
             }
-            if info.changes.len() < MAX_CHANGES && line.len() > 3 {
-                // "XY path", or "XY old -> new" for a rename.
-                let path = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]).trim_matches('"');
-                info.changes.push((line[..2].to_string(), path.to_string()));
+            // "XY path", or "XY old -> new" for a rename. `get` so that an unexpected line
+            // (not starting with two ASCII status letters) is skipped instead of panicking.
+            if info.changes.len() < MAX_CHANGES
+                && let (Some(xy), Some(rest)) = (line.get(..2), line.get(3..))
+                && !rest.is_empty()
+            {
+                let path = rest.rsplit(" -> ").next().unwrap_or(rest).trim_matches('"');
+                info.changes.push((xy.to_string(), path.to_string()));
             }
         }
     }
@@ -401,6 +405,17 @@ mod tests {
         assert_eq!(info.changes, vec![(" M".into(), "src/a.rs".into()), ("??".into(), "new.txt".into())]);
         let renamed = parse_status("## main\nR  old.rs -> new.rs\n");
         assert_eq!(renamed.changes, vec![("R ".into(), "new.rs".into())]);
+        // Unexpected lines (non-ASCII at the byte offsets) are counted but never panic.
+        let odd = parse_status(
+            "## ağaç [ahead 1]
+日本 x
+é
+",
+        );
+        assert_eq!(odd.branch.as_deref(), Some("ağaç"));
+        assert_eq!(odd.ahead, 1);
+        assert_eq!(odd.dirty, 2);
+        assert!(odd.changes.is_empty());
     }
 
     #[test]
