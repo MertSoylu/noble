@@ -685,6 +685,8 @@ fn terminal_mouse_split_and_drag() {
     });
     let div = div.expect("divider");
     let before = app.tabs[0].root.layout(app.body()).0[0].1.width;
+    let first = app.tabs[0].root.layout(app.body()).0[0].0;
+    let size_before = app.panes[&first].size;
     use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
     for (kind, x) in [
         (MouseEventKind::Down(MouseButton::Left), div.x),
@@ -698,7 +700,13 @@ fn terminal_mouse_split_and_drag() {
             row: div.y + 3,
             modifiers: KeyModifiers::NONE,
         })));
+        render(&mut app, 110, 30);
+        if matches!(kind, MouseEventKind::Drag(_)) {
+            // The shell keeps its size while dragging (no redraw storm), it is resized on release.
+            assert_eq!(app.panes[&first].size, size_before, "PTY resized during the drag");
+        }
     }
+    assert!(app.panes[&first].size.1 + 15 <= size_before.1, "PTY not resized after the drag");
     let after = app.tabs[0].root.layout(app.body()).0[0].1.width;
     assert!(after + 15 <= before, "divider did not move: {before} -> {after}");
     save("terminal-mouse-drag-110x30", &render(&mut app, 110, 30));
@@ -1296,6 +1304,29 @@ fn tabs_drag_and_rename() {
     click(&mut app, active.x + 1, active.y);
     assert!(matches!(app.overlay, Some(Overlay::Prompt(_))), "double-click renames");
     app.overlay = None;
+    app.run(Action::CloseTab);
+    app.run(Action::CloseTab);
+    // Tabs of different widths: the short one only moves once the pointer is far enough into the long
+    // one to stay over it afterwards, and it does not swap back and forth (jitter).
+    app.new_tab(std::env::temp_dir(), None, Some("a".into()));
+    app.new_tab(std::env::temp_dir(), None, Some("a-much-longer-tab".into()));
+    render(&mut app, 110, 30);
+    let short = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
+    let long = find_hit(&app, |h| *h == Hit::Tab(1)).unwrap();
+    let drag = |app: &mut App, x: u16| mouse(app, MouseEventKind::Drag(MouseButton::Left), x, short.y);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), short.x + 1, short.y);
+    drag(&mut app, long.x + 1);
+    assert_eq!(app.tabs[0].origin, "a", "too early: it would land back on the long tab");
+    drag(&mut app, long.right() - 1);
+    assert_eq!(app.tabs[1].origin, "a", "moved past the long tab");
+    // More drag events before the next frame (stale rects) change nothing.
+    drag(&mut app, long.x + 1);
+    drag(&mut app, long.right() - 1);
+    assert_eq!(app.tabs[1].origin, "a");
+    render(&mut app, 110, 30);
+    drag(&mut app, short.x + 1);
+    assert_eq!(app.tabs[0].origin, "a", "and back to the front");
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), short.x + 1, short.y);
     app.run(Action::CloseTab);
     app.run(Action::CloseTab);
 }

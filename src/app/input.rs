@@ -634,6 +634,11 @@ impl App {
             MouseEventKind::ScrollUp => self.mouse_wheel(&m, 1),
             MouseEventKind::ScrollDown => self.mouse_wheel(&m, -1),
             MouseEventKind::Moved => {
+                // Moving without a button: the release was lost (e.g. outside the window), end a divider
+                // drag so the deferred PTY resize happens.
+                if matches!(self.drag, Some(Drag::Divider { .. })) {
+                    self.drag = None;
+                }
                 let over = match self.hit_at(m.column, m.row) {
                     Some(Hit::Pane { pane, inner }) if self.overlay.is_none() => Some((pane, inner)),
                     _ => None,
@@ -855,11 +860,25 @@ impl App {
             }
             Some(Drag::Tab { index }) => {
                 let from = *index;
-                if let Some(Hit::Tab(to)) = self.hit_at(x, y)
-                    && to != from
-                {
+                // Each tab's slot on the bar: its hit rect plus the "× " after it.
+                let slot = |i: usize| {
+                    self.hits.iter().find(|(_, h)| *h == Hit::Tab(i)).map(|(r, _)| (r.x, r.right() + 2, r.y))
+                };
+                let Some((f0, f1, bar_y)) = slot(from) else { return };
+                let target = (0..self.tabs.len())
+                    .filter(|&i| i != from)
+                    .find_map(|i| slot(i).filter(|&(a, b, _)| x >= a && x < b).map(|(a, b, _)| (i, a, b)));
+                let Some((to, t0, t1)) = target else { return };
+                // Only move once the pointer would be over the dragged tab after the move; with tabs of
+                // different widths it would otherwise land on the other tab and swap back (jitter).
+                let w = f1 - f0;
+                let past = if to > from { x >= t1.saturating_sub(w) } else { x < t0 + w };
+                if past && y <= bar_y + 1 {
                     self.move_tab(from, to);
                     self.drag = Some(Drag::Tab { index: to });
+                    // The tab rects are stale until the next frame; several drag events can arrive
+                    // before it, so no further move until then.
+                    self.hits.retain(|(_, h)| !matches!(h, Hit::Tab(_) | Hit::TabClose(_)));
                 }
             }
             None => {}

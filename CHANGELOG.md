@@ -18,6 +18,9 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ### Fixed
 - A `git status` line starting with a non-ASCII character could crash NOBLE while reading a project's changes.
+- Dragging a pane divider no longer flickers or lags: the shells are resized once on release instead of at
+  every mouse step.
+- Dragging a tab over a tab of a different width no longer makes the two swap back and forth.
 
 ## [1.1.0]
 

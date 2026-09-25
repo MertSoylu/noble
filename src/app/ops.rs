@@ -385,6 +385,12 @@ impl App {
 
     /// Brings the visible tab's panes to their new size before drawing.
     pub fn sync_layout(&mut self) {
+        // While a divider is dragged the shells keep their size (the panes are drawn clipped or padded):
+        // resizing a PTY on every mouse step makes the shell redraw its screen each time, which flickers
+        // and lags. The single resize happens on release (`mouse_up` ends the drag).
+        if matches!(self.drag, Some(super::Drag::Divider { .. })) {
+            return;
+        }
         let body = self.body();
         let Some(tab) = self.current_tab() else { return };
         let rects: Vec<(PaneId, ratatui::layout::Rect)> =
