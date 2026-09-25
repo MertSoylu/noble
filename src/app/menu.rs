@@ -66,10 +66,10 @@ impl App {
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
         let mut items = vec![item("Rename…", &hint(crate::keys::Action::RenameTab), MenuCmd::RenameTab(i))];
         if i > 0 {
-            items.push(item("Move left", "drag", MenuCmd::MoveTab(i, -1)));
+            items.push(item("Move left", &hint(crate::keys::Action::MoveTabLeft), MenuCmd::MoveTab(i, -1)));
         }
         if i + 1 < self.tabs.len() {
-            items.push(item("Move right", "drag", MenuCmd::MoveTab(i, 1)));
+            items.push(item("Move right", &hint(crate::keys::Action::MoveTabRight), MenuCmd::MoveTab(i, 1)));
         }
         if let Some(cwd) = self.panes.get(&self.tabs[i].focus).map(|p| p.cwd()) {
             items.push(item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())));

@@ -10,6 +10,12 @@ All notable changes to NOBLE are documented here. The format is based on
 - The pin (★) and more (⋯) buttons now also show on the selected project, not only under the mouse. Press `→`
   to reach them from the keyboard, `←`/`→` to choose and `⏎` to pin the project or open its menu.
 
+### Added
+- Keyboard ways to do what needed the mouse: prefix `<` / `>` moves the current tab, prefix `.` opens the pane
+  menu (copy path, open folder, VS Code …), and the command palette offers **Update NOBLE** and **Dismiss
+  Update Notice** while an update is shown. New bindable actions: `move_tab_left`, `move_tab_right`,
+  `pane_menu`, `update`, `dismiss_update`.
+
 ## [1.1.0]
 
 ### Added

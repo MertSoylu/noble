@@ -1227,6 +1227,52 @@ fn context_menus_on_tabs_and_panes() {
     app.run(Action::CloseTab);
 }
 
+/// What was mouse-only has an action (and a prefix key): moving tabs, the pane menu,
+/// the update notice.
+#[test]
+fn mouse_only_things_have_actions() {
+    use noble::app::Overlay;
+    use noble::keys::Chord;
+    let mut app = demo_app(110, 30);
+    for name in ["one", "two", "three"] {
+        app.new_tab(std::env::temp_dir(), None, Some(name.into()));
+    }
+    let names = |app: &App| (0..app.tabs.len()).map(|i| app.tab_title(i)).collect::<Vec<_>>();
+    // The last tab is open; move it to the front with the prefix keys.
+    let prefix = app.keymap.prefix;
+    let press = |app: &mut App, c: char| {
+        app.on_key(KeyEvent::new(prefix.code, prefix.mods));
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    };
+    assert_eq!(app.view, View::Term(2));
+    press(&mut app, '<');
+    press(&mut app, '<');
+    press(&mut app, '<'); // already first: nothing happens
+    assert_eq!(names(&app), ["three", "one", "two"]);
+    assert_eq!(app.view, View::Term(0), "the view follows the moved tab");
+    press(&mut app, '>');
+    assert_eq!(names(&app), ["one", "three", "two"]);
+    // Pane menu under the pane title, as with a right-click.
+    render(&mut app, 110, 30);
+    press(&mut app, '.');
+    let text = render(&mut app, 110, 30);
+    save("menu-pane-key-110x30", &text);
+    assert!(matches!(app.overlay, Some(Overlay::Menu(_))) && text.contains("Copy path"), "{text}");
+    app.overlay = None;
+    assert_eq!(app.keymap.prefix_map.get(&Chord::parse(".").unwrap()), Some(&Action::PaneMenu));
+    // Update actions are in the palette only while a newer version is known.
+    let titles = |app: &App| app.palette_items().into_iter().map(|i| i.title).collect::<Vec<_>>();
+    assert!(!titles(&app).iter().any(|t| t == "Update NOBLE"));
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    assert!(titles(&app).iter().any(|t| t == "Update NOBLE"));
+    app.run(Action::DismissUpdate);
+    assert!(app.update_notice().is_none());
+    assert!(!titles(&app).iter().any(|t| t == "Dismiss Update Notice"));
+    for _ in 0..3 {
+        app.run(Action::CloseTab);
+    }
+}
+
 /// Reordering tabs by dragging and renaming them with a double click.
 #[test]
 fn tabs_drag_and_rename() {

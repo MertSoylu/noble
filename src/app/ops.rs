@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{App, Confirm, ConfirmAction, Overlay, Prompt, PromptPurpose, ToastLevel, View};
+use super::{App, Confirm, ConfirmAction, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
 use crate::keys::Action;
 use crate::sensors::SensorRequest;
 use crate::store::{SavedTab, Workspace};
@@ -127,6 +127,29 @@ impl App {
                     p.write(&bytes);
                 }
             }
+            Action::MoveTabLeft | Action::MoveTabRight => {
+                if let View::Term(i) = self.view {
+                    let to = if action == Action::MoveTabLeft { i.checked_sub(1) } else { Some(i + 1) };
+                    if let Some(to) = to {
+                        self.move_tab(i, to);
+                    }
+                }
+            }
+            Action::PaneMenu => {
+                if let Some(pane) = self.focused_pane() {
+                    // The same menu as a right-click on the pane title, opened below the title.
+                    let at =
+                        self.hits.iter().find(|(_, h)| *h == Hit::PaneTitle(pane)).map(|(r, _)| (r.x + 1, r.y + 1));
+                    let (x, y) = at.unwrap_or((0, 1));
+                    self.open_pane_menu(pane, x, y);
+                }
+            }
+            Action::Update => {
+                if self.update_notice().is_some() {
+                    self.start_update();
+                }
+            }
+            Action::DismissUpdate => self.dismiss_update(),
         }
     }
 

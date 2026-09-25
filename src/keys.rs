@@ -180,10 +180,15 @@ pub enum Action {
     Search,
     AddProjectFolder,
     SendPrefix,
+    MoveTabLeft,
+    MoveTabRight,
+    PaneMenu,
+    Update,
+    DismissUpdate,
 }
 
 impl Action {
-    pub const ALL: [Action; 44] = [
+    pub const ALL: [Action; 49] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -228,6 +233,11 @@ impl Action {
         Action::Search,
         Action::AddProjectFolder,
         Action::SendPrefix,
+        Action::MoveTabLeft,
+        Action::MoveTabRight,
+        Action::PaneMenu,
+        Action::Update,
+        Action::DismissUpdate,
     ];
 
     pub fn id(&self) -> String {
@@ -270,6 +280,11 @@ impl Action {
                     Action::Search => "search",
                     Action::AddProjectFolder => "add_project_folder",
                     Action::SendPrefix => "send_prefix",
+                    Action::MoveTabLeft => "move_tab_left",
+                    Action::MoveTabRight => "move_tab_right",
+                    Action::PaneMenu => "pane_menu",
+                    Action::Update => "update",
+                    Action::DismissUpdate => "dismiss_update",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -321,6 +336,11 @@ impl Action {
             Action::Search => "Search Scrollback".into(),
             Action::AddProjectFolder => "Add Project Folder…".into(),
             Action::SendPrefix => "Send Prefix Key to Shell".into(),
+            Action::MoveTabLeft => "Move Tab Left".into(),
+            Action::MoveTabRight => "Move Tab Right".into(),
+            Action::PaneMenu => "Pane Menu (copy path, open folder…)".into(),
+            Action::Update => "Update NOBLE".into(),
+            Action::DismissUpdate => "Dismiss Update Notice".into(),
         }
     }
 
@@ -333,7 +353,9 @@ impl Action {
             | Action::NextTab
             | Action::PrevTab
             | Action::GoTab(_)
-            | Action::RenameTab => "TAB",
+            | Action::RenameTab
+            | Action::MoveTabLeft
+            | Action::MoveTabRight => "TAB",
             Action::SplitRight
             | Action::SplitDown
             | Action::ClosePane
@@ -350,7 +372,8 @@ impl Action {
             | Action::ScrollUp
             | Action::ScrollDown
             | Action::Search
-            | Action::SendPrefix => "PANE",
+            | Action::SendPrefix
+            | Action::PaneMenu => "PANE",
             _ => "SYS",
         }
     }
@@ -404,6 +427,9 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("q"), Action::Quit),
         (c("r"), Action::ReloadConfig),
         (c(","), Action::RenameTab),
+        (c("<"), Action::MoveTabLeft),
+        (c(">"), Action::MoveTabRight),
+        (c("."), Action::PaneMenu),
         (c("w"), Action::SaveWorkspace),
         (c("pgup"), Action::ScrollUp),
         (c("["), Action::ScrollUp),

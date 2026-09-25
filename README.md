@@ -203,6 +203,7 @@ plus a few direct shortcuts. Everything can be rebound, and `?` shows the live r
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
 | `alt+.` / `alt+,` | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
+| | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
 <details>
@@ -285,10 +286,11 @@ show = true              # false hides it from Home (Settings → Quick launch)
 # (oh-my-pi), freebuff f, grok z (Grok Build), cursor-agent u, command-code d, cline l, kilo n.
 ```
 
-**Actions** for bindings: `bridge system new_tab close_tab next_tab prev_tab tab_1…tab_9 split_right split_down
-close_pane zoom focus_left focus_right focus_up focus_down focus_next resize_left resize_right resize_up
-resize_down palette help quit reload_config open_config cycle_theme refresh_ai rescan_projects rename_tab
-save_workspace scroll_up scroll_down search send_prefix`.
+**Actions** for bindings: `bridge system settings new_tab close_tab next_tab prev_tab tab_1…tab_9 move_tab_left
+move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
+resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
+refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder send_prefix
+update dismiss_update`.
 
 </details>
 

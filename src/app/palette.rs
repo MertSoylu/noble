@@ -83,7 +83,11 @@ impl App {
                 | Action::RenameTab
                 | Action::ScrollUp
                 | Action::ScrollDown
-                | Action::SendPrefix => in_term,
+                | Action::SendPrefix
+                | Action::MoveTabLeft
+                | Action::MoveTabRight
+                | Action::PaneMenu => in_term,
+                Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
                 Action::Palette => false,
                 _ => true,
             };
