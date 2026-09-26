@@ -9,7 +9,7 @@ mod search;
 mod settings;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -385,6 +385,10 @@ pub struct App {
     pub restored_tabs: usize,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
+    /// Whether a restored pane's directory can be used; runs on a helper thread with a timeout
+    /// (`ops::DIR_PROBE_TIMEOUT`). Replaceable so tests can simulate a hanging network share.
+    #[doc(hidden)]
+    pub dir_probe: fn(&Path) -> bool,
     pub operator: String,
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
@@ -499,13 +503,19 @@ impl App {
         for w in app.keymap.warnings.clone() {
             app.toast(ToastLevel::Warn, w);
         }
-        if app.cfg.terminal.restore_session
-            && let Some(ws) = crate::store::load_session(&app.paths.data_file(app.session_file()))
-        {
-            app.restored_tabs = app.open_workspace(&ws);
-            app.view = View::Bridge;
-        }
+        app.restore_last_session();
         app
+    }
+
+    /// Startup: reopens the tabs of the last session (`session.json`, `session-dev.json` for
+    /// `noble-dev`) when `restore_session` is on.
+    pub fn restore_last_session(&mut self) {
+        if self.cfg.terminal.restore_session
+            && let Some(ws) = crate::store::load_session(&self.paths.data_file(self.session_file()))
+        {
+            self.restored_tabs = self.open_workspace(&ws);
+            self.view = View::Bridge;
+        }
     }
 
     fn build(
@@ -572,6 +582,7 @@ impl App {
             started: Instant::now(),
             restored_tabs: 0,
             dev: false,
+            dir_probe: |p| p.is_dir(),
             operator,
             git_requested: HashMap::new(),
             search: None,

@@ -1,5 +1,6 @@
 //! Small, pure helpers: formatting, fuzzy matching, PATH lookup.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -198,6 +199,34 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     Some(score)
 }
 
+/// Which of `dirs` pass `probe` within `timeout`; all are probed in parallel. A stat on a
+/// network share that stopped answering (SMB/UNC on Windows, NFS/SMB/sshfs mounts on Linux)
+/// can block for tens of seconds; a probe that does not answer in time counts as unusable and
+/// its thread is left to finish on its own.
+pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashSet<PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for dir in dirs {
+        let (thread_tx, thread_dir) = (tx.clone(), dir.clone());
+        let spawned = std::thread::Builder::new().name("dir-probe".into()).spawn(move || {
+            let ok = probe(&thread_dir);
+            let _ = thread_tx.send((thread_dir, ok));
+        });
+        if spawned.is_err() {
+            // No thread to spare: probe inline rather than drop the directory.
+            let _ = tx.send((dir.clone(), probe(dir)));
+        }
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + timeout;
+    let mut usable = HashSet::new();
+    while let Ok((dir, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        if ok {
+            usable.insert(dir);
+        }
+    }
+    usable
+}
+
 /// Is there a graphical session to open files, folders and URLs in? Always on
 /// Windows and macOS; elsewhere an X11/Wayland display and `xdg-open` are needed
 /// (not the case over plain SSH or on a text console).
@@ -312,6 +341,22 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usable_dirs_gives_up_on_a_hanging_probe() {
+        fn probe(p: &Path) -> bool {
+            if p.ends_with("hangs") {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            !p.ends_with("missing")
+        }
+        let dirs: Vec<PathBuf> = ["ok", "missing", "hangs"].iter().map(PathBuf::from).collect();
+        let started = std::time::Instant::now();
+        let usable = usable_dirs(&dirs, Duration::from_millis(300), probe);
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
+        assert_eq!(usable, HashSet::from([PathBuf::from("ok")]));
+        assert!(usable_dirs(&[], Duration::from_secs(5), probe).is_empty());
+    }
 
     #[test]
     fn base64_round_trip() {

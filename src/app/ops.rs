@@ -1,6 +1,8 @@
 //! Actions: tab/pane operations, launchers, session and workspaces.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{App, Confirm, ConfirmAction, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
 use crate::keys::Action;
@@ -10,6 +12,10 @@ use crate::term::Tab;
 use crate::term::layout::{Dir, Direction, MIN_H, MIN_W, Node, PaneId, SavedNode, neighbor};
 use crate::term::pane::{Pane, SpawnSpec};
 use crate::theme;
+
+/// How long restoring a session or workspace waits for the saved directories to answer; a
+/// network share that stopped responding would otherwise hold up startup.
+pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -259,6 +265,17 @@ impl App {
     }
 
     fn spawn_pane(&mut self, cwd: &Path, command: Option<&str>, rows: u16, cols: u16) -> Option<PaneId> {
+        match self.try_spawn_pane(cwd, command, rows, cols) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                self.toast(ToastLevel::Error, e);
+                None
+            }
+        }
+    }
+
+    /// Like `spawn_pane`, but the caller decides what a failure means.
+    fn try_spawn_pane(&mut self, cwd: &Path, command: Option<&str>, rows: u16, cols: u16) -> Result<PaneId, String> {
         let id = self.next_id;
         self.next_id += 1;
         let spec = SpawnSpec {
@@ -269,16 +286,9 @@ impl App {
             cols,
             scrollback: self.cfg.terminal.scrollback.clamp(100, 100_000),
         };
-        match Pane::spawn(id, spec, self.tx.clone()) {
-            Ok(p) => {
-                self.panes.insert(id, p);
-                Some(id)
-            }
-            Err(e) => {
-                self.toast(ToastLevel::Error, format!("{e:#}"));
-                None
-            }
-        }
+        let pane = Pane::spawn(id, spec, self.tx.clone()).map_err(|e| format!("{e:#}"))?;
+        self.panes.insert(id, pane);
+        Ok(id)
     }
 
     /// Opens a new terminal tab; if `command` is given the shell runs it first.
@@ -684,16 +694,35 @@ impl App {
         }
     }
 
-    fn build_node(&mut self, n: &SavedNode, rows: u16, cols: u16) -> Option<Node> {
+    /// Rebuilds a saved layout. A pane whose directory is gone, did not answer the probe in time
+    /// (`usable`) or cannot be entered starts in home instead; such directories go to `unavailable`.
+    fn build_node(
+        &mut self,
+        n: &SavedNode,
+        size: (u16, u16),
+        usable: &HashSet<PathBuf>,
+        unavailable: &mut Vec<String>,
+    ) -> Option<Node> {
+        let (rows, cols) = size;
         match n {
             SavedNode::Leaf { cwd } => {
                 let path = PathBuf::from(cwd);
-                let path = if path.is_dir() { path } else { home() };
-                self.spawn_pane(&path, None, rows, cols).map(Node::Leaf)
+                // A failed spawn in the saved directory (e.g. no permission to enter it) is
+                // retried in home, on Windows and Unix alike.
+                if usable.contains(&path)
+                    && let Ok(id) = self.try_spawn_pane(&path, None, rows, cols)
+                {
+                    return Some(Node::Leaf(id));
+                }
+                let id = self.spawn_pane(&home(), None, rows, cols)?;
+                if !unavailable.contains(cwd) {
+                    unavailable.push(cwd.clone());
+                }
+                Some(Node::Leaf(id))
             }
             SavedNode::Split { dir, ratio, a, b } => {
-                let a = self.build_node(a, rows, cols);
-                let b = self.build_node(b, rows, cols);
+                let a = self.build_node(a, size, usable, unavailable);
+                let b = self.build_node(b, size, usable, unavailable);
                 match (a, b) {
                     (Some(a), Some(b)) => {
                         Some(Node::Split { dir: *dir, ratio: *ratio, a: Box::new(a), b: Box::new(b) })
@@ -707,10 +736,27 @@ impl App {
 
     /// Reopens the saved tabs; returns how many were opened.
     pub fn open_workspace(&mut self, ws: &Workspace) -> usize {
-        let (rows, cols) = self.fresh_size();
+        fn saved_dirs(n: &SavedNode, out: &mut Vec<PathBuf>) {
+            match n {
+                SavedNode::Leaf { cwd } => out.push(PathBuf::from(cwd)),
+                SavedNode::Split { a, b, .. } => {
+                    saved_dirs(a, out);
+                    saved_dirs(b, out);
+                }
+            }
+        }
+        let mut dirs = Vec::new();
+        for t in &ws.tabs {
+            saved_dirs(&t.layout, &mut dirs);
+        }
+        dirs.sort();
+        dirs.dedup();
+        let usable = crate::util::usable_dirs(&dirs, DIR_PROBE_TIMEOUT, self.dir_probe);
+        let mut unavailable = Vec::new();
+        let size = self.fresh_size();
         let mut opened = 0;
         for t in &ws.tabs {
-            if let Some(root) = self.build_node(&t.layout, rows, cols) {
+            if let Some(root) = self.build_node(&t.layout, size, &usable, &mut unavailable) {
                 let leaves = root.leaves();
                 let focus = leaves.get(t.focus).copied().unwrap_or(leaves[0]);
                 let mut tab = Tab::new(focus, t.origin.clone());
@@ -719,6 +765,9 @@ impl App {
                 self.tabs.push(tab);
                 opened += 1;
             }
+        }
+        if !unavailable.is_empty() {
+            self.toast(ToastLevel::Warn, format!("not available, opened in home: {}", unavailable.join(", ")));
         }
         opened
     }

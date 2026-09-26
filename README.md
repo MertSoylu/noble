@@ -104,8 +104,9 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 <td valign="top">
 
 **💾 Sessions and workspaces**<br>
-Tabs, splits and each shell's folder are restored on the next launch. Save named workspaces and reopen them
-from the palette.
+Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
+(a dead network share) opens in home instead. Quick-launch tabs come back as a shell in their folder, without
+running the command again. Save named workspaces and reopen them from the palette.
 
 </td>
 </tr>

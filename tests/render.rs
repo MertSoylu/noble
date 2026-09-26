@@ -1880,3 +1880,224 @@ fn update_notice_bottom_right() {
     app.handle(AppEvent::Update(Ok("99.0.1".into())));
     assert_eq!(app.update_notice(), Some("99.0.1"));
 }
+
+// ─── Session save / restore ───────────────────────────────────────────────
+
+/// A headless app whose data directory (`session.json` / `session-dev.json`) is `data`.
+fn session_app(data: &std::path::Path, dev: bool, cfg: Config) -> App {
+    let mut app = App::headless(cfg, (110, 30));
+    app.paths.data = data.to_path_buf();
+    app.dev = dev;
+    app
+}
+
+fn session_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.general.animations = false;
+    cfg
+}
+
+fn session_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("noble-session-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn session_file(dev: bool) -> &'static str {
+    if dev { "session-dev.json" } else { "session.json" }
+}
+
+fn one_tab(origin: &str, layout: SavedNode) -> Workspace {
+    Workspace {
+        name: "last session".into(),
+        saved_at: 0,
+        tabs: vec![SavedTab { name: None, origin: origin.into(), layout, focus: 0 }],
+    }
+}
+
+fn leaf(dir: &std::path::Path) -> SavedNode {
+    SavedNode::Leaf { cwd: dir.display().to_string() }
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+}
+
+fn start_cwds(app: &App, tab: usize) -> Vec<PathBuf> {
+    app.tabs[tab].panes().iter().map(|id| app.panes[id].start_cwd.clone()).collect()
+}
+
+fn toast_texts(app: &App) -> Vec<String> {
+    app.toasts.iter().map(|t| t.text.clone()).collect()
+}
+
+/// Known bug, kept as a reproduction: several NOBLE windows share one session file and each
+/// overwrites it on exit, so only the tabs of the window closed last come back. Un-ignore once
+/// a merge strategy is chosen.
+#[test]
+#[ignore = "known bug: the last window to close overwrites the other windows' session"]
+fn every_window_keeps_its_tabs_in_the_session() {
+    for dev in [false, true] {
+        let data = session_dir(if dev { "multi-dev" } else { "multi" });
+        let mut a = session_app(&data, dev, session_cfg());
+        a.new_tab(data.clone(), None, Some("window-a".into()));
+        let mut b = session_app(&data, dev, session_cfg());
+        b.new_tab(data.clone(), None, Some("window-b".into()));
+        a.shutdown();
+        b.shutdown();
+        let ws = noble::store::load_session(&data.join(session_file(dev))).expect("session written");
+        let origins: Vec<&str> = ws.tabs.iter().map(|t| t.origin.as_str()).collect();
+        let _ = std::fs::remove_dir_all(&data);
+        assert!(
+            origins.contains(&"window-a") && origins.contains(&"window-b"),
+            "{}: tabs of a window were lost: {origins:?}",
+            session_file(dev)
+        );
+    }
+}
+
+/// A pane whose directory was deleted comes back in the home directory; the rest of the
+/// layout is kept. Checked through the startup path for both session files.
+#[test]
+fn restore_falls_back_to_home_for_a_missing_dir() {
+    for dev in [false, true] {
+        let data = session_dir(if dev { "missing-dev" } else { "missing" });
+        let gone = data.join("deleted-project");
+        let layout = SavedNode::Split {
+            dir: noble::term::layout::Dir::Row,
+            ratio: 0.5,
+            a: Box::new(leaf(&gone)),
+            b: Box::new(leaf(&data)),
+        };
+        noble::store::save_session(&data.join(session_file(dev)), &one_tab("restored", layout));
+        // The other build's file must not be read.
+        noble::store::save_session(&data.join(session_file(!dev)), &one_tab("other-build", leaf(&data)));
+        let mut app = session_app(&data, dev, session_cfg());
+        app.restore_last_session();
+        assert_eq!(app.restored_tabs, 1, "{}", session_file(dev));
+        assert_eq!(app.tabs[0].origin, "restored");
+        let cwds = start_cwds(&app, 0);
+        assert_eq!(cwds.len(), 2, "split lost: {cwds:?}");
+        assert!(same_dir(&cwds[0], &dirs::home_dir().unwrap()), "{cwds:?}");
+        assert!(same_dir(&cwds[1], &data), "{cwds:?}");
+        assert!(toast_texts(&app).iter().any(|t| t.contains("deleted-project")), "{:?}", toast_texts(&app));
+        app.run(Action::CloseTab);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// A directory that exists but cannot be entered (no permission) must not drop the tab: the
+/// pane starts in the home directory instead.
+#[test]
+fn restore_survives_an_inaccessible_dir() {
+    // Windows: denying access needs an ACL edit (no std API for it); the fallback it would hit
+    // (a failed spawn is retried in home) is shared by both platforms and checked here on Unix.
+    if cfg!(windows) {
+        return;
+    }
+    let data = session_dir("locked");
+    let locked = data.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    set_mode(&locked, 0o000);
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions do not apply, nothing to check.
+        set_mode(&locked, 0o755);
+        let _ = std::fs::remove_dir_all(&data);
+        return;
+    }
+    let mut app = session_app(&data, false, session_cfg());
+    let opened = app.open_workspace(&one_tab("locked", leaf(&locked)));
+    set_mode(&locked, 0o755);
+    let _ = std::fs::remove_dir_all(&data);
+    assert_eq!(opened, 1, "tab dropped; toasts: {:?}", toast_texts(&app));
+    assert!(same_dir(&start_cwds(&app, 0)[0], &dirs::home_dir().unwrap()));
+}
+
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &std::path::Path, _: u32) {}
+
+/// A network share that stopped answering (a stat that blocks for tens of seconds) must not
+/// hold up startup: the probe gives up after a short timeout and the pane starts in home.
+#[test]
+fn restore_does_not_wait_for_a_hanging_share() {
+    let data = session_dir("share");
+    let share = data.join("dead-share");
+    std::fs::create_dir_all(&share).unwrap();
+    let mut app = session_app(&data, false, session_cfg());
+    app.dir_probe = |p| {
+        if p.ends_with("dead-share") {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        p.is_dir()
+    };
+    let started = std::time::Instant::now();
+    let opened = app.open_workspace(&one_tab("share", leaf(&share)));
+    let took = started.elapsed();
+    let _ = std::fs::remove_dir_all(&data);
+    assert!(took < Duration::from_secs(10), "restore blocked for {took:?}");
+    assert_eq!(opened, 1);
+    assert!(same_dir(&start_cwds(&app, 0)[0], &dirs::home_dir().unwrap()), "{:?}", start_cwds(&app, 0));
+    assert!(toast_texts(&app).iter().any(|t| t.contains("dead-share")), "{:?}", toast_texts(&app));
+}
+
+/// Current behavior, locked in: a quick-launch tab (e.g. an AI agent) is saved as its directory
+/// and title only. On restore it opens a plain shell in that directory with the same
+/// "<dir> · <launcher>" title; the launcher command is not stored and does not run again.
+#[test]
+fn restored_launch_tab_does_not_rerun_its_command() {
+    let data = session_dir("launch");
+    let project = data.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut cfg = session_cfg();
+    cfg.launchers = vec![noble::config::Launcher {
+        key: "x".into(),
+        name: "Agent".into(),
+        command: "echo relaunch-marker".into(),
+        show: true,
+    }];
+    fn has_marker(app: &App) -> bool {
+        let id = app.tabs[0].focus;
+        app.panes[&id].all_lines().0.iter().any(|l| l.contains("relaunch-marker"))
+    }
+    fn wait(app: &mut App, what: &dyn Fn(&App) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !what(app) && std::time::Instant::now() < deadline {
+            app.pump();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        what(app)
+    }
+
+    let mut app = session_app(&data, false, cfg.clone());
+    app.launch(0, Some(project.clone()));
+    assert_eq!(app.tabs.len(), 1, "launcher did not open a tab");
+    assert!(wait(&mut app, &has_marker), "the launcher command never ran:\n{}", render(&mut app, 110, 30));
+    let origin = app.tabs[0].origin.clone();
+    assert!(origin.ends_with(" · Agent"), "{origin}");
+    app.shutdown();
+    let text = std::fs::read_to_string(data.join("session.json")).unwrap();
+    assert!(!text.contains("relaunch-marker"), "the command is not part of the session: {text}");
+
+    let mut again = session_app(&data, false, cfg);
+    again.restore_last_session();
+    assert_eq!(again.restored_tabs, 1);
+    assert_eq!(again.tabs[0].origin, origin, "title kept");
+    assert!(same_dir(&start_cwds(&again, 0)[0], &project));
+    // Wait for the first prompt, then give a re-run command time to print.
+    let id = again.tabs[0].focus;
+    assert!(wait(&mut again, &|a: &App| a.panes[&id].parser().callbacks().cwd.is_some()), "no prompt");
+    std::thread::sleep(Duration::from_millis(1000));
+    again.pump();
+    let screen = render(&mut again, 110, 30);
+    let rerun = has_marker(&again);
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&data);
+    assert!(!rerun, "the launcher command ran again on restore:\n{screen}");
+}

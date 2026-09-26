@@ -22,6 +22,11 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- Restoring a session or workspace no longer drops a tab whose folder cannot be entered, and no longer waits
+  on a network share that stopped answering (Windows and Linux): after 2 seconds the pane opens in the home
+  folder. A notice names the folders that were not available (also for deleted ones).
+
 ## [1.2.0]
 
 ### Added
