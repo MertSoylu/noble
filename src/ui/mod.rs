@@ -8,7 +8,7 @@ mod settings;
 mod system;
 mod terminal;
 
-pub use settings::{THEME_CARD_W, settings_width};
+pub use settings::settings_width;
 pub use terminal::pane_outline;
 
 use ratatui::Frame;
@@ -46,6 +46,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             None
         }
         View::Settings => {
+            settings::sync_scroll(app, body);
             settings::draw(buf, body, app, &mut hits);
             None
         }
@@ -144,15 +145,8 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
             // Draggable edge: highlight the shared frame line (not the title text on it).
             hud::tint_frame(buf, hud::Outline::closed(*rect), th.accent);
         }
-        Hit::Setting(i) if *i < crate::theme::THEMES.len() => {
-            // The theme card keeps its own colors; a marker is placed on the left edge.
-            if let Some(c) = buf.cell_mut((rect.x, rect.y)) {
-                c.set_symbol("▌");
-                c.set_fg(th.accent);
-            }
-        }
-        Hit::TermScheme(_) => {
-            // The scheme chip also keeps its own colors.
+        Hit::TermScheme(_) | Hit::ThemeOption(_) => {
+            // A selector row keeps its own colors; a marker is placed on the left edge.
             if let Some(c) = buf.cell_mut((rect.x, rect.y)) {
                 c.set_symbol("▌");
                 c.set_fg(th.accent);
@@ -387,7 +381,7 @@ fn hints(app: &App) -> Vec<(String, String)> {
             }
             vec![h("↑↓", "select"), h("c m p n", "sort"), h("/", "filter"), h("K", "end task"), h("esc", "home")]
         }
-        View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "home")],
+        View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]
         }

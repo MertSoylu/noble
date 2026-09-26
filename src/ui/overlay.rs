@@ -22,6 +22,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Welcome { prefix } => welcome(buf, area, app, *prefix, hits),
         Overlay::Palette(st) => palette(buf, area, app, st, hits),
         Overlay::Schemes(p) => schemes(buf, area, app, p, hits),
+        Overlay::Themes(p) => themes(buf, area, app, p, hits),
         Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
         Overlay::Help { scroll } => help(buf, area, app, *scroll, hits),
@@ -215,6 +216,65 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(
         let end = hud::button(buf, x, by, "⏎", "Start", th, true);
         hits.push((Rect::new(start, by, end - start, 1), Hit::WelcomeDone));
         hud::put_right(buf, x + iw, by, "←→ prefix · esc skip", th.dim());
+    }
+}
+
+/// Theme selector: each row is drawn in its theme's own colors (name, accents, status
+/// colors and a line sample); the whole UI previews the theme under the cursor.
+fn themes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::ThemePicker, hits: &mut Vec<(Rect, Hit)>) {
+    use crate::theme::THEMES;
+    let th = &app.theme;
+    let w = 56.min(area.width.saturating_sub(2));
+    let h = (THEMES.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    hits.push((rect, Hit::Inert));
+    let inner = boxed(buf, rect, "THEME", th, th.accent);
+    if inner.height < 3 || inner.width < 16 {
+        return;
+    }
+    let x = inner.x + 1;
+    let iw = inner.width.saturating_sub(2);
+    let list_h = inner.height.saturating_sub(2) as usize;
+    let offset = (p.selected + 1).saturating_sub(list_h);
+    for (row, (i, t)) in THEMES.iter().enumerate().skip(offset).take(list_h).enumerate() {
+        let y = inner.y + row as u16;
+        let line = Rect::new(x, y, iw, 1);
+        let bg = Style::default().bg(t.bg);
+        hud::fill(buf, line, bg.fg(t.fg));
+        let selected = i == p.selected;
+        let marker = if selected { "▌" } else { " " };
+        let mut cx = hud::put(buf, x, y, marker, bg.fg(th.accent), 1);
+        let mut st = bg.fg(t.fg);
+        if selected {
+            st = st.add_modifier(Modifier::BOLD);
+        }
+        let name_w = 18.min(iw.saturating_sub(4));
+        cx = hud::put(buf, cx, y, &util::pad_right(t.label, name_w as usize), st, name_w);
+        // Accents and status colors, then the frame line and dim text as they look in the theme.
+        if cx + 24 <= line.right() {
+            for c in [t.accent, t.accent2, t.ok, t.warn, t.crit] {
+                cx = hud::put(buf, cx, y, "██", bg.fg(c), 2);
+                cx = hud::put(buf, cx, y, " ", bg, 1);
+            }
+            cx = hud::put(buf, cx, y, "── ", bg.fg(t.line), 3);
+            hud::put(buf, cx, y, "dim", bg.fg(t.dim), 3);
+        }
+        if t.name == p.original {
+            hud::put(buf, line.right() - 2, y, "✓", bg.fg(t.ok), 1);
+        }
+        hits.push((line, Hit::ThemeOption(i)));
+    }
+    let by = inner.bottom() - 1;
+    let count = format!("{}/{}", p.selected + 1, THEMES.len());
+    let counter_w = if THEMES.len() > list_h { util::width(&count) as u16 + 2 } else { 0 };
+    if counter_w > 0 {
+        hud::put(buf, x, by, &count, th.dim(), iw);
+    }
+    let hint = ["↑↓ preview · ⏎ apply · esc cancel", "⏎ apply · esc cancel", "⏎ apply"]
+        .into_iter()
+        .find(|h| util::width(h) as u16 + counter_w <= iw);
+    if let Some(hint) = hint {
+        hud::put_right(buf, x + iw, by, hint, th.dim());
     }
 }
 

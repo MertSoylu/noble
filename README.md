@@ -226,7 +226,8 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
   `a` add a project folder · `r` rescan / `R` refresh AI · `m` system · `s` settings · `q` quit.
-- **Settings:** `↑↓←→` move · `⏎`/space change · `←→` also cycles values · `esc` back.
+- **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
+  the wheel scrolls the page · `esc` back to the page you came from.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
   `K` or `del` terminate (asks first) · `esc` back.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
@@ -335,7 +336,7 @@ fill up before it resets.
 <br>
 
 Without help NOBLE can only guess whether a Claude session is busy. Turn on
-**Settings → AI usage → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
+**Settings → Terminal → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
 (a backup is written next to it; turning the setting off removes exactly those entries). Claude then runs
 `noble hook <event>` on prompt / stop / notification / session start / session end. The command writes one
 small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing. The Home screen then

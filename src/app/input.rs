@@ -12,6 +12,7 @@ use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
 use crate::term::layout::{PaneId, ratio_from_point};
 use crate::term::pane::Selection;
+use crate::theme::THEMES;
 
 /// Ctrl held as a shortcut modifier. A character typed with AltGr (Ctrl+Alt on
 /// Windows: '@', '\', '{' …) is text, not a shortcut.
@@ -235,6 +236,35 @@ impl App {
                     _ => {}
                 }
                 true
+            }
+            Overlay::Themes(p) => {
+                let n = THEMES.len();
+                let to = match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(p.selected.saturating_sub(1)),
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => Some((p.selected + 1).min(n - 1)),
+                    KeyCode::PageUp => Some(p.selected.saturating_sub(8)),
+                    KeyCode::PageDown => Some((p.selected + 8).min(n - 1)),
+                    KeyCode::Home => Some(0),
+                    KeyCode::End => Some(n - 1),
+                    _ => None,
+                };
+                match k.code {
+                    KeyCode::Esc => {
+                        self.cancel_picker(&ov);
+                        false
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        self.set_theme(THEMES[p.selected].name);
+                        false
+                    }
+                    _ => {
+                        if let Some(to) = to {
+                            p.selected = to;
+                            self.preview_theme(to);
+                        }
+                        true
+                    }
+                }
             }
             Overlay::Schemes(p) => {
                 let n = self.scheme_options().len();
@@ -691,11 +721,16 @@ impl App {
         }
         match hit {
             Hit::Backdrop if matches!(self.overlay, Some(Overlay::Welcome { .. })) => {}
-            Hit::Backdrop => self.overlay = None,
+            Hit::Backdrop => {
+                // Clicking outside a selector cancels it, preview included.
+                if let Some(ov) = self.overlay.take() {
+                    self.cancel_picker(&ov);
+                }
+            }
             Hit::Inert => {}
             Hit::TabBridge => self.view = View::Bridge,
             Hit::TabSystem => self.view = View::System,
-            Hit::TabSettings => self.view = View::Settings,
+            Hit::TabSettings => self.open_settings(),
             Hit::Tab(i) => {
                 if double && self.view == View::Term(i) {
                     self.rename_tab_prompt(i);
@@ -778,6 +813,12 @@ impl App {
                 self.settings_sel = i;
                 self.open_scheme_picker();
             }
+            Hit::Setting(i)
+                if self.settings_items().get(i) == Some(&super::SettingItem::Setting(super::SettingKey::Theme)) =>
+            {
+                self.settings_sel = i;
+                self.open_theme_picker();
+            }
             Hit::Setting(i) => {
                 self.settings_sel = i;
                 if let Some(item) = self.settings_items().get(i).copied() {
@@ -792,6 +833,12 @@ impl App {
                     *selected = row;
                 }
                 self.change_launcher(i, matches!(hit, Hit::LaunchKey(_)), 1);
+            }
+            Hit::ThemeOption(i) => {
+                if let Some(t) = THEMES.get(i) {
+                    self.overlay = None;
+                    self.set_theme(t.name);
+                }
             }
             Hit::TermScheme(i) => {
                 if let Some(name) = self.scheme_options().get(i).cloned() {
@@ -922,6 +969,12 @@ impl App {
             *scroll = if dir > 0 { scroll.saturating_sub(3) } else { scroll.saturating_add(3) };
             return;
         }
+        if let Some(Overlay::Themes(p)) = &mut self.overlay {
+            p.selected = if dir > 0 { p.selected.saturating_sub(1) } else { (p.selected + 1).min(THEMES.len() - 1) };
+            let sel = p.selected;
+            self.preview_theme(sel);
+            return;
+        }
         if let Some(Overlay::Schemes(p)) = &mut self.overlay {
             let n = self.term_schemes.len() + 1;
             p.selected = if dir > 0 { p.selected.saturating_sub(1) } else { (p.selected + 1).min(n - 1) };
@@ -938,6 +991,13 @@ impl App {
             return;
         }
         if self.overlay.is_some() {
+            return;
+        }
+        if self.view == View::Settings {
+            // The wheel scrolls the page (clamped when drawn); the selection stays where it is.
+            self.settings_scroll =
+                if dir > 0 { self.settings_scroll.saturating_sub(3) } else { self.settings_scroll.saturating_add(3) };
+            self.settings_follow = false;
             return;
         }
         match self.hit_at(m.column, m.row) {
@@ -963,7 +1023,6 @@ impl App {
                 }
             }
             Some(Hit::Project(_)) => self.move_project(-dir),
-            Some(Hit::Setting(_)) => self.move_setting(-dir),
             Some(Hit::Proc(_)) => self.move_proc(-dir * 3),
             _ => {}
         }

@@ -617,12 +617,47 @@ fn settings_screen_mouse_and_keys() {
     for (w, h) in [(160, 45), (110, 30), (76, 24), (56, 18), (30, 8)] {
         save(&format!("settings-{w}x{h}"), &render(&mut app, w, h));
     }
+    // The theme row opens the selector; the whole UI previews the theme under the cursor.
+    let theme_item = noble::app::SettingItem::Setting(noble::app::SettingKey::Theme);
+    let theme_row = app.settings_items().iter().position(|i| *i == theme_item).unwrap();
+    render(&mut app, 110, 30);
+    let row = find_hit(&app, |h| *h == Hit::Setting(theme_row)).expect("theme row");
+    click(&mut app, row.x + 3, row.y);
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Themes(_))));
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("Tokyo Night") && text.contains("Gruvbox"), "{text}");
-    // Clicking a theme card applies the theme.
+    save("theme-picker-110x30", &text);
+    assert!(text.contains("THEME") && text.contains("Tokyo Night") && text.contains("Gruvbox"), "{text}");
+    for (w, h) in SIZES {
+        save(&format!("theme-picker-{w}x{h}"), &render(&mut app, w, h));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.theme.name, noble::theme::THEMES[1].name, "preview");
+    assert_eq!(app.cfg.general.theme, "amber", "a preview is not saved");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.theme.name, "amber", "esc reverts");
+    // Clicking outside cancels too.
+    render(&mut app, 110, 30);
+    click(&mut app, row.x + 3, row.y);
+    app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    render(&mut app, 110, 30);
+    click(&mut app, 0, 29);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.theme.name, "amber", "backdrop click reverts");
+    // Clicking a row applies it.
+    render(&mut app, 110, 30);
+    click(&mut app, row.x + 3, row.y);
+    render(&mut app, 110, 30);
     let idx = noble::theme::THEMES.iter().position(|t| t.name == "nord").unwrap();
-    let card = find_hit(&app, |h| *h == Hit::Setting(idx)).expect("nord card");
-    click(&mut app, card.x + 2, card.y);
+    let nord = find_hit(&app, |h| *h == Hit::ThemeOption(idx)).expect("nord row");
+    click(&mut app, nord.x + 2, nord.y);
+    assert!(app.overlay.is_none());
+    assert_eq!((app.theme.name, app.cfg.general.theme.as_str()), ("nord", "nord"));
+    // ←→ on the row step through the themes.
+    app.settings_sel = theme_row;
+    app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let next = noble::theme::THEMES[idx + 1].name;
+    assert_eq!((app.theme.name, app.cfg.general.theme.as_str()), (next, next));
+    app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(app.theme.name, "nord");
     // Keyboard: move down and flip a toggle.
     let before = app.cfg.general.clock_24h;
@@ -651,7 +686,7 @@ fn settings_screen_mouse_and_keys() {
     app.hooks_installed = false;
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, View::Bridge);
-    // Keyboard navigation in the theme grid does not overflow.
+    // Keyboard navigation does not overflow at either end.
     app.run(Action::Settings);
     app.settings_sel = 0;
     for code in [
@@ -671,6 +706,89 @@ fn settings_screen_mouse_and_keys() {
     ] {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
         render(&mut app, 110, 30);
+    }
+}
+
+/// Settings: esc returns to the page it was opened from, ← / → turn a switch off / on, the wheel
+/// scrolls the page (with "more" markers) and a key brings the selection back; rows that only
+/// matter under a switched-off setting are dimmed.
+#[test]
+fn settings_back_arrows_scroll_and_dim() {
+    use crossterm::event::MouseEventKind;
+    use noble::app::{SettingItem, SettingKey};
+    let key = |app: &mut App, code: KeyCode| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("back".into()));
+    app.run(Action::NewTab);
+    app.go_tab(1);
+    app.run(Action::Settings);
+    // The tab it came from moved meanwhile: esc still finds it.
+    app.move_tab(0, 1);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, View::Term(1));
+    app.run(Action::System);
+    app.run(Action::Settings);
+    key(&mut app, KeyCode::Char('q'));
+    assert_eq!(app.view, View::System);
+    app.run(Action::CloseTab);
+    app.run(Action::CloseTab);
+
+    app.run(Action::Settings);
+    let items = app.settings_items();
+    let pos = |k: SettingKey| items.iter().position(|i| *i == SettingItem::Setting(k)).unwrap();
+    // ← off, → on; pressing again changes nothing.
+    app.settings_sel = pos(SettingKey::Clock24);
+    assert!(app.cfg.general.clock_24h);
+    key(&mut app, KeyCode::Right);
+    assert!(app.cfg.general.clock_24h);
+    key(&mut app, KeyCode::Left);
+    key(&mut app, KeyCode::Left);
+    assert!(!app.cfg.general.clock_24h);
+    key(&mut app, KeyCode::Right);
+    assert!(app.cfg.general.clock_24h);
+    // A choice steps; a popup row ignores ←→.
+    app.settings_sel = pos(SettingKey::AiRefresh);
+    key(&mut app, KeyCode::Right);
+    assert_eq!(app.cfg.ai.refresh_minutes, 15);
+    key(&mut app, KeyCode::Left);
+    assert_eq!(app.cfg.ai.refresh_minutes, 5);
+    app.settings_sel = pos(SettingKey::QuickLaunch);
+    key(&mut app, KeyCode::Right);
+    assert!(app.overlay.is_none());
+
+    // The wheel scrolls the page, the selection stays; a key scrolls back to it.
+    app.settings_sel = 0;
+    key(&mut app, KeyCode::Home);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Theme") && text.contains("↓ more") && !text.contains("↑ more"), "{text}");
+    for _ in 0..20 {
+        mouse(&mut app, MouseEventKind::ScrollDown, 50, 15);
+    }
+    let text = render(&mut app, 110, 30);
+    save("settings-scrolled-110x30", &text);
+    assert!(text.contains("↑ more") && !text.contains("↓ more"), "{text}");
+    assert!(text.contains("Edit config file") && !text.contains("Transparent background"), "{text}");
+    assert_eq!(app.settings_sel, 0);
+    key(&mut app, KeyCode::Right);
+    assert!(render(&mut app, 110, 30).contains("Transparent background"));
+
+    // Show AI usage off: the provider rows are dimmed.
+    let mut cfg = app.cfg.clone();
+    cfg.ai.enabled = false;
+    app.apply_config(cfg);
+    app.settings_sel = pos(SettingKey::AiEnabled);
+    let mut term = Terminal::new(TestBackend::new(110, 60)).unwrap();
+    app.size = (110, 60);
+    term.draw(|f| noble::ui::draw(f, &mut app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let row = find_hit(&app, |h| *h == noble::app::Hit::Setting(pos(SettingKey::AiRefresh))).expect("refresh row");
+    let label = (row.x..row.right()).find(|x| buf[(*x, row.y)].symbol() == "R").unwrap();
+    assert_eq!(buf[(label, row.y)].fg, app.theme.dim, "dependent row not dimmed");
+    let row = find_hit(&app, |h| *h == noble::app::Hit::Setting(pos(SettingKey::Shell))).expect("shell row");
+    let label = (row.x..row.right()).find(|x| buf[(*x, row.y)].symbol() == "S").unwrap();
+    assert_ne!(buf[(label, row.y)].fg, app.theme.dim);
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
     }
 }
 
@@ -855,7 +973,7 @@ fn page_slide_transition() {
     app.tick();
     assert!(app.slide.is_none());
     let done = render(&mut app, 110, 30);
-    assert!(done.contains("Tokyo Night"));
+    assert!(done.contains("Transparent background"));
     assert_ne!(mid, done);
     // The way back slides in the opposite direction.
     app.run(Action::Bridge);

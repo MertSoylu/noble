@@ -41,7 +41,7 @@ impl App {
         match action {
             Action::Bridge => self.view = View::Bridge,
             Action::System => self.view = View::System,
-            Action::Settings => self.view = View::Settings,
+            Action::Settings => self.open_settings(),
             Action::NewTab => {
                 let cwd = self.current_cwd().unwrap_or_else(home);
                 self.new_tab(cwd, None, None);
@@ -566,14 +566,7 @@ impl App {
     pub fn set_theme(&mut self, name: &str) {
         self.cfg.general.theme = name.to_string();
         self.theme = crate::theme::Theme::by_name(name, self.cfg.general.transparent);
-        if self.services.is_some()
-            && let Ok(text) = std::fs::read_to_string(&self.paths.config)
-        {
-            let updated = crate::config::set_value(&text, "general", "theme", &format!("\"{name}\""));
-            if std::fs::write(&self.paths.config, updated).is_ok() {
-                self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
-            }
-        }
+        self.persist("general", "theme", &format!("\"{name}\""));
         self.toast(ToastLevel::Ok, format!("theme · {}", self.theme.label));
     }
 

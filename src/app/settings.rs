@@ -7,6 +7,7 @@ use crate::theme::THEMES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingKey {
+    Theme,
     Transparent,
     Boot,
     Animations,
@@ -37,7 +38,6 @@ pub enum SettingKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingItem {
-    Theme(usize),
     Setting(SettingKey),
     OpenConfig,
     ReloadConfig,
@@ -62,6 +62,7 @@ pub const PROVIDER_KEYS: [SettingKey; 6] = [
 impl SettingKey {
     pub fn label(&self) -> &'static str {
         match self {
+            SettingKey::Theme => "Theme",
             SettingKey::Transparent => "Transparent background",
             SettingKey::Boot => "Boot animation",
             SettingKey::Animations => "Animations",
@@ -104,10 +105,22 @@ impl SettingKey {
         }
     }
 
+    /// The on/off setting this one only matters under: drawn indented, and dimmed while it is off.
+    pub fn parent(&self) -> Option<SettingKey> {
+        let under_ai = PROVIDER_KEYS.contains(self) || matches!(self, SettingKey::AiRefresh | SettingKey::AiWarn);
+        under_ai.then_some(SettingKey::AiEnabled)
+    }
+
+    /// Set in a popup window (⏎); ←→ do not change it.
+    pub fn opens_popup(&self) -> bool {
+        matches!(self, SettingKey::QuickLaunch)
+    }
+
     pub fn is_toggle(&self) -> bool {
         !matches!(
             self,
-            SettingKey::Shell
+            SettingKey::Theme
+                | SettingKey::Shell
                 | SettingKey::Prefix
                 | SettingKey::Passthrough
                 | SettingKey::TermColors
@@ -140,44 +153,58 @@ fn cycle<T: PartialEq + Clone>(options: &[T], current: &T, dir: i32) -> T {
 }
 
 impl App {
+    /// The page's sections and their items, in display order (the drawing uses the same list).
+    pub fn settings_sections(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
+        use SettingKey::*;
+        let rows = |keys: &[SettingKey]| keys.iter().map(|k| SettingItem::Setting(*k)).collect::<Vec<_>>();
+        let mut terminal = rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, Notify, QuickLaunch]);
+        if self.claude_hooks_available() {
+            terminal.push(SettingItem::Setting(ClaudeHooks));
+        }
+        let mut ai = rows(&[AiEnabled]);
+        // A provider that is not installed is hidden anyway; toggling it is meaningless.
+        ai.extend(rows(&PROVIDER_KEYS).into_iter().filter(|i| match i {
+            SettingItem::Setting(k) => self.ai_installed.contains(&k.provider_id()),
+            _ => false,
+        }));
+        ai.extend(rows(&[AiRefresh, AiWarn]));
+        let mut general = rows(&[Updates]);
+        general.extend([SettingItem::OpenConfig, SettingItem::ReloadConfig]);
+        vec![
+            ("Display", rows(&[Theme, Transparent, Boot, Animations, Clock24, Seconds])),
+            ("Terminal", terminal),
+            ("Keys", rows(&[Prefix, Passthrough, ShellFirst])),
+            ("AI usage", ai),
+            ("General", general),
+        ]
+    }
+
     /// Selectable items on the page, in display order.
     pub fn settings_items(&self) -> Vec<SettingItem> {
-        let mut v: Vec<SettingItem> = (0..THEMES.len()).map(SettingItem::Theme).collect();
-        v.extend(
-            [
-                SettingKey::Transparent,
-                SettingKey::Boot,
-                SettingKey::Animations,
-                SettingKey::Clock24,
-                SettingKey::Seconds,
-                SettingKey::Updates,
-                SettingKey::Shell,
-                SettingKey::Prefix,
-                SettingKey::Passthrough,
-                SettingKey::ShellFirst,
-                SettingKey::Restore,
-                SettingKey::CopySelect,
-                SettingKey::TabFollowsCwd,
-                SettingKey::TermColors,
-                SettingKey::Notify,
-                SettingKey::QuickLaunch,
-                SettingKey::AiEnabled,
-            ]
-            .map(SettingItem::Setting),
-        );
-        // A provider that is not installed is hidden anyway; toggling it is meaningless.
-        v.extend(
-            PROVIDER_KEYS
-                .iter()
-                .filter(|k| self.ai_installed.contains(&k.provider_id()))
-                .map(|k| SettingItem::Setting(*k)),
-        );
-        v.extend([SettingKey::AiRefresh, SettingKey::AiWarn].map(SettingItem::Setting));
-        if self.claude_hooks_available() {
-            v.push(SettingItem::Setting(SettingKey::ClaudeHooks));
+        self.settings_sections().into_iter().flat_map(|(_, items)| items).collect()
+    }
+
+    /// Opens Settings; esc goes back to the page it was opened from.
+    pub fn open_settings(&mut self) {
+        if self.view != View::Settings {
+            let pane = match self.view {
+                View::Term(i) => self.tabs.get(i).map(|t| t.focus),
+                _ => None,
+            };
+            self.settings_back = Some((self.view, pane));
         }
-        v.extend([SettingItem::OpenConfig, SettingItem::ReloadConfig]);
-        v
+        self.view = View::Settings;
+        self.settings_follow = true;
+    }
+
+    /// Leaves Settings for the page it was opened from (a tab is found again by its pane,
+    /// since tabs may have moved or closed meanwhile), Home otherwise.
+    pub fn close_settings(&mut self) {
+        self.view = match self.settings_back.take() {
+            Some((View::System, _)) => View::System,
+            Some((View::Term(_), Some(pane))) => self.tab_of(pane).map_or(View::Bridge, View::Term),
+            _ => View::Bridge,
+        };
     }
 
     pub fn setting_on(&self, key: SettingKey) -> bool {
@@ -221,6 +248,7 @@ impl App {
                     shell.to_string()
                 }
             }
+            SettingKey::Theme => self.theme.label.to_string(),
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
             SettingKey::Passthrough => {
                 let key = self.keymap.hint(crate::keys::Action::Passthrough).unwrap_or_default();
@@ -246,7 +274,7 @@ impl App {
     }
 
     /// Updates a single value in the config file, preserving its comments.
-    fn persist(&mut self, section: &str, key: &str, value_toml: &str) {
+    pub(super) fn persist(&mut self, section: &str, key: &str, value_toml: &str) {
         if self.services.is_none() {
             return;
         }
@@ -255,8 +283,17 @@ impl App {
             Err(e) => return self.toast(ToastLevel::Error, e),
         };
         let updated = crate::config::set_value(&text, section, key, value_toml);
-        if std::fs::write(&self.paths.config, updated).is_ok() {
-            self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
+        self.write_config(updated);
+    }
+
+    /// Writes the edited config; a failure is reported (the change then only lasts this session).
+    fn write_config(&mut self, text: String) {
+        match std::fs::write(&self.paths.config, text) {
+            Ok(()) => self.cfg_mtime = crate::config::mtime_of(&self.paths.config),
+            Err(e) => {
+                let path = crate::util::tilde(&self.paths.config);
+                self.toast(ToastLevel::Error, format!("could not save {path}: {e}"));
+            }
         }
     }
 
@@ -270,9 +307,7 @@ impl App {
             Err(e) => return self.toast(ToastLevel::Error, e),
         };
         let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
-        if std::fs::write(&self.paths.config, updated).is_ok() {
-            self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
-        }
+        self.write_config(updated);
     }
 
     /// Shows/hides a launcher or flips its shortcut to the next key
@@ -301,11 +336,6 @@ impl App {
         match item {
             SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
             SettingItem::Setting(SettingKey::ClaudeHooks) => self.toggle_claude_hooks(),
-            SettingItem::Theme(i) => {
-                if let Some(t) = THEMES.get(i) {
-                    self.set_theme(t.name);
-                }
-            }
             SettingItem::OpenConfig => self.run(crate::keys::Action::OpenConfig),
             SettingItem::ReloadConfig => self.reload_config(true),
             SettingItem::Setting(key) => {
@@ -313,6 +343,11 @@ impl App {
                 let (section, name, value) = match key {
                     // Set from the popup (handled above).
                     SettingKey::QuickLaunch => return self.open_launcher_picker(),
+                    // ←→ step through the themes; `set_theme` saves it.
+                    SettingKey::Theme => {
+                        let names: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
+                        return self.set_theme(cycle(&names, &self.theme.name, dir));
+                    }
                     SettingKey::Transparent => {
                         c.general.transparent ^= true;
                         ("general", "transparent", c.general.transparent.to_string())
@@ -555,6 +590,31 @@ impl App {
         self.overlay = Some(super::Overlay::Schemes(super::SchemePicker { selected, original: current }));
     }
 
+    /// Opens the theme selector on the theme in use.
+    pub fn open_theme_picker(&mut self) {
+        let original = self.theme.name.to_string();
+        let selected = THEMES.iter().position(|t| t.name == original).unwrap_or(0);
+        self.overlay = Some(super::Overlay::Themes(super::ThemePicker { selected, original }));
+    }
+
+    /// Shows the whole UI in a theme while navigating the selector, without saving it.
+    pub(super) fn preview_theme(&mut self, idx: usize) {
+        if let Some(t) = THEMES.get(idx) {
+            self.theme = crate::theme::Theme::by_name(t.name, self.cfg.general.transparent);
+        }
+    }
+
+    /// Closes a selector without choosing: its preview is undone.
+    pub(super) fn cancel_picker(&mut self, ov: &super::Overlay) {
+        match ov {
+            super::Overlay::Themes(p) => {
+                self.theme = crate::theme::Theme::by_name(&p.original, self.cfg.general.transparent)
+            }
+            super::Overlay::Schemes(p) => self.cfg.terminal.colors = p.original.clone(),
+            _ => {}
+        }
+    }
+
     /// Previews a scheme while navigating the selector, without saving it.
     pub(super) fn preview_scheme(&mut self, idx: usize) {
         if let Some(name) = self.scheme_options().get(idx) {
@@ -579,61 +639,38 @@ impl App {
         self.settings_sel = (self.settings_sel as i32 + delta).clamp(0, n - 1) as usize;
     }
 
-    /// Column count of the theme grid (same calculation as the drawing).
-    pub fn theme_columns(&self) -> usize {
-        let inner = crate::ui::settings_width(self.size.0).saturating_sub(6);
-        (inner as usize / crate::ui::THEME_CARD_W as usize).clamp(1, 6)
-    }
-
     pub(super) fn settings_key(&mut self, k: KeyEvent) {
+        // The page scrolls back to the selection (the wheel may have moved it away).
+        self.settings_follow = true;
         let items = self.settings_items();
         let sel = self.settings_sel.min(items.len() - 1);
-        let cols = self.theme_columns() as i32;
-        let in_grid = matches!(items[sel], SettingItem::Theme(_));
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if in_grid {
-                    if sel >= cols as usize {
-                        self.settings_sel = sel - cols as usize;
+            KeyCode::Up | KeyCode::Char('k') => self.move_setting(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_setting(1),
+            // ← turns a switch off and → on (pressing again changes nothing); a choice steps back/forward.
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
+                let right = matches!(k.code, KeyCode::Right | KeyCode::Char('l'));
+                if let SettingItem::Setting(key) = items[sel] {
+                    if key.opens_popup() {
+                    } else if key.is_toggle() {
+                        if self.setting_on(key) != right {
+                            self.activate_setting(items[sel], 1);
+                        }
+                    } else {
+                        self.activate_setting(items[sel], if right { 1 } else { -1 });
                     }
-                } else if let Some(SettingItem::Theme(_)) = items.get(sel.saturating_sub(1)) {
-                    // Wrap to the start of the grid's last row.
-                    let n = THEMES.len();
-                    self.settings_sel = n - 1 - (n - 1) % cols as usize;
-                } else {
-                    self.move_setting(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if in_grid {
-                    let n = THEMES.len();
-                    let next = sel + cols as usize;
-                    self.settings_sel = if next < n { next } else { n };
-                } else {
-                    self.move_setting(1);
-                }
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if in_grid {
-                    self.move_setting(-1);
-                } else if let SettingItem::Setting(key) = items[sel] {
-                    self.activate_setting(items[sel], if key.is_toggle() { 1 } else { -1 });
-                }
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if in_grid {
-                    self.move_setting(1);
-                } else if let SettingItem::Setting(_) = items[sel] {
-                    self.activate_setting(items[sel], 1);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::TermColors) => {
                 self.open_scheme_picker()
             }
+            KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::Theme) => {
+                self.open_theme_picker()
+            }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_setting(items[sel], 1),
             KeyCode::Home => self.settings_sel = 0,
             KeyCode::End => self.settings_sel = items.len() - 1,
-            KeyCode::Esc | KeyCode::Char('q') => self.view = View::Bridge,
+            KeyCode::Esc | KeyCode::Char('q') => self.close_settings(),
             KeyCode::Char('?') => self.run(crate::keys::Action::Help),
             KeyCode::Char(':' | 'p') => self.run(crate::keys::Action::Palette),
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),

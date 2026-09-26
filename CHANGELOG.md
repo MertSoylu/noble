@@ -7,6 +7,14 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- Settings: sections are regrouped (Display, Terminal, Keys, AI usage, General; the Claude Code hooks moved to
+  Terminal). `←` / `→` turn a switch off / on instead of flipping it, `esc` returns to the page Settings was
+  opened from, and the wheel scrolls the page with "more" markers when it does not fit. Rows that only matter
+  under "Show AI usage" are indented and dimmed while it is off, Quick launch shows that it opens a popup,
+  and the duplicate key hint inside the page is gone.
+- Settings: the theme grid is now a single Theme row. `⏎` or a click opens a theme selector where the whole
+  UI previews the theme under the cursor (`esc` or a click outside reverts), `←` / `→` on the row step
+  through the themes directly.
 - A terminal tab is named after the folder its focused pane is in now, so a tab opened with prefix `t` (which
   starts in the current folder) gets a new name after a `cd`. Settings → Tab name follows the folder
   (`terminal.tab_follows_cwd = false`) keeps the name of the folder the tab was opened in.
@@ -14,6 +22,12 @@ All notable changes to NOBLE are documented here. The format is based on
   lines only run between split panes. Split panes share one border line instead of drawing two side by
   side; the lines meet in `┬ ├ ┤ ┴ ┼`. The focused pane's frame keeps its color all around. A horizontal
   border runs along the lower pane's title row: drag the line to resize, the title and buttons still click.
+
+### Fixed
+- Closing the terminal color selector by clicking outside it no longer leaves the previewed scheme on the open
+  terminals.
+- A setting that cannot be written to `config.toml` now shows an error instead of silently lasting only
+  until NOBLE closes.
 
 ## [1.3.0]
 

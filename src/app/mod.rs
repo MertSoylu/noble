@@ -121,6 +121,13 @@ pub struct SchemePicker {
     pub original: String,
 }
 
+/// Theme selector: the whole UI previews the theme under the cursor, esc reverts.
+pub struct ThemePicker {
+    pub selected: usize,
+    /// The theme in use when the selector opened (`THEMES` name).
+    pub original: String,
+}
+
 pub enum Overlay {
     /// First launch: short intro and prefix key choice (`PREFIXES` order).
     Welcome {
@@ -128,6 +135,7 @@ pub enum Overlay {
     },
     Palette(PaletteState),
     Schemes(SchemePicker),
+    Themes(ThemePicker),
     /// Quick launch settings: `selected`, the row in the installed launchers list.
     Launchers {
         selected: usize,
@@ -187,6 +195,8 @@ pub enum Hit {
     Setting(usize),
     /// Row in the scheme selector (`scheme_options` order).
     TermScheme(usize),
+    /// Row in the theme selector (`THEMES` order).
+    ThemeOption(usize),
     /// Quick launch popup: show/hide and shortcut (`launchers` order).
     LaunchShow(usize),
     LaunchKey(usize),
@@ -358,6 +368,11 @@ pub struct App {
     pub bridge: BridgeState,
     pub system: SystemState,
     pub settings_sel: usize,
+    /// First line of the Settings page on screen; `settings_follow` scrolls it to the selection.
+    pub settings_scroll: usize,
+    pub settings_follow: bool,
+    /// The page Settings was opened from (and its tab's focused pane), for esc.
+    pub settings_back: Option<(View, Option<crate::term::layout::PaneId>)>,
     pub overlay: Option<Overlay>,
     pub toasts: Vec<Toast>,
     pub boot: Option<Boot>,
@@ -576,6 +591,9 @@ impl App {
             bridge: BridgeState::default(),
             system: SystemState::default(),
             settings_sel: 0,
+            settings_scroll: 0,
+            settings_follow: true,
+            settings_back: None,
             overlay: None,
             toasts: Vec::new(),
             boot,
