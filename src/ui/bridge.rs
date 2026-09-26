@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::hud;
-use crate::ai::{Presence, ProviderState, Status};
+use crate::ai::{ProviderState, Status};
 use crate::app::{AgentState, App, Hit, ProjectAct};
 use crate::projects::GitInfo;
 use crate::theme::Theme;
@@ -518,10 +518,7 @@ fn git_summary(git: Option<&GitInfo>, th: &Theme) -> Vec<(String, ratatui::style
 
 /// Providers with a live session (credentials found).
 fn signed_in(app: &App) -> Vec<&ProviderState> {
-    if !app.cfg.ai.enabled {
-        return Vec::new();
-    }
-    app.ai.iter().filter(|p| p.presence == Presence::Ready && p.status != Status::SignIn).collect()
+    app.quota_providers().collect()
 }
 
 /// State marker and color: ◆ needs attention, ○ your turn, ● running.

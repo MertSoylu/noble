@@ -742,6 +742,14 @@ impl App {
         false
     }
 
+    /// Providers on Home's quota panel: signed in, and only while the panel is enabled.
+    pub fn quota_providers(&self) -> impl Iterator<Item = &crate::ai::ProviderState> {
+        let enabled = self.cfg.ai.enabled;
+        self.ai.iter().filter(move |p| {
+            enabled && p.presence == crate::ai::Presence::Ready && p.status != crate::ai::Status::SignIn
+        })
+    }
+
     /// When the screen changes even with no events: clock, animation,
     /// loading indicator, notification timeout… `None`: never changes.
     /// The main loop draws only when that moment arrives (or an event fires).
@@ -763,10 +771,11 @@ impl App {
         }
         let loading = match self.view {
             View::Bridge => {
+                // Only providers on the quota panel spin: a configured but missing CLI stays
+                // Pending forever and would otherwise redraw Home ~8 times a second.
                 !self.projects_loaded
                     || self
-                        .ai
-                        .iter()
+                        .quota_providers()
                         .any(|p| matches!(p.status, crate::ai::Status::Loading | crate::ai::Status::Pending))
                     || self.sensors.last.is_none()
             }

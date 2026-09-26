@@ -54,6 +54,8 @@ All notable changes to NOBLE are documented here. The format is based on
 - Restoring a session or workspace no longer drops a tab whose folder cannot be entered, and no longer waits
   on a network share that stopped answering (Windows and Linux): after 2 seconds the pane opens in the home
   folder. A notice names the folders that were not available (also for deleted ones).
+- Home no longer redraws about 8 times a second forever when a configured AI CLI is not installed or signed
+  out: the loading spinner only runs for providers shown on the quota panel (idle Home CPU about 70% lower).
 
 ## [1.2.0]
 
