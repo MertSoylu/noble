@@ -108,7 +108,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (error = toast, never a crash); `store.rs` stores
   recent dirs, the session, workspaces, AI usage history and UI state (`state.json`: welcome seen, pinned
-  projects) with atomic JSON writes.
+  projects) with atomic JSON writes. The session file is shared by every window of a build: each window
+  (`store::instance_id`) merges only its own tabs in (`session_save`, under a `.lock` file), and only the first
+  window of a run restores (`session_begin`, liveness via pid + process start time).
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
   (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running

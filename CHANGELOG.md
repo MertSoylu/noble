@@ -21,6 +21,11 @@ All notable changes to NOBLE are documented here. The format is based on
   command started at the prompt or a quick-launch command.
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
+- Several NOBLE windows no longer overwrite each other's session: each window merges its own tabs into the
+  session file on exit, and the next launch restores the tabs of every window. Only the first window of a run
+  restores; a window opened while another one is running starts empty instead of opening the same tabs again.
+- Restored quick-launch tabs (and quick-launch panes in saved workspaces) run their command again, e.g. the AI
+  agent starts in its folder. Session files from older versions still load.
 
 ### Fixed
 - Link detection: URLs inside `( )` or `[ ]`, markdown links `[text](url)`, URLs glued to text
@@ -46,6 +51,9 @@ All notable changes to NOBLE are documented here. The format is based on
   drawn in a tiny window. Editing `config.toml` from Settings keeps a ` #` inside quoted values and headers
   with a trailing comment intact, and a config file that is not valid UTF-8 is reported instead of being
   silently replaced. Corrupt data files with extreme timestamps no longer panic.
+- Restoring a session or workspace no longer drops a tab whose folder cannot be entered, and no longer waits
+  on a network share that stopped answering (Windows and Linux): after 2 seconds the pane opens in the home
+  folder. A notice names the folders that were not available (also for deleted ones).
 
 ## [1.2.0]
 
