@@ -22,6 +22,11 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- Link detection: URLs inside `( )` or `[ ]`, markdown links `[text](url)`, URLs glued to text
+  (`url=https://…`), short URLs such as `http://a` and paths with combining accents are now recognised
+  correctly.
+
 ## [1.2.0]
 
 ### Added
