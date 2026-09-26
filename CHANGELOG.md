@@ -23,6 +23,9 @@ All notable changes to NOBLE are documented here. The format is based on
   every line could run as a command.
 
 ### Fixed
+- Link detection: URLs inside `( )` or `[ ]`, markdown links `[text](url)`, URLs glued to text
+  (`url=https://…`), short URLs such as `http://a` and paths with combining accents are now recognised
+  correctly.
 - `noble update` never leaves you without a working binary: the new binary is staged next to the old one
   and swapped with renames, an empty binary in the archive is refused, and a leftover `*.old` that cannot
   be deleted no longer blocks the update.
