@@ -29,6 +29,8 @@ All notable changes to NOBLE are documented here. The format is based on
 - `noble update` never leaves you without a working binary: the new binary is staged next to the old one
   and swapped with renames, an empty binary in the archive is refused, and a leftover `*.old` that cannot
   be deleted no longer blocks the update.
+- Better readability: One Dark's dim text and Solarized Light's dim text and accent are slightly darker to
+  reach WCAG contrast (3:1 for dim text, 4.5:1 for the accent).
 
 ## [1.2.0]
 
