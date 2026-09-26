@@ -727,6 +727,14 @@ impl Pane {
         p.callbacks().cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| self.start_cwd.clone())
     }
 
+    /// Name of the folder the shell last reported (or started in). No file system access, so
+    /// it is cheap enough for every frame (the tab strip); a root has no name and shows whole.
+    pub fn dir_name(&self) -> String {
+        let p = lock(&self.parser);
+        let path = p.callbacks().cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| self.start_cwd.clone());
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+    }
+
     /// Clipboard content the app requested via OSC 52 (once).
     pub fn take_clipboard(&self) -> Option<String> {
         lock(&self.parser).callbacks_mut().clipboard.take()

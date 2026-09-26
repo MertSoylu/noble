@@ -78,24 +78,70 @@ pub fn set_bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, color: Color) {
     }
 }
 
+/// A frame's rectangle and which of its sides are left open (no vertical line: the content
+/// reaches the edge, the top and bottom lines run through). Terminal panes leave the window's
+/// outer sides open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    pub rect: Rect,
+    pub open_left: bool,
+    pub open_right: bool,
+}
+
+impl Outline {
+    pub fn closed(rect: Rect) -> Self {
+        Outline { rect, open_left: false, open_right: false }
+    }
+
+    /// The area inside the lines.
+    pub fn inner(&self) -> Rect {
+        let (l, r) = (u16::from(!self.open_left), u16::from(!self.open_right));
+        let a = self.rect;
+        Rect::new(a.x + l, a.y + 1, a.width.saturating_sub(l + r), a.height.saturating_sub(2))
+    }
+
+    /// The cells the lines are drawn on.
+    fn border(&self) -> Vec<(u16, u16)> {
+        let a = self.rect;
+        if a.width == 0 || a.height == 0 {
+            return Vec::new();
+        }
+        let (l, r, t, b) = (a.left(), a.right() - 1, a.top(), a.bottom() - 1);
+        let mut out: Vec<(u16, u16)> = (l..=r).flat_map(|x| [(x, t), (x, b)]).collect();
+        for (x, open) in [(l, self.open_left), (r, self.open_right)] {
+            if !open {
+                out.extend((t..=b).map(|y| (x, y)));
+            }
+        }
+        out
+    }
+}
+
 /// Rounded-corner HUD panel. Title on the left, label on the right. Returns the inner area.
 pub fn frame(buf: &mut Buffer, area: Rect, title: &str, tag: &str, focused: bool, th: &Theme) -> Rect {
+    frame_outline(buf, Outline::closed(area), title, tag, focused, th)
+}
+
+/// `frame` with sides that may be open (see `Outline`).
+pub fn frame_outline(buf: &mut Buffer, o: Outline, title: &str, tag: &str, focused: bool, th: &Theme) -> Rect {
+    let area = o.rect;
     if area.width < 4 || area.height < 2 {
         return Rect::new(area.x, area.y, 0, 0);
     }
     let line = if focused { Style::default().fg(th.accent_dim) } else { th.line() };
-    let corner = line;
     let (l, r, t, b) = (area.left(), area.right() - 1, area.top(), area.bottom() - 1);
-    hline(buf, l + 1, t, area.width - 2, "─", line);
-    hline(buf, l + 1, b, area.width - 2, "─", line);
-    for y in t + 1..b {
-        put(buf, l, y, "│", line, 1);
-        put(buf, r, y, "│", line, 1);
+    hline(buf, l, t, area.width, "─", line);
+    hline(buf, l, b, area.width, "─", line);
+    for (x, open, top, bottom) in [(l, o.open_left, "╭", "╰"), (r, o.open_right, "╮", "╯")] {
+        if open {
+            continue;
+        }
+        for y in t + 1..b {
+            put(buf, x, y, "│", line, 1);
+        }
+        put(buf, x, t, top, line, 1);
+        put(buf, x, b, bottom, line, 1);
     }
-    put(buf, l, t, "╭", corner, 1);
-    put(buf, r, t, "╮", corner, 1);
-    put(buf, l, b, "╰", corner, 1);
-    put(buf, r, b, "╯", corner, 1);
     let max_title = area.width.saturating_sub(6);
     if !title.is_empty() && max_title > 2 {
         let title_style =
@@ -110,7 +156,67 @@ pub fn frame(buf: &mut Buffer, area: Rect, title: &str, tag: &str, focused: bool
             put_right(buf, r - 1, t, &tag, th.dim());
         }
     }
-    Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
+    o.inner()
+}
+
+/// Light frame line pieces: only these are replaced or recolored, never title text or buttons.
+fn is_frame_line(sym: &str) -> bool {
+    matches!(sym, "─" | "│" | "╭" | "╮" | "╰" | "╯" | "├" | "┤" | "┬" | "┴" | "┼")
+}
+
+/// Frames that share border lines (split panes): every line cell gets the piece that joins
+/// all the lines meeting there (`├ ┤ ┬ ┴ ┼`). Keeps each cell's color.
+pub fn join_frames(buf: &mut Buffer, frames: &[Outline]) {
+    let frames: Vec<Outline> = frames.iter().filter(|o| o.rect.width >= 2 && o.rect.height >= 2).copied().collect();
+    for f in &frames {
+        for (x, y) in f.border() {
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            if !is_frame_line(cell.symbol()) {
+                continue;
+            }
+            // Directions the lines leave this cell in: up, down, left, right.
+            let (mut up, mut down, mut left, mut right) = (false, false, false, false);
+            for o in &frames {
+                let a = o.rect;
+                let (ol, or, ot, ob) = (a.left(), a.right() - 1, a.top(), a.bottom() - 1);
+                if (y == ot || y == ob) && (ol..=or).contains(&x) {
+                    // Past an open side the line runs on to the edge.
+                    left |= x > ol || o.open_left;
+                    right |= x < or || o.open_right;
+                }
+                if ((x == ol && !o.open_left) || (x == or && !o.open_right)) && (ot..=ob).contains(&y) {
+                    up |= y > ot;
+                    down |= y < ob;
+                }
+            }
+            let sym = match (up, down, left, right) {
+                (true, true, true, true) => "┼",
+                (true, true, true, false) => "┤",
+                (true, true, false, true) => "├",
+                (false, true, true, true) => "┬",
+                (true, false, true, true) => "┴",
+                (false, true, false, true) => "╭",
+                (false, true, true, false) => "╮",
+                (true, false, false, true) => "╰",
+                (true, false, true, false) => "╯",
+                (true, true, false, false) => "│",
+                _ => "─",
+            };
+            cell.set_symbol(sym);
+        }
+    }
+}
+
+/// Recolors a frame's line cells (e.g. the focused pane among frames that share borders).
+/// A one-cell-wide or -high rect is a single line (a divider).
+pub fn tint_frame(buf: &mut Buffer, o: Outline, color: Color) {
+    for (x, y) in o.border() {
+        if let Some(cell) = buf.cell_mut((x, y))
+            && is_frame_line(cell.symbol())
+        {
+            cell.set_fg(color);
+        }
+    }
 }
 
 /// Fill bar on a thin track: the filled part is a colored `━`, the rest of the track is dim.
@@ -356,6 +462,56 @@ mod tests {
         assert_eq!(row, "▕█████▏▍");
         // No overflow.
         battery_icon(&mut one, Rect::new(5, 0, 30, 5), 70.0, th.ok, &th, None);
+    }
+
+    #[test]
+    fn split_frames_share_joined_lines() {
+        let th = crate::theme::Theme::by_name("amber", false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 9, 5));
+        // Left pane, and two stacked right panes reaching one cell into their neighbours.
+        let frames = [Rect::new(0, 0, 5, 5), Rect::new(4, 0, 5, 3), Rect::new(4, 2, 5, 3)].map(Outline::closed);
+        for f in frames {
+            frame_outline(&mut buf, f, "", "", false, &th);
+        }
+        join_frames(&mut buf, &frames);
+        let rows: Vec<String> = (0..5).map(|y| (0..9).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        assert_eq!(rows, ["╭───┬───╮", "│   │   │", "│   ├───┤", "│   │   │", "╰───┴───╯"]);
+        // Four panes: the middle becomes a cross.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 7, 7));
+        let frames = [Rect::new(0, 0, 4, 4), Rect::new(3, 0, 4, 4), Rect::new(0, 3, 4, 4), Rect::new(3, 3, 4, 4)]
+            .map(Outline::closed);
+        for f in frames {
+            frame_outline(&mut buf, f, "", "", false, &th);
+        }
+        join_frames(&mut buf, &frames);
+        assert_eq!(buf[(3, 3)].symbol(), "┼");
+        // Title text on a shared line is kept.
+        put(&mut buf, 3, 0, "x", th.text(), 1);
+        join_frames(&mut buf, &frames);
+        tint_frame(&mut buf, Outline::closed(Rect::new(3, 0, 4, 4)), th.accent);
+        assert_eq!(buf[(3, 0)].symbol(), "x");
+        assert_ne!(buf[(3, 0)].fg, th.accent);
+        assert_eq!(buf[(3, 3)].fg, th.accent);
+    }
+
+    #[test]
+    fn open_sides_leave_only_the_lines_between() {
+        let th = crate::theme::Theme::by_name("amber", false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 9, 5));
+        // Left and right panes with the outer sides open; the right one split in two.
+        let frames = [
+            Outline { rect: Rect::new(0, 0, 5, 5), open_left: true, open_right: false },
+            Outline { rect: Rect::new(4, 0, 5, 3), open_left: false, open_right: true },
+            Outline { rect: Rect::new(4, 2, 5, 3), open_left: false, open_right: true },
+        ];
+        for f in frames {
+            frame_outline(&mut buf, f, "", "", false, &th);
+        }
+        join_frames(&mut buf, &frames);
+        let rows: Vec<String> = (0..5).map(|y| (0..9).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        assert_eq!(rows, ["────┬────", "    │    ", "    ├────", "    │    ", "────┴────"]);
+        assert_eq!(frames[0].inner(), Rect::new(0, 1, 4, 3));
+        assert_eq!(frames[1].inner(), Rect::new(5, 1, 4, 1));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::keys::Action;
 use crate::sensors::SensorRequest;
 use crate::store::{SavedTab, Workspace};
 use crate::term::Tab;
-use crate::term::layout::{Dir, Direction, MIN_H, MIN_W, Node, PaneId, SavedNode, neighbor};
+use crate::term::layout::{Dir, Direction, MIN_H, MIN_W, Node, PaneId, SavedNode, frame_rect, neighbor};
 use crate::term::pane::{Pane, SpawnSpec};
 use crate::theme;
 
@@ -231,12 +231,19 @@ impl App {
         if launcher && t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.launch_running())) {
             return t.origin.clone();
         }
-        let label = self.panes.get(&t.focus).map(|p| (p.label(), p.shell_label.clone()));
+        // Named after the folder the focused pane is in now, or the one the tab opened in
+        // (`terminal.tab_follows_cwd`).
+        let pane = self.panes.get(&t.focus);
+        let base = match pane {
+            Some(p) if self.cfg.terminal.tab_follows_cwd => p.dir_name(),
+            _ => base.to_string(),
+        };
+        let label = pane.map(|p| (p.label(), p.shell_label.clone()));
         match label {
             Some((l, shell)) if !l.eq_ignore_ascii_case(&shell) && !l.is_empty() => {
                 format!("{base} · {}", crate::util::truncate(&l, 16))
             }
-            _ => base.to_string(),
+            _ => base,
         }
     }
 
@@ -265,10 +272,11 @@ impl App {
         self.go_tab(next as usize + 1);
     }
 
-    /// Approximate size a new pane gets in the terminal body.
+    /// Size a new pane gets in the terminal body (a tab with one pane).
     fn fresh_size(&self) -> (u16, u16) {
         let b = self.body();
-        (b.height.saturating_sub(2).max(4), b.width.saturating_sub(2).max(10))
+        let inner = crate::ui::pane_outline(b, b).inner();
+        (inner.height.max(4), inner.width.max(10))
     }
 
     fn spawn_pane(&mut self, cwd: &Path, command: Option<&str>, rows: u16, cols: u16) -> Option<PaneId> {
@@ -351,10 +359,12 @@ impl App {
             self.toast(ToastLevel::Warn, "not enough room to split");
             return;
         }
-        let (rows, cols) = match dir {
-            Dir::Row => (rect.height.saturating_sub(2), (rect.width / 2).saturating_sub(2)),
-            Dir::Col => ((rect.height / 2).saturating_sub(2), rect.width.saturating_sub(2)),
-        };
+        // The new pane's size: lay out the tree as it will be after the split.
+        let mut after = tab.root.clone();
+        after.split(focus, PaneId::MAX, dir);
+        let tile = after.layout(body).0.into_iter().find(|(id, _)| *id == PaneId::MAX).map(|(_, r)| r);
+        let inner = crate::ui::pane_outline(tile.unwrap_or(rect), body).inner();
+        let (rows, cols) = (inner.height, inner.width);
         let cwd = self.panes.get(&focus).map(|p| p.cwd()).unwrap_or_else(home);
         if let Some(new) = self.spawn_pane(&cwd, None, rows, cols)
             && let Some(tab) = self.current_tab_mut()
@@ -424,7 +434,7 @@ impl App {
             return;
         }
         tab.focus = pane;
-        let tile = tab.root.layout(body).0.into_iter().find(|(id, _)| *id == pane).map(|(_, r)| r);
+        let tile = tab.root.layout(body).0.into_iter().find(|(id, _)| *id == pane).map(|(_, r)| frame_rect(r, body));
         tab.zoomed = !tab.zoomed;
         let zoomed = tab.zoomed;
         if let Some(tile) = tile
@@ -472,9 +482,10 @@ impl App {
         let Some(tab) = self.current_tab() else { return };
         let rects: Vec<(PaneId, ratatui::layout::Rect)> =
             if tab.zoomed { vec![(tab.focus, body)] } else { tab.root.layout(body).0 };
-        for (id, r) in rects {
+        for (id, tile) in rects {
+            let inner = crate::ui::pane_outline(tile, body).inner();
             if let Some(p) = self.panes.get_mut(&id) {
-                p.resize(r.height.saturating_sub(2), r.width.saturating_sub(2));
+                p.resize(inner.height, inner.width);
             }
         }
     }

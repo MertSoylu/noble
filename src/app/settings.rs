@@ -15,6 +15,7 @@ pub enum SettingKey {
     Shell,
     Restore,
     CopySelect,
+    TabFollowsCwd,
     TermColors,
     Notify,
     Prefix,
@@ -69,6 +70,7 @@ impl SettingKey {
             SettingKey::Shell => "Shell",
             SettingKey::Restore => "Restore tabs on launch",
             SettingKey::CopySelect => "Copy text on select",
+            SettingKey::TabFollowsCwd => "Tab name follows the folder",
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
@@ -155,6 +157,7 @@ impl App {
                 SettingKey::ShellFirst,
                 SettingKey::Restore,
                 SettingKey::CopySelect,
+                SettingKey::TabFollowsCwd,
                 SettingKey::TermColors,
                 SettingKey::Notify,
                 SettingKey::QuickLaunch,
@@ -189,6 +192,7 @@ impl App {
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
+            SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
             SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
             SettingKey::ClaudeHooks => self.hooks_installed,
@@ -340,6 +344,10 @@ impl App {
                     SettingKey::CopySelect => {
                         c.terminal.copy_on_select ^= true;
                         ("terminal", "copy_on_select", c.terminal.copy_on_select.to_string())
+                    }
+                    SettingKey::TabFollowsCwd => {
+                        c.terminal.tab_follows_cwd ^= true;
+                        ("terminal", "tab_follows_cwd", c.terminal.tab_follows_cwd.to_string())
                     }
                     // Written to Claude's own settings file, not the config (handled above).
                     SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),

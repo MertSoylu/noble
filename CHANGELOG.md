@@ -6,6 +6,15 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- A terminal tab is named after the folder its focused pane is in now, so a tab opened with prefix `t` (which
+  starts in the current folder) gets a new name after a `cd`. Settings → Tab name follows the folder
+  (`terminal.tab_follows_cwd = false`) keeps the name of the folder the tab was opened in.
+- Terminal tabs have no line on the window's left and right edges: the output uses the full width, and
+  lines only run between split panes. Split panes share one border line instead of drawing two side by
+  side; the lines meet in `┬ ├ ┤ ┴ ┼`. The focused pane's frame keeps its color all around. A horizontal
+  border runs along the lower pane's title row: drag the line to resize, the title and buttons still click.
+
 ## [1.3.0]
 
 ### Added

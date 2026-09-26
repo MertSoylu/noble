@@ -9,6 +9,7 @@ mod system;
 mod terminal;
 
 pub use settings::{THEME_CARD_W, settings_width};
+pub use terminal::pane_outline;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -140,14 +141,8 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     match hit {
         Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) => {}
         Hit::Divider { .. } => {
-            // Draggable edge: highlight the shared frame line.
-            for yy in rect.top()..rect.bottom() {
-                for xx in rect.left()..rect.right() {
-                    if let Some(c) = buf.cell_mut((xx, yy)) {
-                        c.set_fg(th.accent);
-                    }
-                }
-            }
+            // Draggable edge: highlight the shared frame line (not the title text on it).
+            hud::tint_frame(buf, hud::Outline::closed(*rect), th.accent);
         }
         Hit::Setting(i) if *i < crate::theme::THEMES.len() => {
             // The theme card keeps its own colors; a marker is placed on the left edge.

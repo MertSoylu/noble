@@ -53,6 +53,7 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
             SettingKey::ShellFirst,
             SettingKey::Restore,
             SettingKey::CopySelect,
+            SettingKey::TabFollowsCwd,
             SettingKey::TermColors,
             SettingKey::Notify,
             SettingKey::QuickLaunch,

@@ -6,9 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 
 use super::hud;
 use crate::app::{App, Hit, LinkHover, SearchState};
-use crate::term::layout::Dir;
+use crate::term::layout::{Dir, PaneId, frame_rect};
 use crate::term::pane::Pane;
 use crate::theme::{TermPalette, Theme};
+use crate::ui::hud::Outline;
 use crate::util;
 
 /// Draws the visible tab; returns the focused pane's cursor position.
@@ -29,10 +30,14 @@ pub fn draw(
     let t = &app.cfg.terminal;
     let pal = TermPalette::resolve(&app.term_schemes, &t.colors, &t.background, &t.foreground, th);
     let mut cursor = None;
-    for (id, rect) in &rects {
+    // Neighbouring panes share one border line; the frames are joined after they are all drawn.
+    let frames: Vec<(PaneId, Outline)> = rects.iter().map(|(id, tile)| (*id, pane_outline(*tile, area))).collect();
+    // Title text and buttons go on top of the dividers: a horizontal divider runs along the lower pane's title row.
+    let mut on_top = Vec::new();
+    for (id, rect) in &frames {
         let Some(pane) = app.panes.get(id) else { continue };
         let focused = *id == tab.focus;
-        let inner = pane_frame(buf, *rect, pane, focused, multi, tab.zoomed, th, hits);
+        let inner = pane_frame(buf, *rect, pane, focused, multi, tab.zoomed, th, hits, &mut on_top);
         if inner.width == 0 || inner.height == 0 {
             continue;
         }
@@ -49,13 +54,22 @@ pub fn draw(
             cursor = c;
         }
     }
+    if frames.len() > 1 {
+        let all: Vec<Outline> = frames.iter().map(|(_, o)| *o).collect();
+        hud::join_frames(buf, &all);
+        // The focused frame is drawn in its color all around, also where it shares a line.
+        if let Some((_, r)) = frames.iter().find(|(id, _)| *id == tab.focus) {
+            hud::tint_frame(buf, *r, th.accent_dim);
+        }
+    }
     if let Some(z) = anim {
         // The growing/shrinking pane: an intermediate rect between its place and fullscreen.
         let t = crate::app::ease(z.started, crate::app::ZOOM_DURATION);
         let rect = lerp_rect(z.from, z.to, t);
         if let Some(pane) = app.panes.get(&z.pane) {
             hud::clear(buf, rect, th);
-            let inner = pane_frame(buf, rect, pane, true, multi, tab.zoomed, th, &mut Vec::new());
+            let o = Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right() };
+            let inner = pane_frame(buf, o, pane, true, multi, tab.zoomed, th, &mut Vec::new(), &mut Vec::new());
             if inner.width > 0 && inner.height > 0 {
                 pane_content(buf, inner, pane, th, &pal, false, &Marks::default());
             }
@@ -65,20 +79,30 @@ pub fn draw(
     for div in dividers {
         hits.push((div.hit, Hit::Divider { tab: tab_idx, div: div.clone() }));
     }
+    hits.extend(on_top);
     cursor
+}
+
+/// A pane's frame: it reaches one cell into a neighbour on its left or top (one shared line),
+/// and the window's outer left and right sides stay open (the lines only go between panes).
+pub fn pane_outline(tile: Rect, area: Rect) -> Outline {
+    let rect = frame_rect(tile, area);
+    Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right() }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn pane_frame(
     buf: &mut Buffer,
-    rect: Rect,
+    outline: Outline,
     pane: &Pane,
     focused: bool,
     multi: bool,
     zoomed: bool,
     th: &Theme,
     hits: &mut Vec<(Rect, Hit)>,
+    on_top: &mut Vec<(Rect, Hit)>,
 ) -> Rect {
+    let rect = outline.rect;
     if rect.width < 4 || rect.height < 3 {
         return Rect::new(rect.x, rect.y, 0, 0);
     }
@@ -99,9 +123,13 @@ fn pane_frame(
     } else {
         String::new()
     };
-    let inner = hud::frame(buf, rect, &title, "", focused, th);
-    // Title row: click to focus, right click for the menu (buttons stay on top).
+    let inner = hud::frame_outline(buf, outline, &title, "", focused, th);
+    // Title row: click to focus, right click for the menu (buttons stay on top). The title
+    // text itself also stays on top of a divider running along this row.
     hits.push((Rect::new(rect.x, rect.y, rect.width, 1), Hit::PaneTitle(pane.id)));
+    let title_w = (util::width(&util::truncate(&title, rect.width.saturating_sub(6) as usize)) as u16 + 2)
+        .min(rect.width.saturating_sub(2));
+    on_top.push((Rect::new(rect.x + 1, rect.y, title_w, 1), Hit::PaneTitle(pane.id)));
     // Top-right corner buttons: split (right / down), zoom, close.
     let y = rect.y;
     let style = if focused { th.accent() } else { th.dim() };
@@ -123,7 +151,7 @@ fn pane_frame(
         bx += 1;
         for (glyph, hit) in buttons {
             hud::put(buf, bx, y, &format!(" {glyph} "), style, 3);
-            hits.push((Rect::new(bx, y, 3, 1), hit));
+            on_top.push((Rect::new(bx, y, 3, 1), hit));
             bx += 3;
         }
         if !tag.is_empty() {

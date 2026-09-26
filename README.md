@@ -265,6 +265,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true
 copy_on_select = true
+tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
 colors = "windows-terminal"  # windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
 background = ""          # override the scheme's background, e.g. "#c8c8c8"
 foreground = ""          # override the scheme's text color

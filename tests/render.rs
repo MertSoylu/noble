@@ -450,6 +450,19 @@ fn check_cwd_tracking(shell: &str) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // The tab is named after the folder the shell is in now; with `tab_follows_cwd` off
+    // it keeps the name it was opened with.
+    let folder = target.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(app.tab_title(0).starts_with(&folder), "{shell}: tab title {:?}", app.tab_title(0));
+    app.cfg.terminal.tab_follows_cwd = false;
+    assert!(app.tab_title(0).starts_with("cwd"), "{shell}: fixed tab title {:?}", app.tab_title(0));
+    app.cfg.terminal.tab_follows_cwd = true;
+    // A new tab (prefix t) opens in the same directory and is named after it.
+    app.run(Action::NewTab);
+    assert_eq!(app.tabs.len(), 2);
+    assert!(app.tab_title(1).starts_with(&folder), "{shell}: new tab title {:?}", app.tab_title(1));
+    app.run(Action::CloseTab);
+    app.go_tab(1);
     // The split opens the new pane in the same directory.
     app.run(Action::SplitRight);
     let new = app.tabs[0].focus;
@@ -748,6 +761,70 @@ fn selection_beyond_the_shell_size_after_a_lost_release() {
     mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x, y + 1);
     mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, y + 1);
     render(&mut app, 110, 30);
+    app.run(Action::CloseTab);
+}
+
+/// Split panes share one border line joined with `┬ ├ ┤ ┴ ┼`; the outer left and right sides
+/// have no line. The horizontal divider runs along the lower pane's title row: the line drags,
+/// the title text and buttons stay clickable.
+#[test]
+fn split_panes_share_joined_borders() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::Hit;
+    use noble::term::layout::Dir;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("grid".into()));
+    for action in [Action::SplitRight, Action::SplitDown, Action::FocusLeft, Action::SplitDown] {
+        app.run(action);
+    }
+    assert_eq!(app.tabs[0].panes().len(), 4);
+    let text = render(&mut app, 110, 30);
+    save("terminal-grid-110x30", &text);
+    let rows: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+    for junction in ['┬', '┴', '┼'] {
+        assert!(text.contains(junction), "no {junction}:\n{text}");
+    }
+    assert!(!text.contains("││") && !text.contains("╮╭"), "double border:\n{text}");
+    // The window's outer left and right sides have no line: lines only run between panes.
+    let body = app.body();
+    for y in body.top()..body.bottom() {
+        let row = &rows[y as usize];
+        for edge in [row[0], row[row.len() - 1]] {
+            assert!(edge == ' ' || edge == '─', "outer side line at row {y}:\n{text}");
+        }
+    }
+    let top = |x: u16, y: u16| {
+        app.hits.iter().rev().find(|(r, _)| r.contains(ratatui::layout::Position { x, y })).map(|(_, h)| h.clone())
+    };
+    // The left column's horizontal divider and the lower-left pane on it.
+    let div = app
+        .hits
+        .iter()
+        .find_map(|(r, h)| match h {
+            Hit::Divider { div, .. } if div.dir == Dir::Col && r.x == 0 => Some(*r),
+            _ => None,
+        })
+        .expect("horizontal divider");
+    let y = div.y;
+    assert!(matches!(top(3, y), Some(Hit::PaneTitle(_))), "title text is not on top");
+    let line_x = (0..div.right()).rev().find(|x| rows[y as usize][*x as usize] == '─' && x + 1 < div.right()).unwrap();
+    assert!(matches!(top(line_x, y), Some(Hit::Divider { .. })), "the line does not drag");
+    let upper = |app: &App| app.tabs[0].root.layout(app.body()).0[0].1.height;
+    let before = upper(&app);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), line_x, y);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), line_x, y + 4);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), line_x, y + 4);
+    render(&mut app, 110, 30);
+    assert_eq!(upper(&app), before + 4, "divider did not move");
+    // The lower-left pane's close button on the divider row still closes it.
+    let close = app
+        .hits
+        .iter()
+        .rev()
+        .find_map(|(r, h)| matches!(h, Hit::PaneClose(_)).then_some(*r).filter(|r| r.y == y + 4 && r.x < 55))
+        .expect("close button on the divider row");
+    click(&mut app, close.x + 1, close.y);
+    assert_eq!(app.tabs[0].panes().len(), 3);
     app.run(Action::CloseTab);
 }
 
@@ -1405,6 +1482,8 @@ fn mouse_only_things_have_actions() {
     use noble::app::Overlay;
     use noble::keys::Chord;
     let mut app = demo_app(110, 30);
+    // Every tab opens in the same folder: keep the names they were opened with to tell them apart.
+    app.cfg.terminal.tab_follows_cwd = false;
     for name in ["one", "two", "three"] {
         app.new_tab(std::env::temp_dir(), None, Some(name.into()));
     }
@@ -1450,6 +1529,8 @@ fn tabs_drag_and_rename() {
     use crossterm::event::{MouseButton, MouseEventKind};
     use noble::app::{Hit, Overlay};
     let mut app = demo_app(110, 30);
+    // Every tab opens in the same folder: keep the names they were opened with to tell them apart.
+    app.cfg.terminal.tab_follows_cwd = false;
     app.new_tab(std::env::temp_dir(), None, Some("first".into()));
     app.new_tab(std::env::temp_dir(), None, Some("second".into()));
     render(&mut app, 110, 30);

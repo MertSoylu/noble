@@ -118,10 +118,11 @@ impl Node {
             Node::Leaf(id) => panes.push((*id, area)),
             Node::Split { dir, ratio, a, b } => {
                 let (ra, rb) = split_rect(area, *dir, *ratio);
+                // Divider: the border line the two sides share (see `frame_rect`). For a
+                // horizontal split that row is also the lower pane's title row; the title
+                // text and buttons are pushed after the dividers and stay clickable.
                 let hit = match dir {
-                    // Divider: the two columns/rows where the pane frames meet.
-                    Dir::Row => Rect::new(ra.right().saturating_sub(1), area.y, 2.min(area.width), area.height),
-                    // Only the top pane's bottom edge, so the lower pane's title buttons stay clickable.
+                    Dir::Row => Rect::new(ra.right().saturating_sub(1), area.y, 1.min(area.width), area.height),
                     Dir::Col => Rect::new(area.x, ra.bottom().saturating_sub(1), area.width, 1.min(area.height)),
                 };
                 dividers.push(Divider { path: path.clone(), dir: *dir, area, hit });
@@ -199,6 +200,15 @@ pub fn split_rect(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
             (Rect::new(area.x, area.y, area.width, ha), Rect::new(area.x, area.y + ha, area.width, total - ha))
         }
     }
+}
+
+/// The rect a pane draws its frame in. A tile with a neighbour on its left or top reaches one
+/// cell into it, so two neighbours share a single border line instead of drawing two. `area`
+/// is the whole tab area the tiles were laid out in.
+pub fn frame_rect(tile: Rect, area: Rect) -> Rect {
+    let dx = u16::from(tile.x > area.x);
+    let dy = u16::from(tile.y > area.y);
+    Rect::new(tile.x - dx, tile.y - dy, tile.width + dx, tile.height + dy)
 }
 
 /// Computes the new ratio from the mouse position while a divider is dragged.
@@ -288,6 +298,22 @@ mod tests {
         // The area is fully covered.
         let total: u32 = panes.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
         assert_eq!(total, 100 * 40);
+    }
+
+    #[test]
+    fn neighbours_share_a_border() {
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Row);
+        n.split(2, 3, Dir::Col);
+        let (panes, dividers) = n.layout(area());
+        let frames: Vec<Rect> = panes.iter().map(|(_, t)| frame_rect(*t, area())).collect();
+        assert_eq!(frames[0], Rect::new(0, 0, 50, 40));
+        // The right panes start on the left pane's right border; the lower one on the upper's bottom border.
+        assert_eq!(frames[1], Rect::new(49, 0, 51, 20));
+        assert_eq!(frames[2], Rect::new(49, 19, 51, 21));
+        // The dividers are exactly those shared lines.
+        assert_eq!(dividers[0].hit, Rect::new(49, 0, 1, 40));
+        assert_eq!(dividers[1].hit, Rect::new(50, 19, 50, 1));
     }
 
     #[test]
