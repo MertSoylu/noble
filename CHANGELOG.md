@@ -22,6 +22,13 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- bash, zsh and fish now percent-encode the directory they report (OSC 7), so a directory whose name ends in a
+  space keeps it (spaces, `%`, `;`, `#` and non-ASCII names round-trip exactly).
+- A bash started as a login shell (`-l` / `--login` in `shell_args`) lost the cwd tracking: a login shell never
+  reads the rc file. NOBLE now loads the login files itself (`/etc/profile`, then `~/.bash_profile`,
+  `~/.bash_login` or `~/.profile`) and keeps the tracking.
+
 ## [1.2.0]
 
 ### Added
