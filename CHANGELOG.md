@@ -22,6 +22,10 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- Better readability: One Dark's dim text and Solarized Light's dim text and accent are slightly darker to
+  reach WCAG contrast (3:1 for dim text, 4.5:1 for the accent).
+
 ## [1.2.0]
 
 ### Added
