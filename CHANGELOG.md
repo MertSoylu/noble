@@ -22,6 +22,11 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- `noble update` never leaves you without a working binary: the new binary is staged next to the old one
+  and swapped with renames, an empty binary in the archive is refused, and a leftover `*.old` that cannot
+  be deleted no longer blocks the update.
+
 ## [1.2.0]
 
 ### Added
