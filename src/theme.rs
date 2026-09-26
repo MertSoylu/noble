@@ -206,7 +206,7 @@ pub const THEMES: [Theme; 20] = [
         bg: rgb(0x282c34),
         raised: rgb(0x21252b),
         fg: rgb(0xabb2bf),
-        dim: rgb(0x5c6370),
+        dim: rgb(0x6c7584),
         line: rgb(0x3e4451),
         accent: rgb(0x61afef),
         accent_dim: rgb(0x2f5d85),
@@ -342,9 +342,9 @@ pub const THEMES: [Theme; 20] = [
         bg: rgb(0xfdf6e3),
         raised: rgb(0xeee8d5),
         fg: rgb(0x586e75),
-        dim: rgb(0x93a1a1),
+        dim: rgb(0x829292),
         line: rgb(0xe0d9c3),
-        accent: rgb(0xb58900),
+        accent: rgb(0x8f6c00),
         accent_dim: rgb(0xe0cc88),
         accent2: rgb(0x268bd2),
         ok: rgb(0x859900),
@@ -697,5 +697,73 @@ mod term_tests {
         // Also found by the display name used in Windows Terminal.
         assert_eq!(find_scheme(&list, "Dark+").map(|s| s.name.as_str()), Some("dark-plus"));
         assert_eq!(find_scheme(&list, "campbell powershell").map(|s| s.bg), Some(rgb(0x012456)));
+    }
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    /// WCAG 2.x relative luminance of an RGB color.
+    fn luminance(c: Color) -> f64 {
+        let Color::Rgb(r, g, b) = c else { panic!("theme colors must be RGB: {c:?}") };
+        let lin = |v: u8| {
+            let s = v as f64 / 255.0;
+            if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    /// WCAG contrast ratio (1.0 ..= 21.0).
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Pairs below threshold that are kept on purpose (theme, pair). An entry that starts passing must be
+    /// removed, so the list only ever shrinks.
+    /// All current entries are near misses (dim ≥ 2.7, text ≥ 4.2) that keep the original palette colors of
+    /// the scheme the theme is named after.
+    const ALLOWED: &[(&str, &str)] = &[
+        ("tokyonight", "dim/bg"),    // 2.76, Tokyo Night comment color
+        ("solarized", "dim/bg"),     // 2.79, Solarized base01
+        ("solarized", "fg/sel_bg"),  // 4.22, Solarized base1 on the selection
+        ("latte", "dim/bg"),         // 2.83, Catppuccin Latte overlay1
+        ("solarlight", "fg/sel_bg"), // 4.39, Solarized base01 on base2
+        ("paper", "accent/bg"),      // 4.44, GitHub-style blue
+    ];
+
+    /// Foreground/background pairs the UI draws, with their minimum ratio: body text, dim text (3:1, used
+    /// for secondary labels), accent text, text on the selection row, and chips (`on_accent` on `accent`).
+    fn pairs(t: &Theme) -> [(&'static str, Color, Color, f64); 5] {
+        [
+            ("fg/bg", t.fg, t.bg, 4.5),
+            ("dim/bg", t.dim, t.bg, 3.0),
+            ("accent/bg", t.accent, t.bg, 4.5),
+            ("fg/sel_bg", t.fg, t.sel_bg, 4.5),
+            ("on_accent/accent", t.on_accent, t.accent, 4.5),
+        ]
+    }
+
+    #[test]
+    fn theme_contrast_meets_wcag() {
+        let mut failures = Vec::new();
+        let mut stale = Vec::new();
+        for t in THEMES.iter() {
+            for (pair, fg, bg, min) in pairs(t) {
+                let ratio = contrast(fg, bg);
+                let allowed = ALLOWED.contains(&(t.name, pair));
+                if ratio < min {
+                    println!("{:<12} {:<18} {ratio:>5.2} (min {min})", t.name, pair);
+                    if !allowed {
+                        failures.push(format!("{} {pair} {ratio:.2} < {min}", t.name));
+                    }
+                } else if allowed {
+                    stale.push(format!("{} {pair} now {ratio:.2}", t.name));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "contrast below threshold:\n{}", failures.join("\n"));
+        assert!(stale.is_empty(), "allow-list entries that now pass (remove them):\n{}", stale.join("\n"));
     }
 }

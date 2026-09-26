@@ -114,14 +114,16 @@ pub fn spawn_check(tx: Tx) {
 
 /// Name of the ready-made archive for this platform (see `release.yml`).
 pub fn asset_name() -> Option<&'static str> {
-    if cfg!(all(windows, target_arch = "x86_64")) {
-        Some("noble-windows-x86_64.zip")
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("noble-linux-x86_64.tar.gz")
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Some("noble-linux-aarch64.tar.gz")
-    } else {
-        None
+    asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Archive name for an OS / CPU pair as `std::env::consts` names them.
+fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("windows", "x86_64") => Some("noble-windows-x86_64.zip"),
+        ("linux", "x86_64") => Some("noble-linux-x86_64.tar.gz"),
+        ("linux", "aarch64") => Some("noble-linux-aarch64.tar.gz"),
+        _ => None,
     }
 }
 
@@ -140,19 +142,43 @@ fn old_path(exe: &Path) -> PathBuf {
 /// deleted on Windows; it is renamed instead and cleaned up on the next start).
 pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(old_path(&exe));
+        cleanup_old_at(&exe);
     }
 }
 
-/// Extracts the archive with the system `tar` (Windows 10+ `tar.exe` opens zips too).
-fn extract(archive: &Path, dest: &Path) -> Result<(), String> {
-    // Git Bash's GNU tar cannot open zips: use the system one on Windows.
-    let tar = std::env::var_os("SystemRoot")
+fn cleanup_old_at(exe: &Path) {
+    for p in old_paths(exe) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// `noble.old`, then `noble.old2` … `noble.old9` (used when an earlier one cannot be deleted).
+fn old_paths(exe: &Path) -> impl Iterator<Item = PathBuf> {
+    let first = old_path(exe);
+    (1..=9).map(move |i| {
+        if i == 1 {
+            return first.clone();
+        }
+        let mut name = first.as_os_str().to_os_string();
+        name.push(i.to_string());
+        PathBuf::from(name)
+    })
+}
+
+/// The system `tar` (Windows 10+ `tar.exe` opens zips too).
+fn tar_program() -> PathBuf {
+    // Windows: Git Bash's GNU tar cannot open zips, so System32's bsdtar is preferred.
+    // Linux: whatever `tar` is on PATH.
+    std::env::var_os("SystemRoot")
         .filter(|_| cfg!(windows))
         .map(|r| PathBuf::from(r).join("System32").join("tar.exe"))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("tar"));
-    let out = std::process::Command::new(&tar)
+        .unwrap_or_else(|| PathBuf::from("tar"))
+}
+
+/// Extracts the archive with `tar`.
+fn extract(tar: &Path, archive: &Path, dest: &Path) -> Result<(), String> {
+    let out = std::process::Command::new(tar)
         .arg("-xf")
         .arg(archive)
         .arg("-C")
@@ -176,29 +202,75 @@ fn download(url: &str, to: &Path) -> Result<(), String> {
     file.flush().map_err(|e| e.to_string())
 }
 
-/// Puts the new binary in place of the running one. The running binary is moved
-/// aside first (it cannot be overwritten on Windows but it can be renamed); it
-/// is put back if the copy fails.
+/// A free name to move the running binary aside to. An earlier `.old` may not be deletable (on Windows
+/// it can still be running in another NOBLE window), so a numbered one is used then.
+fn free_old_path(exe: &Path) -> Option<PathBuf> {
+    old_paths(exe).find(|p| {
+        let _ = std::fs::remove_file(p);
+        std::fs::symlink_metadata(p).is_err()
+    })
+}
+
+/// Puts the new binary in place of the running one. The copy (slow, may fail half way) goes to a
+/// staging file next to it first; then the running binary is moved aside (it cannot be overwritten on
+/// Windows but it can be renamed) and the staged one renamed into place. Any failure leaves the
+/// installed binary where it was.
 fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
-    let old = old_path(exe);
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).map_err(|e| format!("could not move {} aside: {e}", exe.display()))?;
-    if let Err(e) = std::fs::copy(new, exe) {
-        let _ = std::fs::rename(&old, exe);
-        return Err(format!("could not install the new binary: {e}"));
+    let mut staged = exe.as_os_str().to_os_string();
+    staged.push(".new");
+    let staged = PathBuf::from(staged);
+    let _ = std::fs::remove_file(&staged);
+    if let Err(e) = std::fs::copy(new, &staged) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("could not write the new binary next to {}: {e}", exe.display()));
     }
+    // Unix: make it executable. Windows: no mode bits, the `.exe` name is enough.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     }
-    // On Linux it can be deleted right away; on Windows on the next start.
+    let aside = free_old_path(exe)
+        .ok_or_else(|| format!("could not move {} aside: no free .old name", exe.display()))
+        .and_then(|old| {
+            std::fs::rename(exe, &old).map_err(|e| format!("could not move {} aside: {e}", exe.display()))?;
+            Ok(old)
+        });
+    let old = match aside {
+        Ok(old) => old,
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::rename(&staged, exe) {
+        let _ = std::fs::remove_file(&staged);
+        return match std::fs::rename(&old, exe) {
+            Ok(()) => Err(format!("could not install the new binary: {e}")),
+            Err(e2) => Err(format!(
+                "could not install the new binary: {e}; the previous one is at {} (could not restore: {e2})",
+                old.display()
+            )),
+        };
+    }
+    // Linux: it can be deleted right away. Windows: the running binary cannot, `cleanup_old` does it
+    // on the next start.
     let _ = std::fs::remove_file(&old);
     Ok(())
 }
 
 /// Downloads the release's archive for this platform and puts it in place of `exe`.
 pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
+    install_with(release, exe, &download, &tar_program())
+}
+
+/// `install` with the downloader and `tar` passed in (tests use a local fetcher, never the network).
+fn install_with(
+    release: &Release,
+    exe: &Path,
+    fetch: &dyn Fn(&str, &Path) -> Result<(), String>,
+    tar: &Path,
+) -> Result<(), String> {
     let name = asset_name().ok_or("no prebuilt binary for this platform; update with `cargo install noble`")?;
     let url = release
         .assets
@@ -206,17 +278,23 @@ pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
         .find(|(n, _)| n == name)
         .map(|(_, u)| u.clone())
         .ok_or_else(|| format!("release {} has no {name}", release.version))?;
-    let work = std::env::temp_dir().join(format!("noble-update-{}", std::process::id()));
+    // Unique per call, not only per process (parallel tests install at the same time).
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("noble-update-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let result = (|| {
         let archive = work.join(name);
         println!("Downloading {name}…");
-        download(&url, &archive)?;
-        extract(&archive, &work)?;
+        fetch(&url, &archive)?;
+        extract(tar, &archive, &work)?;
         let new = work.join(binary_name());
         if !new.is_file() {
             return Err(format!("{} not found in the archive", binary_name()));
+        }
+        if new.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            return Err(format!("{} in the archive is empty", binary_name()));
         }
         replace_exe(&new, exe)
     })();
@@ -332,6 +410,169 @@ mod tests {
         assert!(text.contains(&release.version), "{text}");
         assert!(!old_path(&exe).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch directory holding a fake "installed" binary.
+    fn scratch(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("noble-update-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(binary_name());
+        std::fs::write(&exe, b"installed").unwrap();
+        (dir, exe)
+    }
+
+    fn release_for_this_platform() -> Option<Release> {
+        let name = asset_name()?;
+        Some(Release { version: "9.9.9".into(), assets: vec![(name.into(), "http://fake/asset".into())] })
+    }
+
+    /// A real archive for this platform holding `binary_name()` with `content`, built with the system tar
+    /// (Windows 10+ `tar.exe` writes zips with `-a`; GNU tar on Linux writes tar.gz with `-z`).
+    fn make_archive(dir: &Path, content: &[u8]) -> Option<Vec<u8>> {
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join(binary_name()), content).unwrap();
+        let out = dir.join(asset_name()?);
+        let mode = if cfg!(windows) { "-acf" } else { "-czf" };
+        let ok = std::process::Command::new(tar_program())
+            .arg(mode)
+            .arg(&out)
+            .arg("-C")
+            .arg(&src)
+            .arg(binary_name())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        ok.then(|| std::fs::read(&out).unwrap())
+    }
+
+    /// A fetcher that "downloads" fixed bytes, never touching the network.
+    fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path) -> Result<(), String> {
+        move |_url, to| std::fs::write(to, &bytes).map_err(|e| e.to_string())
+    }
+
+    fn assert_intact(exe: &Path) {
+        assert_eq!(std::fs::read(exe).unwrap(), b"installed", "the installed binary was damaged");
+    }
+
+    #[test]
+    fn corrupt_download_keeps_the_installed_binary() {
+        let Some(release) = release_for_this_platform() else { return }; // no prebuilt archive here
+        let (dir, exe) = scratch("corrupt");
+        let err = install_with(&release, &exe, &serve(b"<html>captive portal</html>".to_vec()), &tar_program());
+        assert!(err.is_err());
+        assert_intact(&exe);
+        // A valid archive whose binary is empty (a broken release) is refused too.
+        if let Some(empty) = make_archive(&dir, b"") {
+            assert!(install_with(&release, &exe, &serve(empty), &tar_program()).is_err());
+            assert_intact(&exe);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_tar_is_reported_and_keeps_the_installed_binary() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("notar");
+        let archive = make_archive(&dir, b"new").unwrap_or_default();
+        let err = install_with(&release, &exe, &serve(archive), Path::new("noble-no-such-tar")).unwrap_err();
+        assert!(err.contains("tar"), "{err}");
+        assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undeletable_old_binary_does_not_block_the_update() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("oldlocked");
+        let Some(archive) = make_archive(&dir, b"new") else { return }; // no tar on this machine
+        // A directory cannot be removed with remove_file nor replaced by a rename, on either platform —
+        // like a previous `noble.exe.old` still running in another NOBLE window on Windows.
+        std::fs::create_dir_all(old_path(&exe).join("busy")).unwrap();
+        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        let mut staged = exe.as_os_str().to_os_string();
+        staged.push(".new");
+        assert!(!Path::new(&staged).exists(), "staging file left behind");
+        cleanup_old_at(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_install_dir_keeps_the_installed_binary() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("readonly");
+        let Some(archive) = make_archive(&dir, b"new") else { return };
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe_ro = bin.join(binary_name());
+        std::fs::rename(&exe, &exe_ro).unwrap();
+        // Unix: a directory without write permission. Windows has no such mode bit on directories (a
+        // read-only flag is ignored there), so the case is only exercised on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o555)).unwrap();
+            // root ignores permissions (as in containers): nothing to test then.
+            if std::fs::write(bin.join("probe"), b"").is_ok() {
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let err = install_with(&release, &exe_ro, &serve(archive), &tar_program()).unwrap_err();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!err.is_empty());
+            assert_intact(&exe_ro);
+            assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1, "leftover files next to the binary");
+        }
+        #[cfg(not(unix))]
+        let _ = (archive, release);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A local server that promises more bytes than it sends, then hangs up.
+    #[test]
+    fn partial_download_is_an_error() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial");
+        });
+        let dir = std::env::temp_dir().join(format!("noble-update-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join("archive");
+        let res = download(&format!("http://127.0.0.1:{port}/asset"), &to);
+        server.join().unwrap();
+        assert!(res.is_err(), "a truncated download was accepted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asset_names_match_release_workflow() {
+        assert_eq!(asset_name_for("windows", "x86_64"), Some("noble-windows-x86_64.zip"));
+        assert_eq!(asset_name_for("linux", "x86_64"), Some("noble-linux-x86_64.tar.gz"));
+        assert_eq!(asset_name_for("linux", "aarch64"), Some("noble-linux-aarch64.tar.gz"));
+        assert_eq!(asset_name_for("macos", "aarch64"), None);
+        assert_eq!(asset_name(), asset_name_for(std::env::consts::OS, std::env::consts::ARCH));
+        // Every archive release.yml builds is the one `noble update` asks for on that target.
+        let yml =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows/release.yml")).unwrap();
+        let field = |line: &str, key: &str| line.trim().strip_prefix(key).map(|v| v.trim().to_string());
+        let targets: Vec<String> =
+            yml.lines().filter_map(|l| field(l, "target:")).filter(|t| !t.contains('$')).collect();
+        let archives: Vec<String> = yml.lines().filter_map(|l| field(l, "archive:")).collect();
+        assert_eq!(targets.len(), 3, "{targets:?}");
+        assert_eq!(targets.len(), archives.len());
+        for (target, archive) in targets.iter().zip(&archives) {
+            let arch = target.split('-').next().unwrap();
+            let os = if target.contains("windows") { "windows" } else { "linux" };
+            assert_eq!(asset_name_for(os, arch), Some(archive.as_str()), "{target}");
+        }
     }
 
     #[test]
