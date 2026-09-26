@@ -291,6 +291,8 @@ impl ShellSpec {
         let skip: &[&str] = match self.kind() {
             ShellKind::Bash => &["--norc", "--rcfile", "--init-file", "-c"],
             ShellKind::Zsh => &["-f", "--no-rcs", "-c"],
+            // The README documents these as "start the shell untouched" (fish would still run
+            // `--init-command` with `-N`, but the opt-out is kept for every shell alike).
             ShellKind::Fish => &["-N", "--no-config", "-c", "--command"],
             _ => return None,
         };
@@ -313,9 +315,13 @@ impl ShellSpec {
         let mut args = Vec::new();
         match (self.kind(), self.integration_dir()) {
             (ShellKind::Bash, Some(dir)) => {
+                // A login shell never reads `--rcfile`: the login option is dropped and the
+                // login script loads the profile files instead.
+                let login = self.args.iter().any(|a| without_bash_login(a).as_deref() != Some(a.as_str()));
+                let rc = if login { integration::bash_login_rc(dir) } else { integration::bash_rc(dir) };
                 // bash wants long options before single-letter ones.
-                args.extend(["--rcfile".into(), integration::bash_rc(dir).display().to_string()]);
-                args.extend(self.args.iter().cloned());
+                args.extend(["--rcfile".into(), rc.display().to_string()]);
+                args.extend(self.args.iter().filter_map(|a| without_bash_login(a)));
             }
             (ShellKind::Fish, Some(dir)) => {
                 args.extend(self.args.iter().cloned());
@@ -447,6 +453,22 @@ impl ShellSpec {
 /// prompt (oh-my-posh included). It contains no double quotes so command line
 /// quoting never breaks.
 pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function global:prompt { [Console]::Write([char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); & $global:__nobleP }";
+
+/// A bash argument without its login option: `-l` and `--login` disappear, a short option
+/// cluster such as `-il` becomes `-i`; anything else is returned as it is.
+fn without_bash_login(arg: &str) -> Option<String> {
+    if arg == "--login" {
+        return None;
+    }
+    let short = arg.strip_prefix('-').filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic()));
+    match short {
+        Some(flags) if flags.contains('l') => {
+            let rest = flags.replace('l', "");
+            (!rest.is_empty()).then(|| format!("-{rest}"))
+        }
+        _ => Some(arg.to_string()),
+    }
+}
 
 enum ShellKind {
     PowerShell,
@@ -917,6 +939,17 @@ mod tests {
         assert_eq!(launched[2], format!("claude; exec '/usr/bin/bash' '--rcfile' '{rc}' '-i'"));
         // Arguments that skip the startup files turn it off.
         assert_eq!(with("bash", vec!["--norc".into()]).args_with_command(None), vec!["--norc"]);
+        // A login shell never reads `--rcfile`: the login script replaces the option.
+        let login_rc = integration::bash_login_rc(&dir).display().to_string();
+        for (args, rest) in [(vec!["-l"], vec![]), (vec!["--login", "-i"], vec!["-i"]), (vec!["-il"], vec!["-i"])] {
+            let spec = with("bash", args.iter().map(|a| a.to_string()).collect());
+            let want: Vec<String> = ["--rcfile", login_rc.as_str()].into_iter().chain(rest).map(Into::into).collect();
+            assert_eq!(spec.args_with_command(None), want, "{args:?}");
+        }
+        // The launcher command itself still runs in a login shell.
+        assert_eq!(with("bash", vec!["-l".into()]).args_with_command(Some("x"))[..2], ["-l", "-c"]);
+        assert_eq!(without_bash_login("-O"), Some("-O".into()));
+        assert_eq!(without_bash_login("--rcfile"), Some("--rcfile".into()));
 
         let zsh = with("/bin/zsh", vec![]);
         assert!(zsh.args_with_command(None).is_empty());
@@ -929,6 +962,7 @@ mod tests {
         let args = fish.args_with_command(None);
         assert_eq!(args[0], "--init-command");
         assert!(args[1].starts_with("source '") && args[1].contains("noble.fish"), "{args:?}");
+        assert_eq!(with("fish", vec!["-N".into()]).args_with_command(None), vec!["-N"]);
 
         // Other shells start as configured.
         assert!(with("/bin/dash", vec![]).args_with_command(None).is_empty());
