@@ -22,6 +22,12 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- No more crashes when selecting text after a lost mouse release during a divider drag, or when a dialog is
+  drawn in a tiny window. Editing `config.toml` from Settings keeps a ` #` inside quoted values and headers
+  with a trailing comment intact, and a config file that is not valid UTF-8 is reported instead of being
+  silently replaced. Corrupt data files with extreme timestamps no longer panic.
+
 ## [1.2.0]
 
 ### Added
