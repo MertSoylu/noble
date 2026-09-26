@@ -25,6 +25,7 @@ pub struct Callbacks {
     pub clipboard: Option<String>,
     pub bell: bool,
     /// The shell drew a new prompt (OSC 7 / 9;9 / 133): the previous command finished.
+    /// See `Callbacks::shell_prompt` for what else that resets.
     pub prompt: bool,
     /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
@@ -32,6 +33,17 @@ pub struct Callbacks {
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
     open_link: Option<(usize, u16, String)>,
+}
+
+impl Callbacks {
+    /// The shell is back at its prompt, so the program that ran before it has exited:
+    /// the window title it set no longer describes the pane (a shell that titles its
+    /// prompt sets a new one right after). Only shells emit these marks; agents such as
+    /// Claude Code set a title (OSC 0) and progress (OSC 9;4) but never OSC 7 / 9;9 / 133.
+    fn shell_prompt(&mut self) {
+        self.prompt = true;
+        self.title.clear();
+    }
 }
 
 /// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
@@ -79,12 +91,12 @@ impl vt100::Callbacks for Callbacks {
             [b"7", rest @ ..] if !rest.is_empty() => {
                 let path = parse_cwd_url(&join(rest));
                 self.cwd = Some(if cfg!(windows) { msys_to_windows(&path) } else { path });
-                self.prompt = true;
+                self.shell_prompt();
             }
             // OSC 9;9: Windows Terminal's cwd report.
             [b"9", b"9", rest @ ..] if !rest.is_empty() => {
                 self.cwd = Some(join(rest).trim_matches('"').to_string());
-                self.prompt = true;
+                self.shell_prompt();
             }
             // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
             // extensions such as 9;4 progress) are not notifications.
@@ -117,7 +129,7 @@ impl vt100::Callbacks for Callbacks {
                 }
             }
             // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished.
-            [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.prompt = true,
+            [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.shell_prompt(),
             _ => {}
         }
     }
@@ -279,6 +291,8 @@ impl ShellSpec {
         let skip: &[&str] = match self.kind() {
             ShellKind::Bash => &["--norc", "--rcfile", "--init-file", "-c"],
             ShellKind::Zsh => &["-f", "--no-rcs", "-c"],
+            // The README documents these as "start the shell untouched" (fish would still run
+            // `--init-command` with `-N`, but the opt-out is kept for every shell alike).
             ShellKind::Fish => &["-N", "--no-config", "-c", "--command"],
             _ => return None,
         };
@@ -301,9 +315,13 @@ impl ShellSpec {
         let mut args = Vec::new();
         match (self.kind(), self.integration_dir()) {
             (ShellKind::Bash, Some(dir)) => {
+                // A login shell never reads `--rcfile`: the login option is dropped and the
+                // login script loads the profile files instead.
+                let login = self.args.iter().any(|a| without_bash_login(a).as_deref() != Some(a.as_str()));
+                let rc = if login { integration::bash_login_rc(dir) } else { integration::bash_rc(dir) };
                 // bash wants long options before single-letter ones.
-                args.extend(["--rcfile".into(), integration::bash_rc(dir).display().to_string()]);
-                args.extend(self.args.iter().cloned());
+                args.extend(["--rcfile".into(), rc.display().to_string()]);
+                args.extend(self.args.iter().filter_map(|a| without_bash_login(a)));
             }
             (ShellKind::Fish, Some(dir)) => {
                 args.extend(self.args.iter().cloned());
@@ -435,6 +453,22 @@ impl ShellSpec {
 /// prompt (oh-my-posh included). It contains no double quotes so command line
 /// quoting never breaks.
 pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function global:prompt { [Console]::Write([char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); & $global:__nobleP }";
+
+/// A bash argument without its login option: `-l` and `--login` disappear, a short option
+/// cluster such as `-il` becomes `-i`; anything else is returned as it is.
+fn without_bash_login(arg: &str) -> Option<String> {
+    if arg == "--login" {
+        return None;
+    }
+    let short = arg.strip_prefix('-').filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic()));
+    match short {
+        Some(flags) if flags.contains('l') => {
+            let rest = flags.replace('l', "");
+            (!rest.is_empty()).then(|| format!("-{rest}"))
+        }
+        _ => Some(arg.to_string()),
+    }
+}
 
 enum ShellKind {
     PowerShell,
@@ -673,6 +707,12 @@ impl Pane {
         }
     }
 
+    /// The launcher command the pane was opened with is still running: no prompt has come
+    /// back since. Without shell integration (no prompt signal) this stays true.
+    pub fn launch_running(&self) -> bool {
+        self.command.is_some() && !self.prompted
+    }
+
     pub fn scroll_offset(&self) -> usize {
         lock(&self.parser).screen().scrollback()
     }
@@ -711,7 +751,12 @@ impl Pane {
         }
         let ((r0, c0), (r1, c1)) = sel.ordered();
         let p = lock(&self.parser);
-        let text = p.screen().contents_between(r0, c0, r1, c1.saturating_add(1));
+        // The pane can be drawn larger than its screen for a moment (the PTY is resized only when a
+        // divider drag ends); vt100 panics on columns past the screen, so the selection is kept inside.
+        let (rows, cols) = p.screen().size();
+        let (r0, r1) = (r0.min(rows.saturating_sub(1)), r1.min(rows.saturating_sub(1)));
+        let (c0, c1) = (c0.min(cols), c1.saturating_add(1).min(cols));
+        let text = p.screen().contents_between(r0, c0, r1, c1);
         let text: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
         let joined = text.join("\n");
         (!joined.trim().is_empty()).then_some(joined)
@@ -903,6 +948,17 @@ mod tests {
         assert_eq!(launched[2], format!("claude; exec '/usr/bin/bash' '--rcfile' '{rc}' '-i'"));
         // Arguments that skip the startup files turn it off.
         assert_eq!(with("bash", vec!["--norc".into()]).args_with_command(None), vec!["--norc"]);
+        // A login shell never reads `--rcfile`: the login script replaces the option.
+        let login_rc = integration::bash_login_rc(&dir).display().to_string();
+        for (args, rest) in [(vec!["-l"], vec![]), (vec!["--login", "-i"], vec!["-i"]), (vec!["-il"], vec!["-i"])] {
+            let spec = with("bash", args.iter().map(|a| a.to_string()).collect());
+            let want: Vec<String> = ["--rcfile", login_rc.as_str()].into_iter().chain(rest).map(Into::into).collect();
+            assert_eq!(spec.args_with_command(None), want, "{args:?}");
+        }
+        // The launcher command itself still runs in a login shell.
+        assert_eq!(with("bash", vec!["-l".into()]).args_with_command(Some("x"))[..2], ["-l", "-c"]);
+        assert_eq!(without_bash_login("-O"), Some("-O".into()));
+        assert_eq!(without_bash_login("--rcfile"), Some("--rcfile".into()));
 
         let zsh = with("/bin/zsh", vec![]);
         assert!(zsh.args_with_command(None).is_empty());
@@ -915,6 +971,7 @@ mod tests {
         let args = fish.args_with_command(None);
         assert_eq!(args[0], "--init-command");
         assert!(args[1].starts_with("source '") && args[1].contains("noble.fish"), "{args:?}");
+        assert_eq!(with("fish", vec!["-N".into()]).args_with_command(None), vec!["-N"]);
 
         // Other shells start as configured.
         assert!(with("/bin/dash", vec![]).args_with_command(None).is_empty());
@@ -950,10 +1007,30 @@ mod tests {
         }
     }
 
+    /// A title set by a program that has since exited (the shell prompt came back) is
+    /// dropped; one the shell sets for its prompt, after the mark, is kept.
+    #[test]
+    fn prompt_signal_drops_the_finished_programs_title() {
+        for mark in [&b"\x1b]7;file://h/tmp\x07"[..], b"\x1b]9;9;C:\\x\x1b\\", b"\x1b]133;A\x07", b"\x1b]133;D;0\x07"] {
+            let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+            parser.process("\x1b]0;\u{2733} Claude Code\x07".as_bytes());
+            assert_eq!(parser.callbacks().title, "\u{2733} Claude Code");
+            // Agent progress (OSC 9;4) and notifications are not prompt marks.
+            parser.process(b"\x1b]9;4;3;0\x07\x1b]9;done\x07");
+            assert!(!parser.callbacks().prompt);
+            assert_eq!(parser.callbacks().title, "\u{2733} Claude Code");
+            parser.process(mark);
+            assert!(parser.callbacks().prompt, "{mark:?}");
+            assert_eq!(parser.callbacks().title, "", "{mark:?}");
+            parser.process(b"\x1b]0;user@host: ~\x07");
+            assert_eq!(parser.callbacks().title, "user@host: ~");
+        }
+    }
+
     #[test]
     fn callbacks_answer_queries() {
         let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
-        parser.process(b"abc\x1b[6n\x1b]0;C:\\bin\\cmd.exe\x07\x1b]7;file://h/tmp/x\x07");
+        parser.process(b"abc\x1b[6n\x1b]7;file://h/tmp/x\x07\x1b]0;C:\\bin\\cmd.exe\x07");
         let cb = parser.callbacks();
         assert_eq!(cb.responses, b"\x1b[1;4R");
         assert_eq!(cb.title, "C:\\bin\\cmd.exe");

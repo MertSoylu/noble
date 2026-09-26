@@ -21,6 +21,9 @@ pub const EVENTS: [(&str, &str); 5] = [
     ("SessionEnd", "session-end"),
 ];
 
+/// The `noble hook` argument that ends a session (Claude's `SessionEnd`).
+pub const SESSION_END: &str = "session-end";
+
 /// The shared marker used to recognize our hook commands.
 const MARKER: &str = " hook ";
 
@@ -138,14 +141,20 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     if !instance.bytes().all(|b| b.is_ascii_digit()) || !pane.bytes().all(|b| b.is_ascii_digit()) {
         return;
     }
+    let dir = agents_dir(data);
+    let file = dir.join(format!("{instance}-{pane}.json"));
+    // The session is over (Claude exited, or `/clear` right before a new `session-start`):
+    // the pane no longer runs Claude, so its record goes.
+    if event == SESSION_END {
+        let _ = std::fs::remove_file(&file);
+        return;
+    }
     let message = serde_json::from_str::<Value>(stdin)
         .ok()
         .and_then(|v| v.get("message").and_then(Value::as_str).map(|m| crate::util::truncate(m.trim(), 120)));
     let rec = HookRecord { event: event.to_string(), message, ts: chrono::Utc::now().timestamp() };
-    let dir = agents_dir(data);
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(text) = serde_json::to_string(&rec) {
-        let file = dir.join(format!("{instance}-{pane}.json"));
         let tmp = dir.join(format!("{instance}-{pane}.tmp"));
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, file);
@@ -171,16 +180,22 @@ pub fn read_records(data: &Path, instance: u32) -> HashMap<PaneId, HookRecord> {
     out
 }
 
-/// Deletes records older than a day (left behind by closed NOBLE instances).
-pub fn prune(data: &Path) {
+/// Startup cleanup of the agents folder: files older than a day (left behind by NOBLE
+/// instances that crashed or were killed), and every file named after this `instance`.
+/// No pane of this instance exists yet, so such a file can only come from an earlier
+/// process that had the same id (process ids are reused) and would otherwise mark a
+/// fresh pane as running Claude. Records of other running instances stay.
+pub fn prune(data: &Path, instance: u32) {
     let Ok(entries) = std::fs::read_dir(agents_dir(data)) else { return };
+    let prefix = format!("{instance}-");
     for e in entries.flatten() {
-        let old = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() > 86_400);
+        let mine = e.file_name().to_string_lossy().starts_with(&prefix);
+        let old = mine
+            || e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 86_400);
         if old {
             let _ = std::fs::remove_file(e.path());
         }
@@ -259,6 +274,52 @@ mod tests {
         assert_eq!(recs[&3].message.as_deref(), Some("Claude needs your permission to use Bash"));
         remove_record(&data, 42, 3);
         assert!(read_records(&data, 42).is_empty());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// `session-end` clears the pane's record instead of leaving a state behind;
+    /// `/clear` (session-end, then session-start) ends with a fresh record.
+    #[test]
+    fn session_end_clears_the_record() {
+        let data = temp("end");
+        run_cli("prompt", "{}", &data, Some("42"), Some("3"));
+        run_cli("prompt", "{}", &data, Some("42"), Some("4"));
+        run_cli(SESSION_END, "{}", &data, Some("42"), Some("3"));
+        let recs = read_records(&data, 42);
+        assert!(!recs.contains_key(&3), "{recs:?}");
+        assert_eq!(recs[&4].event, "prompt", "other panes keep their record");
+        // Ending a session that has no record is harmless.
+        run_cli(SESSION_END, "{}", &data, Some("42"), Some("9"));
+        run_cli("session-start", "{}", &data, Some("42"), Some("3"));
+        assert_eq!(read_records(&data, 42)[&3].event, "session-start");
+        let names: Vec<String> = std::fs::read_dir(agents_dir(&data))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| n.ends_with(".json")), "no temp files left: {names:?}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Startup cleanup: records a day old (crashed instances) and leftovers of an earlier
+    /// process with this instance's id go; another running instance's records stay.
+    #[test]
+    fn prune_removes_stale_and_reused_instance_records() {
+        let data = temp("prune");
+        run_cli("prompt", "{}", &data, Some("42"), Some("1")); // an earlier process with our id
+        run_cli("stop", "{}", &data, Some("420"), Some("1")); // another instance (shares the prefix digits)
+        run_cli("notification", "{}", &data, Some("7"), Some("2")); // crashed long ago
+        let dir = agents_dir(&data);
+        std::fs::write(dir.join("42-5.tmp"), "{").unwrap(); // write cut short by a crash
+        let day_old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options().write(true).open(dir.join("7-2.json")).unwrap().set_modified(day_old).unwrap();
+        prune(&data, 42);
+        assert!(read_records(&data, 42).is_empty());
+        assert!(!dir.join("42-5.tmp").exists());
+        assert!(read_records(&data, 7).is_empty(), "day-old record of a crashed instance");
+        assert_eq!(read_records(&data, 420)[&1].event, "stop", "another live instance is untouched");
+        // Without an agents folder there is nothing to do.
+        prune(&data.join("missing"), 42);
         let _ = std::fs::remove_dir_all(&data);
     }
 }

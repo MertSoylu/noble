@@ -43,7 +43,7 @@ pub struct RecentEntry {
 impl RecentEntry {
     /// Frequency × recency: a use from a day ago counts at half weight.
     pub fn score(&self, now: i64) -> f64 {
-        let hours = ((now - self.last).max(0) as f64) / 3600.0;
+        let hours = (now.saturating_sub(self.last).max(0) as f64) / 3600.0;
         self.count as f64 / (1.0 + hours / 24.0)
     }
 }
@@ -380,11 +380,11 @@ impl UsageHistory {
     pub fn record(&mut self, key: &str, ts: i64, used: u8) {
         let list = self.series.entry(key.to_string()).or_default();
         match list.last_mut() {
-            Some(last) if (ts - last.0).abs() < 60 => *last = (ts, used),
+            Some(last) if ts.abs_diff(last.0) < 60 => *last = (ts, used),
             Some(last) if ts < last.0 => {}
             _ => list.push((ts, used)),
         }
-        list.retain(|(t, _)| ts - t <= HISTORY_KEEP_SECS);
+        list.retain(|(t, _)| ts.saturating_sub(*t) <= HISTORY_KEEP_SECS);
     }
 
     pub fn save(&self) {
@@ -397,13 +397,13 @@ impl UsageHistory {
     /// rising for at least 15 minutes (since the window start or the last 2 hours).
     pub fn pace_eta(&self, key: &str, window_start: i64, now: i64, used: u8) -> Option<u64> {
         let list = self.series.get(key)?;
-        let since = window_start.max(now - 2 * 3600);
+        let since = window_start.max(now.saturating_sub(2 * 3600));
         let recent: Vec<&(i64, u8)> = list.iter().filter(|(t, _)| *t >= since && *t <= now).collect();
         let (&(t0, u0), &(t1, u1)) = (*recent.first()?, *recent.last()?);
-        if t1 - t0 < 15 * 60 || u1 <= u0 || used >= 100 {
+        if t1.saturating_sub(t0) < 15 * 60 || u1 <= u0 || used >= 100 {
             return None;
         }
-        let per_sec = (u1 - u0) as f64 / (t1 - t0) as f64;
+        let per_sec = (u1 - u0) as f64 / t1.saturating_sub(t0) as f64;
         Some(((100 - used) as f64 / per_sec) as u64)
     }
 
@@ -414,11 +414,11 @@ impl UsageHistory {
         if buckets == 0 || to <= from {
             return Vec::new();
         }
-        let span = (to - from) as f64 / buckets as f64;
+        let span = to.saturating_sub(from) as f64 / buckets as f64;
         (0..buckets)
             .map(|b| {
-                let end = from + (span * (b + 1) as f64) as i64;
-                list.iter().rev().find(|(t, _)| *t <= end && *t >= from - 6 * 3600).map(|(_, u)| *u)
+                let end = from.saturating_add((span * (b + 1) as f64) as i64);
+                list.iter().rev().find(|(t, _)| *t <= end && *t >= from.saturating_sub(6 * 3600)).map(|(_, u)| *u)
             })
             .collect()
     }
@@ -472,6 +472,59 @@ mod tests {
         let again = Recent::load(file);
         assert_eq!(again.entries.len(), 1);
         assert_eq!(again.top(5).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Corrupt or hostile data files load as empty/defaults (or as the valid values they hold),
+    /// and nothing that uses them afterwards panics.
+    #[test]
+    fn corrupt_files_never_panic() {
+        let dir = std::env::temp_dir().join(format!("noble-store-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.json");
+        let bodies: [&[u8]; 14] = [
+            b"",
+            b"\xef\xbb\xbf",
+            b"\xff\xfe\x00{",
+            b"{",
+            b"[{\"path\":",
+            b"null",
+            b"42",
+            b"{\"welcomed\": \"yes\", \"pins\": [1, 2]}",
+            b"{\"pins\": [\"\xc3\xa9\xe6\x97\xa5\", \"\"], \"update_checked\": -9223372036854775808}",
+            b"{\"update_checked\": 9223372036854775807, \"update_latest\": \"v\xf0\x9f\x99\x82.\"}",
+            b"[{\"path\": \"/\", \"count\": 4294967295, \"last\": -9223372036854775808}]",
+            b"[{\"path\": \"/\", \"count\": 1, \"last\": 9223372036854775807}]",
+            b"{\"claude/5h\": [[-9223372036854775808, 255], [9223372036854775807, 0], [0, 200]]}",
+            b"[{\"name\": \"w\", \"saved_at\": 0, \"tabs\": [{\"name\": null, \"origin\": \"\", \"focus\": 99, \
+               \"layout\": {\"type\": \"split\", \"dir\": \"Row\", \"ratio\": -1e39, \"a\": {\"type\": \"leaf\", \
+               \"cwd\": \"\"}, \"b\": {\"type\": \"leaf\", \"cwd\": \"\\u0000\"}}}]}]",
+        ];
+        for body in bodies {
+            std::fs::write(&file, body).unwrap();
+            let mut recent = Recent::load(file.clone());
+            let _ = recent.top(5);
+            recent.file = None;
+            recent.record(&dir);
+            let _ = load_session(&file).map(|ws| ws.pane_count());
+            let ws = Workspaces::load(file.clone());
+            let panes = ws.list.iter().map(Workspace::pane_count).sum::<usize>();
+            if body.starts_with(b"[{\"name\"") {
+                assert_eq!(panes, 2, "the damaged but well-formed workspace still loads");
+            }
+            let mut ui = UiState::load(file.clone());
+            ui.file = None;
+            let _ = ui.is_pinned(&dir);
+            ui.toggle_pin(&dir);
+            let mut h = UsageHistory::load(file.clone());
+            h.file = None;
+            let t = now();
+            let _ = h.pace_eta("claude/5h", t - 3600, t, 50);
+            let _ = h.pace_eta("claude/5h", i64::MIN, t, 99);
+            let _ = h.resample("claude/5h", t - 5 * 3600, t, 40);
+            h.record("claude/5h", t, 30);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

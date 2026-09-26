@@ -21,8 +21,6 @@ All notable changes to NOBLE are documented here. The format is based on
   command started at the prompt or a quick-launch command.
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
-
-### Changed
 - Several NOBLE windows no longer overwrite each other's session: each window merges its own tabs into the
   session file on exit, and the next launch restores the tabs of every window. Only the first window of a run
   restores; a window opened while another one is running starts empty instead of opening the same tabs again.
@@ -30,6 +28,29 @@ All notable changes to NOBLE are documented here. The format is based on
   agent starts in its folder. Session files from older versions still load.
 
 ### Fixed
+- Link detection: URLs inside `( )` or `[ ]`, markdown links `[text](url)`, URLs glued to text
+  (`url=https://…`), short URLs such as `http://a` and paths with combining accents are now recognised
+  correctly.
+- `noble update` never leaves you without a working binary: the new binary is staged next to the old one
+  and swapped with renames, an empty binary in the archive is refused, and a leftover `*.old` that cannot
+  be deleted no longer blocks the update.
+- Better readability: One Dark's dim text and Solarized Light's dim text and accent are slightly darker to
+  reach WCAG contrast (3:1 for dim text, 4.5:1 for the accent).
+- After Claude exits, its pane and tab no longer keep saying "claude": the agent indicator and labels follow
+  the program running now (another agent, or none back at the shell prompt), on Windows and Linux in every
+  shell. Claude's `SessionEnd` hook clears the pane's state, and a quick-launch tab is named after its project
+  once the launched command has exited.
+- Claude hook state left behind by a crashed NOBLE can no longer show up in a new NOBLE that got the same
+  process id.
+- bash, zsh and fish now percent-encode the directory they report (OSC 7), so a directory whose name ends in a
+  space keeps it (spaces, `%`, `;`, `#` and non-ASCII names round-trip exactly).
+- A bash started as a login shell (`-l` / `--login` in `shell_args`) lost the cwd tracking: a login shell never
+  reads the rc file. NOBLE now loads the login files itself (`/etc/profile`, then `~/.bash_profile`,
+  `~/.bash_login` or `~/.profile`) and keeps the tracking.
+- No more crashes when selecting text after a lost mouse release during a divider drag, or when a dialog is
+  drawn in a tiny window. Editing `config.toml` from Settings keeps a ` #` inside quoted values and headers
+  with a trailing comment intact, and a config file that is not valid UTF-8 is reported instead of being
+  silently replaced. Corrupt data files with extreme timestamps no longer panic.
 - Restoring a session or workspace no longer drops a tab whose folder cannot be entered, and no longer waits
   on a network share that stopped answering (Windows and Linux): after 2 seconds the pane opens in the home
   folder. A notice names the folders that were not available (also for deleted ones).

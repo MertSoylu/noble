@@ -353,7 +353,9 @@ NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, with no setup:
 - **PowerShell** (Windows and Linux): your existing prompt (oh-my-posh included) is wrapped to emit OSC 9;9.
 - **cmd.exe**: a `PROMPT` that does the same, unless you already have one.
 - **bash, zsh, fish** (Git Bash too): your own `~/.bashrc`, `.zshrc` or `config.fish` loads first, then a
-  small hook reports OSC 7 on every prompt. Starship, oh-my-zsh and friends keep working. The hook scripts live
+  small hook reports OSC 7 on every prompt. Starship, oh-my-zsh and friends keep working, and so does a zsh
+  `ZDOTDIR` of your own. A bash login shell (`-l` / `--login` in `shell_args`) loads `/etc/profile` and your
+  `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`. The hook scripts live
   in the data folder under `shell/`; pass `--norc` (bash), `-f` (zsh) or `--no-config` (fish) in `shell_args`
   to start the shell untouched.
 - Any other shell whose prompt emits OSC 7 works too.

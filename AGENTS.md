@@ -100,8 +100,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Claude hooks:** `hooks.rs` — when enabled in Settings, adds `noble hook <event>` to
   `~/.claude/settings.json` (writes a backup, removes only its own entries). `main.rs` handles this subcommand
   without opening the terminal; state is written to `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files,
-  which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). Never touch the real file in
-  tests.
+  which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). `session-end` deletes the
+  record, and the prompt signal clears the pane's agent (`App::clear_agent`; older records are ignored) and its
+  window title; the launcher command only names the agent until the first prompt (`Pane::launch_running`).
+  `hooks::prune` runs at startup. Never touch the real file in tests.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (error = toast, never a crash); `store.rs` stores
