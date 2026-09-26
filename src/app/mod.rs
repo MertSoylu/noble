@@ -394,6 +394,9 @@ pub struct App {
     pub ui_state: crate::store::UiState,
     /// Latest events from the Claude Code hooks (pane → record).
     pub agent_hooks: HashMap<PaneId, crate::hooks::HookRecord>,
+    /// When each pane's shell prompt last came back (Unix seconds): a hook record written
+    /// until then belongs to a program that has exited (`clear_agent`).
+    agent_cleared: HashMap<PaneId, i64>,
     last_hook_scan: Instant,
     /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
     pub hooks_installed: bool,
@@ -482,7 +485,7 @@ impl App {
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
         app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
-        crate::hooks::prune(&app.paths.data);
+        crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| crate::hooks::is_installed(&p));
         crate::update::cleanup_old();
         app.init_updates();
@@ -579,6 +582,7 @@ impl App {
             usage_history: UsageHistory::memory(),
             ui_state: crate::store::UiState::memory(),
             agent_hooks: HashMap::new(),
+            agent_cleared: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_installed: false,
             sensor_mode: None,
@@ -855,16 +859,23 @@ impl App {
             _ => Vec::new(),
         };
         let mut changed = Vec::new();
-        for (pane, rec) in &records {
-            if !self.panes.contains_key(pane) {
-                crate::hooks::remove_record(&self.paths.data, std::process::id(), *pane);
+        let mut live = HashMap::new();
+        for (pane, rec) in records {
+            // Orphans (pane closed or never ours), finished sessions, and records from
+            // before the pane's shell prompt came back (the agent has exited since).
+            let stale = !self.panes.contains_key(&pane)
+                || rec.event == crate::hooks::SESSION_END
+                || self.agent_cleared.get(&pane).is_some_and(|&t| rec.ts <= t);
+            if stale {
+                crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
                 continue;
             }
-            if self.agent_hooks.get(pane) != Some(rec) {
-                changed.push((*pane, rec.clone()));
+            if self.agent_hooks.get(&pane) != Some(&rec) {
+                changed.push((pane, rec.clone()));
             }
+            live.insert(pane, rec);
         }
-        self.agent_hooks = records.into_iter().filter(|(p, _)| self.panes.contains_key(p)).collect();
+        self.agent_hooks = live;
         for (pane, rec) in changed {
             let notice = match rec.event.as_str() {
                 "notification" => Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into())),
@@ -888,7 +899,31 @@ impl App {
         }
     }
 
-    /// The AI agent running in a pane and its state.
+    /// The pane's shell prompt came back, so whatever agent ran there has exited:
+    /// its hook record goes, and records written until now are ignored if they show up
+    /// later (a hook finishing its write just as the agent exits).
+    ///
+    /// Only the shell emits the prompt marks (OSC 7 / 9;9 / 133); Claude Code sets
+    /// the title and OSC 9;4 progress but none of these, so a running agent is not
+    /// cleared by it. Should one ever emit them, its next hook event (every prompt,
+    /// notification and stop) writes a newer record and the state comes back.
+    fn clear_agent(&mut self, pane: PaneId) {
+        self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
+        if self.agent_hooks.remove(&pane).is_some() {
+            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
+        }
+    }
+
+    /// Forgets a closed pane's agent state and deletes its hook record.
+    pub(crate) fn forget_agent(&mut self, pane: PaneId) {
+        self.agent_cleared.remove(&pane);
+        if self.agent_hooks.remove(&pane).is_some() {
+            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
+        }
+    }
+
+    /// The AI agent running in a pane and its state: from Claude's hook record, else
+    /// guessed from the launcher command (while it still runs) or the window title.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         if let Some(rec) = self.agent_hooks.get(&pane) {
             let state = match rec.event.as_str() {
@@ -900,7 +935,9 @@ impl App {
             return Some(("claude", state));
         }
         let p = self.panes.get(&pane)?;
-        let kind = crate::ai::agent_kind(p.command.as_deref(), &p.label())?;
+        // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
+        let command = p.command.as_deref().filter(|_| p.launch_running());
+        let kind = crate::ai::agent_kind(command, &p.label())?;
         let alert = self.tabs.iter().any(|t| t.alert && t.root.contains(pane));
         Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
     }
@@ -1012,11 +1049,14 @@ impl App {
                 });
             }
         }
-        let shown = signals.iter().any(|s| s.visible);
+        let mut shown = signals.iter().any(|s| s.visible);
         for sig in signals {
             if let Some(cwd) = &sig.cwd {
                 // Command finished: the repo may have changed.
                 self.refresh_git_at(cwd);
+                // An agent there has exited; the tab title in the top bar may change too.
+                shown |= self.agent_state(sig.id).is_some();
+                self.clear_agent(sig.id);
                 if let Some(p) = self.panes.get_mut(&sig.id) {
                     p.command_started = None;
                     p.prompted = true;

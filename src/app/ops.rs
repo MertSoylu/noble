@@ -216,14 +216,21 @@ impl App {
         if let Some(n) = &t.name {
             return n.clone();
         }
+        // Launcher tabs ("project · claude") say what is running while it runs; once it
+        // has exited (or after a restore) they are named after the project like any other.
+        let (base, launcher) = match t.origin.split_once(" · ") {
+            Some((base, _)) => (base, true),
+            None => (t.origin.as_str(), false),
+        };
+        if launcher && t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.launch_running())) {
+            return t.origin.clone();
+        }
         let label = self.panes.get(&t.focus).map(|p| (p.label(), p.shell_label.clone()));
         match label {
-            // Launcher tabs ("project · claude") already say what is running.
-            _ if t.origin.contains(" · ") => t.origin.clone(),
             Some((l, shell)) if !l.eq_ignore_ascii_case(&shell) && !l.is_empty() => {
-                format!("{} · {}", t.origin, crate::util::truncate(&l, 16))
+                format!("{base} · {}", crate::util::truncate(&l, 16))
             }
-            _ => t.origin.clone(),
+            _ => base.to_string(),
         }
     }
 
@@ -299,9 +306,7 @@ impl App {
         let tab = self.tabs.remove(i);
         for id in tab.panes() {
             self.panes.remove(&id);
-            if self.agent_hooks.remove(&id).is_some() {
-                crate::hooks::remove_record(&self.paths.data, std::process::id(), id);
-            }
+            self.forget_agent(id);
         }
         self.view = match self.view {
             View::Term(v) if v == i => {
@@ -382,9 +387,7 @@ impl App {
 
     pub fn close_pane(&mut self, id: PaneId) {
         self.panes.remove(&id);
-        if self.agent_hooks.remove(&id).is_some() {
-            crate::hooks::remove_record(&self.paths.data, std::process::id(), id);
-        }
+        self.forget_agent(id);
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
         if self.tabs[ti].panes().len() <= 1 {
             self.remove_tab(ti);

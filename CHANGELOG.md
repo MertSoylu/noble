@@ -31,6 +31,12 @@ All notable changes to NOBLE are documented here. The format is based on
   be deleted no longer blocks the update.
 - Better readability: One Dark's dim text and Solarized Light's dim text and accent are slightly darker to
   reach WCAG contrast (3:1 for dim text, 4.5:1 for the accent).
+- After Claude exits, its pane and tab no longer keep saying "claude": the agent indicator and labels follow
+  the program running now (another agent, or none back at the shell prompt), on Windows and Linux in every
+  shell. Claude's `SessionEnd` hook clears the pane's state, and a quick-launch tab is named after its project
+  once the launched command has exited.
+- Claude hook state left behind by a crashed NOBLE can no longer show up in a new NOBLE that got the same
+  process id.
 
 ## [1.2.0]
 
