@@ -98,7 +98,7 @@ the app.
 
 **🖱 Mouse first, keyboard too**<br>
 Every button, tab, row and chip is clickable, with context menus on right-click. A tmux-style prefix key and
-a command palette (`alt+p`) cover the keyboard side.
+a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 
 </td>
 <td valign="top">
@@ -191,19 +191,29 @@ noble [--config <path>] [--no-boot]
 NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
 plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference.
 
+The direct shortcuts marked \* are shell keys too (last argument, transpose words, fish's sudo and pager …), so in
+a terminal they go to the shell and work everywhere else; use the prefix column there instead. `shell_first =
+false` (Settings → Leave shell keys to the shell) gives them back to NOBLE everywhere.
+
+When an app in a pane needs one of NOBLE's other shortcuts (e.g. `alt+m`, `alt+z`), **prefix `i`** locks the
+pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
+working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there is no lock: prefix + a shortcut
+(e.g. `ctrl+a alt+m`) sends just that key, and prefix `i` sends the next key.
+
 | Direct | | Prefix, then | |
 |---|---|---|---|
 | `alt+1…9` | go to tab | `t` `c` | new tab |
 | `alt+0` | Home | `v` `\|` | split right |
-| `alt+t` | new tab | `s` `-` | split down |
-| `alt+p` | command palette | `x` / `X` | close pane / tab |
+| `alt+t`\* | new tab | `s` `-` | split down |
+| `alt+p`\* | command palette | `x` / `X` | close pane / tab |
 | `alt+m` | system monitor | `z` | zoom pane |
-| `alt+s` | settings | `S` | settings |
+| `alt+s`\* | settings | `S` | settings |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
-| `alt+.` / `alt+,` | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
+| `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
+| | | `i` | pass shortcuts to the app (lock / next key) |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
 <details>
@@ -220,7 +230,7 @@ plus a few direct shortcuts. Everything can be rebound, and `?` shows the live r
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename ·
-  drag dividers · drag to select text (copied on release) · right-click pastes · wheel scrolls ·
+  drag dividers · drag to select text (copied on release) · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
   `shift+drag` selects even inside apps that capture the mouse.
 
 AltGr symbols (`@ { } [ ] \ | ~ €` on Turkish, German, Polish… layouts) are passed through as characters,
@@ -261,6 +271,8 @@ notify_after = 10        # report background commands that ran at least this man
 
 [keys]
 prefix = "ctrl+a"
+passthrough = "lock"     # "lock": prefix i locks a pane's keys to its app · "once": prefix + shortcut sends it
+shell_first = true       # alt+. alt+, alt+t alt+s alt+p go to the shell in a terminal
 [keys.prefix_bindings]   # key after the prefix → action ("none" unbinds)
 "%" = "split_right"
 [keys.direct_bindings]   # global chords
@@ -290,7 +302,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder send_prefix
-update dismiss_update`.
+passthrough update dismiss_update`.
 
 </details>
 

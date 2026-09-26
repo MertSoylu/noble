@@ -1186,6 +1186,135 @@ fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) 
 
 /// Right-click menus: tab and pane title; the command picked from the menu runs.
 #[test]
+fn passthrough_sends_shortcuts_to_the_app() {
+    use noble::app::{SettingItem, SettingKey};
+    let key = |c: char, m: KeyModifiers| KeyEvent::new(KeyCode::Char(c), m);
+    let prefix = || KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let term = app.view;
+    // Shell keys (alt+p, alt+. …) reach the shell in a terminal; the others are NOBLE's.
+    app.on_key(key('p', KeyModifiers::ALT));
+    assert!(app.overlay.is_none());
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("ctrl+a : commands") && !text.contains("alt+p commands"), "{text}");
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+    app.on_key(key('p', KeyModifiers::ALT));
+    assert!(app.overlay.is_some(), "outside a terminal alt+p stays the palette");
+    app.overlay = None;
+    app.view = term;
+
+    // "lock" (default): prefix i locks the pane, alt+m / alt+z go to the app.
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(app.focused_locked());
+    let text = render(&mut app, 110, 30);
+    save("term-keys-locked-110x30", &text);
+    assert!(text.contains("🔒 bash") || text.contains("🔒 "), "{text}");
+    assert!(text.contains("KEYS") && text.contains("unlock keys"), "{text}");
+    app.on_key(key('m', KeyModifiers::ALT));
+    app.on_key(key('z', KeyModifiers::ALT));
+    assert!(app.overlay.is_none() && !app.tabs[0].zoomed);
+    assert_eq!(app.view, term);
+    // The lock also shows on a pane too narrow for the corner tag.
+    let narrow = render(&mut app, 16, 10);
+    save("term-keys-locked-16x10", &narrow);
+    assert!(narrow.contains('🔒'), "{narrow}");
+    // The prefix still works while locked; prefix i unlocks.
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(!app.focused_locked());
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+
+    // "once": prefix + a shortcut sends only that key; prefix i passes the next key.
+    assert_eq!(noble::config::parse(noble::config::DEFAULT_CONFIG).unwrap().keys.passthrough, "lock");
+    assert_eq!(app.setting_value(SettingKey::Passthrough), "lock (ctrl+a i)");
+    app.activate_setting(SettingItem::Setting(SettingKey::Passthrough), 1);
+    assert_eq!(app.setting_value(SettingKey::Passthrough), "once (ctrl+a + key)");
+    app.view = term;
+    app.toasts.clear();
+    app.on_key(prefix());
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert!(app.view == term && app.toasts.is_empty(), "sent to the app, no 'not bound' warning");
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    assert!(!app.focused_locked() && app.pass_next.is_some());
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, term);
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+    // A pending "next key" is dropped when the terminal is left.
+    app.view = term;
+    app.on_key(prefix());
+    app.on_key(key('i', KeyModifiers::NONE));
+    app.view = View::Bridge;
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System);
+    app.view = term;
+    app.on_key(key('m', KeyModifiers::ALT));
+    assert_eq!(app.view, View::System, "not carried back into the terminal");
+
+    // shell_first off: NOBLE takes alt+p in terminals too.
+    app.activate_setting(SettingItem::Setting(SettingKey::ShellFirst), 1);
+    app.view = term;
+    app.on_key(key('p', KeyModifiers::ALT));
+    assert!(app.overlay.is_some());
+}
+
+/// Closing a pane or tab with something still running, and a paste with line breaks, ask first.
+#[test]
+fn risky_terminal_actions_ask_first() {
+    use noble::app::Overlay;
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("busy".into()));
+    let id = app.focused_pane().unwrap();
+    // An idle shell closes right away.
+    app.run(Action::SplitRight);
+    let second = app.focused_pane().unwrap();
+    app.run(Action::ClosePane);
+    assert!(app.overlay.is_none() && !app.panes.contains_key(&second));
+
+    // A command running at the prompt (shell integration seen): ask, then close on "yes".
+    {
+        let p = app.panes.get_mut(&id).unwrap();
+        p.prompted = true;
+        p.command_started = Some(std::time::Instant::now());
+    }
+    app.run(Action::ClosePane);
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    let text = render(&mut app, 110, 30);
+    save("confirm-close-pane-110x30", &text);
+    assert!(text.contains("CLOSE PANE") && text.contains("still running"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.overlay.is_none() && app.panes.contains_key(&id), "esc keeps the pane");
+    app.run(Action::CloseTab);
+    assert!(render(&mut app, 110, 30).contains("CLOSE TAB"));
+
+    // Paste: a line break asks first when the app has no bracketed paste, one line does not.
+    // The mode is set on the emulator directly so the test does not depend on the shell's version.
+    app.overlay = None;
+    app.panes[&id].parser().process(b"\x1b[?2004h");
+    app.paste_into(id, "echo one\necho two".into());
+    assert!(app.overlay.is_none(), "bracketed paste: the app itself decides");
+    app.panes[&id].parser().process(b"\x1b[?2004l");
+    app.paste_into(id, "echo one".into());
+    assert!(app.overlay.is_none());
+    app.paste_into(id, "echo one\necho two\n".into());
+    let text = render(&mut app, 110, 30);
+    save("confirm-paste-110x30", &text);
+    assert!(text.contains("PASTE") && text.contains("2 lines"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+
+    app.run(Action::CloseTab);
+    app.on_key(enter);
+    assert!(app.tabs.is_empty());
+}
+
+#[test]
 fn context_menus_on_tabs_and_panes() {
     use crossterm::event::{MouseButton, MouseEventKind};
     use noble::app::{Hit, Overlay};
@@ -1658,10 +1787,10 @@ fn redraw_only_when_something_visible_changes() {
     assert!(!app.handle(AppEvent::Projects(app.projects.clone())));
     let term = app.redraw_after().unwrap();
     assert!(term <= Duration::from_secs(61), "{term:?}");
-    // A key always redraws; the palette cursor blinks twice a second.
-    assert!(
-        app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))))
-    );
+    // A key always redraws; the palette cursor blinks twice a second (alt+p is the shell's in a terminal).
+    let key = |c, m| AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char(c), m)));
+    assert!(app.handle(key('a', KeyModifiers::CONTROL)));
+    assert!(app.handle(key(':', KeyModifiers::NONE)));
     assert!(app.redraw_after().unwrap() <= Duration::from_millis(500));
     app.overlay = None;
     // We wake at the moment a notification must expire and disappear.

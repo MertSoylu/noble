@@ -49,6 +49,8 @@ fn build_lines(items: &[SettingItem], cols: usize) -> Vec<Line> {
         [
             SettingKey::Shell,
             SettingKey::Prefix,
+            SettingKey::Passthrough,
+            SettingKey::ShellFirst,
             SettingKey::Restore,
             SettingKey::CopySelect,
             SettingKey::TermColors,

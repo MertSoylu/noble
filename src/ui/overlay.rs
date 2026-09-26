@@ -494,7 +494,13 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
             }
             continue;
         }
-        v.push((k, a.title(), false));
+        // Shell keys reach the shell in a terminal (`keys.shell_first`).
+        let title = if app.keymap.shell_first.iter().any(|c| c.to_string() == k) {
+            format!("{} (not in terminals)", a.title())
+        } else {
+            a.title()
+        };
+        v.push((k, title, false));
     }
 
     section(&mut v, "HOME");

@@ -6,6 +6,22 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Apps in a pane can get NOBLE's own shortcuts (`alt+m`, `alt+z` …). Prefix `i` locks the pane's keys to its
+  app (🔒 KEYS on the pane, prefix `i` again to unlock; the prefix keeps working). With `keys.passthrough =
+  "once"` (Settings → Pass shortcuts to apps) prefix + a shortcut sends just that key and prefix `i` the next
+  key. Also in the pane menu; new bindable action `passthrough`.
+
+### Changed
+- The direct shortcuts that are shell keys (`alt+.` last argument, `alt+t` transpose words, `alt+s` / `alt+p`
+  fish's sudo and pager, `alt+,`) now go to the shell in a terminal and stay NOBLE's elsewhere; use the prefix
+  there (`ctrl+a :` palette, `n` / `p` tabs). `keys.shell_first = false` (Settings → Leave shell keys to the
+  shell) restores the old behavior; a key bound in `direct_bindings` is always NOBLE's.
+- Closing a pane or tab (✕, keys, menus) asks first while something still runs in it: a full-screen app, a
+  command started at the prompt or a quick-launch command.
+- A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
+  every line could run as a command.
+
 ## [1.2.0]
 
 ### Added
