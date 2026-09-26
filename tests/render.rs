@@ -196,7 +196,7 @@ fn demo_app(w: u16, h: u16) -> App {
         tabs: vec![SavedTab {
             name: None,
             origin: "noble-rs".into(),
-            layout: SavedNode::Leaf { cwd: "C:\\".into() },
+            layout: SavedNode::Leaf { cwd: "C:\\".into(), launch: None },
             focus: 0,
         }],
     });
@@ -714,6 +714,40 @@ fn terminal_mouse_split_and_drag() {
     let close = find_hit(&app, |h| matches!(h, Hit::PaneClose(_))).unwrap();
     click(&mut app, close.x + 1, close.y);
     assert_eq!(app.tabs[0].panes().len(), 2);
+    app.run(Action::CloseTab);
+}
+
+/// A divider drag whose release never arrives (button let go outside the window) leaves the
+/// panes drawn at a size their shells do not have yet. Selecting text past the shell's width
+/// there must not crash (it did: vt100 `contents_between` underflowed).
+#[test]
+fn selection_beyond_the_shell_size_after_a_lost_release() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("sel".into()));
+    app.run(Action::SplitRight);
+    render(&mut app, 110, 30);
+    let div = find_hit(&app, |h| matches!(h, Hit::Divider { .. })).expect("divider");
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), div.x, div.y + 3);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), div.x - 30, div.y + 3);
+    // No Up: the right pane is now drawn 30 columns wider than its shell.
+    render(&mut app, 110, 30);
+    let right = app.tabs[0].root.layout(app.body()).0[1].0;
+    let inner = app
+        .hits
+        .iter()
+        .find_map(|(_, h)| match h {
+            Hit::Pane { pane, inner } if *pane == right => Some(*inner),
+            _ => None,
+        })
+        .expect("right pane");
+    assert!(inner.width > app.panes[&right].size.1 + 10, "{inner:?} {:?}", app.panes[&right].size);
+    let (x, y) = (inner.right() - 1, inner.y + 1);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x - 3, y);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x, y + 1);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, y + 1);
+    render(&mut app, 110, 30);
     app.run(Action::CloseTab);
 }
 
@@ -1572,6 +1606,175 @@ fn claude_hook_states_drive_sessions() {
     assert!(app.agent_hooks.is_empty());
 }
 
+/// Runs the real `noble hook <event>` the way Claude Code's hooks do: inside the pane's
+/// environment (`NOBLE_INSTANCE`, `NOBLE_PANE`), with the event JSON on stdin.
+fn noble_hook(app: &App, pane: noble::term::layout::PaneId, instance: u32, event: &str, stdin: &str) {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+        .args(["hook", event])
+        .env("NOBLE_HOME", &app.paths.data)
+        .env("NOBLE_INSTANCE", instance.to_string())
+        .env("NOBLE_PANE", pane.to_string())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("noble hook");
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+/// What `App::tick` does once a second while hooks are live.
+fn scan_hooks(app: &mut App) {
+    let records = noble::hooks::read_records(&app.paths.data, std::process::id());
+    app.apply_hook_records(records);
+}
+
+fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        app.pump();
+        if done(app) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what} never happened\n{}", render(app, 110, 30));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A stand-in for an agent's TUI in `shell`: sets the window title the way the agent
+/// does, then waits for a line (Enter "exits" it).
+fn fake_agent(shell: &noble::term::pane::ShellSpec, title: &str) -> String {
+    match shell.label().to_lowercase().as_str() {
+        "pwsh" | "powershell" => {
+            format!("Write-Host -NoNewline ([char]27 + ']0;{title}' + [char]7); $null = Read-Host")
+        }
+        // cmd.exe has no escape sequences: `title` sets the console title, which ConPTY reports as OSC 0.
+        "cmd" => format!("title {title} & pause >nul"),
+        // bash, zsh and fish all understand `\e` in printf. The wait is an external program:
+        // fish's own `read` re-titles the terminal.
+        _ => format!("printf '\\e]0;{title}\\a'; head -n 1 >/dev/null"),
+    }
+}
+
+/// Agent lifecycle in one pane, on every installed shell: Claude opened from a quick
+/// launch goes through its hook events and exits; the shell prompt (OSC 7 / 9;9) ends it;
+/// another agent started in the same pane is shown instead; back at the shell nothing
+/// is shown; closing the pane clears the records. Orphan records, late writes and other
+/// NOBLE instances are covered along the way.
+#[test]
+fn agent_state_follows_the_program_in_the_pane() {
+    check_agent_lifecycle("");
+    if cfg!(windows) {
+        check_agent_lifecycle("cmd.exe");
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_agent_lifecycle(&path.display().to_string());
+            }
+        }
+    }
+}
+
+fn check_agent_lifecycle(shell: &str) {
+    use noble::app::AgentState;
+    let mut app = demo_app(160, 45);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let tag = std::path::Path::new(shell)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".into());
+    // Own data folder: headless apps share one, and panes of parallel tests have the same ids.
+    app.paths.data = std::env::temp_dir().join(format!("noble-agent-life-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&app.paths.data);
+    let me = std::process::id();
+    let agents = noble::hooks::agents_dir(&app.paths.data);
+
+    // Quick launch, as `App::launch` does it: the tab is named after the launcher.
+    let claude = fake_agent(&app.shell, "Claude Code");
+    let project = std::env::temp_dir();
+    let origin = format!("{} · claude", project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap());
+    app.new_tab(project, Some(&claude), Some(origin.clone()));
+    let pane = app.tabs[0].focus;
+    pump_until(&mut app, &format!("{shell}: agent title"), |a| a.panes[&pane].label().contains("Claude Code"));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Running)), "{shell}: no hook yet");
+    assert_eq!(app.tab_title(0), origin);
+
+    // Claude's hooks.
+    let steps = [
+        ("session-start", "{}", AgentState::Idle),
+        ("prompt", r#"{"prompt":"fix it"}"#, AgentState::Working),
+        ("notification", r#"{"message":"Claude needs your permission to use Bash"}"#, AgentState::NeedsYou),
+        ("stop", "{}", AgentState::Idle),
+    ];
+    for (event, stdin, want) in steps {
+        noble_hook(&app, pane, me, event, stdin);
+        scan_hooks(&mut app);
+        assert_eq!(app.agent_state(pane), Some(("claude", want)), "{shell}: after {event}");
+    }
+    // Another NOBLE instance's pane with the same id is not ours.
+    noble_hook(&app, pane, me + 1, "notification", "{}");
+    // An orphan: a pane this instance never had (or already closed).
+    noble_hook(&app, 9999, me, "prompt", "{}");
+    scan_hooks(&mut app);
+    assert!(!agents.join(format!("{me}-9999.json")).exists(), "{shell}: orphan record kept");
+    assert!(agents.join(format!("{}-{pane}.json", me + 1)).exists(), "{shell}: other instance's record removed");
+
+    // `/exit`: SessionEnd clears the record; the program itself is still closing.
+    noble_hook(&app, pane, me, "session-end", r#"{"reason":"prompt_input_exit"}"#);
+    scan_hooks(&mut app);
+    assert!(!app.agent_hooks.contains_key(&pane), "{shell}: session-end left the record");
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists());
+
+    // A stop hook that races the exit lands after session-end.
+    noble_hook(&app, pane, me, "stop", "{}");
+    // The agent exits; the shell prompt comes back.
+    app.panes[&pane].write(b"\r");
+    pump_until(&mut app, &format!("{shell}: prompt after the agent"), |a| a.panes[&pane].prompted);
+    scan_hooks(&mut app);
+    assert_eq!(app.agent_state(pane), None, "{shell}: agent shown at the shell prompt");
+    // The title is gone, or is the one the shell sets for its own prompt.
+    let label = app.panes[&pane].label();
+    assert!(!label.contains("Claude"), "{shell}: the agent's title outlived it: {label}");
+    assert!(!app.tab_title(0).contains("claude"), "{shell}: tab still says {:?}", app.tab_title(0));
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after the prompt");
+    let text = render(&mut app, 160, 45);
+    save(&format!("agent-back-at-shell-{tag}"), &text);
+    let top = text.lines().next().unwrap_or_default();
+    assert!(!top.contains("claude"), "{shell}: top bar still says claude: {top}");
+
+    // Another harness in the same pane.
+    let codex = fake_agent(&app.shell, "codex");
+    app.panes[&pane].write(format!("{codex}\r").as_bytes());
+    pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some());
+    assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)), "{shell}");
+    // An elevated cmd.exe prefixes its title with "Administrator: ", which the tab's 16-character
+    // label cuts before the program name; the pane label still carries it. Other shells show it.
+    let tab = app.tab_title(0);
+    let label = app.panes[&pane].label();
+    assert!(tab.contains("codex") || (shell == "cmd.exe" && label.contains("codex")), "{shell}: {tab:?} / {label:?}");
+    assert!(!tab.contains("claude"), "{shell}: {tab:?}");
+    app.panes[&pane].write(b"\r");
+    pump_until(&mut app, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
+    assert!(!app.panes[&pane].label().contains("codex"), "{shell}");
+
+    // Claude again, typed at the prompt this time; closing the pane clears its record.
+    // Records written in the same second as the last prompt count as leftovers of the
+    // program before it (hook timestamps are in seconds), so wait for the next second.
+    std::thread::sleep(Duration::from_millis(1100));
+    noble_hook(&app, pane, me, "session-start", "{}");
+    scan_hooks(&mut app);
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)), "{shell}");
+    app.run(Action::CloseTab);
+    assert!(app.agent_hooks.is_empty());
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after close");
+    let _ = std::fs::remove_dir_all(&app.paths.data);
+}
+
 /// A warning row appears in the AI panel when the quota would fill before it resets.
 #[test]
 fn quota_pace_warning_line() {
@@ -1915,4 +2118,1006 @@ fn update_notice_bottom_right() {
     assert!(app.update_notice().is_none(), "dismissed version stays hidden");
     app.handle(AppEvent::Update(Ok("99.0.1".into())));
     assert_eq!(app.update_notice(), Some("99.0.1"));
+}
+
+/// Shell integration edge cases for bash, zsh and fish (`term/integration.rs`): unusual
+/// directory names, user startup options, the user's own prompt hooks and `ZDOTDIR`.
+/// Every shell starts through a small wrapper named after it (so NOBLE treats it as that
+/// shell) that points HOME, XDG_CONFIG_HOME and XDG_DATA_HOME at a temporary directory: the
+/// tests write their own "user config" there and never read the real one.
+/// Unix only: the wrapper is a POSIX script. On Windows the same scripts run under Git Bash,
+/// whose cwd tracking `cwd_is_tracked_after_cd` covers; pwsh and cmd report with OSC 9;9.
+#[cfg(unix)]
+mod shells {
+    use super::*;
+    use noble::term::layout::PaneId;
+    use std::path::Path;
+
+    struct IsolatedShell {
+        shell: &'static str,
+        home: PathBuf,
+        wrapper: PathBuf,
+    }
+
+    impl IsolatedShell {
+        /// `None` when the shell is not installed. `env` is exported by the wrapper as well.
+        fn new(shell: &'static str, case: &str, env: &[(&str, &str)]) -> Option<IsolatedShell> {
+            use std::os::unix::fs::PermissionsExt;
+            let real = noble::util::which(shell)?;
+            let root = std::env::temp_dir().join(format!("noble-shell-{case}-{shell}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let home = root.join("home");
+            std::fs::create_dir_all(home.join(".config").join("fish")).unwrap();
+            std::fs::create_dir_all(root.join("bin")).unwrap();
+            let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+            let mut script = format!(
+                "#!/bin/sh\nexport HOME={h} XDG_CONFIG_HOME={h}/.config XDG_DATA_HOME={h}/.local/share\n\
+                 unset NOBLE_USER_ZDOTDIR PROMPT_COMMAND\n",
+                h = q(&home.display().to_string())
+            );
+            for (k, v) in env {
+                script.push_str(&format!("export {k}={}\n", q(v)));
+            }
+            script.push_str(&format!("exec {} \"$@\"\n", q(&real.display().to_string())));
+            let wrapper = root.join("bin").join(shell);
+            std::fs::write(&wrapper, script).unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Some(IsolatedShell { shell, home, wrapper })
+        }
+
+        fn write(&self, rel: &str, text: &str) {
+            let path = self.home.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+
+        /// Opens a tab with this shell and `args` in `cwd`.
+        fn open(&self, args: &[&str], cwd: &Path) -> (App, PaneId) {
+            let mut app = demo_app(110, 30);
+            let mut cfg = app.cfg.clone();
+            cfg.terminal.shell = self.wrapper.display().to_string();
+            cfg.terminal.shell_args = args.iter().map(|a| a.to_string()).collect();
+            app.apply_config(cfg);
+            app.new_tab(cwd.to_path_buf(), None, Some("shell".into()));
+            let id = app.tabs[0].focus;
+            (app, id)
+        }
+    }
+
+    impl Drop for IsolatedShell {
+        fn drop(&mut self) {
+            if let Some(root) = self.home.parent() {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    /// Pumps until the pane's reported directory (OSC 7) is `want`; panics with the screen otherwise.
+    fn wait_cwd(app: &mut App, id: PaneId, want: &Path, what: &str) {
+        let want = std::fs::canonicalize(want).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            app.pump();
+            let reported = app.panes[&id].parser().callbacks().cwd.clone();
+            if reported.as_ref().and_then(|c| std::fs::canonicalize(c).ok()) == Some(want.clone()) {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                let screen = app.panes[&id].parser().screen().contents();
+                panic!("{what}: reported cwd {reported:?}, want {want:?}\n{screen}");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Pumps until the pane's screen contains `needle`.
+    fn wait_screen(app: &mut App, id: PaneId, needle: &str, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            app.pump();
+            let screen = app.panes[&id].parser().screen().contents();
+            if screen.contains(needle) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}: {needle:?} never appeared\n{screen}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// OSC 7 round trip: directories with spaces, Unicode, `%`, `#`, `;`, `?` and a trailing
+    /// space are reported by every installed bash/zsh/fish and decoded back to the same path.
+    #[test]
+    fn cwd_with_special_characters_is_tracked() {
+        for shell in ["bash", "zsh", "fish"] {
+            let Some(sh) = IsolatedShell::new(shell, "chars", &[]) else { continue };
+            let base = sh.home.join("dir with spaces ü 日本");
+            let odd = base.join("100% #1;x? ");
+            std::fs::create_dir_all(&odd).unwrap();
+            let (mut app, id) = sh.open(&[], &base);
+            wait_cwd(&mut app, id, &base, &format!("{shell} start"));
+            app.panes[&id].write(b"cd '100% #1;x? '\r");
+            wait_cwd(&mut app, id, &odd, &format!("{shell} cd"));
+            assert_eq!(app.panes[&id].cwd(), odd, "{}", sh.shell);
+            app.run(Action::CloseTab);
+        }
+    }
+
+    /// Types `cd <dir>` and checks both the OSC 7 report and the user's own hook marker.
+    fn cd_and_check(app: &mut App, id: PaneId, dir: &Path, marker: &str, what: &str) {
+        app.panes[&id].write(format!("cd '{}'\r", dir.display()).as_bytes());
+        wait_cwd(app, id, dir, what);
+        wait_screen(app, id, marker, what);
+    }
+
+    /// The user's own prompt hooks keep running next to NOBLE's, which still reports the cwd.
+    #[test]
+    fn user_prompt_hooks_keep_working() {
+        let target = std::env::temp_dir().join(format!("noble-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        // bash: a string PROMPT_COMMAND ending in a comment, and the bash 5.1+ array form.
+        for (case, rc) in [
+            ("bash-str", "PROMPT_COMMAND='__u=$((__u+1)); echo \"UHOOK$__u\" # user hook'\n"),
+            ("bash-arr", "__u=0\nPROMPT_COMMAND=('__u=$((__u+1))' 'echo \"UHOOK$__u\"')\n"),
+        ] {
+            let Some(sh) = IsolatedShell::new("bash", case, &[]) else { break };
+            sh.write(".bashrc", rc);
+            let (mut app, id) = sh.open(&[], &sh.home);
+            wait_cwd(&mut app, id, &sh.home, case);
+            wait_screen(&mut app, id, "UHOOK1", case);
+            cd_and_check(&mut app, id, &target, "UHOOK2", case);
+            app.run(Action::CloseTab);
+        }
+        if let Some(sh) = IsolatedShell::new("zsh", "hooks", &[]) {
+            sh.write(
+                ".zshrc",
+                "precmd() { __u=$((__u+1)); echo \"UHOOK$__u\" }\n\
+                 __v() { echo VHOOK }\nprecmd_functions+=(__v)\n",
+            );
+            let (mut app, id) = sh.open(&[], &sh.home);
+            wait_cwd(&mut app, id, &sh.home, "zsh");
+            wait_screen(&mut app, id, "UHOOK1", "zsh");
+            wait_screen(&mut app, id, "VHOOK", "zsh");
+            cd_and_check(&mut app, id, &target, "UHOOK2", "zsh");
+            app.run(Action::CloseTab);
+        }
+        if let Some(sh) = IsolatedShell::new("fish", "hooks", &[]) {
+            sh.write(
+                ".config/fish/config.fish",
+                "set -g __u 0\nfunction fish_prompt\n    set -g __u (math $__u + 1)\n    echo \"UHOOK$__u> \"\nend\n",
+            );
+            let (mut app, id) = sh.open(&[], &sh.home);
+            wait_cwd(&mut app, id, &sh.home, "fish");
+            wait_screen(&mut app, id, "UHOOK1>", "fish");
+            cd_and_check(&mut app, id, &target, "UHOOK2>", "fish");
+            app.run(Action::CloseTab);
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// zsh finds the user's startup files in their own `ZDOTDIR`: one set by `~/.zshenv`
+    /// (the common `ZDOTDIR=~/.config/zsh` setup) and one NOBLE inherited from its environment
+    /// (`extra_env` hands it over as `NOBLE_USER_ZDOTDIR`).
+    #[test]
+    fn zsh_user_zdotdir_is_sourced() {
+        let target = std::env::temp_dir().join(format!("noble-zdotdir-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        let Some(sh) = IsolatedShell::new("zsh", "zdot-env", &[]) else { return };
+        sh.write(".zshenv", "ZDOTDIR=$HOME/.config/zsh\n");
+        sh.write(".config/zsh/.zshrc", "precmd() { echo ZRC_HOOK }\n");
+        let (mut app, id) = sh.open(&[], &sh.home);
+        wait_cwd(&mut app, id, &sh.home, "zshenv ZDOTDIR");
+        wait_screen(&mut app, id, "ZRC_HOOK", "zshenv ZDOTDIR");
+        app.panes[&id].write(b"echo \"ZD=$ZDOTDIR\"\r");
+        wait_screen(&mut app, id, &format!("ZD={}", sh.home.join(".config/zsh").display()), "zshenv ZDOTDIR");
+        cd_and_check(&mut app, id, &target, "ZRC_HOOK", "zshenv ZDOTDIR");
+        app.run(Action::CloseTab);
+        drop(sh);
+
+        let root = std::env::temp_dir().join(format!("noble-shell-zdot-inherit-zsh-{}", std::process::id()));
+        let user = root.join("home").join("zdot");
+        let Some(sh) =
+            IsolatedShell::new("zsh", "zdot-inherit", &[("NOBLE_USER_ZDOTDIR", &user.display().to_string())])
+        else {
+            return;
+        };
+        sh.write("zdot/.zshenv", "export ZENV_SEEN=1\n");
+        sh.write("zdot/.zshrc", "precmd() { echo \"ZRC2_HOOK$ZENV_SEEN\" }\n");
+        let (mut app, id) = sh.open(&[], &sh.home);
+        wait_cwd(&mut app, id, &sh.home, "inherited ZDOTDIR");
+        wait_screen(&mut app, id, "ZRC2_HOOK1", "inherited ZDOTDIR");
+        cd_and_check(&mut app, id, &target, "ZRC2_HOOK1", "inherited ZDOTDIR");
+        app.run(Action::CloseTab);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// User shell options: login shells keep the integration (and load their login files);
+    /// options that skip every startup file start the shell as asked.
+    #[test]
+    fn user_shell_args_and_integration() {
+        let target = std::env::temp_dir().join(format!("noble-args-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        // bash login shells read ~/.bash_profile, not the rc file: NOBLE loads it itself.
+        for login in ["-l", "--login"] {
+            let Some(sh) = IsolatedShell::new("bash", &format!("login{login}"), &[]) else { break };
+            sh.write(".bash_profile", "echo PROFILE_LOADED\n. ~/.bashrc\n");
+            sh.write(".bashrc", "PROMPT_COMMAND='echo RC_HOOK'\n");
+            let (mut app, id) = sh.open(&[login], &sh.home);
+            wait_cwd(&mut app, id, &sh.home, login);
+            wait_screen(&mut app, id, "PROFILE_LOADED", login);
+            wait_screen(&mut app, id, "RC_HOOK", login);
+            cd_and_check(&mut app, id, &target, "RC_HOOK", login);
+            app.run(Action::CloseTab);
+        }
+        // The documented opt-out (README): these start the shell untouched, without the user's
+        // files and without NOBLE's hook, and the shell still works.
+        for (shell, arg) in
+            [("bash", "--norc"), ("zsh", "-f"), ("zsh", "--no-rcs"), ("fish", "--no-config"), ("fish", "-N")]
+        {
+            let Some(sh) = IsolatedShell::new(shell, &format!("norc{arg}"), &[]) else { continue };
+            sh.write(".bashrc", "echo RC_READ\n");
+            sh.write(".zshrc", "echo RC_READ\n");
+            sh.write(".config/fish/config.fish", "echo RC_READ\n");
+            let (mut app, id) = sh.open(&[arg], &sh.home);
+            let probe = if shell == "fish" { "echo ALIVE(math 1+1)\r" } else { "echo ALIVE$((1+1))\r" };
+            app.panes[&id].write(probe.as_bytes());
+            wait_screen(&mut app, id, "ALIVE2", arg);
+            let screen = app.panes[&id].parser().screen().contents();
+            assert!(!screen.contains("RC_READ"), "{shell} {arg}: rc file was read\n{screen}");
+            app.run(Action::CloseTab);
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+}
+
+// ─── Crash hunt: tiny screens, random input, random escape sequences ─────────────
+
+/// Deterministic xorshift generator: a failing run is reproduced by its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len())]
+    }
+
+    /// The fixed seed, or `NOBLE_FUZZ_SEED` to explore further (a failure prints the seed to reuse).
+    fn seeded(default: u64) -> Rng {
+        let seed = std::env::var("NOBLE_FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(default);
+        eprintln!("fuzz seed {seed}");
+        Rng(seed.max(1))
+    }
+}
+
+/// Iterations of a fuzz loop: `NOBLE_FUZZ_SCALE` multiplies them for a longer run.
+fn fuzz_steps(base: usize) -> usize {
+    base * std::env::var("NOBLE_FUZZ_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1)
+}
+
+/// Degenerate sizes: zero width or height, 1×1, one row, one column.
+const TINY: [(u16, u16); 12] =
+    [(0, 0), (0, 10), (10, 0), (1, 1), (2, 2), (3, 1), (1, 3), (8, 2), (30, 8), (300, 1), (1, 120), (12, 5)];
+
+/// Every screen and overlay is drawn at degenerate sizes without panicking.
+#[test]
+fn every_screen_survives_tiny_sizes() {
+    let mut app = demo_app(80, 24);
+    app.new_tab(std::env::temp_dir(), None, Some("tiny".into()));
+    app.run(Action::SplitRight);
+    app.run(Action::SplitDown);
+    let screens: [&dyn Fn(&mut App); 17] = [
+        &|a| a.show_welcome(),
+        &|a| a.open_scheme_picker(),
+        &|a| a.open_launcher_picker(),
+        &|a| a.open_tab_menu(0, 500, 500),
+        &|a| {
+            let path = a.projects[0].path.clone();
+            a.open_project_menu(path, 0, 0)
+        },
+        &|a| a.run(Action::Bridge),
+        &|a| a.run(Action::System),
+        &|a| a.run(Action::Settings),
+        &|a| a.run(Action::GoTab(1)),
+        &|a| a.run(Action::Palette),
+        &|a| a.run(Action::Help),
+        &|a| a.run(Action::RenameTab),
+        &|a| a.run(Action::PaneMenu),
+        &|a| a.run(Action::Search),
+        &|a| a.run(Action::Quit),
+        &|a| a.run(Action::Zoom),
+        &|a| {
+            a.run(Action::Bridge);
+            a.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+            a.on_key(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE));
+        },
+    ];
+    for open in screens {
+        app.overlay = None;
+        app.search = None;
+        open(&mut app);
+        for (w, h) in TINY {
+            render(&mut app, w, h);
+            // A resize event at that size, then the frame after it.
+            app.handle(AppEvent::Input(crossterm::event::Event::Resize(w, h)));
+            render(&mut app, w, h);
+        }
+    }
+    app.overlay = None;
+    app.run(Action::CloseTab);
+}
+
+/// A saved workspace edited by hand or damaged (focus out of range, a huge or infinite ratio —
+/// JSON `1e39` reads as an infinite f32 — a missing or invalid directory) still opens and draws.
+#[test]
+fn damaged_workspace_restores() {
+    use noble::term::layout::Dir;
+    let json = r#"{"name":"é","saved_at":-9223372036854775808,"tabs":[{"name":"日本","origin":"","focus":99,
+        "layout":{"type":"split","dir":"Row","ratio":1e39,"a":{"type":"leaf","cwd":"\u0000"},
+        "b":{"type":"split","dir":"Col","ratio":-5,"a":{"type":"leaf","cwd":"/no/such/dir"},
+        "b":{"type":"leaf","cwd":""}}}}]}"#;
+    let ws: Workspace = serde_json::from_str(json).unwrap();
+    assert!(matches!(&ws.tabs[0].layout, SavedNode::Split { dir: Dir::Row, ratio, .. } if ratio.is_infinite()));
+    let mut app = demo_app(100, 30);
+    assert_eq!(app.open_workspace(&ws), 1);
+    app.run(Action::GoTab(1));
+    for (w, h) in SIZES.into_iter().chain(TINY) {
+        render(&mut app, w, h);
+    }
+    app.run(Action::ResizeLeft);
+    app.run(Action::FocusRight);
+    app.run(Action::ResizeDown);
+    render(&mut app, 100, 30);
+    app.run(Action::CloseTab);
+}
+
+/// Random keys, mouse events, paste and resizes (tiny sizes included) never panic.
+/// Only input that stays inside the app is generated: no Enter (it would run a shell command or
+/// a palette/menu item), no clicks that open external programs, no clipboard writes.
+#[test]
+fn random_input_never_panics() {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+    use noble::app::{Hit, Overlay, SettingItem};
+    let mut app = demo_app(100, 30);
+    app.cfg.terminal.copy_on_select = false;
+    let mut rng = Rng::seeded(0x00c0_ffee_d00d_f00d);
+    let texts = ["é", "日本語", "🙂", "e\u{301}", "İ", "\u{200b}", "a b", "ß", "\t", "ǅ", "x", "/", "..", "\u{202e}"];
+    let actions: Vec<Action> = Action::ALL
+        .into_iter()
+        .filter(|a| !matches!(a, Action::Quit | Action::OpenConfig | Action::ReloadConfig | Action::Update))
+        .collect();
+    let keys = [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Esc,
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::F(1),
+    ];
+    let mods = [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL];
+    let safe_click = |h: &Hit| {
+        !matches!(
+            h,
+            Hit::Launcher(_)
+                | Hit::MenuItem(_)
+                | Hit::PaletteItem(_)
+                | Hit::OpenFiles
+                | Hit::OpenSelected
+                | Hit::Update
+        )
+    };
+    let (mut w, mut h) = (100u16, 30u16);
+    for step in 0..fuzz_steps(4000) {
+        // A random click on the Settings row could turn it back on (and write the real clipboard).
+        app.cfg.terminal.copy_on_select = false;
+        let spawn_ok = app.pane_count() < 3;
+        // Where typed text lands in a text field (elsewhere letters and space are shortcuts, which
+        // could run "Open config" or a launcher). A filter flag only counts on its own screen.
+        let text_field = match (&app.overlay, app.view) {
+            (Some(o), _) => matches!(o, Overlay::Palette(_) | Overlay::Prompt(_)),
+            (None, View::Bridge) => app.bridge.filtering,
+            (None, View::System) => app.system.filtering,
+            (None, View::Term(_)) => true,
+            (None, View::Settings) => false,
+        };
+        match rng.below(10) {
+            0 => {
+                (w, h) = if rng.below(3) == 0 {
+                    *rng.pick(&TINY)
+                } else {
+                    (20 + rng.below(160) as u16, 5 + rng.below(50) as u16)
+                };
+                app.handle(AppEvent::Input(Event::Resize(w, h)));
+            }
+            1 => {
+                let a = *rng.pick(&actions);
+                let spawns = matches!(a, Action::NewTab | Action::SplitRight | Action::SplitDown);
+                if spawn_ok || !spawns {
+                    app.run(a);
+                }
+            }
+            2 | 3 => app.on_key(KeyEvent::new(*rng.pick(&keys), *rng.pick(&mods))),
+            4 if text_field => {
+                let t = *rng.pick(&texts);
+                // A multi-line paste into a shell would run it: pasted only into NOBLE's own fields.
+                if rng.below(4) == 0 && !matches!((&app.overlay, app.view), (None, View::Term(_))) {
+                    app.handle(AppEvent::Input(Event::Paste(format!("{t}\n{t}"))));
+                } else {
+                    for c in t.chars() {
+                        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                    }
+                }
+            }
+            // Characters open the filter and reach the shell (never followed by Enter); elsewhere
+            // letters are shortcuts that may start launchers or external programs.
+            4 => {
+                let c = *rng.pick(&['/', 'é', '日', 'x']);
+                if matches!(app.view, View::Term(_)) || c == '/' {
+                    app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                }
+            }
+            5 | 6 => {
+                let kind = *rng.pick(&[
+                    MouseEventKind::Moved,
+                    MouseEventKind::ScrollUp,
+                    MouseEventKind::ScrollDown,
+                    MouseEventKind::Down(MouseButton::Right),
+                    MouseEventKind::Up(MouseButton::Right),
+                    MouseEventKind::Up(MouseButton::Left),
+                    MouseEventKind::Drag(MouseButton::Left),
+                ]);
+                let (x, y) = (rng.below(w as usize + 4) as u16, rng.below(h as usize + 4) as u16);
+                app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
+                    kind,
+                    column: x,
+                    row: y,
+                    modifiers: *rng.pick(&[KeyModifiers::NONE, KeyModifiers::SHIFT]),
+                })));
+            }
+            7 | 8 => {
+                // Left press on a random safe target (at a random point inside it), sometimes dragged.
+                // "Open config" starts an editor and "Reload config" writes the headless (relative) path.
+                let items = app.settings_items();
+                let config_row =
+                    |i: usize| matches!(items.get(i), Some(SettingItem::OpenConfig | SettingItem::ReloadConfig));
+                let targets: Vec<ratatui::layout::Rect> = app
+                    .hits
+                    .iter()
+                    .filter(|(_, hit)| safe_click(hit))
+                    .filter(|(_, hit)| !matches!(hit, Hit::Setting(i) if config_row(*i)))
+                    .filter(|(_, hit)| spawn_ok || !matches!(hit, Hit::NewTab | Hit::PaneSplit { .. }))
+                    .map(|(r, _)| *r)
+                    .collect();
+                if !targets.is_empty() {
+                    let r = *rng.pick(&targets);
+                    let x = r.x + rng.below(r.width as usize) as u16;
+                    let y = r.y + rng.below(r.height as usize) as u16;
+                    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+                    if rng.below(2) == 0 {
+                        let (dx, dy) = (rng.below(w as usize + 2) as u16, rng.below(h as usize + 2) as u16);
+                        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), dx, dy);
+                        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), dx, dy);
+                    } else {
+                        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, y);
+                    }
+                }
+            }
+            _ => app.pump(),
+        }
+        // Clicks resolve against the hits of the last frame, like in the real loop.
+        render(&mut app, w, h);
+        if step % 500 == 0 {
+            app.tick();
+        }
+    }
+    while !app.tabs.is_empty() {
+        app.remove_tab(0);
+    }
+}
+
+/// Hostile values from outside (git output, provider APIs, sensors, the battery): non-ASCII and
+/// control characters, extreme timestamps, percentages over 100, NaN. Home, System and the
+/// notifications must still draw at every size.
+#[test]
+fn hostile_external_data_renders() {
+    let mut app = demo_app(160, 45);
+    let weird = "é日🙂\u{301}\u{202e}\t\x1b[31m\u{0}İ";
+    let status = format!(
+        "## {weird}...origin/{weird} [ahead 99999999999, behind x]\n M {weird}\n?? \"{weird} -> ü\"\nR  a -> {weird}\nXé\n\u{fffd}\n"
+    );
+    let mut git = noble::projects::parse_status(&status);
+    git.last_commit = Some(i64::MIN);
+    git.last_subject = Some(weird.repeat(20));
+    git.commits = [i64::MIN, i64::MAX, 0, -1]
+        .into_iter()
+        .map(|time| noble::projects::Commit {
+            hash: weird.into(),
+            time,
+            author: weird.into(),
+            subject: weird.repeat(30),
+        })
+        .collect();
+    git.commits
+        .extend(noble::projects::parse_log(&format!("{weird}\u{1f}-9223372036854775808\u{1f}{weird}\u{1f}{weird}")));
+    for i in 0..app.projects.len() {
+        let path = app.projects[i].path.clone();
+        app.handle(AppEvent::Git(path, git.clone()));
+    }
+    for (used, resets_at, fetched_at) in
+        [(255, Some(i64::MIN), Some(i64::MIN)), (101, Some(i64::MAX), Some(i64::MAX)), (100, Some(0), None)]
+    {
+        // Ok: recorded in the usage history and checked for the quota warning; Error: shown as is.
+        for (id, status) in [("claude", Status::Ok), ("codex", Status::Error(weird.into()))] {
+            app.handle(AppEvent::Ai(Box::new(ProviderState {
+                id,
+                name: "Claude Code",
+                login_hint: "claude",
+                presence: Presence::Ready,
+                status,
+                usage: Some(Usage {
+                    windows: ["5H", "WEEK", weird, ""]
+                        .iter()
+                        .map(|l| Window { label: l.to_string(), used, resets_at })
+                        .collect(),
+                    plan: Some(weird.into()),
+                    note: Some(weird.into()),
+                }),
+                fetched_at,
+            })));
+        }
+        app.handle(AppEvent::Sensors(Box::new(SensorSample {
+            cpu: f32::NAN,
+            cores: vec![f32::INFINITY, -5.0, 250.0],
+            freq_mhz: u64::MAX,
+            mem_used: u64::MAX,
+            mem_total: 0,
+            swap_used: 5,
+            swap_total: 0,
+            rx_rate: f64::NAN,
+            tx_rate: f64::INFINITY,
+            disks: vec![DiskInfo { mount: weird.into(), total: 0, used: u64::MAX }],
+            procs: vec![ProcInfo { pid: 1, name: weird.into(), cpu: f32::NAN, mem: u64::MAX }],
+            proc_count: usize::MAX,
+            uptime: u64::MAX,
+            battery: Some(noble::battery::Battery {
+                percent: [f32::NAN, 250.0, -3.0][used as usize % 3],
+                state: noble::battery::PowerState::Discharging,
+                secs_left: Some(u64::MAX),
+                secs_to_full: Some(u64::MAX),
+            }),
+        })));
+        for view in [Action::Bridge, Action::System] {
+            app.run(view);
+            for (w, h) in SIZES.into_iter().chain(TINY) {
+                render(&mut app, w, h);
+            }
+        }
+    }
+}
+
+/// Random and malformed escape sequences (and invalid UTF-8) fed to a real pane's emulator,
+/// with the pane drawn and resized in between, never panic.
+#[test]
+fn random_escape_sequences_never_panic() {
+    let mut app = demo_app(80, 24);
+    app.new_tab(std::env::temp_dir(), None, Some("escapes".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let pieces: [&[u8]; 58] = [
+        b"\x1b[",
+        b"\x1b]",
+        b"\x1bP",
+        b"\x1b",
+        b"\x1b[?",
+        b"\x07",
+        b"\x1b\\",
+        b";",
+        b":",
+        b"0",
+        b"1",
+        b"9",
+        b"65535",
+        b"99999999999",
+        b"-1",
+        b"m",
+        b"H",
+        b"J",
+        b"K",
+        b"r",
+        b"h",
+        b"l",
+        b"@",
+        b"L",
+        b"M",
+        b"P",
+        b"X",
+        b"S",
+        b"T",
+        b"G",
+        b"d",
+        b"b",
+        b"t",
+        b"7;file://h\xc3\xa9/\xe6\x97\xa5/%zz%e9%",
+        b"7;file://",
+        b"9;9;\"C:\\x\xff\"",
+        b"9;4;3;",
+        b"8;;https://\xe6\x97\xa5",
+        b"8;id=\xff;",
+        b"133;A",
+        b"133;D;\xff",
+        b"777;notify;\xf0\x9f;",
+        b"0;title \xf0\x9f\x99\x82",
+        b"2;",
+        b"\xff",
+        b"\xc3",
+        b"\xe6\x97",
+        "日本".as_bytes(),
+        "e\u{301}\u{200d}".as_bytes(),
+        b"\r\n",
+        b"\x08\x08\x08",
+        b"\t",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?1000h\x1b[?1006h",
+        b"\x1b[6n",
+        b"\x1bc",
+        b"\x1b#8",
+    ];
+    let mut rng = Rng::seeded(0x1234_5678_9abc_def1);
+    for round in 0..fuzz_steps(600) {
+        let mut chunk = Vec::new();
+        for _ in 0..rng.below(48) {
+            if rng.below(6) == 0 {
+                chunk.push(rng.next() as u8);
+            } else {
+                chunk.extend_from_slice(rng.pick(&pieces));
+            }
+        }
+        {
+            let pane = &app.panes[&id];
+            let mut p = pane.parser();
+            // As in the PTY reader thread: an emulator panic skips the chunk (vt100 has a few on
+            // hostile input); what matters here is that the app keeps working with that state.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(&chunk)));
+            // Replies go nowhere, and no system clipboard write can come from here.
+            p.callbacks_mut().responses.clear();
+            p.callbacks_mut().clipboard = None;
+            pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        }
+        app.handle(AppEvent::PtyOutput);
+        let (w, h) =
+            if round % 7 == 0 { *rng.pick(&TINY) } else { (20 + rng.below(140) as u16, 4 + rng.below(40) as u16) };
+        render(&mut app, w, h);
+        if round % 50 == 0 {
+            // Search through whatever landed in the scrollback.
+            app.run(Action::Search);
+            for c in ["é", "日", "\u{301}", "x"][rng.below(4)].chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            render(&mut app, w, h);
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+    }
+    app.run(Action::CloseTab);
+}
+
+// ─── Session save / restore ───────────────────────────────────────────────
+
+/// A headless app whose data directory (`session.json` / `session-dev.json`) is `data`.
+fn session_app(data: &std::path::Path, dev: bool, cfg: Config) -> App {
+    let mut app = App::headless(cfg, (110, 30));
+    app.paths.data = data.to_path_buf();
+    app.dev = dev;
+    app
+}
+
+fn session_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.general.animations = false;
+    cfg
+}
+
+fn session_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("noble-session-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn session_file(dev: bool) -> &'static str {
+    if dev { "session-dev.json" } else { "session.json" }
+}
+
+fn one_tab(origin: &str, layout: SavedNode) -> Workspace {
+    Workspace {
+        name: "last session".into(),
+        saved_at: 0,
+        tabs: vec![SavedTab { name: None, origin: origin.into(), layout, focus: 0 }],
+    }
+}
+
+/// Writes a session file the way older versions did (a plain workspace, no window tags).
+fn write_session(file: &std::path::Path, ws: &Workspace) {
+    std::fs::write(file, serde_json::to_string(ws).unwrap()).unwrap();
+}
+
+fn leaf(dir: &std::path::Path) -> SavedNode {
+    SavedNode::Leaf { cwd: dir.display().to_string(), launch: None }
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+}
+
+fn start_cwds(app: &App, tab: usize) -> Vec<PathBuf> {
+    app.tabs[tab].panes().iter().map(|id| app.panes[id].start_cwd.clone()).collect()
+}
+
+fn toast_texts(app: &App) -> Vec<String> {
+    app.toasts.iter().map(|t| t.text.clone()).collect()
+}
+
+fn session_origins(data: &std::path::Path, dev: bool) -> Vec<String> {
+    let text = std::fs::read_to_string(data.join(session_file(dev))).unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    json["tabs"].as_array().into_iter().flatten().filter_map(|t| t["origin"].as_str().map(String::from)).collect()
+}
+
+fn tab_origins(app: &App) -> Vec<String> {
+    app.tabs.iter().map(|t| t.origin.clone()).collect()
+}
+
+/// Several windows share one session file: each one merges only its own tabs into it on exit,
+/// so the tabs of every window come back on the next launch (and only once).
+#[test]
+fn every_window_keeps_its_tabs_in_the_session() {
+    for dev in [false, true] {
+        let data = session_dir(if dev { "multi-dev" } else { "multi" });
+        let mut a = session_app(&data, dev, session_cfg());
+        a.restore_last_session();
+        a.new_tab(data.clone(), None, Some("window-a".into()));
+        let mut b = session_app(&data, dev, session_cfg());
+        b.restore_last_session();
+        b.new_tab(data.clone(), None, Some("window-b".into()));
+        a.shutdown();
+        b.shutdown();
+        let mut origins = session_origins(&data, dev);
+        origins.sort();
+        assert_eq!(origins, ["window-a", "window-b"], "{}: tabs of a window were lost", session_file(dev));
+
+        // The next launch restores both windows' tabs, once.
+        let mut c = session_app(&data, dev, session_cfg());
+        c.restore_last_session();
+        let mut restored = tab_origins(&c);
+        restored.sort();
+        assert_eq!(restored, ["window-a", "window-b"], "{}", session_file(dev));
+        // Closing them for good: they do not come back.
+        while !c.tabs.is_empty() {
+            c.remove_tab(0);
+        }
+        c.shutdown();
+        let mut d = session_app(&data, dev, session_cfg());
+        d.restore_last_session();
+        assert!(d.tabs.is_empty(), "{}: closed tabs came back: {:?}", session_file(dev), tab_origins(&d));
+        d.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// A second window opened while the first one runs starts empty instead of restoring the
+/// same tabs again; after both close, the next launch has each tab exactly once. Also loads a
+/// session file written by an older version (no instance tags).
+#[test]
+fn a_second_window_does_not_restore_the_session_again() {
+    for dev in [false, true] {
+        let data = session_dir(if dev { "second-dev" } else { "second" });
+        let old = one_tab("saved", leaf(&data));
+        write_session(&data.join(session_file(dev)), &old);
+        let mut a = session_app(&data, dev, session_cfg());
+        a.restore_last_session();
+        assert_eq!(tab_origins(&a), ["saved"], "{}", session_file(dev));
+        let mut b = session_app(&data, dev, session_cfg());
+        b.restore_last_session();
+        assert!(b.tabs.is_empty(), "{}: second window duplicated {:?}", session_file(dev), tab_origins(&b));
+        assert_eq!(b.restored_tabs, 0);
+        b.shutdown();
+        a.shutdown();
+        let mut c = session_app(&data, dev, session_cfg());
+        c.restore_last_session();
+        assert_eq!(tab_origins(&c), ["saved"], "{}", session_file(dev));
+        c.shutdown();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// A window that crashed (still listed as running, its process gone) does not stop the next
+/// launch from restoring; its tabs come back too.
+#[test]
+fn a_crashed_window_does_not_block_the_restore() {
+    let data = session_dir("crashed");
+    let json = serde_json::json!({
+        "saved_at": 0,
+        "running": ["4000000000-1-0"],
+        "tabs": [{ "instance": "4000000000-1-0", "name": null, "origin": "crashed",
+                   "layout": { "type": "leaf", "cwd": data.display().to_string() }, "focus": 0 }],
+    });
+    std::fs::write(data.join("session.json"), json.to_string()).unwrap();
+    let mut app = session_app(&data, false, session_cfg());
+    app.restore_last_session();
+    assert_eq!(tab_origins(&app), ["crashed"]);
+    app.shutdown();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A pane whose directory was deleted comes back in the home directory; the rest of the
+/// layout is kept. Checked through the startup path for both session files.
+#[test]
+fn restore_falls_back_to_home_for_a_missing_dir() {
+    for dev in [false, true] {
+        let data = session_dir(if dev { "missing-dev" } else { "missing" });
+        let gone = data.join("deleted-project");
+        let layout = SavedNode::Split {
+            dir: noble::term::layout::Dir::Row,
+            ratio: 0.5,
+            a: Box::new(leaf(&gone)),
+            b: Box::new(leaf(&data)),
+        };
+        write_session(&data.join(session_file(dev)), &one_tab("restored", layout));
+        // The other build's file must not be read.
+        write_session(&data.join(session_file(!dev)), &one_tab("other-build", leaf(&data)));
+        let mut app = session_app(&data, dev, session_cfg());
+        app.restore_last_session();
+        assert_eq!(app.restored_tabs, 1, "{}", session_file(dev));
+        assert_eq!(app.tabs[0].origin, "restored");
+        let cwds = start_cwds(&app, 0);
+        assert_eq!(cwds.len(), 2, "split lost: {cwds:?}");
+        assert!(same_dir(&cwds[0], &dirs::home_dir().unwrap()), "{cwds:?}");
+        assert!(same_dir(&cwds[1], &data), "{cwds:?}");
+        assert!(toast_texts(&app).iter().any(|t| t.contains("deleted-project")), "{:?}", toast_texts(&app));
+        app.run(Action::CloseTab);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+/// A directory that exists but cannot be entered (no permission) must not drop the tab: the
+/// pane starts in the home directory instead.
+#[test]
+fn restore_survives_an_inaccessible_dir() {
+    // Windows: denying access needs an ACL edit (no std API for it); the fallback it would hit
+    // (a failed spawn is retried in home) is shared by both platforms and checked here on Unix.
+    if cfg!(windows) {
+        return;
+    }
+    let data = session_dir("locked");
+    let locked = data.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    set_mode(&locked, 0o000);
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions do not apply, nothing to check.
+        set_mode(&locked, 0o755);
+        let _ = std::fs::remove_dir_all(&data);
+        return;
+    }
+    let mut app = session_app(&data, false, session_cfg());
+    let opened = app.open_workspace(&one_tab("locked", leaf(&locked)));
+    set_mode(&locked, 0o755);
+    let _ = std::fs::remove_dir_all(&data);
+    assert_eq!(opened, 1, "tab dropped; toasts: {:?}", toast_texts(&app));
+    assert!(same_dir(&start_cwds(&app, 0)[0], &dirs::home_dir().unwrap()));
+}
+
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &std::path::Path, _: u32) {}
+
+/// A network share that stopped answering (a stat that blocks for tens of seconds) must not
+/// hold up startup: the probe gives up after a short timeout and the pane starts in home.
+#[test]
+fn restore_does_not_wait_for_a_hanging_share() {
+    let data = session_dir("share");
+    let share = data.join("dead-share");
+    std::fs::create_dir_all(&share).unwrap();
+    let mut app = session_app(&data, false, session_cfg());
+    app.dir_probe = |p| {
+        if p.ends_with("dead-share") {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        p.is_dir()
+    };
+    let started = std::time::Instant::now();
+    let opened = app.open_workspace(&one_tab("share", leaf(&share)));
+    let took = started.elapsed();
+    let _ = std::fs::remove_dir_all(&data);
+    assert!(took < Duration::from_secs(10), "restore blocked for {took:?}");
+    assert_eq!(opened, 1);
+    assert!(same_dir(&start_cwds(&app, 0)[0], &dirs::home_dir().unwrap()), "{:?}", start_cwds(&app, 0));
+    assert!(toast_texts(&app).iter().any(|t| t.contains("dead-share")), "{:?}", toast_texts(&app));
+}
+
+/// A quick-launch tab (e.g. an AI agent) remembers its launcher command in the session: on
+/// restore the pane that ran it runs it again, in the same directory and with the same
+/// "<dir> · <launcher>" title. Other panes split off in that tab come back as plain shells.
+#[test]
+fn restored_launch_tab_reruns_its_command() {
+    let data = session_dir("launch");
+    let project = data.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut cfg = session_cfg();
+    cfg.launchers = vec![noble::config::Launcher {
+        key: "x".into(),
+        name: "Agent".into(),
+        command: "echo relaunch-marker".into(),
+        show: true,
+    }];
+    fn marker_in(app: &App, pane: usize) -> bool {
+        let id = app.tabs[0].panes()[pane];
+        app.panes[&id].all_lines().0.iter().any(|l| l.contains("relaunch-marker"))
+    }
+    fn wait(app: &mut App, what: &dyn Fn(&App) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !what(app) && std::time::Instant::now() < deadline {
+            app.pump();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        what(app)
+    }
+
+    let mut app = session_app(&data, false, cfg.clone());
+    app.restore_last_session();
+    app.launch(0, Some(project.clone()));
+    assert_eq!(app.tabs.len(), 1, "launcher did not open a tab");
+    assert!(
+        wait(&mut app, &|a: &App| marker_in(a, 0)),
+        "the launcher command never ran:\n{}",
+        render(&mut app, 110, 30)
+    );
+    let origin = app.tabs[0].origin.clone();
+    assert!(origin.ends_with(" · Agent"), "{origin}");
+    app.run(Action::SplitRight);
+    assert_eq!(app.tabs[0].panes().len(), 2);
+    app.shutdown();
+    let text = std::fs::read_to_string(data.join("session.json")).unwrap();
+    assert_eq!(text.matches("echo relaunch-marker").count(), 1, "launcher stored once, on its pane: {text}");
+
+    for round in 0..2 {
+        let mut again = session_app(&data, false, cfg.clone());
+        again.restore_last_session();
+        assert_eq!(again.restored_tabs, 1);
+        assert_eq!(again.tabs[0].origin, origin, "title kept");
+        assert!(same_dir(&start_cwds(&again, 0)[0], &project));
+        assert!(
+            wait(&mut again, &|a: &App| marker_in(a, 0)),
+            "round {round}: the launcher command did not run again on restore:\n{}",
+            render(&mut again, 110, 30)
+        );
+        // The split pane is a plain shell: wait for its prompt, then make sure nothing ran there.
+        let split = again.tabs[0].panes()[1];
+        assert!(wait(&mut again, &|a: &App| a.panes[&split].parser().callbacks().cwd.is_some()), "no prompt");
+        again.pump();
+        assert!(!marker_in(&again, 1), "the launcher ran in the split pane too");
+        // Restored again on the next launch too.
+        again.shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&data);
 }

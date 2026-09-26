@@ -248,8 +248,18 @@ pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dir: Direction) -> Optio
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SavedNode {
-    Leaf { cwd: String },
-    Split { dir: Dir, ratio: f32, a: Box<SavedNode>, b: Box<SavedNode> },
+    Leaf {
+        cwd: String,
+        /// Quick-launch command this pane was opened with (e.g. `claude`); run again on restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch: Option<String>,
+    },
+    Split {
+        dir: Dir,
+        ratio: f32,
+        a: Box<SavedNode>,
+        b: Box<SavedNode>,
+    },
 }
 
 #[cfg(test)]

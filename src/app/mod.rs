@@ -9,7 +9,7 @@ mod search;
 mod settings;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -385,6 +385,12 @@ pub struct App {
     pub restored_tabs: usize,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
+    /// This window's id in the shared session file (`store::instance_id`).
+    pub instance: String,
+    /// Whether a restored pane's directory can be used; runs on a helper thread with a timeout
+    /// (`ops::DIR_PROBE_TIMEOUT`). Replaceable so tests can simulate a hanging network share.
+    #[doc(hidden)]
+    pub dir_probe: fn(&Path) -> bool,
     pub operator: String,
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
@@ -394,6 +400,9 @@ pub struct App {
     pub ui_state: crate::store::UiState,
     /// Latest events from the Claude Code hooks (pane → record).
     pub agent_hooks: HashMap<PaneId, crate::hooks::HookRecord>,
+    /// When each pane's shell prompt last came back (Unix seconds): a hook record written
+    /// until then belongs to a program that has exited (`clear_agent`).
+    agent_cleared: HashMap<PaneId, i64>,
     last_hook_scan: Instant,
     /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
     pub hooks_installed: bool,
@@ -482,7 +491,7 @@ impl App {
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
         app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
-        crate::hooks::prune(&app.paths.data);
+        crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| crate::hooks::is_installed(&p));
         crate::update::cleanup_old();
         app.init_updates();
@@ -499,13 +508,29 @@ impl App {
         for w in app.keymap.warnings.clone() {
             app.toast(ToastLevel::Warn, w);
         }
-        if app.cfg.terminal.restore_session
-            && let Some(ws) = crate::store::load_session(&app.paths.data_file(app.session_file()))
-        {
-            app.restored_tabs = app.open_workspace(&ws);
-            app.view = View::Bridge;
-        }
+        app.restore_last_session();
         app
+    }
+
+    /// Startup: registers this window in the session file (`session.json`, `session-dev.json`
+    /// for `noble-dev`) and, when it is the first window of the run, reopens the saved tabs of
+    /// every window. Only with `restore_session` on.
+    pub fn restore_last_session(&mut self) {
+        if !self.cfg.terminal.restore_session {
+            return;
+        }
+        let file = self.paths.data_file(self.session_file());
+        let Some(tabs) = crate::store::session_begin(&file, &self.instance) else { return };
+        if tabs.is_empty() {
+            return;
+        }
+        let ws = crate::store::Workspace { name: "last session".into(), saved_at: 0, tabs };
+        self.restored_tabs = self.open_workspace(&ws);
+        self.view = View::Bridge;
+        // What actually opened (directories that fell back to home included) replaces the
+        // taken-over tabs right away, so a crash keeps them as they are now.
+        let tabs = self.snapshot("last session").tabs;
+        crate::store::session_save(&file, &self.instance, tabs, false);
     }
 
     fn build(
@@ -572,6 +597,8 @@ impl App {
             started: Instant::now(),
             restored_tabs: 0,
             dev: false,
+            instance: crate::store::instance_id(),
+            dir_probe: |p| p.is_dir(),
             operator,
             git_requested: HashMap::new(),
             search: None,
@@ -579,6 +606,7 @@ impl App {
             usage_history: UsageHistory::memory(),
             ui_state: crate::store::UiState::memory(),
             agent_hooks: HashMap::new(),
+            agent_cleared: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_installed: false,
             sensor_mode: None,
@@ -778,7 +806,7 @@ impl App {
         }
         let latest = self.ui_state.data.update_latest.clone();
         self.set_latest_version(&latest);
-        let age = chrono::Utc::now().timestamp() - self.ui_state.data.update_checked;
+        let age = chrono::Utc::now().timestamp().saturating_sub(self.ui_state.data.update_checked);
         let wait = (crate::update::CHECK_INTERVAL - age).clamp(0, crate::update::CHECK_INTERVAL);
         self.next_update_check = Some(Instant::now() + Duration::from_secs(wait as u64));
     }
@@ -848,7 +876,7 @@ impl App {
             let reset = w
                 .resets_at
                 .map(|t| {
-                    let left = (t - chrono::Utc::now().timestamp()).max(0) as u64;
+                    let left = t.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64;
                     format!(" · resets in {}", crate::util::fmt_duration(Duration::from_secs(left)))
                 })
                 .unwrap_or_default();
@@ -864,16 +892,23 @@ impl App {
             _ => Vec::new(),
         };
         let mut changed = Vec::new();
-        for (pane, rec) in &records {
-            if !self.panes.contains_key(pane) {
-                crate::hooks::remove_record(&self.paths.data, std::process::id(), *pane);
+        let mut live = HashMap::new();
+        for (pane, rec) in records {
+            // Orphans (pane closed or never ours), finished sessions, and records from
+            // before the pane's shell prompt came back (the agent has exited since).
+            let stale = !self.panes.contains_key(&pane)
+                || rec.event == crate::hooks::SESSION_END
+                || self.agent_cleared.get(&pane).is_some_and(|&t| rec.ts <= t);
+            if stale {
+                crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
                 continue;
             }
-            if self.agent_hooks.get(pane) != Some(rec) {
-                changed.push((*pane, rec.clone()));
+            if self.agent_hooks.get(&pane) != Some(&rec) {
+                changed.push((pane, rec.clone()));
             }
+            live.insert(pane, rec);
         }
-        self.agent_hooks = records.into_iter().filter(|(p, _)| self.panes.contains_key(p)).collect();
+        self.agent_hooks = live;
         for (pane, rec) in changed {
             let notice = match rec.event.as_str() {
                 "notification" => Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into())),
@@ -897,7 +932,31 @@ impl App {
         }
     }
 
-    /// The AI agent running in a pane and its state.
+    /// The pane's shell prompt came back, so whatever agent ran there has exited:
+    /// its hook record goes, and records written until now are ignored if they show up
+    /// later (a hook finishing its write just as the agent exits).
+    ///
+    /// Only the shell emits the prompt marks (OSC 7 / 9;9 / 133); Claude Code sets
+    /// the title and OSC 9;4 progress but none of these, so a running agent is not
+    /// cleared by it. Should one ever emit them, its next hook event (every prompt,
+    /// notification and stop) writes a newer record and the state comes back.
+    fn clear_agent(&mut self, pane: PaneId) {
+        self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
+        if self.agent_hooks.remove(&pane).is_some() {
+            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
+        }
+    }
+
+    /// Forgets a closed pane's agent state and deletes its hook record.
+    pub(crate) fn forget_agent(&mut self, pane: PaneId) {
+        self.agent_cleared.remove(&pane);
+        if self.agent_hooks.remove(&pane).is_some() {
+            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
+        }
+    }
+
+    /// The AI agent running in a pane and its state: from Claude's hook record, else
+    /// guessed from the launcher command (while it still runs) or the window title.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         if let Some(rec) = self.agent_hooks.get(&pane) {
             let state = match rec.event.as_str() {
@@ -909,7 +968,9 @@ impl App {
             return Some(("claude", state));
         }
         let p = self.panes.get(&pane)?;
-        let kind = crate::ai::agent_kind(p.command.as_deref(), &p.label())?;
+        // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
+        let command = p.command.as_deref().filter(|_| p.launch_running());
+        let kind = crate::ai::agent_kind(command, &p.label())?;
         let alert = self.tabs.iter().any(|t| t.alert && t.root.contains(pane));
         Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
     }
@@ -1021,11 +1082,14 @@ impl App {
                 });
             }
         }
-        let shown = signals.iter().any(|s| s.visible);
+        let mut shown = signals.iter().any(|s| s.visible);
         for sig in signals {
             if let Some(cwd) = &sig.cwd {
                 // Command finished: the repo may have changed.
                 self.refresh_git_at(cwd);
+                // An agent there has exited; the tab title in the top bar may change too.
+                shown |= self.agent_state(sig.id).is_some();
+                self.clear_agent(sig.id);
                 if let Some(p) = self.panes.get_mut(&sig.id) {
                     p.command_started = None;
                     p.prompted = true;
@@ -1319,8 +1383,9 @@ impl App {
     /// On exit: save the session.
     pub fn shutdown(&mut self) {
         if self.cfg.terminal.restore_session {
-            let ws = self.snapshot("last session");
-            crate::store::save_session(&self.paths.data_file(self.session_file()), &ws);
+            // Merged with the other windows' tabs; this window's earlier entries are replaced.
+            let tabs = self.snapshot("last session").tabs;
+            crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();
     }

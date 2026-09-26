@@ -100,13 +100,17 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Claude hooks:** `hooks.rs` — when enabled in Settings, adds `noble hook <event>` to
   `~/.claude/settings.json` (writes a backup, removes only its own entries). `main.rs` handles this subcommand
   without opening the terminal; state is written to `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files,
-  which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). Never touch the real file in
-  tests.
+  which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). `session-end` deletes the
+  record, and the prompt signal clears the pane's agent (`App::clear_agent`; older records are ignored) and its
+  window title; the launcher command only names the agent until the first prompt (`Pane::launch_running`).
+  `hooks::prune` runs at startup. Never touch the real file in tests.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (error = toast, never a crash); `store.rs` stores
   recent dirs, the session, workspaces, AI usage history and UI state (`state.json`: welcome seen, pinned
-  projects) with atomic JSON writes.
+  projects) with atomic JSON writes. The session file is shared by every window of a build: each window
+  (`store::instance_id`) merges only its own tabs in (`session_save`, under a `.lock` file), and only the first
+  window of a run restores (`session_begin`, liveness via pid + process start time).
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
   (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
