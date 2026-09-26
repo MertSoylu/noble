@@ -1,6 +1,8 @@
 //! Small persistent data: recent dirs (frecency), session and saved workspaces.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +23,10 @@ fn write_json<T: Serialize>(file: &Path, value: &T) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(text) = serde_json::to_string_pretty(value) {
-        let tmp = file.with_extension("json.tmp");
+        // A name of its own per write: windows saving the same file at once must not share it.
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let tmp =
+            file.with_extension(format!("json.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, file);
         }
@@ -138,16 +143,124 @@ impl Workspace {
     }
 }
 
-pub fn load_session(file: &Path) -> Option<Workspace> {
+// ─── Session: one file shared by every window of a build ─────────────────
+
+/// A tab in the session file, tagged with the window that saved it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SessionTab {
+    /// The window's `instance_id`; empty in files written by older versions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance: String,
+    #[serde(flatten)]
+    pub tab: SavedTab,
+}
+
+/// `session.json` (`session-dev.json` for `noble-dev`): the tabs of every window, merged. A
+/// file from an older version (a plain `Workspace`) loads as well.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Session {
+    #[serde(default)]
+    pub saved_at: i64,
+    /// Windows running right now (`instance_id`s). While one of them is alive, a newly opened
+    /// window is not the first of the run and does not restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running: Vec<String>,
+    #[serde(default)]
+    pub tabs: Vec<SessionTab>,
+}
+
+/// An id for one window: `<pid>-<process start time>-<n>`. The start time tells a live window
+/// from a dead one whose pid was reused; `n` tells apart several apps in one process (tests).
+pub fn instance_id() -> String {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let pid = std::process::id();
+    let start = crate::util::process_start(pid).unwrap_or(0);
+    format!("{pid}-{start}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Is the window with this id still running? (Its process exists with the same start time.)
+fn instance_alive(id: &str) -> bool {
+    let mut parts = id.split('-').map(|p| p.parse::<u64>().ok());
+    let (Some(Some(pid)), Some(Some(start))) = (parts.next(), parts.next()) else { return false };
+    let Ok(pid) = u32::try_from(pid) else { return false };
+    crate::util::process_start(pid).is_some_and(|s| start == 0 || s == start)
+}
+
+pub fn load_session(file: &Path) -> Option<Session> {
     read_json(file)
 }
 
-pub fn save_session(file: &Path, ws: &Workspace) {
-    if ws.tabs.is_empty() {
-        let _ = std::fs::remove_file(file);
-    } else {
-        write_json(file, ws);
+/// A window starts and registers itself as running. The first window of a run (no other
+/// window of this build alive) gets every saved tab back to restore, and takes them over so a
+/// crash before its next save keeps them; a later window gets `None` and starts empty.
+pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
+    with_lock(file, || {
+        let mut session: Session = read_json(file).unwrap_or_default();
+        session.running.retain(|id| id != me && instance_alive(id));
+        let first = session.running.is_empty();
+        session.running.push(me.to_string());
+        let restore = first.then(|| {
+            session.tabs.iter_mut().for_each(|t| t.instance = me.to_string());
+            session.tabs.iter().map(|t| t.tab.clone()).collect()
+        });
+        write_json(file, &session);
+        restore
+    })
+}
+
+/// Merges a window's tabs into the session file: replaces what this window saved before and
+/// keeps the other windows' tabs. `leaving`: the window is closing.
+pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
+    with_lock(file, || {
+        let mut session: Session = read_json(file).unwrap_or_default();
+        session.tabs.retain(|t| t.instance != me);
+        session.tabs.extend(tabs.into_iter().map(|tab| SessionTab { instance: me.to_string(), tab }));
+        if leaving {
+            session.running.retain(|id| id != me);
+        }
+        session.saved_at = now();
+        if session.tabs.is_empty() && session.running.is_empty() {
+            let _ = std::fs::remove_file(file);
+        } else {
+            write_json(file, &session);
+        }
+    })
+}
+
+/// Runs `f` while holding `<file>.lock`, so windows that close at the same time do not lose
+/// each other's tabs. A lock older than 10 s is left over from a crash and taken over; after
+/// 2 s of waiting (or when the lock cannot be created at all) `f` runs anyway.
+fn with_lock<T>(file: &Path, f: impl FnOnce() -> T) -> T {
+    let lock = file.with_extension("json.lock");
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let held = loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => break true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(&lock)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(10));
+                if stale {
+                    let _ = std::fs::remove_file(&lock);
+                } else if Instant::now() > deadline {
+                    break false;
+                } else {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            Err(_) => break false,
+        }
+    };
+    let out = f();
+    if held {
+        let _ = std::fs::remove_file(&lock);
+    }
+    out
 }
 
 pub struct Workspaces {
@@ -363,6 +476,17 @@ mod tests {
     }
 
     #[test]
+    fn instance_ids_tell_live_windows_from_dead_ones() {
+        let me = instance_id();
+        assert!(instance_alive(&me), "{me}");
+        assert_ne!(instance_id(), me, "two windows in one process get different ids");
+        assert!(!instance_alive("4000000000-1-0"));
+        // Our pid, but another start time: the pid was reused, the window is gone.
+        assert!(!instance_alive(&format!("{}-1-0", std::process::id())));
+        assert!(!instance_alive("garbage"));
+    }
+
+    #[test]
     fn workspace_serialization() {
         let ws = Workspace {
             name: "work".into(),
@@ -373,8 +497,8 @@ mod tests {
                 layout: SavedNode::Split {
                     dir: crate::term::layout::Dir::Row,
                     ratio: 0.5,
-                    a: Box::new(SavedNode::Leaf { cwd: "C:\\a".into() }),
-                    b: Box::new(SavedNode::Leaf { cwd: "C:\\b".into() }),
+                    a: Box::new(SavedNode::Leaf { cwd: "C:\\a".into(), launch: Some("claude".into()) }),
+                    b: Box::new(SavedNode::Leaf { cwd: "C:\\b".into(), launch: None }),
                 },
                 focus: 1,
             }],

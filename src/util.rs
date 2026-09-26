@@ -199,6 +199,16 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     Some(score)
 }
 
+/// When the process `pid` started (seconds since the epoch), or `None` if it is not running.
+/// Same on Windows and Linux (sysinfo); only that one process is read.
+pub fn process_start(pid: u32) -> Option<u64> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+    sys.process(pid).map(|p| p.start_time())
+}
+
 /// Which of `dirs` pass `probe` within `timeout`; all are probed in parallel. A stat on a
 /// network share that stopped answering (SMB/UNC on Windows, NFS/SMB/sshfs mounts on Linux)
 /// can block for tens of seconds; a probe that does not answer in time counts as unusable and

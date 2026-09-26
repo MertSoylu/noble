@@ -495,7 +495,14 @@ impl App {
         };
         let origin = format!("{} · {}", dir_name(&path), launcher.name);
         let command = self.shell.invocation(&launcher.command);
+        let before = self.tabs.len();
         self.new_tab(path, Some(&command), Some(origin));
+        // Remembered for the session: the restored pane runs the launcher again.
+        if self.tabs.len() > before
+            && let Some(p) = self.tabs.last().map(|t| t.focus).and_then(|id| self.panes.get_mut(&id))
+        {
+            p.launcher = Some(launcher.command.clone());
+        }
     }
 
     pub fn open_project_shell(&mut self, path: PathBuf) {
@@ -666,7 +673,11 @@ impl App {
     fn save_node(&self, n: &Node) -> SavedNode {
         match n {
             Node::Leaf(id) => {
-                SavedNode::Leaf { cwd: self.panes.get(id).map(|p| p.cwd()).unwrap_or_else(home).display().to_string() }
+                let pane = self.panes.get(id);
+                SavedNode::Leaf {
+                    cwd: pane.map(|p| p.cwd()).unwrap_or_else(home).display().to_string(),
+                    launch: pane.and_then(|p| p.launcher.clone()),
+                }
             }
             Node::Split { dir, ratio, a, b } => SavedNode::Split {
                 dir: *dir,
@@ -705,18 +716,25 @@ impl App {
     ) -> Option<Node> {
         let (rows, cols) = size;
         match n {
-            SavedNode::Leaf { cwd } => {
+            SavedNode::Leaf { cwd, launch } => {
                 let path = PathBuf::from(cwd);
+                // A quick-launch pane runs its command again (prepared for the current shell).
+                let command = launch.as_deref().map(|l| self.shell.invocation(l));
+                let command = command.as_deref();
                 // A failed spawn in the saved directory (e.g. no permission to enter it) is
                 // retried in home, on Windows and Unix alike.
-                if usable.contains(&path)
-                    && let Ok(id) = self.try_spawn_pane(&path, None, rows, cols)
-                {
-                    return Some(Node::Leaf(id));
-                }
-                let id = self.spawn_pane(&home(), None, rows, cols)?;
-                if !unavailable.contains(cwd) {
-                    unavailable.push(cwd.clone());
+                let id = match usable.contains(&path).then(|| self.try_spawn_pane(&path, command, rows, cols)) {
+                    Some(Ok(id)) => id,
+                    _ => {
+                        let id = self.spawn_pane(&home(), command, rows, cols)?;
+                        if !unavailable.contains(cwd) {
+                            unavailable.push(cwd.clone());
+                        }
+                        id
+                    }
+                };
+                if let Some(p) = self.panes.get_mut(&id) {
+                    p.launcher = launch.clone();
                 }
                 Some(Node::Leaf(id))
             }
@@ -738,7 +756,7 @@ impl App {
     pub fn open_workspace(&mut self, ws: &Workspace) -> usize {
         fn saved_dirs(n: &SavedNode, out: &mut Vec<PathBuf>) {
             match n {
-                SavedNode::Leaf { cwd } => out.push(PathBuf::from(cwd)),
+                SavedNode::Leaf { cwd, .. } => out.push(PathBuf::from(cwd)),
                 SavedNode::Split { a, b, .. } => {
                     saved_dirs(a, out);
                     saved_dirs(b, out);

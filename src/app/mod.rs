@@ -385,6 +385,8 @@ pub struct App {
     pub restored_tabs: usize,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
+    /// This window's id in the shared session file (`store::instance_id`).
+    pub instance: String,
     /// Whether a restored pane's directory can be used; runs on a helper thread with a timeout
     /// (`ops::DIR_PROBE_TIMEOUT`). Replaceable so tests can simulate a hanging network share.
     #[doc(hidden)]
@@ -507,15 +509,25 @@ impl App {
         app
     }
 
-    /// Startup: reopens the tabs of the last session (`session.json`, `session-dev.json` for
-    /// `noble-dev`) when `restore_session` is on.
+    /// Startup: registers this window in the session file (`session.json`, `session-dev.json`
+    /// for `noble-dev`) and, when it is the first window of the run, reopens the saved tabs of
+    /// every window. Only with `restore_session` on.
     pub fn restore_last_session(&mut self) {
-        if self.cfg.terminal.restore_session
-            && let Some(ws) = crate::store::load_session(&self.paths.data_file(self.session_file()))
-        {
-            self.restored_tabs = self.open_workspace(&ws);
-            self.view = View::Bridge;
+        if !self.cfg.terminal.restore_session {
+            return;
         }
+        let file = self.paths.data_file(self.session_file());
+        let Some(tabs) = crate::store::session_begin(&file, &self.instance) else { return };
+        if tabs.is_empty() {
+            return;
+        }
+        let ws = crate::store::Workspace { name: "last session".into(), saved_at: 0, tabs };
+        self.restored_tabs = self.open_workspace(&ws);
+        self.view = View::Bridge;
+        // What actually opened (directories that fell back to home included) replaces the
+        // taken-over tabs right away, so a crash keeps them as they are now.
+        let tabs = self.snapshot("last session").tabs;
+        crate::store::session_save(&file, &self.instance, tabs, false);
     }
 
     fn build(
@@ -582,6 +594,7 @@ impl App {
             started: Instant::now(),
             restored_tabs: 0,
             dev: false,
+            instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
             operator,
             git_requested: HashMap::new(),
@@ -1321,8 +1334,9 @@ impl App {
     /// On exit: save the session.
     pub fn shutdown(&mut self) {
         if self.cfg.terminal.restore_session {
-            let ws = self.snapshot("last session");
-            crate::store::save_session(&self.paths.data_file(self.session_file()), &ws);
+            // Merged with the other windows' tabs; this window's earlier entries are replaced.
+            let tabs = self.snapshot("last session").tabs;
+            crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();
     }

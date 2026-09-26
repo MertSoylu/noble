@@ -105,8 +105,9 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 
 **💾 Sessions and workspaces**<br>
 Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
-(a dead network share) opens in home instead. Quick-launch tabs come back as a shell in their folder, without
-running the command again. Save named workspaces and reopen them from the palette.
+(a dead network share) opens in home instead. With several NOBLE windows open, each one saves its own tabs and
+the next launch brings back all of them; a window opened while another is running starts empty. Quick-launch
+tabs run their command (e.g. `claude`) again. Save named workspaces and reopen them from the palette.
 
 </td>
 </tr>

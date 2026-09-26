@@ -22,6 +22,13 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Changed
+- Several NOBLE windows no longer overwrite each other's session: each window merges its own tabs into the
+  session file on exit, and the next launch restores the tabs of every window. Only the first window of a run
+  restores; a window opened while another one is running starts empty instead of opening the same tabs again.
+- Restored quick-launch tabs (and quick-launch panes in saved workspaces) run their command again, e.g. the AI
+  agent starts in its folder. Session files from older versions still load.
+
 ### Fixed
 - Restoring a session or workspace no longer drops a tab whose folder cannot be entered, and no longer waits
   on a network share that stopped answering (Windows and Linux): after 2 seconds the pane opens in the home

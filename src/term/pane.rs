@@ -501,6 +501,9 @@ pub struct Pane {
     pub start_cwd: PathBuf,
     pub shell_label: String,
     pub command: Option<String>,
+    /// The quick-launch command (as configured, e.g. `claude`) this pane was opened with;
+    /// saved in the session and run again on restore.
+    pub launcher: Option<String>,
     pub selection: Option<Selection>,
     pub pid: Option<u32>,
     /// When the user last pressed Enter: to time the command
@@ -612,6 +615,7 @@ impl Pane {
             start_cwd: cwd,
             shell_label: spec.shell.label(),
             command: spec.command.map(str::to_string),
+            launcher: None,
             selection: None,
             pid,
             command_started: None,
