@@ -1572,6 +1572,175 @@ fn claude_hook_states_drive_sessions() {
     assert!(app.agent_hooks.is_empty());
 }
 
+/// Runs the real `noble hook <event>` the way Claude Code's hooks do: inside the pane's
+/// environment (`NOBLE_INSTANCE`, `NOBLE_PANE`), with the event JSON on stdin.
+fn noble_hook(app: &App, pane: noble::term::layout::PaneId, instance: u32, event: &str, stdin: &str) {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+        .args(["hook", event])
+        .env("NOBLE_HOME", &app.paths.data)
+        .env("NOBLE_INSTANCE", instance.to_string())
+        .env("NOBLE_PANE", pane.to_string())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("noble hook");
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+/// What `App::tick` does once a second while hooks are live.
+fn scan_hooks(app: &mut App) {
+    let records = noble::hooks::read_records(&app.paths.data, std::process::id());
+    app.apply_hook_records(records);
+}
+
+fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        app.pump();
+        if done(app) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what} never happened\n{}", render(app, 110, 30));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A stand-in for an agent's TUI in `shell`: sets the window title the way the agent
+/// does, then waits for a line (Enter "exits" it).
+fn fake_agent(shell: &noble::term::pane::ShellSpec, title: &str) -> String {
+    match shell.label().to_lowercase().as_str() {
+        "pwsh" | "powershell" => {
+            format!("Write-Host -NoNewline ([char]27 + ']0;{title}' + [char]7); $null = Read-Host")
+        }
+        // cmd.exe has no escape sequences: `title` sets the console title, which ConPTY reports as OSC 0.
+        "cmd" => format!("title {title} & pause >nul"),
+        // bash, zsh and fish all understand `\e` in printf. The wait is an external program:
+        // fish's own `read` re-titles the terminal.
+        _ => format!("printf '\\e]0;{title}\\a'; head -n 1 >/dev/null"),
+    }
+}
+
+/// Agent lifecycle in one pane, on every installed shell: Claude opened from a quick
+/// launch goes through its hook events and exits; the shell prompt (OSC 7 / 9;9) ends it;
+/// another agent started in the same pane is shown instead; back at the shell nothing
+/// is shown; closing the pane clears the records. Orphan records, late writes and other
+/// NOBLE instances are covered along the way.
+#[test]
+fn agent_state_follows_the_program_in_the_pane() {
+    check_agent_lifecycle("");
+    if cfg!(windows) {
+        check_agent_lifecycle("cmd.exe");
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_agent_lifecycle(&path.display().to_string());
+            }
+        }
+    }
+}
+
+fn check_agent_lifecycle(shell: &str) {
+    use noble::app::AgentState;
+    let mut app = demo_app(160, 45);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let tag = std::path::Path::new(shell)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".into());
+    // Own data folder: headless apps share one, and panes of parallel tests have the same ids.
+    app.paths.data = std::env::temp_dir().join(format!("noble-agent-life-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&app.paths.data);
+    let me = std::process::id();
+    let agents = noble::hooks::agents_dir(&app.paths.data);
+
+    // Quick launch, as `App::launch` does it: the tab is named after the launcher.
+    let claude = fake_agent(&app.shell, "Claude Code");
+    let project = std::env::temp_dir();
+    let origin = format!("{} · claude", project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap());
+    app.new_tab(project, Some(&claude), Some(origin.clone()));
+    let pane = app.tabs[0].focus;
+    pump_until(&mut app, &format!("{shell}: agent title"), |a| a.panes[&pane].label().contains("Claude Code"));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Running)), "{shell}: no hook yet");
+    assert_eq!(app.tab_title(0), origin);
+
+    // Claude's hooks.
+    let steps = [
+        ("session-start", "{}", AgentState::Idle),
+        ("prompt", r#"{"prompt":"fix it"}"#, AgentState::Working),
+        ("notification", r#"{"message":"Claude needs your permission to use Bash"}"#, AgentState::NeedsYou),
+        ("stop", "{}", AgentState::Idle),
+    ];
+    for (event, stdin, want) in steps {
+        noble_hook(&app, pane, me, event, stdin);
+        scan_hooks(&mut app);
+        assert_eq!(app.agent_state(pane), Some(("claude", want)), "{shell}: after {event}");
+    }
+    // Another NOBLE instance's pane with the same id is not ours.
+    noble_hook(&app, pane, me + 1, "notification", "{}");
+    // An orphan: a pane this instance never had (or already closed).
+    noble_hook(&app, 9999, me, "prompt", "{}");
+    scan_hooks(&mut app);
+    assert!(!agents.join(format!("{me}-9999.json")).exists(), "{shell}: orphan record kept");
+    assert!(agents.join(format!("{}-{pane}.json", me + 1)).exists(), "{shell}: other instance's record removed");
+
+    // `/exit`: SessionEnd clears the record; the program itself is still closing.
+    noble_hook(&app, pane, me, "session-end", r#"{"reason":"prompt_input_exit"}"#);
+    scan_hooks(&mut app);
+    assert!(!app.agent_hooks.contains_key(&pane), "{shell}: session-end left the record");
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists());
+
+    // A stop hook that races the exit lands after session-end.
+    noble_hook(&app, pane, me, "stop", "{}");
+    // The agent exits; the shell prompt comes back.
+    app.panes[&pane].write(b"\r");
+    pump_until(&mut app, &format!("{shell}: prompt after the agent"), |a| a.panes[&pane].prompted);
+    scan_hooks(&mut app);
+    assert_eq!(app.agent_state(pane), None, "{shell}: agent shown at the shell prompt");
+    // The title is gone, or is the one the shell sets for its own prompt.
+    let label = app.panes[&pane].label();
+    assert!(!label.contains("Claude"), "{shell}: the agent's title outlived it: {label}");
+    assert!(!app.tab_title(0).contains("claude"), "{shell}: tab still says {:?}", app.tab_title(0));
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after the prompt");
+    let text = render(&mut app, 160, 45);
+    save(&format!("agent-back-at-shell-{tag}"), &text);
+    let top = text.lines().next().unwrap_or_default();
+    assert!(!top.contains("claude"), "{shell}: top bar still says claude: {top}");
+
+    // Another harness in the same pane.
+    let codex = fake_agent(&app.shell, "codex");
+    app.panes[&pane].write(format!("{codex}\r").as_bytes());
+    pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some());
+    assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)), "{shell}");
+    // An elevated cmd.exe prefixes its title with "Administrator: ", which the tab's 16-character
+    // label cuts before the program name; the pane label still carries it. Other shells show it.
+    let tab = app.tab_title(0);
+    let label = app.panes[&pane].label();
+    assert!(tab.contains("codex") || (shell == "cmd.exe" && label.contains("codex")), "{shell}: {tab:?} / {label:?}");
+    assert!(!tab.contains("claude"), "{shell}: {tab:?}");
+    app.panes[&pane].write(b"\r");
+    pump_until(&mut app, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
+    assert!(!app.panes[&pane].label().contains("codex"), "{shell}");
+
+    // Claude again, typed at the prompt this time; closing the pane clears its record.
+    // Records written in the same second as the last prompt count as leftovers of the
+    // program before it (hook timestamps are in seconds), so wait for the next second.
+    std::thread::sleep(Duration::from_millis(1100));
+    noble_hook(&app, pane, me, "session-start", "{}");
+    scan_hooks(&mut app);
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)), "{shell}");
+    app.run(Action::CloseTab);
+    assert!(app.agent_hooks.is_empty());
+    assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after close");
+    let _ = std::fs::remove_dir_all(&app.paths.data);
+}
+
 /// A warning row appears in the AI panel when the quota would fill before it resets.
 #[test]
 fn quota_pace_warning_line() {

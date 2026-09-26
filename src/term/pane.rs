@@ -25,6 +25,7 @@ pub struct Callbacks {
     pub clipboard: Option<String>,
     pub bell: bool,
     /// The shell drew a new prompt (OSC 7 / 9;9 / 133): the previous command finished.
+    /// See `Callbacks::shell_prompt` for what else that resets.
     pub prompt: bool,
     /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
@@ -32,6 +33,17 @@ pub struct Callbacks {
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
     open_link: Option<(usize, u16, String)>,
+}
+
+impl Callbacks {
+    /// The shell is back at its prompt, so the program that ran before it has exited:
+    /// the window title it set no longer describes the pane (a shell that titles its
+    /// prompt sets a new one right after). Only shells emit these marks; agents such as
+    /// Claude Code set a title (OSC 0) and progress (OSC 9;4) but never OSC 7 / 9;9 / 133.
+    fn shell_prompt(&mut self) {
+        self.prompt = true;
+        self.title.clear();
+    }
 }
 
 /// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
@@ -79,12 +91,12 @@ impl vt100::Callbacks for Callbacks {
             [b"7", rest @ ..] if !rest.is_empty() => {
                 let path = parse_cwd_url(&join(rest));
                 self.cwd = Some(if cfg!(windows) { msys_to_windows(&path) } else { path });
-                self.prompt = true;
+                self.shell_prompt();
             }
             // OSC 9;9: Windows Terminal's cwd report.
             [b"9", b"9", rest @ ..] if !rest.is_empty() => {
                 self.cwd = Some(join(rest).trim_matches('"').to_string());
-                self.prompt = true;
+                self.shell_prompt();
             }
             // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
             // extensions such as 9;4 progress) are not notifications.
@@ -117,7 +129,7 @@ impl vt100::Callbacks for Callbacks {
                 }
             }
             // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished.
-            [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.prompt = true,
+            [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.shell_prompt(),
             _ => {}
         }
     }
@@ -691,6 +703,12 @@ impl Pane {
         }
     }
 
+    /// The launcher command the pane was opened with is still running: no prompt has come
+    /// back since. Without shell integration (no prompt signal) this stays true.
+    pub fn launch_running(&self) -> bool {
+        self.command.is_some() && !self.prompted
+    }
+
     pub fn scroll_offset(&self) -> usize {
         lock(&self.parser).screen().scrollback()
     }
@@ -980,10 +998,30 @@ mod tests {
         }
     }
 
+    /// A title set by a program that has since exited (the shell prompt came back) is
+    /// dropped; one the shell sets for its prompt, after the mark, is kept.
+    #[test]
+    fn prompt_signal_drops_the_finished_programs_title() {
+        for mark in [&b"\x1b]7;file://h/tmp\x07"[..], b"\x1b]9;9;C:\\x\x1b\\", b"\x1b]133;A\x07", b"\x1b]133;D;0\x07"] {
+            let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+            parser.process("\x1b]0;\u{2733} Claude Code\x07".as_bytes());
+            assert_eq!(parser.callbacks().title, "\u{2733} Claude Code");
+            // Agent progress (OSC 9;4) and notifications are not prompt marks.
+            parser.process(b"\x1b]9;4;3;0\x07\x1b]9;done\x07");
+            assert!(!parser.callbacks().prompt);
+            assert_eq!(parser.callbacks().title, "\u{2733} Claude Code");
+            parser.process(mark);
+            assert!(parser.callbacks().prompt, "{mark:?}");
+            assert_eq!(parser.callbacks().title, "", "{mark:?}");
+            parser.process(b"\x1b]0;user@host: ~\x07");
+            assert_eq!(parser.callbacks().title, "user@host: ~");
+        }
+    }
+
     #[test]
     fn callbacks_answer_queries() {
         let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
-        parser.process(b"abc\x1b[6n\x1b]0;C:\\bin\\cmd.exe\x07\x1b]7;file://h/tmp/x\x07");
+        parser.process(b"abc\x1b[6n\x1b]7;file://h/tmp/x\x07\x1b]0;C:\\bin\\cmd.exe\x07");
         let cb = parser.callbacks();
         assert_eq!(cb.responses, b"\x1b[1;4R");
         assert_eq!(cb.title, "C:\\bin\\cmd.exe");

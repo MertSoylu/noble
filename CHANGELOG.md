@@ -23,6 +23,20 @@ All notable changes to NOBLE are documented here. The format is based on
   every line could run as a command.
 
 ### Fixed
+- Link detection: URLs inside `( )` or `[ ]`, markdown links `[text](url)`, URLs glued to text
+  (`url=https://…`), short URLs such as `http://a` and paths with combining accents are now recognised
+  correctly.
+- `noble update` never leaves you without a working binary: the new binary is staged next to the old one
+  and swapped with renames, an empty binary in the archive is refused, and a leftover `*.old` that cannot
+  be deleted no longer blocks the update.
+- Better readability: One Dark's dim text and Solarized Light's dim text and accent are slightly darker to
+  reach WCAG contrast (3:1 for dim text, 4.5:1 for the accent).
+- After Claude exits, its pane and tab no longer keep saying "claude": the agent indicator and labels follow
+  the program running now (another agent, or none back at the shell prompt), on Windows and Linux in every
+  shell. Claude's `SessionEnd` hook clears the pane's state, and a quick-launch tab is named after its project
+  once the launched command has exited.
+- Claude hook state left behind by a crashed NOBLE can no longer show up in a new NOBLE that got the same
+  process id.
 - bash, zsh and fish now percent-encode the directory they report (OSC 7), so a directory whose name ends in a
   space keeps it (spaces, `%`, `;`, `#` and non-ASCII names round-trip exactly).
 - A bash started as a login shell (`-l` / `--login` in `shell_args`) lost the cwd tracking: a login shell never
