@@ -507,7 +507,7 @@ mod tests {
             let _ = recent.top(5);
             recent.file = None;
             recent.record(&dir);
-            let _ = load_session(&file).map(|ws| ws.pane_count());
+            let _ = load_session(&file).map(|s| s.tabs.len());
             let ws = Workspaces::load(file.clone());
             let panes = ws.list.iter().map(Workspace::pane_count).sum::<usize>();
             if body.starts_with(b"[{\"name\"") {
@@ -524,6 +524,9 @@ mod tests {
             let _ = h.pace_eta("claude/5h", i64::MIN, t, 99);
             let _ = h.resample("claude/5h", t - 5 * 3600, t, 40);
             h.record("claude/5h", t, 30);
+            // Startup and shutdown of the session merge on the same damaged file (they rewrite it).
+            let _ = session_begin(&file, "1-1-0");
+            session_save(&file, "1-1-0", Vec::new(), true);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
