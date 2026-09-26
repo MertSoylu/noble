@@ -3064,12 +3064,11 @@ fn restored_launch_tab_reruns_its_command() {
     let project = data.join("proj");
     std::fs::create_dir_all(&project).unwrap();
     let mut cfg = session_cfg();
-    cfg.launchers = vec![noble::config::Launcher {
-        key: "x".into(),
-        name: "Agent".into(),
-        command: "echo relaunch-marker".into(),
-        show: true,
-    }];
+    // A launcher only runs when its first word is a program on PATH. Linux has `/bin/echo`;
+    // on Windows `echo` is a shell builtin (only Git's usr\bin puts an echo.exe on PATH), so cmd runs it.
+    let command = if cfg!(windows) { "cmd /c echo relaunch-marker" } else { "echo relaunch-marker" };
+    cfg.launchers =
+        vec![noble::config::Launcher { key: "x".into(), name: "Agent".into(), command: command.into(), show: true }];
     fn marker_in(app: &App, pane: usize) -> bool {
         let id = app.tabs[0].panes()[pane];
         app.panes[&id].all_lines().0.iter().any(|l| l.contains("relaunch-marker"))
@@ -3098,7 +3097,7 @@ fn restored_launch_tab_reruns_its_command() {
     assert_eq!(app.tabs[0].panes().len(), 2);
     app.shutdown();
     let text = std::fs::read_to_string(data.join("session.json")).unwrap();
-    assert_eq!(text.matches("echo relaunch-marker").count(), 1, "launcher stored once, on its pane: {text}");
+    assert_eq!(text.matches(command).count(), 1, "launcher stored once, on its pane: {text}");
 
     for round in 0..2 {
         let mut again = session_app(&data, false, cfg.clone());

@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.3.0]
+
 ### Added
 - Apps in a pane can get NOBLE's own shortcuts (`alt+m`, `alt+z` …). Prefix `i` locks the pane's keys to its
   app (🔒 KEYS on the pane, prefix `i` again to unlock; the prefix keeps working). With `keys.passthrough =
@@ -137,7 +139,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/MertSoylu/noble/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/MertSoylu/noble/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/MertSoylu/noble/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/MertSoylu/noble/releases/tag/v1.0.0
