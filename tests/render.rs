@@ -1718,7 +1718,12 @@ fn check_agent_lifecycle(shell: &str) {
     app.panes[&pane].write(format!("{codex}\r").as_bytes());
     pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some());
     assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)), "{shell}");
-    assert!(app.tab_title(0).contains("codex"), "{shell}: {:?}", app.tab_title(0));
+    // An elevated cmd.exe prefixes its title with "Administrator: ", which the tab's 16-character
+    // label cuts before the program name; the pane label still carries it. Other shells show it.
+    let tab = app.tab_title(0);
+    let label = app.panes[&pane].label();
+    assert!(tab.contains("codex") || (shell == "cmd.exe" && label.contains("codex")), "{shell}: {tab:?} / {label:?}");
+    assert!(!tab.contains("claude"), "{shell}: {tab:?}");
     app.panes[&pane].write(b"\r");
     pump_until(&mut app, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
     assert!(!app.panes[&pane].label().contains("codex"), "{shell}");
