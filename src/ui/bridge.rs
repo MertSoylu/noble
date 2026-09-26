@@ -139,7 +139,7 @@ fn ago(t: SystemTime) -> String {
 
 fn ago_ts(ts: i64) -> String {
     let now = chrono::Utc::now().timestamp();
-    util::fmt_ago(Duration::from_secs((now - ts).max(0) as u64))
+    util::fmt_ago(Duration::from_secs(now.saturating_sub(ts).max(0) as u64))
 }
 
 fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
@@ -575,8 +575,8 @@ fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
     let w = u.windows.iter().find(|w| w.label == "5H")?;
     let reset = w.resets_at?;
     let key = crate::store::UsageHistory::key(p.id, &w.label);
-    let eta = app.usage_history.pace_eta(&key, reset - 5 * 3600, now, w.used)?;
-    (now + (eta as i64) < reset).then(|| {
+    let eta = app.usage_history.pace_eta(&key, reset.saturating_sub(5 * 3600), now, w.used)?;
+    (now.saturating_add(eta.min(i64::MAX as u64) as i64) < reset).then(|| {
         let name = crate::ai::window_name(&w.label);
         format!("▲ {name} full in ~{} at this pace", util::fmt_duration(Duration::from_secs(eta)))
     })

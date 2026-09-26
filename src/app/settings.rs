@@ -246,7 +246,10 @@ impl App {
         if self.services.is_none() {
             return;
         }
-        let text = std::fs::read_to_string(&self.paths.config).unwrap_or_else(|_| crate::config::DEFAULT_CONFIG.into());
+        let text = match crate::config::read_for_edit(&self.paths.config) {
+            Ok(text) => text,
+            Err(e) => return self.toast(ToastLevel::Error, e),
+        };
         let updated = crate::config::set_value(&text, section, key, value_toml);
         if std::fs::write(&self.paths.config, updated).is_ok() {
             self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
@@ -258,7 +261,10 @@ impl App {
         if self.services.is_none() {
             return;
         }
-        let text = std::fs::read_to_string(&self.paths.config).unwrap_or_else(|_| crate::config::DEFAULT_CONFIG.into());
+        let text = match crate::config::read_for_edit(&self.paths.config) {
+            Ok(text) => text,
+            Err(e) => return self.toast(ToastLevel::Error, e),
+        };
         let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
         if std::fs::write(&self.paths.config, updated).is_ok() {
             self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
