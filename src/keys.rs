@@ -565,6 +565,82 @@ mod tests {
     }
 
     #[test]
+    fn parse_edge_cases() {
+        for bad in ["", " ", "ctrl+", "ctrl+alt+", "+ctrl", "ff5", "f999", "f256", "f-1", "ctrl+hyper", "é+x", "日本"]
+        {
+            assert_eq!(Chord::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(Chord::parse("f"), Some(Chord::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+        assert_eq!(Chord::parse("+"), Some(Chord::new(KeyCode::Char('+'), KeyModifiers::NONE)));
+        assert_eq!(Chord::parse("f255"), Some(Chord::new(KeyCode::F(255), KeyModifiers::NONE)));
+        assert_eq!(Chord::parse("alt+é"), Some(Chord::new(KeyCode::Char('é'), KeyModifiers::ALT)));
+        assert_eq!(Chord::parse("ctrl+日"), Some(Chord::new(KeyCode::Char('日'), KeyModifiers::CONTROL)));
+        assert_eq!(Chord::parse("İ"), Some(Chord::new(KeyCode::Char('İ'), KeyModifiers::NONE)));
+        assert_eq!(Chord::parse("🙂"), Some(Chord::new(KeyCode::Char('🙂'), KeyModifiers::NONE)));
+    }
+
+    /// Deterministic xorshift generator, so a failing input can be reproduced.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[(self.next() % items.len() as u64) as usize]
+        }
+    }
+
+    /// Random key texts (modifiers, separators, multi-byte characters) never panic, and a
+    /// parsed chord shown as text reads back as the same chord when the display is parseable.
+    #[test]
+    fn parse_fuzz_never_panics() {
+        const PIECES: [&str; 24] = [
+            "ctrl", "alt", "shift", "c", "m", "s", "+", "++", "f", "1", "12", "999", "é", "日", "🙂", "İ", " ", "",
+            "space", "enter", "\u{301}", "\u{0}", "tab", "-",
+        ];
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..20_000 {
+            let n = rng.next() % 6;
+            let text: String = (0..n).map(|_| rng.pick(&PIECES)).collect();
+            if let Some(chord) = Chord::parse(&text) {
+                let shown = chord.to_string();
+                if let Some(back) = Chord::parse(&shown) {
+                    assert_eq!(back, chord, "{text:?} → {shown:?}");
+                }
+            }
+        }
+        // Raw random characters too, from every Unicode plane.
+        for _ in 0..20_000 {
+            let n = rng.next() % 5;
+            let text: String = (0..n).filter_map(|_| char::from_u32((rng.next() % 0x11_0000) as u32)).collect();
+            let _ = Chord::parse(&text);
+        }
+    }
+
+    /// Any key table from the config builds a keymap: bad entries become warnings.
+    #[test]
+    fn keymap_from_random_config_never_panics() {
+        const KEYS: [&str; 10] = ["ctrl+", "f", "f999", "+", "", "alt+é", "🙂", "ctrl++", "shift+tab", "ctrl+alt+"];
+        const ACTIONS: [&str; 6] = ["none", "", "zoom", "bogus", "split_right", "日本"];
+        let mut rng = Rng(42);
+        for _ in 0..500 {
+            let mut cfg = KeysCfg { prefix: rng.pick(&KEYS).into(), ..KeysCfg::default() };
+            for _ in 0..rng.next() % 6 {
+                cfg.prefix_bindings.insert(rng.pick(&KEYS).into(), rng.pick(&ACTIONS).into());
+                cfg.direct_bindings.insert(rng.pick(&KEYS).into(), rng.pick(&ACTIONS).into());
+            }
+            let km = Keymap::from_config(&cfg);
+            for a in Action::ALL {
+                let _ = km.hint(a);
+                let _ = km.term_hint(a, true);
+            }
+        }
+    }
+
+    #[test]
     fn shift_is_folded_into_chars() {
         let from_terminal = Chord::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
         assert_eq!(Some(from_terminal), Chord::parse("X"));

@@ -413,8 +413,45 @@ pub fn load(path: &Path) -> Loaded {
             Ok(config) => Loaded { config, error: None, mtime },
             Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
         },
-        Err(_) => Loaded { config: Config::default(), error: None, mtime },
+        // No file (and none could be written, e.g. a read-only home): the defaults, silently.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
+        // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.
+        Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
     }
+}
+
+/// The config text to rewrite from the Settings screen: the template when the file is missing,
+/// an error when it exists but cannot be read (it is then left untouched rather than replaced).
+pub fn read_for_edit(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULT_CONFIG.into()),
+        Err(e) => Err(format!("config not saved: {e}")),
+    }
+}
+
+/// Byte index of the `#` that starts a line's comment; a `#` inside a "basic" or 'literal'
+/// string does not count.
+fn comment_start(line: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' => return Some(i),
+            None => {}
+        }
+    }
+    None
+}
+
+/// A line without its comment.
+fn strip_comment(line: &str) -> &str {
+    comment_start(line).map_or(line, |i| &line[..i])
 }
 
 pub fn mtime_of(path: &Path) -> Option<SystemTime> {
@@ -443,12 +480,12 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
                 out.extend(tail);
                 done = true;
             }
-            in_section = trimmed == header;
+            in_section = strip_comment(trimmed).trim_end() == header;
             section_seen |= in_section;
         } else if in_section && !done {
             let lhs = trimmed.split('=').next().unwrap_or("").trim();
             if lhs == key && !trimmed.starts_with('#') {
-                let comment = line.find(" #").map(|i| &line[i..]).unwrap_or("");
+                let comment = comment_start(line).map(|i| &line[i..]).unwrap_or("");
                 let new_line = format!("{key} = {value_toml}");
                 let padded = if comment.is_empty() {
                     new_line
@@ -486,7 +523,7 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_block = trimmed == "[[launchers]]";
+            in_block = strip_comment(trimmed).trim_end() == "[[launchers]]";
             if in_block {
                 // The block content (trailing blank lines included) is skipped.
                 insert_at.get_or_insert(out.len());
@@ -608,6 +645,121 @@ providers = [\"claude\", \"gemini\"]
     #[test]
     fn bad_config_reports_error() {
         assert!(parse("[general\ntheme=").is_err());
+    }
+
+    /// Broken files never crash: every unreadable or invalid file yields the defaults plus an error
+    /// (shown as a toast), and a missing file gets the template.
+    #[test]
+    fn load_reports_broken_files() {
+        let dir = std::env::temp_dir().join(format!("noble-cfg-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let cases: [(&[u8], bool); 7] = [
+            (b"[general\ntheme=", true),
+            (b"[general]\ntheme = 5\n", true),
+            (b"[general]\ntheme = \"\xff\xfe\"\n", true),
+            (b"\xef\xbb\xbf[general]\ntheme = \"ice\"\n", false),
+            (b"[general]\ntheme = \"ice\"\n[general]\n", true),
+            (b"\0\0\0", true),
+            (b"", false),
+        ];
+        for (bytes, broken) in cases {
+            std::fs::write(&path, bytes).unwrap();
+            let loaded = load(&path);
+            assert_eq!(loaded.error.is_some(), broken, "{:?}: {:?}", String::from_utf8_lossy(bytes), loaded.error);
+        }
+        std::fs::remove_file(&path).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.error.is_none() && path.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A " #" inside a quoted value is not a comment: the old value must not leak into the new line.
+    #[test]
+    fn set_value_hash_inside_quotes() {
+        let text = "[general]\noperator = \"team #1\"   # greeting name\nshell = 'C:\\x #y'\n";
+        let out = set_value(text, "general", "operator", "\"bob\"");
+        assert!(out.contains("operator = \"bob\""), "{out}");
+        assert!(out.contains("# greeting name") && !out.contains("#1"), "{out}");
+        assert_eq!(parse(&out).unwrap().general.operator, "bob");
+        let out = set_value(text, "general", "shell", "\"sh\"");
+        assert!(!out.contains("#y"), "{out}");
+        assert_eq!(parse(&out).unwrap().terminal.shell, "", "shell lives in [terminal]");
+        // No comment at all: only the new value remains.
+        let out = set_value("[general]\noperator = \"a #b\"\n", "general", "operator", "\"c\"");
+        assert_eq!(out, "[general]\noperator = \"c\"\n");
+    }
+
+    /// A section header with a trailing comment is still the section (no duplicate table).
+    #[test]
+    fn set_value_header_with_comment() {
+        let text = "[general]   # look\ntheme = \"ice\"\n\n[ai]\n";
+        let out = set_value(text, "general", "theme", "\"synth\"");
+        assert_eq!(parse(&out).map(|c| c.general.theme), Ok("synth".into()), "{out}");
+        assert_eq!(out.matches("[general]").count(), 1, "{out}");
+        let out = set_value(text, "general", "clock_24h", "false");
+        assert!(parse(&out).is_ok_and(|c| !c.general.clock_24h), "{out}");
+        // The same for launcher blocks: the commented block is replaced, not kept next to the new ones.
+        let text = "[[launchers]]  # mine\nkey = \"c\"\nname = \"a\"\ncommand = \"a\"\n";
+        let list = default_launchers();
+        let out = set_launchers(text, &list);
+        assert_eq!(parse(&out).map(|c| c.launchers), Ok(list), "{out}");
+    }
+
+    #[test]
+    fn read_for_edit_never_replaces_unreadable_files() {
+        let dir = std::env::temp_dir().join(format!("noble-cfg-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        assert_eq!(read_for_edit(&path).as_deref(), Ok(DEFAULT_CONFIG));
+        std::fs::write(&path, b"# caf\xe9\n[general]\n").unwrap();
+        assert!(read_for_edit(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Random config texts: `set_value` never panics, and a file that parsed before still parses after.
+    #[test]
+    fn set_value_fuzz_keeps_valid_files_valid() {
+        const LINES: [&str; 18] = [
+            "[general]",
+            "[general] # c",
+            "[terminal]",
+            "[keys]",
+            "[keys.prefix_bindings]",
+            "# comment with = sign",
+            "",
+            "   ",
+            "theme = \"ice\"",
+            "theme = \"a #b\" # c",
+            "operator = 'x # y'",
+            "operator = \"é日🙂\"   # ünïcode",
+            "shell = \"\"",
+            "\"%\" = \"split_right\"",
+            "notify_after = 10",
+            "clock_24h = true#tight",
+            "\t theme = \"tab\"",
+            "[[launchers]]",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let targets = [("general", "theme"), ("general", "operator"), ("terminal", "shell"), ("keys", "prefix")];
+        for _ in 0..3000 {
+            let n = next() % 8;
+            let text: Vec<&str> = (0..n).map(|_| LINES[(next() % LINES.len() as u64) as usize]).collect();
+            let text = text.join("\n");
+            let (section, key) = targets[(next() % targets.len() as u64) as usize];
+            let out = set_value(&text, section, key, "\"v #1\"");
+            if parse(&text).is_ok() {
+                assert!(parse(&out).is_ok(), "{text:?}\n→\n{out}");
+            }
+        }
     }
 
     #[test]

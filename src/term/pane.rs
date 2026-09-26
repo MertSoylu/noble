@@ -747,7 +747,12 @@ impl Pane {
         }
         let ((r0, c0), (r1, c1)) = sel.ordered();
         let p = lock(&self.parser);
-        let text = p.screen().contents_between(r0, c0, r1, c1.saturating_add(1));
+        // The pane can be drawn larger than its screen for a moment (the PTY is resized only when a
+        // divider drag ends); vt100 panics on columns past the screen, so the selection is kept inside.
+        let (rows, cols) = p.screen().size();
+        let (r0, r1) = (r0.min(rows.saturating_sub(1)), r1.min(rows.saturating_sub(1)));
+        let (c0, c1) = (c0.min(cols), c1.saturating_add(1).min(cols));
+        let text = p.screen().contents_between(r0, c0, r1, c1);
         let text: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
         let joined = text.join("\n");
         (!joined.trim().is_empty()).then_some(joined)

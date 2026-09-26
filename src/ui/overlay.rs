@@ -35,11 +35,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 buf,
                 x,
                 inner.y + 1,
-                &util::truncate(&c.body, inner.width as usize - 2),
+                &util::truncate(&c.body, (inner.width as usize).saturating_sub(2)),
                 th.text(),
-                inner.width - 2,
+                inner.width.saturating_sub(2),
             );
-            let y = inner.bottom() - 1;
+            let y = inner.bottom().saturating_sub(1);
             let yes_x = x;
             let end = hud::put_spans(
                 buf,
@@ -76,9 +76,15 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 x,
                 y,
                 &[("❯ ", th.accent()), (&p.value, th.accent_bold()), (cursor, th.accent())],
-                inner.width - 2,
+                inner.width.saturating_sub(2),
             );
-            hud::put_right(buf, inner.right() - 1, inner.bottom() - 1, "⏎ save · esc cancel", th.dim());
+            hud::put_right(
+                buf,
+                inner.right().saturating_sub(1),
+                inner.bottom().saturating_sub(1),
+                "⏎ save · esc cancel",
+                th.dim(),
+            );
         }
     }
 }

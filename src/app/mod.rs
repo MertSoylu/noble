@@ -773,7 +773,7 @@ impl App {
         }
         let latest = self.ui_state.data.update_latest.clone();
         self.set_latest_version(&latest);
-        let age = chrono::Utc::now().timestamp() - self.ui_state.data.update_checked;
+        let age = chrono::Utc::now().timestamp().saturating_sub(self.ui_state.data.update_checked);
         let wait = (crate::update::CHECK_INTERVAL - age).clamp(0, crate::update::CHECK_INTERVAL);
         self.next_update_check = Some(Instant::now() + Duration::from_secs(wait as u64));
     }
@@ -843,7 +843,7 @@ impl App {
             let reset = w
                 .resets_at
                 .map(|t| {
-                    let left = (t - chrono::Utc::now().timestamp()).max(0) as u64;
+                    let left = t.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64;
                     format!(" · resets in {}", crate::util::fmt_duration(Duration::from_secs(left)))
                 })
                 .unwrap_or_default();

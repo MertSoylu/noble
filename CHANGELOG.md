@@ -42,6 +42,10 @@ All notable changes to NOBLE are documented here. The format is based on
 - A bash started as a login shell (`-l` / `--login` in `shell_args`) lost the cwd tracking: a login shell never
   reads the rc file. NOBLE now loads the login files itself (`/etc/profile`, then `~/.bash_profile`,
   `~/.bash_login` or `~/.profile`) and keeps the tracking.
+- No more crashes when selecting text after a lost mouse release during a divider drag, or when a dialog is
+  drawn in a tiny window. Editing `config.toml` from Settings keeps a ` #` inside quoted values and headers
+  with a trailing comment intact, and a config file that is not valid UTF-8 is reported instead of being
+  silently replaced. Corrupt data files with extreme timestamps no longer panic.
 
 ## [1.2.0]
 
