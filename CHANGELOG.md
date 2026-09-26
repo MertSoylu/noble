@@ -22,6 +22,14 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste with a line break asks first when the app has no bracketed paste (cmd, older PowerShell), since
   every line could run as a command.
 
+### Fixed
+- After Claude exits, its pane and tab no longer keep saying "claude": the agent indicator and labels follow
+  the program running now (another agent, or none back at the shell prompt), on Windows and Linux in every
+  shell. Claude's `SessionEnd` hook clears the pane's state, and a quick-launch tab is named after its project
+  once the launched command has exited.
+- Claude hook state left behind by a crashed NOBLE can no longer show up in a new NOBLE that got the same
+  process id.
+
 ## [1.2.0]
 
 ### Added
