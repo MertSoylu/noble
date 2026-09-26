@@ -1800,6 +1800,42 @@ fn redraw_only_when_something_visible_changes() {
     app.run(Action::CloseTab);
 }
 
+/// Home's 120 ms loading spinner only runs for providers that are actually shown:
+/// a configured but not installed provider (Pending forever) or a signed-out one
+/// must not keep Home redrawing ~8 times a second.
+#[test]
+fn hidden_providers_do_not_spin_home() {
+    let mut app = demo_app(110, 30);
+    assert_eq!(app.view, View::Bridge);
+    let hidden = |id: &'static str, presence: Presence, status: Status| {
+        AppEvent::Ai(Box::new(ProviderState {
+            id,
+            name: id,
+            login_hint: id,
+            presence,
+            status,
+            usage: None,
+            fetched_at: None,
+        }))
+    };
+    let spinner = Duration::from_millis(120);
+    assert!(app.redraw_after().unwrap() > spinner);
+    // The collector reports a missing CLI as Pending and a signed-out one as SignIn: neither is drawn.
+    app.handle(hidden("antigravity", Presence::NotInstalled, Status::Pending));
+    app.handle(hidden("kilo", Presence::NoLogin, Status::SignIn));
+    let home = app.redraw_after().unwrap();
+    assert!(home > spinner, "hidden provider keeps Home spinning: {home:?}");
+    // A shown provider that is loading does spin.
+    app.handle(hidden("opencode-go", Presence::Ready, Status::Loading));
+    assert!(app.redraw_after().unwrap() <= spinner);
+    // With the quota panel disabled nothing is shown, so nothing spins.
+    let mut cfg = app.cfg.clone();
+    cfg.ai.enabled = false;
+    app.apply_config(cfg);
+    let home = app.redraw_after().unwrap();
+    assert!(home > spinner, "disabled quota panel keeps Home spinning: {home:?}");
+}
+
 /// The big Home clock draws without seconds on battery and with seconds plugged in.
 #[test]
 fn clock_hides_seconds_on_battery() {
