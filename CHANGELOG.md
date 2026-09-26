@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.0]
+
 ### Changed
 - Settings: sections are regrouped (Display, Terminal, Keys, AI usage, General; the Claude Code hooks moved to
   Terminal). `←` / `→` turn a switch off / on instead of flipping it, `esc` returns to the page Settings was
@@ -162,7 +164,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/MertSoylu/noble/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/MertSoylu/noble/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/MertSoylu/noble/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/MertSoylu/noble/compare/v1.0.0...v1.1.0
