@@ -28,8 +28,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let buf = f.buffer_mut();
     hud::clear(buf, area, &app.theme);
 
-    if app.boot.is_some() {
-        boot::draw(buf, area, app);
+    let boot_ms = boot::elapsed(app);
+    if let Some(ms) = boot_ms
+        && boot::covers(ms)
+    {
+        boot::draw(buf, area, app, ms);
         app.hits = hits;
         return;
     }
@@ -60,8 +63,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     toasts(buf, area, app);
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
+    // The boot's closing iris opens over the finished frame.
+    if let Some(ms) = boot_ms {
+        boot::draw(buf, area, app, ms);
+    }
     app.hits = hits;
     if app.overlay.is_none()
+        && boot_ms.is_none()
         && let Some((x, y)) = cursor
     {
         f.set_cursor_position((x, y));

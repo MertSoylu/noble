@@ -477,14 +477,45 @@ fn check_cwd_tracking(shell: &str) {
 
 #[test]
 fn boot_sequence_renders() {
-    for (ms, name) in [(300u64, "early"), (1200, "mid"), (1850, "late")] {
-        let mut app = demo_app(110, 30);
-        app.boot = Some(noble::app::Boot { started: std::time::Instant::now() - Duration::from_millis(ms) });
-        let text = render(&mut app, 110, 30);
-        save(&format!("boot-{name}-110x30"), &text);
-        render(&mut app, 40, 10);
-        render(&mut app, 3, 3);
+    let boot_at = |app: &mut App, ms: u64| {
+        app.boot = Some(noble::app::Boot { started: std::time::Instant::now() - Duration::from_millis(ms), seed: 7 });
+    };
+    for (ms, name) in [(250u64, "open"), (1000, "converge"), (1500, "decode"), (2250, "hold"), (2850, "iris")] {
+        for (w, h) in SIZES {
+            let mut app = demo_app(w, h);
+            boot_at(&mut app, ms);
+            let text = render(&mut app, w, h);
+            save(&format!("boot-{name}-{w}x{h}"), &text);
+        }
+        for (w, h) in [(1, 1), (3, 3), (5, 3), (20, 4), (200, 3), (3, 60)] {
+            let mut app = demo_app(w, h);
+            boot_at(&mut app, ms);
+            render(&mut app, w, h);
+        }
     }
+    // Fully decoded: only the logo, inside the brackets.
+    let mut app = demo_app(110, 30);
+    boot_at(&mut app, 2250);
+    let text = render(&mut app, 110, 30);
+    for line in noble::ui::hud::LOGO {
+        assert!(text.contains(line.trim_end()), "{text}");
+    }
+    assert!(text.contains('┌') && text.contains('┘'), "{text}");
+    let letters = text.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+    assert_eq!(letters, 0, "no text besides the logo\n{text}");
+    // The iris has opened over Home; once the boot ends the app draws on its own.
+    boot_at(&mut app, 2850);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("AI usage") && !text.contains(noble::ui::hud::LOGO[0]), "{text}");
+    boot_at(&mut app, 3000);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Projects"), "{text}");
+    app.tick();
+    assert!(app.boot.is_none());
+    // Narrow windows get a one-line logo.
+    let mut app = demo_app(20, 8);
+    boot_at(&mut app, 2250);
+    assert!(render(&mut app, 20, 8).contains("NOBLE"));
 }
 
 /// Launcher: the command runs in a new tab in the selected directory, the shell stays open.

@@ -282,9 +282,19 @@ pub struct LinkHover {
 
 pub struct Boot {
     pub started: Instant,
+    /// Scatters the boot particles differently on every launch.
+    pub seed: u64,
 }
 
-pub const BOOT_DURATION: Duration = Duration::from_millis(1900);
+impl Boot {
+    pub fn now() -> Boot {
+        let seed =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        Boot { started: Instant::now(), seed }
+    }
+}
+
+pub const BOOT_DURATION: Duration = Duration::from_millis(3000);
 pub const SLIDE_DURATION: Duration = Duration::from_millis(240);
 pub const ZOOM_DURATION: Duration = Duration::from_millis(200);
 
@@ -612,7 +622,7 @@ impl App {
             cfg.general.operator.trim().to_string()
         };
         let launchers = launcher_availability(&cfg.launchers);
-        let boot = cfg.general.boot_animation.then(|| Boot { started: Instant::now() });
+        let boot = cfg.general.boot_animation.then(Boot::now);
         App {
             paths,
             cfg_mtime: None,

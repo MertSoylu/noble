@@ -15,6 +15,12 @@ All notable changes to NOBLE are documented here. The format is based on
   a removed project brings it back. In the add prompt `tab` (or a click) switches between one project and a
   folder to scan (`a`). Both lists live in `state.json`; a folder that no longer exists is skipped.
 
+### Changed
+- A new, calmer boot animation (3 s): viewfinder brackets open from the centre, particles scattered over the
+  screen fly into the NOBLE logo and each cell decodes through random glyphs before it locks in. At the end the
+  logo dissolves and the brackets open out to the screen edges, revealing the app. Only the logo is shown: the
+  tagline, checklist, progress bar and "PRESS ANY KEY" are gone. Any key or click still skips it.
+
 ### Fixed
 - Claude Code status hooks: a session whose subagents (background ones too) are still running stays
   **working** instead of turning into **needs you** / **your turn** when Claude's main answer ends, and no
