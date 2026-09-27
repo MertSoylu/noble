@@ -2114,7 +2114,9 @@ fn check_agent_lifecycle(shell: &str) {
     let top = text.lines().next().unwrap_or_default();
     assert!(!top.contains("claude"), "{shell}: top bar still says claude: {top}");
 
-    // Another harness in the same pane.
+    // Another harness in the same pane. pwsh prints its prompt before PSReadLine is ready
+    // (slowest on macOS) and drops keys typed in between: let it settle first.
+    wait_idle(&mut app, pane);
     let codex = fake_agent(&app.shell, "codex");
     app.panes[&pane].write(format!("{codex}\r").as_bytes());
     pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some());
