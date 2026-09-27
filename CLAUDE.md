@@ -45,9 +45,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`util::is_dev_build`); config and data are shared.
 - **Windows, Linux and macOS are equal platforms.** Every feature must work on all three, or degrade gracefully
   where the OS lacks something (e.g. no desktop over SSH: `util::has_desktop`). This machine has no Mac or
-  Linux: those run in CI only (a local `cargo clippy --target aarch64-apple-darwin` catches compile errors).
-  macOS specifics: login shells by default, the Keychain for AI logins (`keychain_has`), Option as Meta for
-  `alt+` keys, `/var` → `/private/var`, case-insensitive paths, `/bin/bash` 3.2. When touching OS-specific code:
+  Linux: those run in CI only. macOS specifics: login shells by default, the Keychain for AI logins
+  (`keychain_has`), Option as Meta for `alt+` keys, `/var` → `/private/var`, case-insensitive paths, `/bin/bash`
+  3.2. When touching OS-specific code:
   - Keep platform branches small and side by side (`cfg!(windows)` / `#[cfg(...)]` in the same function), each
     with a comment naming what the other platform does; never leave a platform with a silent no-op.
   - Name things by what they do, not by the OS (paths via `dirs`, programs via `util::which`, `Path` joins —
