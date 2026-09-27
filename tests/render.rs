@@ -1408,6 +1408,38 @@ fn status_bar_shows_tips_when_wide() {
     assert!(!narrow.lines().last().unwrap().contains("tip: "));
 }
 
+/// Until the prefix key is used once, the tip points it out (with the configured key).
+#[test]
+fn status_bar_points_out_the_prefix_until_used() {
+    let mut app = demo_app(200, 40);
+    let want = format!("tip: press {}, then ? for all keys", app.keymap.prefix);
+    let text = render(&mut app, 200, 40);
+    save("status-prefix-tip-200x40", &text);
+    assert!(text.lines().last().unwrap().contains(&want), "{text}");
+    for (w, h) in SIZES {
+        save(&format!("status-prefix-tip-{w}x{h}"), &render(&mut app, w, h));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert!(app.ui_state.data.prefix_used);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let text = render(&mut app, 200, 40);
+    let last = text.lines().last().unwrap();
+    assert!(last.contains("tip: ") && !last.contains(&want), "{text}");
+}
+
+/// Cached quota numbers ("~") carry their age on the provider's name row; fresh ones do not.
+#[test]
+fn stale_quota_shows_its_age() {
+    let mut app = demo_app(160, 45);
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("Codex ~1h"), "{text}");
+    assert!(text.contains("~18%") && !text.contains("from 1h ago"), "{text}");
+    assert!(!text.contains("Claude Code ~"), "{text}");
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
+    }
+}
+
 fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) {
     use crossterm::event::{Event, MouseEvent};
     app.handle(AppEvent::Input(Event::Mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE })));
@@ -2158,6 +2190,77 @@ fn cmd_runs_quoted_commands() {
     app.new_tab(dir.clone(), Some(&cmd), Some("quoted".into()));
     let id = app.tabs[0].focus;
     wait_for(&mut app, id, "QUOTED_PROBE_OK");
+    app.run(Action::CloseTab);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file name full of shell syntax (ctrl+click opens it in a terminal editor) reaches the
+/// program as text in every installed shell: the file is read and nothing in its name runs.
+/// `command_with_arg` is what `App::edit_in_tab` builds its command with.
+#[test]
+fn hostile_file_name_is_not_executed() {
+    let mut shells: Vec<String> = vec![String::new()];
+    if cfg!(windows) {
+        shells.push("cmd.exe".into());
+        // Windows PowerShell 5.1 next to the default pwsh (it splits its command line differently).
+        shells.extend(noble::util::which("powershell").map(|p| p.display().to_string()));
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            shells.push(git_bash.display().to_string());
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh", "sh"] {
+            shells.extend(noble::util::which(shell).map(|p| p.display().to_string()));
+        }
+    }
+    for shell in shells {
+        check_hostile_file_name(&shell);
+    }
+}
+
+fn check_hostile_file_name(shell: &str) {
+    let mut app = demo_app(110, 30);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let label = app.shell.label().to_lowercase();
+    let dir = std::env::temp_dir().join(format!("noble-hostile-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Each part would create a `pw*` directory if the shell ran it: POSIX and PowerShell
+    // `$(…)`, backticks, fish `(…)`, `;` after a closed quote (ASCII and typographic), cmd `&`.
+    let mut name = String::from("h $(mkdir pw1) `mkdir pw2` (mkdir pw3) ’;mkdir pw4;’ &mkdir pw5& ^ ü 日本");
+    if label != "cmd" {
+        // cmd.exe refuses `%` and `!` (see `quote_arg`); every other shell takes them.
+        name.push_str(" ';mkdir pw6;' %PATH% !x!");
+    }
+    if !cfg!(windows) {
+        // Not allowed in Windows file names.
+        name.push_str(r#" ";mkdir pw7;" \"#);
+    }
+    name.push_str(".txt");
+    let file = dir.join(&name);
+    let needle = format!("HOSTILE_OK_{}", std::process::id());
+    std::fs::write(&file, format!("{needle}\n")).unwrap();
+    let reader = match label.as_str() {
+        "pwsh" | "powershell" => "Get-Content -LiteralPath",
+        "cmd" => "type",
+        _ => "cat",
+    };
+    let command = app.shell.command_with_arg(reader, &file.display().to_string()).expect("quotable");
+    app.new_tab(dir.clone(), Some(&command), Some("hostile".into()));
+    let id = app.tabs[0].focus;
+    wait_for(&mut app, id, &needle);
+    wait_idle(&mut app, id);
+    let ran: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("pw"))
+        .collect();
+    assert!(ran.is_empty(), "{label}: the file name ran as a command, created {ran:?}");
     app.run(Action::CloseTab);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2985,7 +3088,7 @@ fn random_escape_sequences_never_panic() {
             if rng.below(6) == 0 {
                 chunk.push(rng.next() as u8);
             } else {
-                chunk.extend_from_slice(rng.pick(&pieces));
+                chunk.extend_from_slice(rng.pick::<&[u8]>(&pieces));
             }
         }
         {

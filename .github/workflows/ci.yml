@@ -1,4 +1,4 @@
-# On every push and PR: formatting, clippy and tests.
+# On every push and PR: formatting, clippy, tests, the MSRV build and dependency checks (cargo-deny).
 name: CI
 
 on:
@@ -56,3 +56,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --target x86_64-unknown-linux-musl
       - run: target/x86_64-unknown-linux-musl/debug/noble --version
+
+  msrv:
+    # The oldest Rust that `rust-version` in Cargo.toml promises (read from there, so it is kept in one
+    # place). `cargo install noble` users build with whatever toolchain they have; this keeps the promise true.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read rust-version
+        id: msrv
+        shell: bash
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
+
+  deny:
+    # Dependencies: RustSec advisories, licenses (`deny.toml` allow-list), banned crates and sources.
+    # `audit.yml` runs the advisory check weekly as well, so a new advisory shows up without a push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

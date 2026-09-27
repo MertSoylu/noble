@@ -1,7 +1,8 @@
 # On a `v*` tag, builds ready-to-run Windows and Linux binaries and uploads them
 # to the GitHub release (so users don't need a Rust toolchain).
 # The Linux binaries are static (musl): they run on any distribution, old glibc included.
-# Archive names are what `noble update` looks for (`update::asset_name`); keep them stable.
+# Archive names are what `noble update` looks for (`update::asset_name`); keep them stable. Each archive
+# gets a `<archive>.sha256` next to it, which `noble update` verifies before unpacking.
 name: Release
 
 on:
@@ -51,6 +52,17 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: tar -czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release noble -C "$GITHUB_WORKSPACE" README.md LICENSE
+      # `<archive>.sha256` in `sha256sum` format ("<hex>  <name>"): `noble update` refuses an archive without
+      # one or with a mismatch (`update::checksum_name`). Users can check it with `sha256sum -c` (Linux) or
+      # compare `Get-FileHash` (Windows). Written by hand so the format is the same on every runner.
+      - name: Checksum
+        shell: bash
+        run: |
+          archive="${{ matrix.archive }}"
+          hash=$(sha256sum "$archive" | cut -d' ' -f1)
+          printf '%s  %s\n' "$hash" "$archive" > "${{ matrix.archive }}.sha256"
+          cat "$archive.sha256"
+          sha256sum -c "$archive.sha256"
       # The release text is this version's CHANGELOG.md section. GitHub's generated notes only list the
       # merged PRs and call the maintainer a "new contributor"; a missing section fails the release.
       - name: Release notes
@@ -73,5 +85,7 @@ jobs:
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ matrix.archive }}
+          files: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
           body_path: notes.md

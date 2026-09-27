@@ -544,7 +544,8 @@ impl App {
     }
 
     /// Opens a file in a terminal editor in a new tab (at `line` when the editor
-    /// understands `+N`). `false` when no editor is found.
+    /// understands `+N`). `false` when no editor is found. A file name the shell cannot
+    /// pass on literally (`"`, `%` or `!` under cmd.exe) is refused with a toast.
     pub fn edit_in_tab(&mut self, path: &Path, line: Option<u32>, title: &str) -> bool {
         let Some(editor) = terminal_editor() else { return false };
         let program = editor.split_whitespace().next().unwrap_or("");
@@ -555,7 +556,15 @@ impl App {
             }
             _ => String::new(),
         };
-        let command = format!("{editor}{jump} \"{}\"", path.display());
+        // The path is quoted for the pane's shell: a file name such as `a$(cmd).rs` or `a&cmd.rs`
+        // must reach the editor as text, never run as a command.
+        let Some(command) = self.shell.command_with_arg(&format!("{editor}{jump}"), &path.display().to_string()) else {
+            self.toast(
+                ToastLevel::Warn,
+                format!("{} cannot pass this file name safely: {}", self.shell.label(), crate::util::tilde(path)),
+            );
+            return true;
+        };
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(home);
         self.new_tab(dir, Some(&command), Some(title.into()));
         true

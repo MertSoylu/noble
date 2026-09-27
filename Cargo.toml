@@ -2,7 +2,7 @@
 name = "noble"
 version = "1.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "NOBLE — retro-futurist HUD terminal workspace: real shells, projects, system sensors and AI quota in one cockpit"
 license = "MIT"
 readme = "README.md"
@@ -31,6 +31,8 @@ crossterm = "0.29.0"
 dirs = "7.0.0"
 portable-pty = "0.9.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+# SHA-256 of `noble update` downloads; already in the tree as ureq's TLS backend (rustls), so no new crate.
+ring = { version = "0.17.14", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"

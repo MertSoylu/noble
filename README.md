@@ -6,7 +6,7 @@
   <a href="https://github.com/MertSoylu/noble/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MertSoylu/noble/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="https://github.com/MertSoylu/noble/releases"><img src="https://img.shields.io/github/v/release/MertSoylu/noble?style=flat-square&color=ffb020" alt="Release"></a>
   <a href="https://crates.io/crates/noble"><img src="https://img.shields.io/crates/v/noble?style=flat-square&color=5fd7d0" alt="crates.io"></a>
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange?style=flat-square&logo=rust" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/rust-1.95%2B-orange?style=flat-square&logo=rust" alt="Rust 1.95+">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platforms">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
   <a href="https://ratatui.rs/"><img src="https://ratatui.rs/built-with-ratatui/badge.svg" alt="Built With Ratatui" height="20"></a>
@@ -86,7 +86,7 @@ and a sortable process table.
 </td>
 <td valign="top">
 
-**🎨 20 themes, live config**<br>
+**🎨 22 themes, live config**<br>
 Amber, Ice, Synthwave, Catppuccin, Tokyo Night, Nord, Gruvbox… Terminal panes follow the theme, a built-in
 scheme or, on Windows, your Windows Terminal scheme. `config.toml` reloads live and a bad value never crashes
 the app.
@@ -126,7 +126,7 @@ tabs run their command (e.g. `claude`) again. Save named workspaces and reopen t
 </tr>
 <tr>
 <td width="50%"><img src="docs/assets/settings.svg" alt="Settings"><p align="center"><sub><b>Settings:</b> saved to <code>config.toml</code> instantly</sub></p></td>
-<td width="50%"><img src="docs/assets/themes.svg" alt="Six of the twenty themes"><p align="center"><sub><b>Themes:</b> Ice, Synthwave, Catppuccin, Gruvbox, Nord, Latte</sub></p></td>
+<td width="50%"><img src="docs/assets/themes.svg" alt="Six of the twenty-two themes"><p align="center"><sub><b>Themes:</b> Ice, Synthwave, Catppuccin, Gruvbox, Nord, Latte</sub></p></td>
 </tr>
 </table>
 
@@ -134,9 +134,11 @@ tabs run their command (e.g. `claude`) again. Save named workspaces and reopen t
 
 **Prebuilt binaries:** download the archive for Windows (x86_64) or Linux (x86_64, ARM64) from the
 [latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put `noble` on your PATH.
-The Linux binaries are static, so they run on any distribution.
+The Linux binaries are static, so they run on any distribution. Each archive has a `.sha256` file next to it:
+check it with `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, or compare it with
+`Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
 
-**With Cargo** (Rust 1.88+):
+**With Cargo** (Rust 1.95+):
 
 ```sh
 cargo install noble
@@ -154,7 +156,8 @@ and a choice of prefix key, so it doesn't clash with your shell.
 
 **Updating:** NOBLE checks GitHub for a new release once a day and shows it at the bottom right. Click
 **update** there, or run `noble update` (`noble update --check` only reports). It downloads the prebuilt
-binary for your platform and replaces the installed one; restart NOBLE afterwards. Turn the check off with
+binary for your platform, checks it against the release's SHA-256 checksum (a mismatch or a missing checksum
+stops the update and leaves the installed binary alone) and replaces the installed one; restart NOBLE afterwards. Turn the check off with
 `check_updates = false` or in Settings.
 
 <details>
@@ -232,7 +235,7 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
   `K` or `del` terminate (asks first) · `esc` back.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
-  VS Code · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename ·
+  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename ·
   drag dividers · drag to select text (copied on release) · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
   `shift+drag` selects even inside apps that capture the mouse.
 
@@ -252,7 +255,7 @@ Errors show up as a toast and never crash the app. Most options can also be chan
 
 ```toml
 [general]
-theme = "amber"          # any of the 20 themes in Settings
+theme = "amber"          # any of the 22 themes in Settings
 transparent = false      # let the terminal's own background (blur/opacity) show
 boot_animation = true
 clock_24h = true
@@ -367,6 +370,23 @@ that the previous command finished: it refreshes that repository's git status an
 reports long-running commands. OSC 9 / OSC 777 notifications and the bell mark a background tab with `◆`.
 
 </details>
+
+## 🩺 Troubleshooting
+
+- **Splits and restored tabs open in the wrong folder:** the shell is not reporting its directory (see Shell
+  integration above). cmd keeps a `PROMPT` you set yourself, so add `$E]9;9;$P$E\` to it; bash, zsh and fish
+  started with `--norc`, `-f` or `--no-config` skip the hook; any other shell needs a prompt that emits OSC 7.
+- **An AltGr symbol runs a NOBLE shortcut instead of typing:** a character that arrives with Ctrl+Alt (how
+  Windows reports AltGr) is treated as text, and on Linux the terminal sends the character itself. If a key
+  still triggers a shortcut, the terminal sends it as an `alt+` chord: unbind it (`"alt+…" = "none"` under
+  `[keys.direct_bindings]`) or lock the pane's keys with prefix `i`.
+- **Colors look wrong or washed out:** NOBLE draws in 24-bit color. Use a truecolor terminal (Windows Terminal,
+  WezTerm, Kitty, GNOME Terminal, Konsole …) rather than the old Windows console or the Linux text console; in
+  tmux add `set -ag terminal-overrides ",*:RGB"`. Panes get `COLORTERM=truecolor`; their palette is Settings →
+  Terminal colors (`terminal.colors`).
+- **Copy does not reach your clipboard over SSH:** with no system clipboard NOBLE sends the text with OSC 52,
+  which the terminal on your own machine has to allow (on by default in Windows Terminal, WezTerm and Kitty;
+  tmux needs `set -g set-clipboard on`).
 
 ## 🔋 Performance
 

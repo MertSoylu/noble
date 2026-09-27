@@ -132,8 +132,23 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     Some(Link::File { path: candidate, line: nums.first().copied(), col: nums.get(1).copied() })
 }
 
-/// Opens a link in an external app: URLs in the browser, files with `code -g`
-/// (if present) or with the system's default application.
+/// Editors that can open a file at a line, in the order they are tried: VS Code and its
+/// forks take `-g path:line:col`, Zed takes `path:line:col` as it is.
+const LINE_EDITORS: [(&str, bool); 4] = [("code", true), ("cursor", true), ("windsurf", true), ("zed", false)];
+
+/// The first installed editor that can jump to a line, with its arguments for `target`
+/// (`path:line:col`). `find` looks a program up (`util::which`; tests pass a fake).
+fn line_editor(target: &str, find: impl Fn(&str) -> Option<PathBuf>) -> Option<(PathBuf, Vec<String>)> {
+    LINE_EDITORS.iter().find_map(|&(name, goto)| {
+        let program = find(name)?;
+        let args = if goto { vec!["-g".to_string(), target.to_string()] } else { vec![target.to_string()] };
+        Some((program, args))
+    })
+}
+
+/// Opens a link in an external app: URLs in the browser, `file:line` in the first editor
+/// found that can jump to a line (VS Code, Cursor, Windsurf, Zed), other files with the
+/// system's default application.
 pub fn open(link: &Link) -> Result<(), String> {
     use std::process::{Command, Stdio};
     let spawn = |mut c: Command| {
@@ -162,13 +177,14 @@ pub fn open(link: &Link) -> Result<(), String> {
         Link::Url(url) => spawn(system(std::ffi::OsStr::new(url))),
         Link::File { path, line, col } => {
             if path.is_file()
-                && line.is_some()
-                && let Some(code) = crate::util::which("code")
+                && let Some(line) = line
             {
-                let mut c = crate::util::command_for(&code);
-                let target = format!("{}:{}:{}", path.display(), line.unwrap_or(1), col.unwrap_or(1));
-                c.arg("-g").arg(target);
-                return spawn(c);
+                let target = format!("{}:{}:{}", path.display(), line, col.unwrap_or(1));
+                if let Some((program, args)) = line_editor(&target, crate::util::which) {
+                    let mut c = crate::util::command_for(&program);
+                    c.args(args);
+                    return spawn(c);
+                }
             }
             spawn(system(path.as_os_str()))
         }
@@ -347,6 +363,24 @@ mod tests {
         let uri = format!("file:///{}", s.replace('\\', "/"));
         assert_eq!(classify(&uri, &dir), want(None, None));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_editor_order_and_arguments() {
+        let t = "src/main.rs:3:7";
+        let got = |names: &[&str]| {
+            let find = |n: &str| names.contains(&n).then(|| PathBuf::from(format!("/bin/{n}")));
+            line_editor(t, find).map(|(p, a)| (p.display().to_string(), a))
+        };
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // VS Code stays first when several editors are installed.
+        assert_eq!(got(&["zed", "cursor", "code"]), Some(("/bin/code".into(), args(&["-g", t]))));
+        assert_eq!(got(&["windsurf", "cursor"]), Some(("/bin/cursor".into(), args(&["-g", t]))));
+        assert_eq!(got(&["windsurf", "zed"]), Some(("/bin/windsurf".into(), args(&["-g", t]))));
+        // Zed takes the position without a flag.
+        assert_eq!(got(&["zed"]), Some(("/bin/zed".into(), args(&[t]))));
+        // No editor: the caller falls back to the system's default app.
+        assert_eq!(got(&[]), None);
     }
 
     #[test]

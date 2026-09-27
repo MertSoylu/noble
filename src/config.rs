@@ -218,7 +218,7 @@ impl Default for Config {
 pub const DEFAULT_CONFIG: &str = r#"# NOBLE configuration — the app reloads itself when the file is saved.
 
 [general]
-theme = "amber"          # pickable from the Settings tab (20 themes)
+theme = "amber"          # pickable from the Settings tab (22 themes)
 transparent = false      # true: the terminal's own background (transparency) shows
 boot_animation = true
 animations = true        # page transition and fullscreen animations

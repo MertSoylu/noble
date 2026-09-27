@@ -29,7 +29,7 @@ const fn rgb(hex: u32) -> Color {
     Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
-pub const THEMES: [Theme; 20] = [
+pub const THEMES: [Theme; 22] = [
     Theme {
         name: "amber",
         label: "Amber",
@@ -369,6 +369,40 @@ pub const THEMES: [Theme; 20] = [
         crit: rgb(0xcf222e),
         sel_bg: rgb(0xe8eef9),
         on_accent: rgb(0xffffff),
+    },
+    Theme {
+        name: "ayu",
+        label: "Ayu Dark",
+        bg: rgb(0x0b0e14),
+        raised: rgb(0x0f131a),
+        fg: rgb(0xbfbdb6),
+        dim: rgb(0x646a72),
+        line: rgb(0x1e232b),
+        accent: rgb(0xe6b450),
+        accent_dim: rgb(0x6b5427),
+        accent2: rgb(0x59c2ff),
+        ok: rgb(0xaad94c),
+        warn: rgb(0xff8f40),
+        crit: rgb(0xf07178),
+        sel_bg: rgb(0x273747),
+        on_accent: rgb(0x0b0e14),
+    },
+    Theme {
+        name: "nightowl",
+        label: "Night Owl",
+        bg: rgb(0x011627),
+        raised: rgb(0x0b2942),
+        fg: rgb(0xd6deeb),
+        dim: rgb(0x637777),
+        line: rgb(0x122d42),
+        accent: rgb(0x82aaff),
+        accent_dim: rgb(0x2c4a80),
+        accent2: rgb(0xc792ea),
+        ok: rgb(0xaddb67),
+        warn: rgb(0xecc48d),
+        crit: rgb(0xef5350),
+        sel_bg: rgb(0x1d3b53),
+        on_accent: rgb(0x011627),
     },
 ];
 

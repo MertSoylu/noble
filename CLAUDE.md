@@ -8,7 +8,7 @@ repository.
 
 # NOBLE — development notes
 
-A HUD terminal workspace written in Rust (edition 2024, 1.88+) with ratatui. See `README.md` for features,
+A HUD terminal workspace written in Rust (edition 2024, 1.95+) with ratatui. See `README.md` for features,
 keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 
 ## Commands
@@ -20,9 +20,15 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo test --release --test render heavy_output -- --ignored --nocapture` — 50k-line output throughput
 - `cargo clippy --all-targets` — kept warning-free
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
+- `cargo deny check` — RustSec advisories, license allow-list, bans and sources (`deny.toml`; install with
+  `cargo install cargo-deny --locked`). A new dependency's license must be added to `deny.toml` after review.
 - CI: `.github/workflows/ci.yml` (Windows and Linux: fmt + clippy `-D warnings` + all tests, Linux with zsh and
-  fish installed; plus a static musl build), `release.yml` (Windows x86_64, Linux x86_64/ARM64 musl binaries on
-  a `v*` tag; `gh workflow run release.yml --ref <branch>` builds them all without publishing)
+  fish installed; plus a static musl build, `cargo check` with the `rust-version` toolchain on both, and
+  cargo-deny), `audit.yml` (weekly advisory check), `release.yml` (Windows x86_64, Linux x86_64/ARM64 musl
+  binaries plus a `<archive>.sha256` each on a `v*` tag; `gh workflow run release.yml --ref <branch>` builds
+  them all without publishing)
+- MSRV: `rust-version` in `Cargo.toml` is the oldest Rust the CI `msrv` job builds with; raise it (and the
+  README/CONTRIBUTING mentions) when a dependency needs a newer one
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
 - `cargo run -- --no-boot` — run without the boot animation; `--paths` prints the config/data locations
 - `NOBLE_HOME` moves the config and data directory (to experiment without touching the real config)
@@ -114,8 +120,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
   (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
-  `noble update`). `noble update` downloads the `release.yml` archive for the platform, unpacks it with the
-  system `tar` and swaps the binary (the running one is renamed to `*.old`, removed on the next launch).
+  `noble update`). `noble update` downloads the `release.yml` archive for the platform and its `.sha256`,
+  verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
+  without checksums are refused), unpacks it with the system `tar` and swaps the binary (the running one is
+  renamed to `*.old`, removed on the next launch).
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, `id`, `title`, `group`), handle it in `App::run`,

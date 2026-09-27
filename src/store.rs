@@ -227,31 +227,63 @@ pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
     })
 }
 
+/// How long a window waits for another one's session lock before it saves without it.
+const LOCK_WAIT: Duration = Duration::from_secs(15);
+/// A lock whose owner is still running is only taken over once it is this old (the owner hangs).
+const LOCK_STALE_LIVE: Duration = Duration::from_secs(60);
+/// A lock that names no owner (being written right now, or left by an older NOBLE) is taken
+/// over once it is this old.
+const LOCK_STALE_UNKNOWN: Duration = Duration::from_secs(10);
+
 /// Runs `f` while holding `<file>.lock`, so windows that close at the same time do not lose
-/// each other's tabs. A lock older than 10 s is left over from a crash and taken over; after
-/// 2 s of waiting (or when the lock cannot be created at all) `f` runs anyway.
+/// each other's tabs. See `with_lock_waiting`.
 fn with_lock<T>(file: &Path, f: impl FnOnce() -> T) -> T {
+    with_lock_waiting(file, LOCK_WAIT, f)
+}
+
+/// The lock names its owner (`<pid>-<process start time>`, as in `instance_id`). A lock whose
+/// owner has exited (crash, kill) is taken over at once; one held by a running process is
+/// waited for, up to `wait`, and taken over only when it is older than `LOCK_STALE_LIVE`.
+/// After `wait`, or when no lock can be created at all, `f` runs anyway: saving without the
+/// lock beats never saving (or never closing the window).
+fn with_lock_waiting<T>(file: &Path, wait: Duration, f: impl FnOnce() -> T) -> T {
+    use std::io::Write;
     let lock = file.with_extension("json.lock");
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let started = Instant::now();
+    let deadline = started + wait;
+    // Asking the OS about the owner costs more than trying to create the file: at most 4 times a second.
+    let mut next_check = Instant::now();
     let held = loop {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(_) => break true,
+            Ok(mut handle) => {
+                let _ = handle.write_all(lock_owner().as_bytes());
+                break true;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = std::fs::metadata(&lock)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(10));
-                if stale {
-                    let _ = std::fs::remove_file(&lock);
-                } else if Instant::now() > deadline {
-                    break false;
-                } else {
-                    std::thread::sleep(Duration::from_millis(20));
+                if Instant::now() >= next_check {
+                    next_check = Instant::now() + Duration::from_millis(250);
+                    if lock_is_stale(&lock) {
+                        let _ = std::fs::remove_file(&lock);
+                        continue;
+                    }
                 }
+                if Instant::now() > deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Windows: a lock that was just removed while someone still had it open lingers
+            // for a moment and refuses to be created again. Unix frees the name at once, so
+            // there (as for a directory that is not writable) this is final.
+            Err(e)
+                if cfg!(windows)
+                    && e.kind() == std::io::ErrorKind::PermissionDenied
+                    && started.elapsed() < Duration::from_secs(2) =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
             }
             Err(_) => break false,
         }
@@ -261,6 +293,26 @@ fn with_lock<T>(file: &Path, f: impl FnOnce() -> T) -> T {
         let _ = std::fs::remove_file(&lock);
     }
     out
+}
+
+/// What this process writes into a lock it holds.
+fn lock_owner() -> String {
+    let pid = std::process::id();
+    format!("{pid}-{}", crate::util::process_start(pid).unwrap_or(0))
+}
+
+/// May the lock be taken over? Yes when its owner is gone, or when it is too old (see the
+/// `LOCK_STALE_*` limits). A lock that cannot be read counts as just created.
+fn lock_is_stale(lock: &Path) -> bool {
+    let age = std::fs::metadata(lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .unwrap_or(Duration::ZERO);
+    let owner = std::fs::read_to_string(lock).unwrap_or_default();
+    let owner = owner.trim();
+    let named = owner.split('-').count() == 2 && owner.split('-').all(|p| p.parse::<u64>().is_ok());
+    if !named { age > LOCK_STALE_UNKNOWN } else { !instance_alive(owner) || age > LOCK_STALE_LIVE }
 }
 
 pub struct Workspaces {
@@ -304,6 +356,8 @@ impl Workspaces {
 #[serde(default)]
 pub struct UiStateData {
     pub welcomed: bool,
+    /// The prefix key was pressed at least once: the status bar stops pointing it out.
+    pub prefix_used: bool,
     pub pins: Vec<String>,
     /// Last update check (unix seconds) and the version found.
     pub update_checked: i64,
@@ -528,6 +582,97 @@ mod tests {
             let _ = session_begin(&file, "1-1-0");
             session_save(&file, "1-1-0", Vec::new(), true);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn lock_dir(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("noble-lock-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("session.json");
+        let lock = file.with_extension("json.lock");
+        (dir, file, lock)
+    }
+
+    /// The lock names its owner; a lock left by a process that is gone (or by a pid that was
+    /// reused) is taken over at once instead of after a timeout.
+    #[test]
+    fn session_lock_takes_over_from_dead_owners() {
+        let (dir, file, lock) = lock_dir("dead");
+        let seen = with_lock(&file, || std::fs::read_to_string(&lock).unwrap());
+        assert_eq!(seen, lock_owner());
+        assert!(!lock.exists(), "the lock is released after use");
+        for dead in ["4000000000-1".to_string(), format!("{}-1", std::process::id())] {
+            std::fs::write(&lock, &dead).unwrap();
+            let started = Instant::now();
+            let ran = with_lock_waiting(&file, Duration::from_secs(30), || lock.exists());
+            assert!(ran, "{dead}: f runs holding the lock");
+            assert!(started.elapsed() < Duration::from_secs(5), "{dead}: waited {:?}", started.elapsed());
+            assert!(!lock.exists());
+        }
+        // A lock with no owner in it (an older NOBLE, or one being written) counts only by age.
+        std::fs::write(&lock, "").unwrap();
+        assert!(!lock_is_stale(&lock));
+        let old = std::time::SystemTime::now() - Duration::from_secs(120);
+        std::fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
+        assert!(lock_is_stale(&lock));
+        // A running owner's lock only when it is very old.
+        std::fs::write(&lock, lock_owner()).unwrap();
+        assert!(!lock_is_stale(&lock));
+        std::fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
+        assert!(lock_is_stale(&lock));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock held by a running window is waited for (longer than the old 2 s limit), so two
+    /// windows closing together both keep their tabs; one that is never released still lets
+    /// the save go through once the wait is over.
+    #[test]
+    fn session_lock_waits_for_a_live_owner() {
+        let (dir, file, lock) = lock_dir("live");
+        std::fs::write(&lock, lock_owner()).unwrap();
+        let release = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(2500));
+                std::fs::remove_file(&lock).unwrap();
+            })
+        };
+        let started = Instant::now();
+        // The other window's lock is gone by the time `f` runs, and `f` holds its own.
+        let owner = with_lock(&file, || std::fs::read_to_string(&lock).unwrap_or_default());
+        assert!(started.elapsed() >= Duration::from_millis(2400), "ran after {:?}", started.elapsed());
+        assert_eq!(owner, lock_owner());
+        release.join().unwrap();
+        assert!(!lock.exists());
+
+        // Never released: no deadlock, and the other window's lock stays in place.
+        std::fs::write(&lock, lock_owner()).unwrap();
+        let started = Instant::now();
+        assert!(with_lock_waiting(&file, Duration::from_millis(400), || true));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(lock.exists(), "a live owner's lock is not removed");
+
+        // Two savers at once: both tabs end up in the session.
+        std::fs::remove_file(&lock).unwrap();
+        let tab = |origin: &str| SavedTab {
+            name: None,
+            origin: origin.into(),
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            focus: 0,
+        };
+        let savers: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|who| {
+                let (file, tab) = (file.clone(), tab(who));
+                std::thread::spawn(move || session_save(&file, who, vec![tab], false))
+            })
+            .collect();
+        savers.into_iter().for_each(|s| s.join().unwrap());
+        let session = load_session(&file).unwrap();
+        let mut origins: Vec<_> = session.tabs.iter().map(|t| t.tab.origin.as_str()).collect();
+        origins.sort();
+        assert_eq!(origins, ["a", "b", "c", "d"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,0 +1,45 @@
+# cargo-deny: dependency security and license checks (`cargo deny check`).
+# Runs in CI on every push/PR (`ci.yml`) and once a week (`audit.yml`) so a new RustSec advisory is
+# caught without a push. Docs: https://embarkstudios.github.io/cargo-deny/
+
+# No `[graph] targets`: every platform's dependencies are checked (Windows-only and Linux-only crates alike).
+
+[advisories]
+# Every advisory in the RustSec database fails the check: vulnerabilities, unmaintained and unsound
+# crates and yanked versions. An ignore needs a reason and a plan to remove it, e.g.
+#   { id = "RUSTSEC-0000-0000", reason = "only reachable via X, which NOBLE does not use; drop when Y updates" }
+# `nix 0.28` (via portable-pty 0.9, the latest release) gives a future-incompat warning but has no advisory;
+# it goes away when portable-pty moves to a newer nix.
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The licenses the dependency tree actually uses (all compatible with NOBLE's MIT license).
+# A new license in the tree fails the check until it is reviewed and added here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",           # ring, rustls-webpki, untrusted (TLS for the update check and AI quota)
+    "BSD-3-Clause",  # subtle
+    "BSL-1.0",       # clipboard-win, error-code (Windows clipboard)
+    "MPL-2.0",       # option-ext (via dirs); file-level copyleft, used unmodified
+    "Unicode-3.0",   # unicode-ident
+    "CDLA-Permissive-2.0", # webpki-roots (the Mozilla CA list)
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Several versions of one crate are common in a tree this size (windows-sys, bitflags …); report them
+# without failing. Wildcard version requirements are refused.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io; a git or other registry dependency fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

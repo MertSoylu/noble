@@ -730,6 +730,7 @@ dependencies = [
  "dirs",
  "portable-pty",
  "ratatui",
+ "ring",
  "serde",
  "serde_json",
  "sysinfo",

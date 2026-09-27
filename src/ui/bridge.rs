@@ -579,6 +579,16 @@ fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
     })
 }
 
+/// Age of cached quota numbers ("~5m", "~2h"); `None` while they are fresh, missing or
+/// younger than a minute.
+fn cache_age(p: &ProviderState) -> Option<String> {
+    if !p.is_stale() || p.usage.as_ref().is_none_or(|u| u.windows.is_empty()) {
+        return None;
+    }
+    let age = ago_ts(p.fetched_at?);
+    (age != "now").then(|| format!("~{age}"))
+}
+
 fn ai_panel(
     buf: &mut Buffer,
     area: Rect,
@@ -629,11 +639,21 @@ fn ai_panel(
         let ok = p.status == Status::Ok;
         let name_style = th.text().add_modifier(Modifier::BOLD);
         let cx = hud::put(buf, x, y, p.name, name_style, w);
-        if p.status == Status::Loading || p.status == Status::Pending {
+        let spinning = p.status == Status::Loading || p.status == Status::Pending;
+        if spinning {
             hud::put(buf, cx + 1, y, hud::spinner(ms), th.dim(), 1);
         }
-        if let Some(plan) = p.usage.as_ref().and_then(|u| u.plan.clone()) {
-            hud::put_right(buf, x + w, y, &capitalize(&plan.to_lowercase()), Style::default().fg(th.accent2));
+        let plan_x = match p.usage.as_ref().and_then(|u| u.plan.clone()) {
+            Some(plan) => {
+                hud::put_right(buf, x + w, y, &capitalize(&plan.to_lowercase()), Style::default().fg(th.accent2))
+            }
+            None => x + w,
+        };
+        // Cached numbers ("~" below): how old they are, e.g. "~5m". Home redraws at least
+        // once a minute, so the age keeps up without extra wakeups.
+        if let Some(age) = cache_age(p) {
+            let ax = cx + if spinning { 3 } else { 1 };
+            hud::put(buf, ax, y, &age, th.dim(), plan_x.saturating_sub(ax + 1));
         }
         y += 1;
         match &p.usage {
@@ -666,8 +686,8 @@ fn ai_panel(
         if let (Status::Error(e), Some(_)) = (&p.status, &p.usage)
             && y < bottom
         {
-            let when = p.fetched_at.map(ago_ts).unwrap_or_default();
-            hud::put(buf, x, y, &format!("{e} · from {when} ago"), th.dim(), w);
+            // The age of the cached numbers is on the name row.
+            hud::put(buf, x, y, e, th.dim(), w);
             y += 1;
         }
         if let Some(text) = pace_line(app, p)

@@ -37,7 +37,7 @@ impl Rng {
             if self.below(5) == 0 {
                 s.extend(char::from_u32(self.next() as u32 % 0x11_0000));
             } else {
-                s.push_str(self.pick(pieces));
+                s.push_str(self.pick::<&str>(pieces));
             }
         }
         s

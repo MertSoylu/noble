@@ -131,6 +131,8 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     cfg.general.theme = theme.into();
     let mut app = App::headless(cfg, (w, h));
     app.operator = "ada".into();
+    // Show the rotating tips, not the first-run prefix hint.
+    app.ui_state.data.prefix_used = true;
     // The image must not depend on which CLIs are installed on this machine.
     for (l, ok) in app.launchers.iter_mut() {
         *ok = matches!(l.command.as_str(), "claude" | "codex");

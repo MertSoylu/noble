@@ -276,20 +276,17 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Prepares a `Command` to run a program in the background: on Windows the
-/// `.cmd/.bat` shims run through `cmd /C` and no console window is opened.
+/// Prepares a `Command` to run a program in the background; on Windows no console
+/// window is opened. On Unix the program simply runs.
+///
+/// Windows `.cmd/.bat` shims (VS Code's `code.cmd`, npm tools) are started directly as
+/// well: the standard library then runs them through cmd.exe itself and escapes every
+/// argument for it (or refuses one it cannot pass safely). Going through `cmd /C` by
+/// hand would leave `&`, `|` or `%` in an argument, e.g. a file name, to cmd.exe as
+/// command syntax.
 pub fn command_for(program: &Path) -> std::process::Command {
     #[allow(unused_mut)]
-    let mut cmd = {
-        let ext = program.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if cfg!(windows) && (ext == "cmd" || ext == "bat") {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C").arg(program);
-            c
-        } else {
-            std::process::Command::new(program)
-        }
-    };
+    let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -366,6 +363,42 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
         assert_eq!(usable, HashSet::from([PathBuf::from("ok")]));
         assert!(usable_dirs(&[], Duration::from_secs(5), probe).is_empty());
+    }
+
+    /// A script shim gets a hostile argument (a file name full of shell syntax) as plain
+    /// text: nothing in it runs. Windows checks a `.cmd` shim (run through cmd.exe), Unix
+    /// an executable `sh` script.
+    #[test]
+    fn command_for_passes_hostile_arguments_literally() {
+        let dir = std::env::temp_dir().join(format!("noble-command-for-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.txt");
+        let (shim, arg) = if cfg!(windows) {
+            // `%1` keeps the quotes cmd.exe needs, so the batch file itself stays safe too.
+            let shim = dir.join("args.cmd");
+            std::fs::write(&shim, "@(echo(%1)> \"%~dp0out.txt\"\r\n").unwrap();
+            (shim, "a&mkdir pwned&b|x ^y %PATH% (z)")
+        } else {
+            let shim = dir.join("args.sh");
+            std::fs::write(&shim, "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/out.txt\"\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            (shim, "a;mkdir pwned;$(mkdir pwned)`mkdir pwned`'\"b %PATH%")
+        };
+        // Without spaces as well: such an argument is not even quoted by the default rules.
+        let tight = arg.replace(' ', "");
+        for arg in [arg, tight.as_str()] {
+            let status = command_for(&shim).arg(arg).current_dir(&dir).status().unwrap();
+            assert!(status.success());
+            let got = std::fs::read_to_string(&out).unwrap();
+            assert!(got.contains(arg), "{got:?}");
+            assert!(!dir.join("pwned").exists(), "an argument ran as a command: {arg}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

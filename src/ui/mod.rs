@@ -415,9 +415,13 @@ const TIPS: [&str; 10] = [
     "prefix z zooms the focused pane",
 ];
 
-/// The hint to show right now (changes every 20 seconds).
-fn current_tip(app: &App) -> &'static str {
-    TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()]
+/// The hint to show right now (changes every 20 seconds). Until the prefix key has been
+/// used once, the tip is how to reach it, with the configured key.
+fn current_tip(app: &App) -> String {
+    if !app.ui_state.data.prefix_used {
+        return format!("press {}, then ? for all keys", app.keymap.prefix);
+    }
+    TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()].to_string()
 }
 
 fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {

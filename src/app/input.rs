@@ -115,6 +115,10 @@ impl App {
         }
         if chord == self.keymap.prefix {
             self.prefix_armed = true;
+            if !self.ui_state.data.prefix_used {
+                self.ui_state.data.prefix_used = true;
+                self.ui_state.save();
+            }
             return;
         }
         if let Some(a) = self.keymap.direct_map.get(&chord).copied()

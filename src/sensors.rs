@@ -49,7 +49,7 @@ pub struct SensorSample {
     pub procs: Vec<ProcInfo>,
     pub proc_count: usize,
     pub uptime: u64,
-    /// Pil durumu; pili olmayan makinelerde `None`.
+    /// Battery state; `None` on machines without a battery.
     pub battery: Option<crate::battery::Battery>,
 }
 

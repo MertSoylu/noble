@@ -341,6 +341,38 @@ impl ShellSpec {
         }
     }
 
+    /// Quotes one argument (a file name, say) so this shell passes it to the program
+    /// literally, with no expansion or command substitution. `None` when the shell
+    /// cannot take the text safely: cmd.exe has no escape for `"` inside quotes and
+    /// expands `%…%` / `!…!` even there, so such words are refused (as is any control
+    /// character there, and a NUL everywhere). PowerShell and the Unix shells take any
+    /// other text.
+    pub fn quote_arg(&self, word: &str) -> Option<String> {
+        if word.contains('\0') {
+            return None;
+        }
+        match self.kind() {
+            ShellKind::PowerShell => Some(pwsh_quote(word)),
+            ShellKind::Cmd => {
+                if word.chars().any(|c| matches!(c, '"' | '%' | '!') || c.is_control()) {
+                    return None;
+                }
+                // Inside quotes `&|<>^()` are plain text for cmd.exe. The program then splits its
+                // command line with the C runtime rules, where backslashes before the closing
+                // quote would escape it, so those are doubled.
+                let trailing = word.len() - word.trim_end_matches('\\').len();
+                Some(format!("\"{word}{}\"", "\\".repeat(trailing)))
+            }
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => Some(self.quote(word)),
+        }
+    }
+
+    /// `command` followed by `arg` quoted for this shell (see `quote_arg`); `None` when the
+    /// shell cannot take `arg` safely. `command` itself is used as written.
+    pub fn command_with_arg(&self, command: &str, arg: &str) -> Option<String> {
+        Some(format!("{command} {}", self.quote_arg(arg)?))
+    }
+
     /// Arguments that start the shell so it runs `command` first and then stays
     /// interactive. A prompt hook reporting the working directory is added as well
     /// (so the split and the session record know the real directory).
@@ -396,7 +428,7 @@ impl ShellSpec {
         let Some(path) = resolved else { return command.to_string() };
         let tail = if rest.is_empty() { String::new() } else { format!(" {rest}") };
         match self.kind() {
-            ShellKind::PowerShell => format!("& '{}'{tail}", path.display().to_string().replace('\'', "''")),
+            ShellKind::PowerShell => format!("& {}{tail}", pwsh_quote(&path.display().to_string())),
             ShellKind::Cmd => format!("\"{}\"{tail}", path.display()),
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => command.to_string(),
         }
@@ -407,7 +439,7 @@ impl ShellSpec {
     pub fn invocation_of(&self, program: &Path, args: &str) -> String {
         let path = program.display().to_string();
         match self.kind() {
-            ShellKind::PowerShell => format!("& '{}' {args}", path.replace('\'', "''")),
+            ShellKind::PowerShell => format!("& {} {args}", pwsh_quote(&path)),
             ShellKind::Cmd => format!("\"{path}\" {args}"),
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => {
                 format!("{} {args}", self.quote(&path))
@@ -453,6 +485,22 @@ impl ShellSpec {
 /// prompt (oh-my-posh included). It contains no double quotes so command line
 /// quoting never breaks.
 pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function global:prompt { [Console]::Write([char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); & $global:__nobleP }";
+
+/// A PowerShell single-quoted string: nothing inside is expanded. PowerShell also takes the
+/// typographic quotes `‘ ’ ‚ ‛` as single quotes, so each of them is doubled too (a file
+/// name may well contain `’`).
+fn pwsh_quote(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() + 2);
+    out.push('\'');
+    for c in word.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
 
 /// A bash argument without its login option: `-l` and `--login` disappear, a short option
 /// cluster such as `-il` becomes `-i`; anything else is returned as it is.
@@ -993,6 +1041,46 @@ mod tests {
         let fish = ShellSpec::new("fish", vec![]);
         assert_eq!(fish.quote(r"a\b'c"), r"'a\\b\'c'");
         assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y"), "'/opt/my tool/x' --y");
+    }
+
+    /// Hostile file names are quoted so each shell takes them literally; what cmd.exe cannot
+    /// take safely is refused. (The PTY test `hostile_file_name_is_not_executed` runs them.)
+    #[test]
+    fn argument_quoting_per_shell() {
+        let hostile = "a $(touch x) `id` ' \" ; & | %PATH% !x! ^ ü 日本";
+        let pwsh = ShellSpec::new(r"C:\Program Files\PowerShell\7\pwsh.exe", vec![]);
+        assert_eq!(pwsh.quote_arg("C:\\a b\\x.rs").as_deref(), Some(r"'C:\a b\x.rs'"));
+        assert_eq!(pwsh.quote_arg(hostile), Some(format!("'{}'", hostile.replace('\'', "''"))));
+        // Typographic single quotes end a PowerShell string as well.
+        assert_eq!(pwsh.quote_arg("it’s‘x‚y‛").as_deref(), Some("'it’’s‘‘x‚‚y‛‛'"));
+        assert_eq!(ShellSpec::new("powershell", vec![]).quote_arg("$env:X").as_deref(), Some("'$env:X'"));
+
+        let cmd = ShellSpec::new(r"C:\WINDOWS\system32\cmd.exe", vec![]);
+        assert_eq!(
+            cmd.quote_arg(r"C:\a&b^c|d<e>(f) ü 日本;'`.rs").as_deref(),
+            Some(r#""C:\a&b^c|d<e>(f) ü 日本;'`.rs""#)
+        );
+        assert_eq!(cmd.quote_arg(r"C:\dir\").as_deref(), Some(r#""C:\dir\\""#));
+        for refused in ["a\"b", "100%", "%PATH%", "hi!", "a\nb", "a\rb", hostile] {
+            assert_eq!(cmd.quote_arg(refused), None, "{refused:?}");
+        }
+        assert_eq!(cmd.command_with_arg("notepad", "50%.txt"), None);
+
+        for program in ["/bin/bash", "zsh", "/bin/sh", "dash"] {
+            let sh = ShellSpec::new(program, vec![]);
+            assert_eq!(sh.quote_arg(hostile), Some(format!("'{}'", hostile.replace('\'', r"'\''"))), "{program}");
+            assert_eq!(sh.quote_arg("it's").as_deref(), Some(r"'it'\''s'"), "{program}");
+            assert_eq!(sh.quote_arg(r"a\b").as_deref(), Some(r"'a\b'"), "{program}");
+        }
+        let fish = ShellSpec::new("/usr/bin/fish", vec![]);
+        assert_eq!(fish.quote_arg(r"a\b'c $(x) ü").as_deref(), Some(r"'a\\b\'c $(x) ü'"));
+
+        let bash = ShellSpec::new("bash", vec![]);
+        assert_eq!(bash.command_with_arg("vim +3", "/tmp/a b;c").as_deref(), Some("vim +3 '/tmp/a b;c'"));
+        // A NUL cannot be part of any argument.
+        for spec in [&pwsh, &cmd, &bash, &fish] {
+            assert_eq!(spec.quote_arg("a\0b"), None);
+        }
     }
 
     #[test]

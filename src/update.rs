@@ -127,6 +127,53 @@ fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
+/// Name of the checksum file `release.yml` publishes next to each archive: `<archive>.sha256`.
+pub fn checksum_name(archive: &str) -> String {
+    format!("{archive}.sha256")
+}
+
+/// The SHA-256 (lower-case hex) for `name` from a `sha256sum`-style file: `<hex>  <name>` or
+/// `<hex> *<name>` lines (several files may be listed); a line holding only the hash counts for any name.
+pub fn parse_checksum(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let file = parts.next().map(|f| f.trim_start_matches('*'));
+        let valid = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        (valid && file.is_none_or(|f| f == name)).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// SHA-256 of a file, lower-case hex.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let read_err = |e: std::io::Error| format!("could not read {}: {e}", path.display());
+    let mut file = std::fs::File::open(path).map_err(read_err)?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(read_err)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(ctx.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Checks the downloaded archive against the release's checksum file, before anything is unpacked.
+fn verify(archive: &Path, name: &str, sums: &str) -> Result<(), String> {
+    let expected = parse_checksum(sums, name).ok_or_else(|| format!("the checksum file has no SHA-256 for {name}"))?;
+    let actual = sha256_file(archive)?;
+    if actual != expected {
+        return Err(format!(
+            "checksum mismatch for {name} (expected {expected}, got {actual}); the download is damaged or was \
+             tampered with, nothing was installed"
+        ));
+    }
+    Ok(())
+}
+
 fn binary_name() -> &'static str {
     if cfg!(windows) { "noble.exe" } else { "noble" }
 }
@@ -278,6 +325,11 @@ fn install_with(
         .find(|(n, _)| n == name)
         .map(|(_, u)| u.clone())
         .ok_or_else(|| format!("release {} has no {name}", release.version))?;
+    // Releases from before checksums were published cannot be verified: refuse rather than install blind.
+    let sum_name = checksum_name(name);
+    let sum_url = release.assets.iter().find(|(n, _)| *n == sum_name).map(|(_, u)| u.clone()).ok_or_else(|| {
+        format!("release {} publishes no checksum ({sum_name}), so the download cannot be verified", release.version)
+    })?;
     // Unique per call, not only per process (parallel tests install at the same time).
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -285,9 +337,15 @@ fn install_with(
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let result = (|| {
+        // The checksum first: small, and a release without a usable one is refused before the big download.
+        let sums_path = work.join(&sum_name);
+        fetch(&sum_url, &sums_path)?;
+        let sums = std::fs::read_to_string(&sums_path).map_err(|_| format!("{sum_name} is not a checksum file"))?;
         let archive = work.join(name);
         println!("Downloading {name}…");
         fetch(&url, &archive)?;
+        verify(&archive, name, &sums)?;
+        println!("Checksum verified (SHA-256).");
         extract(tar, &archive, &work)?;
         let new = work.join(binary_name());
         if !new.is_file() {
@@ -300,6 +358,16 @@ fn install_with(
     })();
     let _ = std::fs::remove_dir_all(&work);
     result
+}
+
+/// What to do after a successful update. Run from a NOBLE tab (the notice's "update"
+/// button), the window that is still open is the old version: it has to be quit first.
+fn restart_hint(inside_noble: bool) -> &'static str {
+    if inside_noble {
+        "Quit this NOBLE window and run `noble` again to use it (tabs come back when session restore is on)."
+    } else {
+        "Restart NOBLE to use the new version."
+    }
 }
 
 /// `noble update [--check]`: returns an exit code.
@@ -351,7 +419,8 @@ pub fn run_cli(args: &[String]) -> i32 {
     };
     match install(&release, &exe) {
         Ok(()) => {
-            println!("Updated noble {} → {}. Restart NOBLE to use the new version.", current(), release.version);
+            let inside = std::env::var_os("NOBLE_INSTANCE").is_some();
+            println!("Updated noble {} → {}. {}", current(), release.version, restart_hint(inside));
             0
         }
         Err(e) => {
@@ -394,7 +463,8 @@ mod tests {
         assert!(parse_release(&serde_json::json!({ "tag_name": "nightly" })).is_none());
     }
 
-    /// Downloads the real latest release over a temporary "installed" binary (needs network).
+    /// Downloads the real latest release over a temporary "installed" binary (needs network, and a latest
+    /// release that publishes `.sha256` files; older ones are refused by design).
     /// `cargo test --lib update::tests::installs_latest_release -- --ignored`
     #[test]
     #[ignore]
@@ -424,7 +494,10 @@ mod tests {
 
     fn release_for_this_platform() -> Option<Release> {
         let name = asset_name()?;
-        Some(Release { version: "9.9.9".into(), assets: vec![(name.into(), "http://fake/asset".into())] })
+        Some(Release {
+            version: "9.9.9".into(),
+            assets: vec![(name.into(), "http://fake/asset".into()), (checksum_name(name), "http://fake/sum".into())],
+        })
     }
 
     /// A real archive for this platform holding `binary_name()` with `content`, built with the system tar
@@ -447,9 +520,107 @@ mod tests {
         ok.then(|| std::fs::read(&out).unwrap())
     }
 
-    /// A fetcher that "downloads" fixed bytes, never touching the network.
+    /// SHA-256 of bytes, lower-case hex (through the same code path as a download).
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir().join(format!("noble-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let f = dir.join(SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
+        std::fs::write(&f, bytes).unwrap();
+        let hex = sha256_file(&f).unwrap();
+        let _ = std::fs::remove_file(&f);
+        hex
+    }
+
+    /// A fetcher that "downloads" the archive `bytes` and the checksum file `sums`, never touching the network.
+    fn serve_with(bytes: Vec<u8>, sums: String) -> impl Fn(&str, &Path) -> Result<(), String> {
+        move |url, to| {
+            let body = if url.ends_with("/sum") { sums.as_bytes() } else { &bytes[..] };
+            std::fs::write(to, body).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Serves `bytes` with its correct checksum file (`sha256sum` format).
     fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path) -> Result<(), String> {
-        move |_url, to| std::fs::write(to, &bytes).map_err(|e| e.to_string())
+        let sums = format!("{}  {}\n", sha256_hex(&bytes), asset_name().unwrap_or("archive"));
+        serve_with(bytes, sums)
+    }
+
+    #[test]
+    fn sha256_matches_known_vectors() {
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // Longer than one read buffer.
+        let big = vec![b'a'; 1_000_000];
+        assert_eq!(sha256_hex(&big), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
+    #[test]
+    fn checksum_file_is_parsed() {
+        let h = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let name = "noble-linux-x86_64.tar.gz";
+        // `sha256sum` text and binary mode, CRLF, upper case, a bare hash.
+        assert_eq!(parse_checksum(&format!("{h}  {name}\n"), name).as_deref(), Some(h));
+        assert_eq!(parse_checksum(&format!("{h} *{name}\r\n"), name).as_deref(), Some(h));
+        assert_eq!(parse_checksum(&format!("{}  {name}", h.to_uppercase()), name).as_deref(), Some(h));
+        assert_eq!(parse_checksum(&format!("{h}\n"), name).as_deref(), Some(h));
+        // A SHA256SUMS-style list: the line for this file.
+        let other = "0".repeat(64);
+        let list = format!("{other}  noble-windows-x86_64.zip\n{h}  {name}\n");
+        assert_eq!(parse_checksum(&list, name).as_deref(), Some(h));
+        // Another file's hash, a short hash, non-hex, an HTML page: nothing.
+        assert_eq!(parse_checksum(&format!("{other}  noble-windows-x86_64.zip"), name), None);
+        assert_eq!(parse_checksum(&format!("{}  {name}", &h[..63]), name), None);
+        assert_eq!(parse_checksum(&format!("{}  {name}", "g".repeat(64)), name), None);
+        assert_eq!(parse_checksum("<html>Not Found</html>", name), None);
+        assert_eq!(parse_checksum("", name), None);
+        assert_eq!(checksum_name(name), "noble-linux-x86_64.tar.gz.sha256");
+    }
+
+    #[test]
+    fn checksum_mismatch_keeps_the_installed_binary() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("mismatch");
+        let Some(archive) = make_archive(&dir, b"new") else { return };
+        let name = asset_name().unwrap();
+        let wrong = format!("{}  {name}\n", sha256_hex(b"something else"));
+        let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar_program()).unwrap_err();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert_intact(&exe);
+        // A checksum file that does not name this archive (or is an error page) is refused too.
+        let page = "<html>rate limited</html>".to_string();
+        let err = install_with(&release, &exe, &serve_with(archive, page), &tar_program()).unwrap_err();
+        assert!(err.contains("no SHA-256"), "{err}");
+        assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_without_checksum_is_refused_before_downloading() {
+        let Some(mut release) = release_for_this_platform() else { return };
+        release.assets.retain(|(n, _)| !n.ends_with(".sha256"));
+        let (dir, exe) = scratch("nosum");
+        let fetched = std::cell::Cell::new(false);
+        let fetch = |_: &str, _: &Path| -> Result<(), String> {
+            fetched.set(true);
+            Err("no network in tests".into())
+        };
+        let err = install_with(&release, &exe, &fetch, &tar_program()).unwrap_err();
+        assert!(err.contains("no checksum"), "{err}");
+        assert!(!fetched.get(), "downloaded an archive that cannot be verified");
+        assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verified_archive_is_installed() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("verified");
+        let Some(archive) = make_archive(&dir, b"new") else { return };
+        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        cleanup_old_at(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assert_intact(exe: &Path) {
@@ -573,6 +744,9 @@ mod tests {
             let os = if target.contains("windows") { "windows" } else { "linux" };
             assert_eq!(asset_name_for(os, arch), Some(archive.as_str()), "{target}");
         }
+        // Each archive is published with the checksum file `noble update` verifies it against.
+        let sum = checksum_name("${{ matrix.archive }}");
+        assert!(yml.matches(&sum).count() >= 2, "release.yml must write and upload {sum}");
     }
 
     #[test]

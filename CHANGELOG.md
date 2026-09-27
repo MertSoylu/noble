@@ -6,6 +6,44 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Two themes: Ayu Dark and Night Owl.
+- `ctrl+click` on a `file:line` path opens it at that line in Cursor, Windsurf or Zed when VS Code is not on
+  the PATH (VS Code stays first; without any of them the file opens in the default app as before).
+- Until the prefix key has been used once, the status bar tip says how to reach it (`press ctrl+a, then ? for
+  all keys`, with your configured prefix).
+- README: a short Troubleshooting section (folder tracking, AltGr, colors, clipboard over SSH).
+
+### Changed
+- AI usage on Home: cached numbers (`~`) show their age next to the provider name (`~5m`, `~2h`); the error
+  line under them no longer repeats it.
+- `noble update` run from the notice's tab now says to quit that NOBLE window and start `noble` again.
+- The minimum supported Rust is now 1.95 (`rust-version`). 1.88 was no longer true: `sysinfo` 0.39 already
+  needs 1.95 to build.
+
+### Fixed
+- Two windows closing at the same moment no longer lose one window's tabs from the saved session: a window
+  now waits for another's session lock as long as that window is running (up to 15 s) instead of saving
+  without it after 2 s, and takes over a lock left by a window that crashed right away.
+
+### Security
+- Opening a file in a terminal editor (ctrl+click on a `file:line` link without a desktop, or the config file
+  with `$EDITOR` set) quotes the path for the pane's shell: a file name such as `a$(cmd).rs`, `` a`cmd`.rs ``
+  or `a&cmd.rs` could run commands in PowerShell, bash, zsh, fish or cmd. Under cmd a name containing `"`,
+  `%` or `!` (which cmd cannot quote safely) is refused with a message.
+- On Windows, VS Code (`code.cmd`) and other `.cmd` / `.bat` tools are started so that cmd.exe escapes their
+  arguments: ctrl+clicking a `file:line` link whose file name contained `&` or `|` could run commands.
+- `noble update` verifies the downloaded archive against the release's SHA-256 checksum before unpacking it.
+  A mismatch, or a release without a checksum file (every release up to 1.4.0), stops the update with an error
+  and leaves the installed binary untouched; download such a release by hand from the releases page.
+- Release archives are published with a `<archive>.sha256` file next to each one (`sha256sum` format), so a
+  manual download can be checked too.
+
+### Development
+- CI checks dependencies with cargo-deny (RustSec advisories, a license allow-list in `deny.toml`, crates.io
+  as the only source) on every push, and the advisory check runs weekly as well (`audit.yml`).
+- CI builds with the `rust-version` toolchain on Windows and Linux, so the declared minimum stays true.
+
 ## [1.4.0]
 
 ### Changed
