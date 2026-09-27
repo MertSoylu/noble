@@ -435,6 +435,8 @@ fn check_cwd_tracking(shell: &str) {
         app.pump();
         std::thread::sleep(Duration::from_millis(100));
     }
+    // pwsh prints its prompt before PSReadLine is ready (slowest on macOS): let it settle.
+    wait_idle(&mut app, id);
     app.panes[&id].write(format!("cd \"{}\"\r", target.display()).as_bytes());
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let want = std::fs::canonicalize(&target).unwrap();

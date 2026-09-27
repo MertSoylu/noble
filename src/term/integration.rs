@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 /// non-ASCII names survive the round trip through `parse_cwd_url`. The encoding runs in a
 /// subshell (`$(__noble_urlenc …)`), only for paths that need it: the C locale can never leak
 /// into the interactive shell. It sticks to bash 3.2 syntax (macOS `/bin/bash`): no
-/// `printf -v`, and no `case` written inside `$(…)`, which 3.2 cannot parse.
+/// `printf -v`, no `case` written inside `$(…)` (3.2 cannot parse it), and a byte's value is
+/// masked (3.2 gives bytes above 0x7F as negative numbers).
 macro_rules! bash_hook {
     () => {
         r#"if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]] && builtin command -v cygpath >/dev/null; then
@@ -29,7 +30,8 @@ __noble_urlenc() {
     c=${1:i:1}
     case $c in
       [-/:_.~a-zA-Z0-9]) builtin printf '%s' "$c" ;;
-      *) builtin printf '%%%02X' "'$c" ;;
+      # bash 3.2 gives bytes above 0x7F as negative numbers: keep the low byte.
+      *) builtin printf '%%%02X' $(( $(builtin printf '%d' "'$c") & 255 )) ;;
     esac
     (( i++ ))
   done
@@ -185,7 +187,10 @@ mod tests {
             assert!(script.contains("]7;file://") && script.contains(r"\a'"), "{script}");
         }
         for script in [BASH, BASH_LOGIN] {
-            assert!(script.contains("'%%%02X'") && script.contains("PROMPT_COMMAND="), "{script}");
+            assert!(
+                script.contains("'%%%02X'") && script.contains("& 255") && script.contains("PROMPT_COMMAND="),
+                "{script}"
+            );
         }
         assert!(ZSHRC.contains("[##16]"));
         assert!(FISH.contains("string escape --style=url"));
