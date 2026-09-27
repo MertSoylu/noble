@@ -13,16 +13,35 @@ use serde_json::{Value, json};
 use crate::term::layout::PaneId;
 
 /// Claude Code event → `noble hook` argument.
-pub const EVENTS: [(&str, &str); 5] = [
+pub const EVENTS: [(&str, &str); 7] = [
     ("UserPromptSubmit", "prompt"),
     ("Stop", "stop"),
     ("Notification", "notification"),
     ("SessionStart", "session-start"),
     ("SessionEnd", "session-end"),
+    ("SubagentStart", SUBAGENT_START),
+    ("SubagentStop", SUBAGENT_STOP),
 ];
 
 /// The `noble hook` argument that ends a session (Claude's `SessionEnd`).
 pub const SESSION_END: &str = "session-end";
+
+/// A subagent started / finished. Claude's `Stop` fires when the main answer ends, even
+/// while background subagents keep working, so NOBLE counts the running ones: each has a
+/// marker file next to the pane's record (`<instance>-<pane>.<agent_id>.sub`).
+pub const SUBAGENT_START: &str = "subagent-start";
+pub const SUBAGENT_STOP: &str = "subagent-stop";
+
+/// A subagent marker older than this no longer counts, in case Claude never reported the
+/// end (a crash, a killed process), so a session cannot stay "working" forever.
+const SUBAGENT_MAX_AGE_SECS: u64 = 3 * 3600;
+
+/// Notifications that ask nothing of the user: the idle reminder Claude sends a while after
+/// its answer (it is already "your turn", and it also comes while background subagents still
+/// run) and a background subagent finishing (the subagent hooks track that).
+const QUIET_NOTIFICATIONS: [&str; 2] = ["idle_prompt", "agent_completed"];
+/// The idle reminder's text, for Claude versions that do not send `notification_type`.
+const IDLE_MESSAGE: &str = "Claude is waiting for your input";
 
 /// The shared marker used to recognize our hook commands.
 const MARKER: &str = " hook ";
@@ -34,6 +53,9 @@ pub struct HookRecord {
     #[serde(default)]
     pub message: Option<String>,
     pub ts: i64,
+    /// Subagents of the session still running (counted from the marker files, not stored).
+    #[serde(skip)]
+    pub subagents: usize,
 }
 
 pub fn settings_path() -> Option<PathBuf> {
@@ -109,6 +131,25 @@ pub fn install(path: &Path, base: &str) -> Result<(), String> {
     write_settings(path, &v)
 }
 
+/// Startup: when the hooks of an older NOBLE are installed, adds the events added since
+/// (with the same command) so existing users need not turn the setting off and on.
+/// Does nothing when no NOBLE hook is installed or all of them already are.
+pub fn upgrade(path: &Path) -> Result<(), String> {
+    let v = read_settings(path)?;
+    let base = EVENTS.iter().find_map(|(event, _)| {
+        let list = v.pointer(&format!("/hooks/{event}"))?.as_array()?;
+        let entry = list.iter().find(|e| is_noble_hook(e))?;
+        entry.pointer("/hooks")?.as_array()?.iter().find_map(|h| {
+            let command = h.get("command")?.as_str()?;
+            command.split_once(MARKER).map(|(base, _)| base.to_string())
+        })
+    });
+    match base {
+        Some(base) if !is_installed(path) => install(path, &base),
+        _ => Ok(()),
+    }
+}
+
 /// Removes the hooks NOBLE added; also deletes lists left empty.
 pub fn uninstall(path: &Path) -> Result<(), String> {
     let mut v = read_settings(path)?;
@@ -144,15 +185,42 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     let dir = agents_dir(data);
     let file = dir.join(format!("{instance}-{pane}.json"));
     // The session is over (Claude exited, or `/clear` right before a new `session-start`):
-    // the pane no longer runs Claude, so its record goes.
+    // the pane no longer runs Claude, so its record and subagent markers go.
     if event == SESSION_END {
-        let _ = std::fs::remove_file(&file);
+        remove_pane_files(&dir, instance, pane);
         return;
     }
-    let message = serde_json::from_str::<Value>(stdin)
-        .ok()
-        .and_then(|v| v.get("message").and_then(Value::as_str).map(|m| crate::util::truncate(m.trim(), 120)));
-    let rec = HookRecord { event: event.to_string(), message, ts: chrono::Utc::now().timestamp() };
+    let input = serde_json::from_str::<Value>(stdin).unwrap_or(Value::Null);
+    let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::trim);
+    if event == SUBAGENT_START || event == SUBAGENT_STOP {
+        // Only file-name-safe characters of the id; without an id the subagent is not tracked.
+        let id: String = field("agent_id")
+            .unwrap_or("")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .take(64)
+            .collect();
+        if id.is_empty() {
+            return;
+        }
+        let marker = dir.join(format!("{instance}-{pane}.{id}.sub"));
+        if event == SUBAGENT_START {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(marker, "");
+        } else {
+            let _ = std::fs::remove_file(marker);
+        }
+        return;
+    }
+    // Reminders that ask nothing of the user leave the state as it is.
+    if event == "notification"
+        && (field("notification_type").is_some_and(|t| QUIET_NOTIFICATIONS.contains(&t))
+            || field("message") == Some(IDLE_MESSAGE))
+    {
+        return;
+    }
+    let message = field("message").map(|m| crate::util::truncate(m, 120));
+    let rec = HookRecord { event: event.to_string(), message, ts: chrono::Utc::now().timestamp(), subagents: 0 };
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(text) = serde_json::to_string(&rec) {
         let tmp = dir.join(format!("{instance}-{pane}.tmp"));
@@ -162,20 +230,52 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     }
 }
 
-/// Records belonging to this NOBLE instance (pane → last event).
+/// Deletes a pane's record and its subagent markers.
+fn remove_pane_files(dir: &Path, instance: impl std::fmt::Display, pane: impl std::fmt::Display) {
+    let _ = std::fs::remove_file(dir.join(format!("{instance}-{pane}.json")));
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{instance}-{pane}.");
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".sub") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Records belonging to this NOBLE instance (pane → last event and running subagents).
 pub fn read_records(data: &Path, instance: u32) -> HashMap<PaneId, HookRecord> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir(agents_dir(data)) else { return out };
     let prefix = format!("{instance}-");
+    let mut subagents: HashMap<PaneId, usize> = HashMap::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some(pane) = name.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".json")) else { continue };
+        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+        if let Some(marker) = rest.strip_suffix(".sub") {
+            let fresh = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_none_or(|age| age.as_secs() < SUBAGENT_MAX_AGE_SECS);
+            if let Some(Ok(pane)) = marker.split_once('.').map(|(p, _)| p.parse::<PaneId>())
+                && fresh
+            {
+                *subagents.entry(pane).or_default() += 1;
+            }
+            continue;
+        }
+        let Some(pane) = rest.strip_suffix(".json") else { continue };
         let Ok(pane) = pane.parse::<PaneId>() else { continue };
         if let Ok(text) = std::fs::read_to_string(e.path())
             && let Ok(rec) = serde_json::from_str::<HookRecord>(&text)
         {
             out.insert(pane, rec);
         }
+    }
+    for (pane, rec) in &mut out {
+        rec.subagents = subagents.get(pane).copied().unwrap_or(0);
     }
     out
 }
@@ -202,8 +302,9 @@ pub fn prune(data: &Path, instance: u32) {
     }
 }
 
+/// Deletes a pane's record and its subagent markers.
 pub fn remove_record(data: &Path, instance: u32, pane: PaneId) {
-    let _ = std::fs::remove_file(agents_dir(data).join(format!("{instance}-{pane}.json")));
+    remove_pane_files(&agents_dir(data), instance, pane);
 }
 
 #[cfg(test)]
@@ -299,6 +400,99 @@ mod tests {
             .collect();
         assert!(names.iter().all(|n| n.ends_with(".json")), "no temp files left: {names:?}");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Running subagents are counted from `subagent-start` until `subagent-stop`, per pane;
+    /// markers of subagents that never reported their end stop counting after a while, and
+    /// `session-end` removes them with the record.
+    #[test]
+    fn subagents_are_counted_until_they_stop() {
+        let data = temp("subagents");
+        let hook = |event: &str, stdin: &str| run_cli(event, stdin, &data, Some("42"), Some("3"));
+        let count = || read_records(&data, 42).get(&3).map(|r| (r.event.clone(), r.subagents));
+        hook("prompt", "{}");
+        hook(SUBAGENT_START, r#"{"agent_id":"agent-001","agent_type":"Explore"}"#);
+        hook(SUBAGENT_START, r#"{"agent_id":"agent-002","agent_type":"general-purpose"}"#);
+        hook(SUBAGENT_START, r#"{"agent_id":"agent-001"}"#); // reported twice: still one
+        hook(SUBAGENT_START, "{}"); // no id: not tracked
+        hook(SUBAGENT_START, r#"{"agent_id":"../.."}"#); // nothing file-name-safe left
+        run_cli(SUBAGENT_START, r#"{"agent_id":"agent-009"}"#, &data, Some("42"), Some("4")); // another pane
+        hook("stop", "{}");
+        assert_eq!(count(), Some(("stop".into(), 2)), "the main answer ended, two subagents run");
+        hook(SUBAGENT_STOP, r#"{"agent_id":"agent-001","last_assistant_message":"done"}"#);
+        assert_eq!(count(), Some(("stop".into(), 1)));
+        // A marker left behind hours ago (Claude killed) no longer counts.
+        let marker = agents_dir(&data).join("42-3.agent-002.sub");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(SUBAGENT_MAX_AGE_SECS + 60);
+        std::fs::File::options().write(true).open(&marker).unwrap().set_modified(old).unwrap();
+        assert_eq!(count(), Some(("stop".into(), 0)));
+        hook(SUBAGENT_START, r#"{"agent_id":"agent-003"}"#);
+        hook(SESSION_END, "{}");
+        let names: Vec<String> = std::fs::read_dir(agents_dir(&data))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["42-4.agent-009.sub".to_string()], "only the other pane's marker is left");
+        remove_record(&data, 42, 4);
+        assert!(std::fs::read_dir(agents_dir(&data)).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The idle reminder and a background subagent finishing ask nothing of the user, so
+    /// they keep the last state; a permission prompt (from Claude or a subagent) is recorded.
+    #[test]
+    fn only_real_notifications_are_recorded() {
+        let data = temp("quiet");
+        let hook = |event: &str, stdin: &str| run_cli(event, stdin, &data, Some("42"), Some("3"));
+        let event = || read_records(&data, 42)[&3].event.clone();
+        hook("stop", "{}");
+        hook("notification", r#"{"notification_type":"idle_prompt","message":"Claude is waiting for your input"}"#);
+        assert_eq!(event(), "stop");
+        hook("notification", r#"{"message":"Claude is waiting for your input"}"#); // older Claude
+        assert_eq!(event(), "stop");
+        hook("notification", r#"{"notification_type":"agent_completed","message":"Agent finished"}"#);
+        assert_eq!(event(), "stop");
+        hook(
+            "notification",
+            r#"{"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash","agent_id":"agent-001"}"#,
+        );
+        assert_eq!(event(), "notification");
+        assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Claude needs your permission to use Bash"));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Hooks installed by an older NOBLE get the events added since, with the same command;
+    /// settings without NOBLE hooks are left alone.
+    #[test]
+    fn upgrade_adds_new_events_to_old_installs() {
+        let dir = temp("upgrade");
+        let file = dir.join("settings.json");
+        let base = r#""C:\Tools\noble.exe""#;
+        let mut hooks = serde_json::Map::new();
+        for (event, arg) in &EVENTS[..5] {
+            hooks.insert(
+                event.to_string(),
+                json!([{ "hooks": [ { "type": "command", "command": format!("{base} hook {arg}") } ] }]),
+            );
+        }
+        std::fs::write(&file, serde_json::to_string(&json!({ "hooks": hooks })).unwrap()).unwrap();
+        assert!(!is_installed(&file));
+        upgrade(&file).unwrap();
+        assert!(is_installed(&file));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["SubagentStop"][0]["hooks"][0]["command"], format!("{base} hook subagent-stop"));
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1, "existing hooks are not duplicated");
+        uninstall(&file).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(v.get("hooks").is_none(), "uninstall removes the new events too: {v}");
+        // Without NOBLE hooks nothing is written.
+        let other = dir.join("other.json");
+        std::fs::write(&other, r#"{ "model": "opus" }"#).unwrap();
+        upgrade(&other).unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), r#"{ "model": "opus" }"#);
+        assert!(!is_installed(&other));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Startup cleanup: records a day old (crashed instances) and leftovers of an earlier

@@ -346,10 +346,12 @@ fill up before it resets.
 Without help NOBLE can only guess whether a Claude session is busy. Turn on
 **Settings → Terminal → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
 (a backup is written next to it; turning the setting off removes exactly those entries). Claude then runs
-`noble hook <event>` on prompt / stop / notification / session start / session end. The command writes one
-small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing. The Home screen then
-lists every Claude session as **working**, **needs you** or **your turn**, and a background tab lights up the
-moment Claude asks for permission.
+`noble hook <event>` on prompt / stop / notification / subagent start and stop / session start / session end.
+The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
+The Home screen then lists every Claude session as **working**, **needs you** or **your turn**, and a
+background tab lights up the moment Claude asks for permission. A session stays **working** while its
+subagents (background ones too) still run, and Claude's idle reminder does not count as needing you. Hooks
+set by an older NOBLE get the new events on the next start.
 
 </details>
 

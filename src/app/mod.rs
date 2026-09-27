@@ -312,6 +312,19 @@ impl AgentState {
     }
 }
 
+/// A Claude session's state from its last hook event. While subagents still run the
+/// session is working even after the main answer ended (`stop`); a question from Claude
+/// or one of its subagents (a permission prompt) still needs you.
+fn hook_state(rec: &crate::hooks::HookRecord) -> Option<AgentState> {
+    let state = match rec.event.as_str() {
+        "prompt" => AgentState::Working,
+        "notification" => AgentState::NeedsYou,
+        "stop" | "session-start" => AgentState::Idle,
+        _ => return None,
+    };
+    Some(if state == AgentState::Idle && rec.subagents > 0 { AgentState::Working } else { state })
+}
+
 /// A row of the session list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSession {
@@ -507,7 +520,11 @@ impl App {
         app.reload_schemes();
         app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
         crate::hooks::prune(&app.paths.data, std::process::id());
-        app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| crate::hooks::is_installed(&p));
+        app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
+            // Hooks from an older NOBLE get the events added since (e.g. the subagent ones).
+            let _ = crate::hooks::upgrade(&p);
+            crate::hooks::is_installed(&p)
+        });
         crate::update::cleanup_old();
         app.init_updates();
         if !app.ui_state.data.welcomed {
@@ -921,16 +938,23 @@ impl App {
                 crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
                 continue;
             }
-            if self.agent_hooks.get(&pane) != Some(&rec) {
+            // Only a new event notifies; the subagent count changing alone does not.
+            let new_event = self
+                .agent_hooks
+                .get(&pane)
+                .is_none_or(|old| (&old.event, &old.message, old.ts) != (&rec.event, &rec.message, rec.ts));
+            if new_event {
                 changed.push((pane, rec.clone()));
             }
             live.insert(pane, rec);
         }
         self.agent_hooks = live;
         for (pane, rec) in changed {
-            let notice = match rec.event.as_str() {
-                "notification" => Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into())),
-                "stop" => Some("Claude finished".into()),
+            let notice = match hook_state(&rec) {
+                Some(AgentState::NeedsYou) => {
+                    Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into()))
+                }
+                Some(AgentState::Idle) if rec.event == "stop" => Some("Claude finished".into()),
                 _ => None,
             };
             let Some(notice) = notice else { continue };
@@ -977,13 +1001,7 @@ impl App {
     /// guessed from the launcher command (while it still runs) or the window title.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         if let Some(rec) = self.agent_hooks.get(&pane) {
-            let state = match rec.event.as_str() {
-                "prompt" => AgentState::Working,
-                "notification" => AgentState::NeedsYou,
-                "stop" | "session-start" => AgentState::Idle,
-                _ => return None,
-            };
-            return Some(("claude", state));
+            return hook_state(rec).map(|state| ("claude", state));
         }
         let p = self.panes.get(&pane)?;
         // Once the launcher command has exited, the pane runs whatever was typed at the prompt.

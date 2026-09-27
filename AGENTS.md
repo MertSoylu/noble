@@ -112,6 +112,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). `session-end` deletes the
   record, and the prompt signal clears the pane's agent (`App::clear_agent`; older records are ignored) and its
   window title; the launcher command only names the agent until the first prompt (`Pane::launch_running`).
+  Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files (`SubagentStart`/`SubagentStop`);
+  while any exist the session stays Working after `Stop`. Idle-reminder notifications are not recorded.
+  `hooks::upgrade` adds newly added events to an older install at startup.
   `hooks::prune` runs at startup. Never touch the real file in tests.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.

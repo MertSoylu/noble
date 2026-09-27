@@ -6,6 +6,14 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- Claude Code status hooks: a session whose subagents (background ones too) are still running stays
+  **working** instead of turning into **needs you** / **your turn** when Claude's main answer ends, and no
+  "Claude finished" notice fires until Claude answers again. Claude's idle reminder ("Claude is waiting for your
+  input") and a background subagent finishing no longer count as needing you; permission requests still do.
+  NOBLE now also listens to `SubagentStart` / `SubagentStop`; hooks set by an older NOBLE get them added on
+  the next start.
+
 ## [1.5.0]
 
 ### Added

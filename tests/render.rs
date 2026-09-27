@@ -1811,6 +1811,7 @@ fn claude_hook_states_drive_sessions() {
         event: event.into(),
         message: msg.map(str::to_string),
         ts: chrono::Utc::now().timestamp(),
+        subagents: 0,
     };
     app.apply_hook_records([(pane, rec("prompt", None))].into_iter().collect());
     assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
@@ -1837,6 +1838,46 @@ fn claude_hook_states_drive_sessions() {
     assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)));
     app.run(Action::CloseTab);
     assert!(app.agent_hooks.is_empty());
+}
+
+/// Claude's `Stop` fires when the main answer ends even while background subagents still
+/// run: the session stays "working" without a notice until they are done, and only
+/// Claude's next answer says it finished. A permission request still needs you.
+#[test]
+fn claude_subagents_keep_the_session_working() {
+    use noble::app::AgentState;
+    use noble::hooks::HookRecord;
+    let mut app = demo_app(160, 45);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    app.run(Action::Bridge);
+    app.toasts.clear();
+    let now = chrono::Utc::now().timestamp();
+    let rec = |event: &str, ts: i64, subagents: usize| HookRecord {
+        event: event.into(),
+        message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
+        ts,
+        subagents,
+    };
+    let mut apply = |event: &str, ts: i64, subagents: usize| {
+        app.apply_hook_records([(pane, rec(event, ts, subagents))].into());
+        (app.agent_state(pane).map(|(_, s)| s), app.toasts.len())
+    };
+    assert_eq!(apply("prompt", now, 0), (Some(AgentState::Working), 0));
+    assert_eq!(apply("prompt", now, 2), (Some(AgentState::Working), 0), "two subagents started");
+    assert_eq!(apply("stop", now + 1, 2), (Some(AgentState::Working), 0), "main answer ended, subagents run");
+    assert_eq!(apply("stop", now + 1, 1), (Some(AgentState::Working), 0));
+    assert_eq!(apply("stop", now + 1, 0), (Some(AgentState::Idle), 0), "a count change alone never notifies");
+    assert_eq!(apply("stop", now + 2, 0), (Some(AgentState::Idle), 1), "Claude answered the results");
+    assert!(app.toasts.iter().any(|t| t.text.contains("Claude finished")));
+    app.toasts.clear();
+    let mut apply = |event: &str, ts: i64, subagents: usize| {
+        app.apply_hook_records([(pane, rec(event, ts, subagents))].into());
+        app.agent_state(pane).map(|(_, s)| s)
+    };
+    assert_eq!(apply("notification", now + 3, 1), Some(AgentState::NeedsYou), "a subagent asks for permission");
+    assert!(app.toasts.iter().any(|t| t.text.contains("needs your permission")));
+    assert!(app.tabs[0].alert);
 }
 
 /// Runs the real `noble hook <event>` the way Claude Code's hooks do: inside the pane's
@@ -2045,14 +2086,14 @@ fn hook_cli_writes_state_file() {
             cmd.env("NOBLE_INSTANCE", "4242").env("NOBLE_PANE", "7");
         }
         let mut child = cmd.spawn().unwrap();
-        child.stdin.take().unwrap().write_all(br#"{"message":"Claude is waiting for your input"}"#).unwrap();
+        child.stdin.take().unwrap().write_all(br#"{"message":"Claude needs your permission to use Bash"}"#).unwrap();
         child.wait().unwrap()
     };
     assert!(run(false).success());
     assert!(noble::hooks::read_records(&home, 4242).is_empty());
     assert!(run(true).success());
     let recs = noble::hooks::read_records(&home, 4242);
-    assert_eq!(recs[&7].message.as_deref(), Some("Claude is waiting for your input"));
+    assert_eq!(recs[&7].message.as_deref(), Some("Claude needs your permission to use Bash"));
     let _ = std::fs::remove_dir_all(&home);
 }
 
