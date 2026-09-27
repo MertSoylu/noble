@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.5.0]
+
 ### Added
 - macOS support (Apple Silicon and Intel): release binaries (`noble-macos-aarch64.tar.gz`,
   `noble-macos-x86_64.tar.gz`, with `.sha256`), `noble update`, and the full test suite in CI.
@@ -51,7 +53,8 @@ All notable changes to NOBLE are documented here. The format is based on
   A mismatch, or a release without a checksum file (every release up to 1.4.0), stops the update with an error
   and leaves the installed binary untouched; download such a release by hand from the releases page.
 - Release archives are published with a `<archive>.sha256` file next to each one (`sha256sum` format), so a
-  manual download can be checked too.
+  manual download can be checked too. Updating from 1.4.0 or older still runs the old updater, which does not
+  check it; every update from 1.5.0 on is verified.
 
 ### Development
 - CI checks dependencies with cargo-deny (RustSec advisories, a license allow-list in `deny.toml`, crates.io
@@ -216,7 +219,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/MertSoylu/noble/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/MertSoylu/noble/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/MertSoylu/noble/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/MertSoylu/noble/compare/v1.1.0...v1.2.0
