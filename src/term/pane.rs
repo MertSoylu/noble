@@ -546,6 +546,15 @@ pub fn resolve_shell(cfg: &TerminalCfg, data: &Path) -> ShellSpec {
     if spec.args.is_empty() && matches!(spec.kind(), ShellKind::PowerShell) {
         spec.args.push("-NoLogo".into());
     }
+    // macOS terminals start login shells: `/etc/zprofile` (path_helper), `~/.zprofile`
+    // (Homebrew's `brew shellenv`) and `~/.bash_profile` hold the PATH and prompt there.
+    // Linux terminals start interactive non-login shells, so there the shell runs as it is.
+    if cfg!(target_os = "macos")
+        && cfg.shell_args.is_empty()
+        && matches!(spec.kind(), ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish)
+    {
+        spec.args.push("-l".into());
+    }
     spec
 }
 
@@ -627,9 +636,19 @@ impl Pane {
             dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
         };
         cmd.cwd(&cwd);
+        // bash and zsh take `PWD` as the logical directory when it matches the real one, so a
+        // folder reached through a symlink keeps its name (macOS `/var` is `/private/var`).
+        // Windows shells report their directory with OSC 9;9 and ignore it.
+        #[cfg(unix)]
+        cmd.env("PWD", &cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "NOBLE");
+        // The outer terminal's identity (kitty/Ghostty terminfo, iTerm2) does not describe the
+        // pane: apps would look up the wrong terminfo or send that terminal's own sequences.
+        for var in ["TERMINFO", "TERM_PROGRAM_VERSION", "LC_TERMINAL", "LC_TERMINAL_VERSION", "ITERM_SESSION_ID"] {
+            cmd.env_remove(var);
+        }
         cmd.env("NOBLE_PANE", id.to_string());
         // So the Claude Code hooks write the state to the right NOBLE instance.
         cmd.env("NOBLE_INSTANCE", std::process::id().to_string());

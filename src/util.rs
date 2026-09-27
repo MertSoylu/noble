@@ -238,14 +238,23 @@ pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool
 }
 
 /// Is there a graphical session to open files, folders and URLs in? Always on
-/// Windows and macOS; elsewhere an X11/Wayland display and `xdg-open` are needed
+/// Windows; on macOS unless NOBLE runs over SSH (`open` would show things on the
+/// Mac's own screen); elsewhere an X11/Wayland display and `xdg-open` are needed
 /// (not the case over plain SSH or on a text console).
 pub fn has_desktop() -> bool {
-    if cfg!(any(windows, target_os = "macos")) {
+    if cfg!(windows) {
         return true;
+    }
+    if cfg!(target_os = "macos") {
+        return !over_ssh();
     }
     let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|d| !d.is_empty()));
     display && which("xdg-open").is_some()
+}
+
+/// Running in an SSH session (the user sits at another machine).
+pub fn over_ssh() -> bool {
+    ["SSH_CONNECTION", "SSH_TTY"].iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
 }
 
 /// Finds an executable on PATH (checks PATHEXT on Windows).

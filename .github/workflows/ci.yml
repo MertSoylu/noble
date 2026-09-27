@@ -1,4 +1,4 @@
-# On every push and PR: formatting, clippy, tests, the MSRV build and dependency checks (cargo-deny).
+# On every push and PR (Windows, Linux and macOS): formatting, clippy, tests, the MSRV build and dependency checks (cargo-deny).
 name: CI
 
 on:
@@ -44,6 +44,22 @@ jobs:
       - run: cargo test
       - run: shellcheck install.sh
 
+  macos:
+    # macOS (Apple Silicon): the same full suite. zsh is the default shell and `/bin/bash` is 3.2 (the
+    # shell tests run it as well); fish comes from Homebrew.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install fish
+        run: brew install fish
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   linux-musl:
     # The release builds static musl binaries (`release.yml`); make sure they still build.
     runs-on: ubuntu-latest
@@ -63,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

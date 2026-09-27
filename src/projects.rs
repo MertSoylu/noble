@@ -86,8 +86,11 @@ pub fn default_roots() -> Vec<PathBuf> {
     .map(|p| home.join(p))
     .filter(|p| p.is_dir())
     .collect();
-    // On Windows, a case difference must not add the same folder twice.
-    roots.dedup_by(|a, b| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
+    // On Windows and macOS `projects` and `Projects` are the same folder: it must not be
+    // added twice. On Linux they are two folders.
+    if cfg!(any(windows, target_os = "macos")) {
+        roots.dedup_by(|a, b| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
+    }
     roots
 }
 
@@ -302,7 +305,9 @@ pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Pro
     let norm = |p: &Path| {
         let s = p.to_string_lossy().replace('\\', "/");
         let s = s.trim_end_matches('/').to_string();
-        if cfg!(windows) { s.to_lowercase() } else { s }
+        // Windows and macOS (APFS) ignore case: `cd ~/projects/noble` is the same folder as
+        // `~/Projects/Noble`. Linux file systems are case-sensitive.
+        if cfg!(any(windows, target_os = "macos")) { s.to_lowercase() } else { s }
     };
     let c = norm(cwd);
     list.iter()

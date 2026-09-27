@@ -7,7 +7,7 @@
   <a href="https://github.com/MertSoylu/noble/releases"><img src="https://img.shields.io/github/v/release/MertSoylu/noble?style=flat-square&color=ffb020" alt="Release"></a>
   <a href="https://crates.io/crates/noble"><img src="https://img.shields.io/crates/v/noble?style=flat-square&color=5fd7d0" alt="crates.io"></a>
   <img src="https://img.shields.io/badge/rust-1.95%2B-orange?style=flat-square&logo=rust" alt="Rust 1.95+">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platforms">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="Platforms">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
   <a href="https://ratatui.rs/"><img src="https://ratatui.rs/built-with-ratatui/badge.svg" alt="Built With Ratatui" height="20"></a>
 </p>
@@ -48,7 +48,7 @@ tab costs about 0.05% of one core and the Home screen about 0.4%.
 <td width="50%" valign="top">
 
 **🖥 Real terminals**<br>
-ConPTY on Windows, a PTY on Linux. Tabs, splits, zoom, drag to resize, scrollback search, `ctrl+click` on URLs
+ConPTY on Windows, a PTY on Linux and macOS. Tabs, splits, zoom, drag to resize, scrollback search, `ctrl+click` on URLs
 and `file:line` paths. vim, htop and Claude Code run full-screen with mouse support.
 
 </td>
@@ -132,11 +132,13 @@ tabs run their command (e.g. `claude`) again. Save named workspaces and reopen t
 
 ## 📦 Install
 
-**Prebuilt binaries:** download the archive for Windows (x86_64) or Linux (x86_64, ARM64) from the
-[latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put `noble` on your PATH.
-The Linux binaries are static, so they run on any distribution. Each archive has a `.sha256` file next to it:
-check it with `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, or compare it with
-`Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
+**Prebuilt binaries:** download the archive for Windows (x86_64), Linux (x86_64, ARM64) or macOS (Apple
+Silicon, Intel) from the [latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put
+`noble` on your PATH. The Linux binaries are static, so they run on any distribution. The macOS binaries are
+not notarized: a file downloaded with a browser needs `xattr -d com.apple.quarantine noble` once (not needed
+with `curl` or `noble update`). Each archive has a `.sha256` file next to it: check it with
+`sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, `shasum -a 256 -c noble-macos-aarch64.tar.gz.sha256`
+on macOS, or compare it with `Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
 
 **With Cargo** (Rust 1.95+):
 
@@ -166,10 +168,11 @@ stops the update and leaves the installed binary alone) and replaces the install
 <br>
 
 Any truecolor terminal with a regular monospace font works, no Nerd Font needed: Windows Terminal, WezTerm,
-Kitty, Alacritty, GNOME Terminal, Konsole, iTerm2. Cascadia Code / Cascadia Mono render every glyph NOBLE uses
+Kitty, Alacritty, GNOME Terminal, Konsole, iTerm2, Ghostty (and Terminal.app on macOS 26+; older versions
+have no truecolor). Cascadia Code / Cascadia Mono render every glyph NOBLE uses
 (box drawing, block elements, braille).
 
-Copy and paste use the system clipboard (Windows, X11 and Wayland). Without one, e.g. over SSH, copied text is
+Copy and paste use the system clipboard (Windows, macOS, X11 and Wayland). Without one, e.g. over SSH, copied text is
 sent to your terminal with OSC 52, links are copied instead of opened, and files and the config open in a
 terminal editor (`$EDITOR`, else nano or vim).
 
@@ -188,8 +191,9 @@ noble [--config <path>] [--no-boot]
 </details>
 
 > [!NOTE]
-> Windows and Linux are both fully supported: CI runs the whole test suite, real terminals and end-to-end
-> included, on both. macOS should build but is not tested yet. Reports and fixes are welcome.
+> Windows, Linux and macOS are all supported: CI runs the whole test suite, real terminals and end-to-end
+> included, on each of them. On macOS, turn on **Option as Meta** in your terminal for the `alt+` shortcuts
+> (see Troubleshooting); the prefix works either way.
 
 ## ⌨ Keys
 
@@ -247,7 +251,8 @@ not as `ctrl+alt` chords.
 ## 🔧 Configuration
 
 `noble --paths` prints the locations (Windows: `%APPDATA%\noble\config.toml`, data in `%LOCALAPPDATA%\noble`;
-Linux: `~/.config/noble/config.toml`, data in `~/.local/share/noble`; `NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
+Linux: `~/.config/noble/config.toml`, data in `~/.local/share/noble`; macOS: both in
+`~/Library/Application Support/noble`; `NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
 Errors show up as a toast and never crash the app. Most options can also be changed from the Settings screen.
 
 <details>
@@ -360,7 +365,9 @@ NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, with no setup:
 - **bash, zsh, fish** (Git Bash too): your own `~/.bashrc`, `.zshrc` or `config.fish` loads first, then a
   small hook reports OSC 7 on every prompt. Starship, oh-my-zsh and friends keep working, and so does a zsh
   `ZDOTDIR` of your own. A bash login shell (`-l` / `--login` in `shell_args`) loads `/etc/profile` and your
-  `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`. The hook scripts live
+  `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`. On macOS bash, zsh and fish
+  start as login shells, as in Terminal.app and iTerm2 (`/etc/zprofile`, `~/.zprofile` and Homebrew's PATH
+  load); any `shell_args` of your own replace that. The hook scripts live
   in the data folder under `shell/`; pass `--norc` (bash), `-f` (zsh) or `--no-config` (fish) in `shell_args`
   to start the shell untouched.
 - Any other shell whose prompt emits OSC 7 works too.
@@ -380,8 +387,17 @@ reports long-running commands. OSC 9 / OSC 777 notifications and the bell mark a
   Windows reports AltGr) is treated as text, and on Linux the terminal sends the character itself. If a key
   still triggers a shortcut, the terminal sends it as an `alt+` chord: unbind it (`"alt+…" = "none"` under
   `[keys.direct_bindings]`) or lock the pane's keys with prefix `i`.
+- **`alt+` shortcuts type `π`, `¡` or `º` on macOS:** the terminal sends Option as a character. Turn on
+  Option as Meta: Terminal.app Settings → Profiles → Keyboard → "Use Option as Meta key"; iTerm2 Profiles →
+  Keys → Left Option key → Esc+; Ghostty `macos-option-as-alt = true`; Kitty `macos_option_as_alt yes`;
+  Alacritty `option_as_alt = "Both"`. On layouts that type `@ { [ |` with Option, set it for the left Option
+  key only. The prefix (`ctrl+a`) works without it.
+- **The project list is empty on macOS:** macOS asks your terminal app for access to Desktop and Documents the
+  first time NOBLE scans them. Allow it (System Settings → Privacy & Security → Files and Folders), or set
+  `projects.roots` to folders outside them.
 - **Colors look wrong or washed out:** NOBLE draws in 24-bit color. Use a truecolor terminal (Windows Terminal,
-  WezTerm, Kitty, GNOME Terminal, Konsole …) rather than the old Windows console or the Linux text console; in
+  WezTerm, Kitty, GNOME Terminal, Konsole, iTerm2 …) rather than the old Windows console, the Linux text console
+  or Terminal.app before macOS 26; in
   tmux add `set -ag terminal-overrides ",*:RGB"`. Panes get `COLORTERM=truecolor`; their palette is Settings →
   Terminal colors (`terminal.colors`).
 - **Copy does not reach your clipboard over SSH:** with no system clipboard NOBLE sends the text with OSC 52,

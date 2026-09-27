@@ -1,7 +1,7 @@
 //! Provider adapters. Each one: detection (sync, file/PATH) and
 //! usage fetching (network/CLI). Supports Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -65,13 +65,44 @@ fn claude_dir(env: &Env) -> PathBuf {
     env.var("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| env.at(&[".claude"]))
 }
 
-fn claude_creds(env: &Env) -> Option<Value> {
+/// The OAuth record from `.credentials.json` (Windows, Linux, and macOS when the
+/// Keychain could not be written).
+fn claude_file_creds(env: &Env) -> Option<Value> {
     read_json(&claude_dir(env).join(".credentials.json"))?.get("claudeAiOauth").cloned()
 }
 
+/// macOS keeps Claude Code's login in the Keychain instead of the file. The item's service
+/// is `Claude Code-credentials`, with `-<8 hex of sha256(config dir)>` appended for a
+/// `CLAUDE_CONFIG_DIR` (and by some versions for the default directory as well).
+fn claude_keychain_services(env: &Env) -> Vec<String> {
+    const BASE: &str = "Claude Code-credentials";
+    let suffixed = |dir: &str| {
+        let digest = ring::digest::digest(&ring::digest::SHA256, dir.as_bytes());
+        let hex: String = digest.as_ref()[..4].iter().map(|b| format!("{b:02x}")).collect();
+        format!("{BASE}-{hex}")
+    };
+    match std::env::var("CLAUDE_CONFIG_DIR").ok().filter(|d| !d.is_empty()) {
+        Some(dir) => vec![suffixed(&dir)],
+        None => vec![BASE.to_string(), suffixed(&claude_dir(env).to_string_lossy())],
+    }
+}
+
+/// The OAuth record: the file first, then (macOS) the Keychain. Only the fetch reads the
+/// secret; detection only asks whether an item exists, which never prompts.
+fn claude_creds(env: &Env) -> Option<Value> {
+    claude_file_creds(env).or_else(|| {
+        claude_keychain_services(env).iter().find_map(|service| {
+            let raw = keychain_secret(env, service)?;
+            serde_json::from_str::<Value>(raw.trim()).ok()?.get("claudeAiOauth").cloned()
+        })
+    })
+}
+
 fn claude_detect(env: &Env) -> Presence {
-    let token = claude_creds(env).and_then(|c| string(&c, &["accessToken"]));
-    if token.is_some() {
+    let token = claude_file_creds(env).and_then(|c| string(&c, &["accessToken"]));
+    let in_keychain =
+        || claude_dir(env).is_dir() && claude_keychain_services(env).iter().any(|s| keychain_has(env, s, None));
+    if token.is_some() || in_keychain() {
         Presence::Ready
     } else if claude_dir(env).is_dir() {
         Presence::NoLogin
@@ -129,7 +160,9 @@ fn codex_dir(env: &Env) -> PathBuf {
 }
 
 fn codex_logged_in(env: &Env) -> bool {
-    let Some(auth) = read_json(&codex_dir(env).join("auth.json")) else { return false };
+    // With `cli_auth_credentials_store = "keyring"` macOS keeps the login in the Keychain
+    // (service `Codex Auth`); the usage itself comes from `codex app-server` either way.
+    let Some(auth) = read_json(&codex_dir(env).join("auth.json")) else { return keychain_has(env, "Codex Auth", None) };
     if string(&auth, &["OPENAI_API_KEY"]).is_some() {
         return true;
     }
@@ -182,13 +215,13 @@ fn agy_signed_in(env: &Env) -> bool {
         env.at(&[".gemini", "jetski-standalone-oauth-token"]),
         env.at(&[".gemini", "antigravity-cli", "antigravity-oauth-token"]),
     ];
-    files.iter().any(|f| f.is_file()) || agy_credential_exists()
+    files.iter().any(|f| f.is_file()) || (env.system_store && agy_credential_exists(env))
 }
 
 /// On Windows the agy session lives in the Credential Manager; `cmdkey /list` only
 /// lists target names and never returns the secret.
 #[cfg(windows)]
-fn agy_credential_exists() -> bool {
+fn agy_credential_exists(_env: &Env) -> bool {
     util::command_for(std::path::Path::new("cmdkey"))
         .arg("/list:gemini:antigravity")
         .stdout(std::process::Stdio::piped())
@@ -197,10 +230,16 @@ fn agy_credential_exists() -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("gemini:antigravity"))
 }
 
+/// On macOS the same entry (service `gemini`, account `antigravity`) is a Keychain item.
+#[cfg(target_os = "macos")]
+fn agy_credential_exists(env: &Env) -> bool {
+    keychain_has(env, "gemini", Some("antigravity"))
+}
+
 /// On Linux the same keyring entry (service `gemini`, user `antigravity`) lives in
 /// the Secret Service. `SearchItems` only returns item paths, never a secret.
-#[cfg(not(windows))]
-fn agy_credential_exists() -> bool {
+#[cfg(not(any(windows, target_os = "macos")))]
+fn agy_credential_exists(_env: &Env) -> bool {
     let Some(gdbus) = util::which("gdbus") else { return false };
     util::command_for(&gdbus)
         .args(["call", "--session", "--timeout", "3", "--dest", "org.freedesktop.secrets"])
@@ -214,9 +253,36 @@ fn agy_credential_exists() -> bool {
 
 /// `SearchItems` reply: `([objectpath '/org/…/1'], @ao [])` — unlocked and locked
 /// item paths. Any path (even a locked one) means a session exists.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn secret_search_found(reply: &str) -> bool {
     reply.contains("/org/freedesktop/secrets/")
+}
+
+// ─── macOS Keychain ──────────────────────────────────────────────────────────
+// Through `/usr/bin/security`. Windows (Credential Manager) and Linux (Secret Service) keep
+// these logins in files or check their own stores above, so there both answer "no".
+
+/// Whether a generic-password item exists. Without `-w` only its attributes are read:
+/// no secret, no Keychain prompt.
+fn keychain_has(env: &Env, service: &str, account: Option<&str>) -> bool {
+    if !cfg!(target_os = "macos") || !env.system_store {
+        return false;
+    }
+    let mut args = vec!["find-generic-password", "-s", service];
+    args.extend(account.iter().flat_map(|a| ["-a", *a]));
+    run_capture(Path::new("/usr/bin/security"), &args, None, Duration::from_secs(3))
+        .is_ok_and(|out| out.contains("keychain:"))
+}
+
+/// The item's secret (`-w`). macOS may ask once whether `security` may read it.
+fn keychain_secret(env: &Env, service: &str) -> Option<String> {
+    if !cfg!(target_os = "macos") || !env.system_store {
+        return None;
+    }
+    let args = ["find-generic-password", "-s", service, "-w"];
+    run_capture(Path::new("/usr/bin/security"), &args, None, Duration::from_secs(30))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn agy_detect(env: &Env) -> Presence {

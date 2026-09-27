@@ -13,14 +13,16 @@ use std::path::{Path, PathBuf};
 /// Git Bash (MSYS) and Cygwin show mount points such as `/tmp` or `/usr`: those are turned
 /// into Windows paths with prefixes looked up once (`/c/...` is converted by NOBLE).
 /// The path is percent-encoded byte by byte (`LC_ALL=C`), so spaces, `%`, `;` and
-/// non-ASCII names survive the round trip through `parse_cwd_url`.
+/// non-ASCII names survive the round trip through `parse_cwd_url`. The encoding runs in a
+/// subshell, only for paths that need it: the C locale can never leak into the interactive
+/// shell, and the loop sticks to bash 3.2 syntax (macOS `/bin/bash`; no `printf -v`).
 macro_rules! bash_hook {
     () => {
         r#"if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]] && builtin command -v cygpath >/dev/null; then
   __noble_root=$(cygpath -m /) __noble_tmp=$(cygpath -m /tmp)
 fi
 __noble_osc7() {
-  local s=$? p=$PWD LC_ALL=C u= c i
+  local s=$? p=$PWD u
   if [[ -n $__noble_root ]]; then
     case $p in
       /[a-zA-Z] | /[a-zA-Z]/*) ;;
@@ -29,13 +31,18 @@ __noble_osc7() {
       /*) p=/${__noble_root%/}$p ;;
     esac
   fi
-  for (( i = 0; i < ${#p}; i++ )); do
-    c=${p:i:1}
-    case $c in
-      [-/:_.~a-zA-Z0-9]) u+=$c ;;
-      *) builtin printf -v c '%%%02X' "'$c"; u+=$c ;;
-    esac
-  done
+  case $p in
+    *[!-/:_.~a-zA-Z0-9]*)
+      u=$(LC_ALL=C; i=0; while (( i < ${#p} )); do
+        c=${p:i:1}
+        case $c in
+          [-/:_.~a-zA-Z0-9]) builtin printf '%s' "$c" ;;
+          *) builtin printf '%%%02X' "'$c" ;;
+        esac
+        (( i++ ))
+      done) ;;
+    *) u=$p ;;
+  esac
   builtin printf '\033]7;file://%s%s\a' "${HOSTNAME}" "$u"
   return $s
 }
@@ -90,6 +97,9 @@ ZDOTDIR=$__noble_zdotdir
 /// dumps and nested shells behave as without NOBLE.
 pub const ZSHRC: &str = r#"# NOBLE shell integration for zsh (generated; changes are overwritten).
 ZDOTDIR=$NOBLE_USER_ZDOTDIR
+# macOS /etc/zshrc sets HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history while ZDOTDIR is still
+# NOBLE's directory; the history belongs in the user's own file. (Linux has no such line.)
+[[ $HISTFILE == $__noble_zdotdir/.zsh_history ]] && HISTFILE=$ZDOTDIR/.zsh_history
 [[ -f $ZDOTDIR/.zshrc ]] && builtin source $ZDOTDIR/.zshrc
 unset __noble_zdotdir
 # The path is percent-encoded byte by byte (`LC_ALL=C`): spaces, `%`, `;` and non-ASCII

@@ -7,6 +7,17 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- macOS support (Apple Silicon and Intel): release binaries (`noble-macos-aarch64.tar.gz`,
+  `noble-macos-x86_64.tar.gz`, with `.sha256`), `noble update`, and the full test suite in CI.
+  - bash, zsh and fish start as login shells, as in Terminal.app and iTerm2, so `/etc/zprofile`, `~/.zprofile`
+    (Homebrew's PATH) and `~/.bash_profile` load; your own `shell_args` replace that. zsh keeps its history in
+    your own `~/.zsh_history` (macOS `/etc/zshrc` pointed it at NOBLE's folder).
+  - AI usage finds Claude Code, Codex and Antigravity logins in the Keychain (macOS may ask once whether
+    `security` may read Claude Code's).
+  - Over SSH into a Mac copied text goes out with OSC 52 and links are copied instead of opened on the Mac's
+    screen. The APFS system volumes no longer show the same disk twice, folder names match without regard to
+    case, and `file:line` links find VS Code, Cursor, Windsurf or Zed inside `/Applications` without a PATH
+    entry.
 - Two themes: Ayu Dark and Night Owl.
 - `ctrl+click` on a `file:line` path opens it at that line in Cursor, Windsurf or Zed when VS Code is not on
   the PATH (VS Code stays first; without any of them the file opens in the default app as before).
@@ -18,6 +29,9 @@ All notable changes to NOBLE are documented here. The format is based on
 - AI usage on Home: cached numbers (`~`) show their age next to the provider name (`~5m`, `~2h`); the error
   line under them no longer repeats it.
 - `noble update` run from the notice's tab now says to quit that NOBLE window and start `noble` again.
+- bash and zsh panes keep a folder reached through a symlink under its own name (`PWD` is passed on), and the
+  outer terminal's `TERMINFO` / iTerm2 variables no longer leak into panes.
+- The bash prompt hook works with bash 3.2 and never leaves the shell in the C locale.
 - The minimum supported Rust is now 1.95 (`rust-version`). 1.88 was no longer true: `sysinfo` 0.39 already
   needs 1.95 to build.
 

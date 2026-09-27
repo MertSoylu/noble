@@ -31,6 +31,12 @@ impl Clipboard {
 
     /// The system clipboard, opened on first use (and again after a failure).
     fn system(&mut self) -> Option<&mut arboard::Clipboard> {
+        // Over SSH the Mac's pasteboard is the remote one, not the user's: OSC 52 instead.
+        // (Linux has no display there, so arboard fails and OSC 52 is used the same way;
+        // Windows has no such case.)
+        if cfg!(target_os = "macos") && crate::util::over_ssh() {
+            return None;
+        }
         if self.inner.is_none() {
             self.inner = arboard::Clipboard::new().ok();
         }

@@ -22,11 +22,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
 - `cargo deny check` — RustSec advisories, license allow-list, bans and sources (`deny.toml`; install with
   `cargo install cargo-deny --locked`). A new dependency's license must be added to `deny.toml` after review.
-- CI: `.github/workflows/ci.yml` (Windows and Linux: fmt + clippy `-D warnings` + all tests, Linux with zsh and
-  fish installed; plus a static musl build, `cargo check` with the `rust-version` toolchain on both, and
-  cargo-deny), `audit.yml` (weekly advisory check), `release.yml` (Windows x86_64, Linux x86_64/ARM64 musl
-  binaries plus a `<archive>.sha256` each on a `v*` tag; `gh workflow run release.yml --ref <branch>` builds
-  them all without publishing)
+- CI: `.github/workflows/ci.yml` (Windows, Linux and macOS: fmt + clippy `-D warnings` + all tests, Linux with
+  zsh and fish installed, macOS with fish and the system bash 3.2; plus a static musl build, `cargo check` with
+  the `rust-version` toolchain on all three, and cargo-deny), `audit.yml` (weekly advisory check), `release.yml`
+  (Windows x86_64, Linux x86_64/ARM64 musl, macOS ARM64/x86_64 binaries plus a `<archive>.sha256` each on a
+  `v*` tag; `gh workflow run release.yml --ref <branch>` builds them all without publishing)
 - MSRV: `rust-version` in `Cargo.toml` is the oldest Rust the CI `msrv` job builds with; raise it (and the
   README/CONTRIBUTING mentions) when a dependency needs a newer one
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
@@ -43,18 +43,21 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `~/.cargo/bin/noble-dev(.exe)`; they never touch the stable `noble` and work while noble-dev is running.
   `noble-dev` shows "NOBLE dev" in the top bar and saves its session to `session-dev.json`
   (`util::is_dev_build`); config and data are shared.
-- **Windows and Linux are equal platforms.** Every feature must work on both, or degrade gracefully where the
-  OS lacks something (e.g. no desktop over SSH: `util::has_desktop`). When touching OS-specific code:
+- **Windows, Linux and macOS are equal platforms.** Every feature must work on all three, or degrade gracefully
+  where the OS lacks something (e.g. no desktop over SSH: `util::has_desktop`). This machine has no Mac or
+  Linux: those run in CI only (a local `cargo clippy --target aarch64-apple-darwin` catches compile errors).
+  macOS specifics: login shells by default, the Keychain for AI logins (`keychain_has`), Option as Meta for
+  `alt+` keys, `/var` → `/private/var`, case-insensitive paths, `/bin/bash` 3.2. When touching OS-specific code:
   - Keep platform branches small and side by side (`cfg!(windows)` / `#[cfg(...)]` in the same function), each
     with a comment naming what the other platform does; never leave a platform with a silent no-op.
   - Name things by what they do, not by the OS (paths via `dirs`, programs via `util::which`, `Path` joins —
     no hard-coded `\` or `/`, `.exe` or drive letters outside Windows-only branches).
-  - Shells: PowerShell and cmd on Windows; bash, zsh and fish everywhere (Git Bash too); a new shell feature
+  - Shells: PowerShell and cmd on Windows; bash (3.2 too), zsh and fish everywhere (Git Bash too); a new shell feature
     needs all of them (`term/pane.rs` `ShellKind`, `term/integration.rs`).
-  - Tests that need a real shell or tool run on both platforms, choosing the command per OS, and cover every
-    installed shell; a Windows-only or Linux-only test returns early on the other OS with a comment saying
-    why. Both CI jobs must stay green — a change is not done while either fails.
-  - User-facing docs (README, config comments, UI text) describe both platforms.
+  - Tests that need a real shell or tool run on every platform, choosing the command per OS, and cover every
+    installed shell; a platform-specific test returns early on the others with a comment saying why. Every CI
+    job must stay green — a change is not done while one fails.
+  - User-facing docs (README, config comments, UI text) describe all three platforms.
 - README images are generated with `cargo run --example screenshots` (`docs/assets/*.svg`, fake data);
   regenerate them when a screen shown in the README changes. The banner (`docs/assets/banner.svg`) is
   hand-written.

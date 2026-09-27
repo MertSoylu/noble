@@ -35,7 +35,7 @@ pub fn read() -> Option<Battery> {
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+        let out = std::process::Command::new("/usr/bin/pmset").args(["-g", "batt"]).output().ok()?;
         parse_pmset(&String::from_utf8_lossy(&out.stdout))
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]

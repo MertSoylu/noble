@@ -283,6 +283,10 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
                 .list()
                 .iter()
                 .filter(|d| d.total_space() > 0)
+                // macOS lists the APFS system volumes (`/System/Volumes/Data`, `VM`, `Preboot`)
+                // next to `/`: they share its container and would show the same disk again.
+                // Windows and Linux have no such mounts.
+                .filter(|d| !(cfg!(target_os = "macos") && d.mount_point().starts_with("/System/Volumes")))
                 .map(|d| DiskInfo {
                     mount: d.mount_point().display().to_string(),
                     total: d.total_space(),

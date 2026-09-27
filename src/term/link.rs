@@ -146,6 +146,24 @@ fn line_editor(target: &str, find: impl Fn(&str) -> Option<PathBuf>) -> Option<(
     })
 }
 
+/// macOS: an editor installed by dragging it to Applications has its command-line tool
+/// inside the app bundle, often without a PATH entry ("Install 'code' command" is a
+/// separate step). Windows and Linux installers put the command on PATH.
+fn app_bundle_cli(name: &str) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let inner = match name {
+        "code" => "Visual Studio Code.app/Contents/Resources/app/bin/code",
+        "cursor" => "Cursor.app/Contents/Resources/app/bin/cursor",
+        "windsurf" => "Windsurf.app/Contents/Resources/app/bin/windsurf",
+        "zed" => "Zed.app/Contents/MacOS/cli",
+        _ => return None,
+    };
+    let user_apps = dirs::home_dir().map(|h| h.join("Applications"));
+    [Some(PathBuf::from("/Applications")), user_apps].into_iter().flatten().map(|d| d.join(inner)).find(|p| p.is_file())
+}
+
 /// Opens a link in an external app: URLs in the browser, `file:line` in the first editor
 /// found that can jump to a line (VS Code, Cursor, Windsurf, Zed), other files with the
 /// system's default application.
@@ -180,7 +198,9 @@ pub fn open(link: &Link) -> Result<(), String> {
                 && let Some(line) = line
             {
                 let target = format!("{}:{}:{}", path.display(), line, col.unwrap_or(1));
-                if let Some((program, args)) = line_editor(&target, crate::util::which) {
+                if let Some((program, args)) =
+                    line_editor(&target, |n| crate::util::which(n).or_else(|| app_bundle_cli(n)))
+                {
                     let mut c = crate::util::command_for(&program);
                     c.args(args);
                     return spawn(c);

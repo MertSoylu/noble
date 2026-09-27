@@ -123,6 +123,8 @@ fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
         ("windows", "x86_64") => Some("noble-windows-x86_64.zip"),
         ("linux", "x86_64") => Some("noble-linux-x86_64.tar.gz"),
         ("linux", "aarch64") => Some("noble-linux-aarch64.tar.gz"),
+        ("macos", "aarch64") => Some("noble-macos-aarch64.tar.gz"),
+        ("macos", "x86_64") => Some("noble-macos-x86_64.tar.gz"),
         _ => None,
     }
 }
@@ -215,7 +217,7 @@ fn old_paths(exe: &Path) -> impl Iterator<Item = PathBuf> {
 /// The system `tar` (Windows 10+ `tar.exe` opens zips too).
 fn tar_program() -> PathBuf {
     // Windows: Git Bash's GNU tar cannot open zips, so System32's bsdtar is preferred.
-    // Linux: whatever `tar` is on PATH.
+    // Linux and macOS: whatever `tar` is on PATH (bsdtar on macOS, which reads .tar.gz as well).
     std::env::var_os("SystemRoot")
         .filter(|_| cfg!(windows))
         .map(|r| PathBuf::from(r).join("System32").join("tar.exe"))
@@ -300,7 +302,8 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
             )),
         };
     }
-    // Linux: it can be deleted right away. Windows: the running binary cannot, `cleanup_old` does it
+    // Linux and macOS: it can be deleted right away (the new binary is a new file, so macOS never
+    // sees a signed binary change in place). Windows: the running binary cannot, `cleanup_old` does it
     // on the next start.
     let _ = std::fs::remove_file(&old);
     Ok(())
@@ -728,7 +731,9 @@ mod tests {
         assert_eq!(asset_name_for("windows", "x86_64"), Some("noble-windows-x86_64.zip"));
         assert_eq!(asset_name_for("linux", "x86_64"), Some("noble-linux-x86_64.tar.gz"));
         assert_eq!(asset_name_for("linux", "aarch64"), Some("noble-linux-aarch64.tar.gz"));
-        assert_eq!(asset_name_for("macos", "aarch64"), None);
+        assert_eq!(asset_name_for("macos", "aarch64"), Some("noble-macos-aarch64.tar.gz"));
+        assert_eq!(asset_name_for("macos", "x86_64"), Some("noble-macos-x86_64.tar.gz"));
+        assert_eq!(asset_name_for("freebsd", "x86_64"), None);
         assert_eq!(asset_name(), asset_name_for(std::env::consts::OS, std::env::consts::ARCH));
         // Every archive release.yml builds is the one `noble update` asks for on that target.
         let yml =
@@ -737,11 +742,17 @@ mod tests {
         let targets: Vec<String> =
             yml.lines().filter_map(|l| field(l, "target:")).filter(|t| !t.contains('$')).collect();
         let archives: Vec<String> = yml.lines().filter_map(|l| field(l, "archive:")).collect();
-        assert_eq!(targets.len(), 3, "{targets:?}");
+        assert_eq!(targets.len(), 5, "{targets:?}");
         assert_eq!(targets.len(), archives.len());
         for (target, archive) in targets.iter().zip(&archives) {
             let arch = target.split('-').next().unwrap();
-            let os = if target.contains("windows") { "windows" } else { "linux" };
+            let os = if target.contains("windows") {
+                "windows"
+            } else if target.contains("apple-darwin") {
+                "macos"
+            } else {
+                "linux"
+            };
             assert_eq!(asset_name_for(os, arch), Some(archive.as_str()), "{target}");
         }
         // Each archive is published with the checksum file `noble update` verifies it against.

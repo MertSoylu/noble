@@ -125,6 +125,9 @@ pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
 pub struct Env {
     pub home: PathBuf,
     pub agent: ureq::Agent,
+    /// `home` is the user's real home: the system credential stores (Keychain, Credential
+    /// Manager, Secret Service) belong to it. A test's fake home never reaches them.
+    pub system_store: bool,
 }
 
 impl Env {
@@ -134,7 +137,8 @@ impl Env {
             .http_status_as_error(false)
             .user_agent("noble/1.0")
             .build();
-        Env { home, agent: ureq::Agent::new_with_config(config) }
+        let system_store = dirs::home_dir().as_deref() == Some(home.as_path());
+        Env { home, agent: ureq::Agent::new_with_config(config), system_store }
     }
 
     pub fn var(&self, key: &str) -> Option<String> {

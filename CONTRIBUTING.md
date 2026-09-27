@@ -85,10 +85,11 @@ cargo deny check                  # advisories, licenses, sources (`cargo instal
   cargo test --release --test render heavy_output -- --ignored --nocapture # 50k lines of output
   ```
 
-CI runs `fmt`, `clippy -D warnings` and the full suite on Windows and Linux, a static musl build, a check with
-the oldest supported Rust (`rust-version` in `Cargo.toml`) on both, and `cargo deny check` (RustSec advisories,
-the license allow-list in `deny.toml`, crates.io only). The advisory check also runs weekly (`audit.yml`). A new
-dependency with a license not yet in `deny.toml` fails CI until it is reviewed and added there.
+CI runs `fmt`, `clippy -D warnings` and the full suite on Windows, Linux and macOS, a static musl build, a check
+with the oldest supported Rust (`rust-version` in `Cargo.toml`) on all three, and `cargo deny check` (RustSec
+advisories, the license allow-list in `deny.toml`, crates.io only). The advisory check also runs weekly
+(`audit.yml`). A new dependency with a license not yet in `deny.toml` fails CI until it is reviewed and added
+there.
 
 ### Screenshots
 

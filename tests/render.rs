@@ -2446,10 +2446,12 @@ mod shells {
 
     impl IsolatedShell {
         /// `None` when the shell is not installed. `env` is exported by the wrapper as well.
+        /// `shell` is a name looked up on PATH or a full path (`/bin/bash`).
         fn new(shell: &'static str, case: &str, env: &[(&str, &str)]) -> Option<IsolatedShell> {
             use std::os::unix::fs::PermissionsExt;
             let real = noble::util::which(shell)?;
-            let root = std::env::temp_dir().join(format!("noble-shell-{case}-{shell}-{}", std::process::id()));
+            let tag = shell.replace('/', "_");
+            let root = std::env::temp_dir().join(format!("noble-shell-{case}-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let home = root.join("home");
             std::fs::create_dir_all(home.join(".config").join("fish")).unwrap();
@@ -2464,7 +2466,8 @@ mod shells {
                 script.push_str(&format!("export {k}={}\n", q(v)));
             }
             script.push_str(&format!("exec {} \"$@\"\n", q(&real.display().to_string())));
-            let wrapper = root.join("bin").join(shell);
+            // Named like the shell, so NOBLE recognizes its kind.
+            let wrapper = root.join("bin").join(Path::new(shell).file_name().unwrap());
             std::fs::write(&wrapper, script).unwrap();
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
             Some(IsolatedShell { shell, home, wrapper })
@@ -2533,7 +2536,7 @@ mod shells {
     /// space are reported by every installed bash/zsh/fish and decoded back to the same path.
     #[test]
     fn cwd_with_special_characters_is_tracked() {
-        for shell in ["bash", "zsh", "fish"] {
+        for shell in bashes().into_iter().chain(["zsh", "fish"]) {
             let Some(sh) = IsolatedShell::new(shell, "chars", &[]) else { continue };
             let base = sh.home.join("dir with spaces ü 日本");
             let odd = base.join("100% #1;x? ");
@@ -2545,6 +2548,25 @@ mod shells {
             assert_eq!(app.panes[&id].cwd(), odd, "{}", sh.shell);
             app.run(Action::CloseTab);
         }
+    }
+
+    /// bash on PATH, and on macOS also the system `/bin/bash` (3.2), which Homebrew's bash 5
+    /// usually hides. Linux has one bash.
+    fn bashes() -> Vec<&'static str> {
+        let mut list = vec!["bash"];
+        if cfg!(target_os = "macos") && noble::util::which("bash").is_some_and(|b| b != Path::new("/bin/bash")) {
+            list.push("/bin/bash");
+        }
+        list
+    }
+
+    /// `major * 10 + minor` of a bash, e.g. 32 for 3.2 or 52 for 5.2.
+    fn bash_version(shell: &str) -> u32 {
+        let out = std::process::Command::new(noble::util::which(shell).unwrap())
+            .args(["-c", "echo $((BASH_VERSINFO[0] * 10 + BASH_VERSINFO[1]))"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
     }
 
     /// Types `cd <dir>` and checks both the OSC 7 report and the user's own hook marker.
@@ -2560,17 +2582,27 @@ mod shells {
         let target = std::env::temp_dir().join(format!("noble-hooks-{}", std::process::id()));
         std::fs::create_dir_all(&target).unwrap();
         // bash: a string PROMPT_COMMAND ending in a comment, and the bash 5.1+ array form.
-        for (case, rc) in [
+        let cases = [
             ("bash-str", "PROMPT_COMMAND='__u=$((__u+1)); echo \"UHOOK$__u\" # user hook'\n"),
             ("bash-arr", "__u=0\nPROMPT_COMMAND=('__u=$((__u+1))' 'echo \"UHOOK$__u\"')\n"),
-        ] {
-            let Some(sh) = IsolatedShell::new("bash", case, &[]) else { break };
-            sh.write(".bashrc", rc);
-            let (mut app, id) = sh.open(&[], &sh.home);
-            wait_cwd(&mut app, id, &sh.home, case);
-            wait_screen(&mut app, id, "UHOOK1", case);
-            cd_and_check(&mut app, id, &target, "UHOOK2", case);
-            app.run(Action::CloseTab);
+        ];
+        for bash in bashes() {
+            for (case, rc) in cases {
+                // Older bash (macOS 3.2) runs only the first element of an array PROMPT_COMMAND.
+                if case == "bash-arr" && bash_version(bash) < 51 {
+                    continue;
+                }
+                let Some(sh) = IsolatedShell::new(bash, case, &[]) else { break };
+                sh.write(".bashrc", rc);
+                // macOS starts bash as a login shell, which reads ~/.bash_profile; users source
+                // ~/.bashrc from there. (Linux starts it with the rc file only.)
+                sh.write(".bash_profile", "[ -f ~/.bashrc ] && . ~/.bashrc\n");
+                let (mut app, id) = sh.open(&[], &sh.home);
+                wait_cwd(&mut app, id, &sh.home, case);
+                wait_screen(&mut app, id, "UHOOK1", case);
+                cd_and_check(&mut app, id, &target, "UHOOK2", case);
+                app.run(Action::CloseTab);
+            }
         }
         if let Some(sh) = IsolatedShell::new("zsh", "hooks", &[]) {
             sh.write(
