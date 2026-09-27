@@ -2244,8 +2244,11 @@ fn check_hostile_file_name(shell: &str) {
     let file = dir.join(&name);
     let needle = format!("HOSTILE_OK_{}", std::process::id());
     std::fs::write(&file, format!("{needle}\n")).unwrap();
+    // The editor is a native program, so it gets the argument as it is. PowerShell's own
+    // cmdlets would read `\` as a path separator on Linux (even with -LiteralPath), so there
+    // the native `cat` stands in for the editor; on Windows `cat` is a Get-Content alias.
     let reader = match label.as_str() {
-        "pwsh" | "powershell" => "Get-Content -LiteralPath",
+        "pwsh" | "powershell" if cfg!(windows) => "Get-Content -LiteralPath",
         "cmd" => "type",
         _ => "cat",
     };
