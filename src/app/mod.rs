@@ -97,15 +97,22 @@ pub enum PromptPurpose {
     SaveWorkspace,
     /// New root folder to scan projects in.
     AddRoot,
+    /// One folder added as a project by hand.
+    AddProject,
 }
 
 impl PromptPurpose {
     /// Maximum input length (paths can be long).
     pub fn max_len(&self) -> usize {
         match self {
-            PromptPurpose::AddRoot => 260,
+            PromptPurpose::AddRoot | PromptPurpose::AddProject => 260,
             _ => 40,
         }
+    }
+
+    /// The add prompt (either mode): Tab switches between adding a project and a folder to scan.
+    pub fn is_add(&self) -> bool {
+        matches!(self, PromptPurpose::AddRoot | PromptPurpose::AddProject)
     }
 }
 
@@ -113,6 +120,20 @@ pub struct Prompt {
     pub title: String,
     pub value: String,
     pub purpose: PromptPurpose,
+}
+
+impl Prompt {
+    /// Switches the add prompt between one project (`project`) and a folder to scan; the
+    /// typed path stays (Tab or a click on the choice line).
+    pub fn set_add_mode(&mut self, project: bool) {
+        let (title, purpose) = if project {
+            ("ADD PROJECT", PromptPurpose::AddProject)
+        } else {
+            ("ADD FOLDER TO SCAN", PromptPurpose::AddRoot)
+        };
+        self.title = title.into();
+        self.purpose = purpose;
+    }
 }
 
 /// Terminal color scheme selector: previews while navigating, esc reverts.
@@ -213,6 +234,8 @@ pub enum Hit {
     PaneTitle(PaneId),
     /// Quick-action button on a project row (row, action).
     ProjectAct(usize, ProjectAct),
+    /// Add prompt: switch to adding one project (`true`) or a folder to scan (`false`).
+    PromptMode(bool),
     /// Update notice at the bottom right: update / dismiss.
     Update,
     UpdateDismiss,
@@ -353,6 +376,8 @@ pub struct Services {
     pub rescan: Sender<ProjectReq>,
     pub ai_refresh: Sender<crate::ai::AiReq>,
     pub proj_cfg: Arc<Mutex<config::ProjectsCfg>>,
+    /// Hidden and manually added projects for the scan thread (kept in sync with `ui_state`).
+    pub proj_manual: Arc<Mutex<crate::projects::Manual>>,
     pub ai_cfg: Arc<Mutex<config::AiCfg>>,
 }
 
@@ -505,20 +530,24 @@ impl App {
         let (sensor_tx, sensor_rx) = std::sync::mpsc::channel();
         sensors::spawn(tx.clone(), sensor_rx);
         let proj_cfg = Arc::new(Mutex::new(cfg.projects.clone()));
+        // Read before the first scan so hidden/added projects apply to it.
+        let ui_state = crate::store::UiState::load(paths.data_file("state.json"));
+        let proj_manual = Arc::new(Mutex::new(ui_state.manual_projects()));
         let (rescan_tx, rescan_rx) = std::sync::mpsc::channel();
-        crate::projects::spawn(proj_cfg.clone(), tx.clone(), rescan_rx);
+        crate::projects::spawn(proj_cfg.clone(), proj_manual.clone(), tx.clone(), rescan_rx);
         let ai_cfg = Arc::new(Mutex::new(cfg.ai.clone()));
         let (ai_tx, ai_rx) = std::sync::mpsc::channel();
         ai::spawn(ai_cfg.clone(), paths.data_file("ai-cache.json"), tx.clone(), ai_rx);
 
-        let services = Services { sensor_req: sensor_tx, rescan: rescan_tx, ai_refresh: ai_tx, proj_cfg, ai_cfg };
+        let services =
+            Services { sensor_req: sensor_tx, rescan: rescan_tx, ai_refresh: ai_tx, proj_cfg, proj_manual, ai_cfg };
         let cache = ai::load_cache(&paths.data_file("ai-cache.json"));
         let mut app = App::build(cfg, paths, Some(services), tx, size, recent, workspaces);
         app.ai_installed = ai::installed_providers();
         app.dev = crate::util::is_dev_build();
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
-        app.ui_state = crate::store::UiState::load(app.paths.data_file("state.json"));
+        app.ui_state = ui_state;
         crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
             // Hooks from an older NOBLE get the events added since (e.g. the subagent ones).
@@ -1055,6 +1084,8 @@ impl App {
     }
 
     fn set_projects(&mut self, mut list: Vec<Project>) {
+        // The scan thread already drops hidden projects; one hidden since it started is dropped here.
+        self.ui_state.manual_projects().filter(&mut list);
         // Keep the previous git info (so a re-scan does not flicker).
         for p in &mut list {
             if let Some(old) = self.projects.iter().find(|o| o.path == p.path) {
@@ -1250,7 +1281,7 @@ impl App {
             .skip(from)
             .take(60)
             .map(|i| &self.projects[*i])
-            .filter(|p| p.git.is_none() && !self.git_requested.contains_key(&p.path))
+            .filter(|p| p.repo && p.git.is_none() && !self.git_requested.contains_key(&p.path))
             .take(8)
             .map(|p| p.path.clone())
             .collect();

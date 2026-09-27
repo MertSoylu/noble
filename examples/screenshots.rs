@@ -215,6 +215,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         branch: Some(branch.into()),
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
+        repo: true,
     };
     app.handle(AppEvent::Projects(vec![
         mk(

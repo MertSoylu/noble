@@ -10,7 +10,6 @@ use ratatui::style::{Modifier, Style};
 use super::hud;
 use crate::ai::{ProviderState, Status};
 use crate::app::{AgentState, App, Hit, ProjectAct};
-use crate::projects::GitInfo;
 use crate::theme::Theme;
 use crate::util;
 
@@ -215,7 +214,13 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             buf,
             x,
             y + 1,
-            &[("press ", th.dim()), ("a", th.accent_bold()), (" to add a folder where your code lives", th.dim())],
+            &[
+                ("press ", th.dim()),
+                ("a", th.accent_bold()),
+                (" to add a folder where your code lives, ", th.dim()),
+                ("A", th.accent_bold()),
+                (" for one project", th.dim()),
+            ],
             w,
         );
     } else if vis.is_empty() {
@@ -283,7 +288,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             if status_w > 0 {
                 cx = hud::put(buf, cx, ry, " ", st(th.dim()), 1);
                 let end = cx + status_w;
-                for (text, color) in git_badge(p.git.as_ref(), status_w >= 16, th) {
+                for (text, color) in git_badge(p, status_w >= 16, th) {
                     cx = hud::put(buf, cx, ry, &text, st(Style::default().fg(color)), end.saturating_sub(cx));
                 }
                 cx = hud::put(
@@ -343,7 +348,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 None => util::tilde(&p.path),
             };
             let mut cx = x + 1;
-            for (text, color) in git_summary(p.git.as_ref(), th) {
+            for (text, color) in git_summary(p, th) {
                 cx = hud::put(buf, cx, by - 2, &text, Style::default().fg(color), (x + w).saturating_sub(cx));
                 cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
             }
@@ -395,7 +400,8 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
     y += 1;
     let rows = area.bottom().saturating_sub(y);
     let Some(g) = p.git.as_ref() else {
-        hud::put(buf, x, y + 1, "checking git status…", th.dim(), w);
+        let text = if p.repo { "checking git status…" } else { "not a git repository" };
+        hud::put(buf, x, y + 1, text, th.dim(), w);
         return;
     };
     // Files in columns; the column width follows the longest path.
@@ -475,8 +481,12 @@ fn plural(n: u32, one: &str, many: &str) -> String {
 
 /// Short git status on a project row: "● 3 changed ↑1 ↓2", "✓ clean". In a
 /// narrow column the words are dropped ("● 3 ↑1").
-fn git_badge(git: Option<&GitInfo>, wide: bool, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
-    let Some(g) = git else { return vec![("…".into(), th.dim)] };
+fn git_badge(p: &crate::projects::Project, wide: bool, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
+    if !p.repo {
+        // A folder added by hand that is not a git repository: nothing to check.
+        return vec![((if wide { "no git" } else { "–" }).into(), th.dim)];
+    }
+    let Some(g) = p.git.as_ref() else { return vec![("…".into(), th.dim)] };
     let mut v = Vec::new();
     if g.dirty > 0 {
         v.push((if wide { format!("● {} changed", g.dirty) } else { format!("● {}", g.dirty) }, th.warn));
@@ -495,8 +505,11 @@ fn git_badge(git: Option<&GitInfo>, wide: bool, th: &Theme) -> Vec<(String, rata
 }
 
 /// The selected project's git status, as a sentence.
-fn git_summary(git: Option<&GitInfo>, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
-    let Some(g) = git else { return vec![("checking git status…".into(), th.dim)] };
+fn git_summary(p: &crate::projects::Project, th: &Theme) -> Vec<(String, ratatui::style::Color)> {
+    if !p.repo {
+        return vec![("not a git repository".into(), th.dim)];
+    }
+    let Some(g) = p.git.as_ref() else { return vec![("checking git status…".into(), th.dim)] };
     let mut v = Vec::new();
     if g.dirty > 0 {
         let mut text = plural(g.dirty, "uncommitted change", "uncommitted changes");

@@ -15,6 +15,8 @@ pub struct Project {
     pub branch: Option<String>,
     pub last_active: Option<SystemTime>,
     pub git: Option<GitInfo>,
+    /// A git repository. Folders added by hand may be plain folders: they are listed without git status.
+    pub repo: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -172,6 +174,7 @@ pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usiz
                 last_active: last_active(&gd),
                 path: dir,
                 git: None,
+                repo: true,
             });
             continue;
         }
@@ -193,6 +196,68 @@ pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usiz
     }
     sort_projects(&mut out);
     out
+}
+
+/// A folder added by hand: a git repo reads its branch and activity like a scanned one, any
+/// other folder is listed without git (its modification time as the activity). `None` when
+/// the folder is gone.
+pub fn project_at(dir: &Path) -> Option<Project> {
+    let meta = std::fs::metadata(dir).ok().filter(|m| m.is_dir())?;
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string());
+    Some(match git_dir(dir) {
+        Some(gd) => Project {
+            name,
+            branch: read_branch(&gd),
+            last_active: last_active(&gd),
+            path: dir.to_path_buf(),
+            git: None,
+            repo: true,
+        },
+        None => Project {
+            name,
+            branch: None,
+            last_active: meta.modified().ok(),
+            path: dir.to_path_buf(),
+            git: None,
+            repo: false,
+        },
+    })
+}
+
+/// Hidden and manually added projects (`state.json`), shared with the scan thread.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Manual {
+    pub hidden: Vec<String>,
+    pub added: Vec<PathBuf>,
+}
+
+impl Manual {
+    pub fn is_hidden(&self, path: &Path) -> bool {
+        self.hidden.iter().any(|h| util::same_path(Path::new(h), path))
+    }
+
+    /// Drops the hidden projects from a list (cheap: paths only, no file system access).
+    pub fn filter(&self, list: &mut Vec<Project>) {
+        if !self.hidden.is_empty() {
+            list.retain(|p| !self.is_hidden(&p.path));
+        }
+    }
+
+    /// The scan result as listed: hidden projects dropped, manually added folders merged in
+    /// once (a folder the scan found too is not listed twice; a folder that is gone is skipped).
+    pub fn apply(&self, mut list: Vec<Project>) -> Vec<Project> {
+        self.filter(&mut list);
+        for dir in &self.added {
+            if self.is_hidden(dir) || list.iter().any(|p| util::same_path(&p.path, dir)) {
+                continue;
+            }
+            if let Some(p) = project_at(dir) {
+                list.push(p);
+            }
+        }
+        sort_projects(&mut list);
+        list
+    }
 }
 
 pub fn sort_projects(list: &mut [Project]) {
@@ -320,7 +385,12 @@ pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Pro
 
 /// Scan + git status thread. Rescans when `Rescan` arrives or the interval is
 /// up; `Refresh` updates a single repo's status in between.
-pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: std::sync::mpsc::Receiver<ProjectReq>) {
+pub fn spawn(
+    cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>,
+    manual: std::sync::Arc<std::sync::Mutex<Manual>>,
+    tx: Tx,
+    req: std::sync::mpsc::Receiver<ProjectReq>,
+) {
     use std::sync::mpsc::RecvTimeoutError;
     let _ = std::thread::Builder::new().name("projects".into()).spawn(move || {
         let git = util::which("git");
@@ -330,10 +400,11 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: st
             let cfg = cfg.lock().map(|c| c.clone()).unwrap_or_default();
             let roots = roots_from(&cfg);
             let list = scan(&roots, cfg.max_depth.clamp(1, 6), &cfg.exclude, 300);
+            let list = manual.lock().map(|m| m.clone()).unwrap_or_default().apply(list);
             let targets: Vec<PathBuf> = list
                 .iter()
                 .take(EAGER_GIT)
-                .filter(|p| seen.get(&p.path) != Some(&p.last_active))
+                .filter(|p| p.repo && seen.get(&p.path) != Some(&p.last_active))
                 .map(|p| p.path.clone())
                 .collect();
             seen = list.iter().map(|p| (p.path.clone(), p.last_active)).collect();
@@ -368,7 +439,10 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<ProjectsCfg>>, tx: Tx, req: st
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 match req.recv_timeout(left) {
                     Ok(ProjectReq::Refresh(path)) => {
+                        // A plain folder (added by hand) has no status; inside another repo
+                        // `git status` would report that repo's instead.
                         if let Some(git) = &git
+                            && git_dir(&path).is_some()
                             && let Some(info) = git_info(&path, git)
                             && tx.send(AppEvent::Git(path, info)).is_err()
                         {
@@ -457,10 +531,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Hidden projects leave the scan result, added folders join it once (a git repo or a
+    /// plain folder), and an added folder that no longer exists is skipped.
+    #[test]
+    fn manual_projects_filter_and_merge() {
+        let base = std::env::temp_dir().join(format!("noble-manual-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for repo in ["alpha", "junk", "deep/a/b/c/d/far"] {
+            std::fs::create_dir_all(base.join(repo).join(".git")).unwrap();
+            std::fs::write(base.join(repo).join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        std::fs::create_dir_all(base.join("notes")).unwrap();
+        let scanned = scan(std::slice::from_ref(&base), 2, &[], 100);
+        let names = |l: &[Project]| {
+            let mut v: Vec<String> = l.iter().map(|p| p.name.clone()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&scanned), ["alpha", "junk"]);
+        let upper = |p: PathBuf| PathBuf::from(p.to_string_lossy().to_uppercase());
+        let manual = Manual {
+            hidden: vec![base.join("junk").to_string_lossy().into_owned()],
+            added: vec![
+                base.join("deep/a/b/c/d/far"),
+                base.join("notes"),
+                base.join("gone"),
+                // Found by the scan too: listed once.
+                base.join("alpha"),
+                // Same folder with another case (Windows/macOS) or a different folder (Linux).
+                if cfg!(any(windows, target_os = "macos")) { upper(base.join("alpha")) } else { base.join("alpha") },
+            ],
+        };
+        let list = manual.apply(scanned);
+        assert_eq!(names(&list), ["alpha", "far", "notes"]);
+        let far = list.iter().find(|p| p.name == "far").unwrap();
+        assert!(far.repo && far.branch.as_deref() == Some("main"));
+        let notes = list.iter().find(|p| p.name == "notes").unwrap();
+        assert!(!notes.repo && notes.branch.is_none() && notes.last_active.is_some());
+        // An added folder that is also hidden stays hidden.
+        let both = Manual { hidden: vec![base.join("notes").to_string_lossy().into_owned()], added: manual.added };
+        assert!(!both.apply(Vec::new()).iter().any(|p| p.name == "notes"));
+        assert!(project_at(&base.join("gone")).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn containing_project_is_deepest_match() {
-        let mk =
-            |p: &str| Project { name: p.into(), path: PathBuf::from(p), branch: None, last_active: None, git: None };
+        let mk = |p: &str| Project {
+            name: p.into(),
+            path: PathBuf::from(p),
+            branch: None,
+            last_active: None,
+            git: None,
+            repo: true,
+        };
         let list = vec![mk("/code/app"), mk("/code/app/vendor/lib"), mk("/code/apple")];
         let find = |c: &str| project_containing(&list, Path::new(c)).map(|p| p.name.as_str());
         assert_eq!(find("/code/app"), Some("/code/app"));

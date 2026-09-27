@@ -6,6 +6,15 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Home: remove a project from the list for good with ⋯ → **Remove from list** (or "Remove Selected Project
+  from List" in the command palette). It stays hidden after a rescan and a restart, is unpinned, and the folder
+  itself is not touched.
+- Home: `A` adds one folder as a project ("Add Project…" in the palette), even outside the scanned folders, too
+  deep for the scan or without git (listed as "no git"). It stays listed after rescans and restarts, and adding
+  a removed project brings it back. In the add prompt `tab` (or a click) switches between one project and a
+  folder to scan (`a`). Both lists live in `state.json`; a folder that no longer exists is skipped.
+
 ### Fixed
 - Claude Code status hooks: a session whose subagents (background ones too) are still running stays
   **working** instead of turning into **needs you** / **your turn** when Claude's main answer ends, and no

@@ -25,6 +25,7 @@ pub enum MenuCmd {
     Launch(usize, PathBuf),
     GitPull(PathBuf),
     TogglePin(PathBuf),
+    RemoveProject(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -108,17 +109,21 @@ impl App {
 
     pub fn open_project_menu(&mut self, path: PathBuf, x: u16, y: u16) {
         let Some(p) = self.projects.iter().find(|p| p.path == path) else { return };
-        let name = p.name.clone();
+        let (name, repo) = (p.name.clone(), p.repo);
         let mut items = vec![item("Open terminal", "⏎", MenuCmd::OpenProject(path.clone()))];
         for (i, l) in self.quick_launchers() {
             items.push(item(&format!("Start {}", l.name), &l.key, MenuCmd::Launch(i, path.clone())));
         }
         items.push(item("Open in VS Code", "", MenuCmd::OpenCode(path.clone())));
         items.push(item("Open folder", "o", MenuCmd::OpenFolder(path.clone())));
-        items.push(item("Git pull", "", MenuCmd::GitPull(path.clone())));
+        if repo {
+            items.push(item("Git pull", "", MenuCmd::GitPull(path.clone())));
+        }
         items.push(item("Copy path", "", MenuCmd::CopyText(path.display().to_string())));
         let pin = if self.ui_state.is_pinned(&path) { "Unpin" } else { "Pin to top" };
-        items.push(item(pin, "", MenuCmd::TogglePin(path)));
+        items.push(item(pin, "", MenuCmd::TogglePin(path.clone())));
+        // Hides it from the list for good (the folder is not touched); A adds it back.
+        items.push(item("Remove from list", "", MenuCmd::RemoveProject(path)));
         self.open_menu(name, x, y, items);
     }
 
@@ -160,6 +165,7 @@ impl App {
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
+            MenuCmd::RemoveProject(path) => self.remove_project(&path),
         }
     }
 

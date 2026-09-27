@@ -179,6 +179,8 @@ pub enum Action {
     ScrollDown,
     Search,
     AddProjectFolder,
+    AddProject,
+    RemoveProject,
     SendPrefix,
     MoveTabLeft,
     MoveTabRight,
@@ -189,7 +191,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 50] = [
+    pub const ALL: [Action; 52] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -233,6 +235,8 @@ impl Action {
         Action::ScrollDown,
         Action::Search,
         Action::AddProjectFolder,
+        Action::AddProject,
+        Action::RemoveProject,
         Action::SendPrefix,
         Action::MoveTabLeft,
         Action::MoveTabRight,
@@ -281,6 +285,8 @@ impl Action {
                     Action::ScrollDown => "scroll_down",
                     Action::Search => "search",
                     Action::AddProjectFolder => "add_project_folder",
+                    Action::AddProject => "add_project",
+                    Action::RemoveProject => "remove_project",
                     Action::SendPrefix => "send_prefix",
                     Action::MoveTabLeft => "move_tab_left",
                     Action::MoveTabRight => "move_tab_right",
@@ -337,7 +343,9 @@ impl Action {
             Action::ScrollUp => "Scroll Up (page)".into(),
             Action::ScrollDown => "Scroll Down (page)".into(),
             Action::Search => "Search Scrollback".into(),
-            Action::AddProjectFolder => "Add Project Folder…".into(),
+            Action::AddProjectFolder => "Add Folder to Scan for Projects…".into(),
+            Action::AddProject => "Add Project…".into(),
+            Action::RemoveProject => "Remove Selected Project from List".into(),
             Action::SendPrefix => "Send Prefix Key to Shell".into(),
             Action::MoveTabLeft => "Move Tab Left".into(),
             Action::MoveTabRight => "Move Tab Right".into(),

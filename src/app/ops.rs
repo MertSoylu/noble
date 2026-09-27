@@ -117,13 +117,12 @@ impl App {
             Action::ScrollUp => self.scroll_page(1),
             Action::ScrollDown => self.scroll_page(-1),
             Action::Search => self.open_search(),
-            Action::AddProjectFolder => {
-                self.overlay = Some(Overlay::Prompt(Prompt {
-                    title: "ADD PROJECT FOLDER".into(),
-                    value: String::new(),
-                    purpose: PromptPurpose::AddRoot,
-                }));
-            }
+            Action::AddProjectFolder => self.open_add_prompt(false),
+            Action::AddProject => self.open_add_prompt(true),
+            Action::RemoveProject => match self.selected_project().map(|p| p.path.clone()) {
+                Some(path) if self.view == View::Bridge => self.remove_project(&path),
+                _ => self.toast(ToastLevel::Info, "select a project on Home first"),
+            },
             Action::Passthrough => self.passthrough(),
             Action::SendPrefix => {
                 let bytes = crate::term::input::encode_key(
@@ -663,6 +662,13 @@ impl App {
         }
     }
 
+    /// The add prompt: one project folder (`project`) or a folder to scan for repos.
+    pub fn open_add_prompt(&mut self, project: bool) {
+        let mut p = Prompt { title: String::new(), value: String::new(), purpose: PromptPurpose::AddRoot };
+        p.set_add_mode(project);
+        self.overlay = Some(Overlay::Prompt(p));
+    }
+
     pub fn submit_prompt(&mut self, prompt: Prompt) {
         let value = prompt.value.trim().to_string();
         match prompt.purpose {
@@ -672,6 +678,7 @@ impl App {
                 }
             }
             PromptPurpose::AddRoot => self.add_project_root(&value),
+            PromptPurpose::AddProject => self.add_project(&value),
             PromptPurpose::SaveWorkspace => {
                 if value.is_empty() {
                     return;

@@ -157,6 +157,21 @@ pub fn tilde(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// A comparable key for a path: `/` separators, no trailing separator. Windows and macOS (APFS)
+/// ignore case, so the key is lowercased there; Linux file systems are case-sensitive.
+pub fn path_key(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    // Keep the root itself ("/" or "C:/") recognizable.
+    let s = if s.is_empty() && !path.as_os_str().is_empty() { "/" } else { s };
+    if cfg!(any(windows, target_os = "macos")) { s.to_lowercase() } else { s.to_string() }
+}
+
+/// Whether two paths name the same folder (see `path_key`).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    path_key(a) == path_key(b)
+}
+
 /// Fuzzy substring match. `None` when there is no match; otherwise a score
 /// (higher is better). Consecutive letters, word starts and an exact prefix are rewarded.
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {

@@ -523,15 +523,7 @@ impl App {
     /// Adds a root folder to the project scan. If the list is empty (auto mode) the
     /// default folders are written first so they keep being scanned too.
     pub fn add_project_root(&mut self, raw: &str) {
-        let raw = raw.trim().trim_matches('"');
-        let path = match raw.strip_prefix('~') {
-            Some(rest) => dirs::home_dir().unwrap_or_default().join(rest.trim_start_matches(['/', '\\'])),
-            None => std::path::PathBuf::from(raw),
-        };
-        if raw.is_empty() || !path.is_dir() {
-            self.toast(ToastLevel::Error, format!("not a folder: {raw}"));
-            return;
-        }
+        let Some(path) = self.prompt_folder(raw) else { return };
         let mut c = self.cfg.clone();
         if c.projects.roots.is_empty() {
             c.projects.roots = crate::projects::default_roots().iter().map(|p| p.display().to_string()).collect();
@@ -546,6 +538,87 @@ impl App {
         self.apply_config(c);
         self.persist("projects", "roots", &list.to_string());
         self.toast(ToastLevel::Ok, format!("added {} · scanning…", crate::util::tilde(&path)));
+    }
+
+    /// A folder typed into the add prompt (`~` expands to the home folder, a relative path is
+    /// taken from the home folder); an error toast and `None` when it is not a folder.
+    fn prompt_folder(&mut self, raw: &str) -> Option<std::path::PathBuf> {
+        let raw = raw.trim().trim_matches('"');
+        let home = dirs::home_dir().unwrap_or_default();
+        let path = match raw.strip_prefix('~') {
+            Some(rest) => home.join(rest.trim_start_matches(['/', '\\'])),
+            None => std::path::PathBuf::from(raw),
+        };
+        let path = if path.is_relative() && !raw.is_empty() { home.join(path) } else { path };
+        if raw.is_empty() || !path.is_dir() {
+            self.toast(ToastLevel::Error, format!("not a folder: {raw}"));
+            return None;
+        }
+        // Rebuilt from its components: a trailing separator or "." parts do not make a new path.
+        Some(path.components().collect())
+    }
+
+    /// Adds one folder as a project (a git repo or any other folder), kept in `state.json`
+    /// so it stays listed after rescans and restarts even when the scan would not find it.
+    /// A project removed from the list earlier comes back this way.
+    pub fn add_project(&mut self, raw: &str) {
+        let Some(path) = self.prompt_folder(raw) else { return };
+        let Some(project) = crate::projects::project_at(&path) else {
+            self.toast(ToastLevel::Error, format!("not a folder: {}", path.display()));
+            return;
+        };
+        let (name, repo) = (project.name.clone(), project.repo);
+        self.ui_state.add_project(&path);
+        self.sync_manual_projects();
+        let listed = self.projects.iter().position(|p| crate::util::same_path(&p.path, &path));
+        let target = match listed {
+            Some(i) => self.projects[i].path.clone(),
+            None => {
+                self.projects.push(project);
+                self.projects_loaded = true;
+                crate::projects::sort_projects(&mut self.projects);
+                path.clone()
+            }
+        };
+        self.sort_pinned();
+        // Select it (clearing a search that would hide it) so the user sees where it landed.
+        self.bridge.filter.clear();
+        self.bridge.filtering = false;
+        self.bridge.proj_act = None;
+        if let Some(pos) = self.visible_projects().iter().position(|i| self.projects[*i].path == target) {
+            self.bridge.proj_sel = pos;
+        }
+        if repo {
+            self.request_git(target, std::time::Duration::ZERO);
+        }
+        if listed.is_some() {
+            self.toast(ToastLevel::Info, format!("{name} is already in Projects"));
+        } else {
+            self.toast(ToastLevel::Ok, format!("added {name} to Projects"));
+        }
+    }
+
+    /// Removes a project from the list for good (until it is added again): it stays hidden
+    /// across rescans and restarts, and is unpinned. The folder itself is not touched.
+    pub fn remove_project(&mut self, path: &std::path::Path) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let selected = self.bridge.proj_sel;
+        self.ui_state.hide_project(path);
+        self.sync_manual_projects();
+        self.projects.retain(|p| !crate::util::same_path(&p.path, path));
+        self.bridge.proj_act = None;
+        let n = self.visible_projects().len();
+        self.bridge.proj_sel = selected.min(n.saturating_sub(1));
+        self.toast(ToastLevel::Ok, format!("removed {name} from Projects · A on Home adds it back"));
+    }
+
+    /// Hands the hidden/added projects to the scan thread (the next scan applies them).
+    fn sync_manual_projects(&self) {
+        if let Some(s) = &self.services
+            && let Ok(mut m) = s.proj_manual.lock()
+        {
+            *m = self.ui_state.manual_projects();
+        }
     }
 
     /// Scheme ids in the selector: "follow theme" first, then `term_schemes`.

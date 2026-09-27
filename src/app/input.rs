@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, View};
+use super::{App, Drag, Hit, Overlay, ProjectAct, PromptPurpose, SortKey, ToastLevel, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -391,6 +391,11 @@ impl App {
                     }
                     return;
                 }
+                KeyCode::Tab | KeyCode::BackTab if p.purpose.is_add() => {
+                    let project = !matches!(p.purpose, PromptPurpose::AddProject);
+                    p.set_add_mode(project);
+                    true
+                }
                 KeyCode::Backspace => {
                     p.value.pop();
                     true
@@ -533,6 +538,7 @@ impl App {
             KeyCode::Char('r') => self.rescan_projects(),
             KeyCode::Char('R') => self.refresh_ai(),
             KeyCode::Char('a') => self.run(Action::AddProjectFolder),
+            KeyCode::Char('A') => self.run(Action::AddProject),
             KeyCode::Char('o') => {
                 if let Some(p) = self.bridge_target_dir() {
                     self.open_in_explorer(&p);
@@ -756,6 +762,13 @@ impl App {
                 }
             }
             Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
+            Hit::PromptMode(project) => {
+                if let Some(Overlay::Prompt(p)) = &mut self.overlay
+                    && p.purpose.is_add()
+                {
+                    p.set_add_mode(project);
+                }
+            }
             Hit::Update => self.start_update(),
             Hit::UpdateDismiss => self.dismiss_update(),
             Hit::TabClose(i) => self.request_close_tab(i),

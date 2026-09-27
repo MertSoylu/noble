@@ -56,7 +56,8 @@ and `file:line` paths. vim, htop and Claude Code run full-screen with mouse supp
 
 **📁 Projects at a glance**<br>
 Finds your git repositories and shows branch, changes, commits to push or pull, recent commits and changed
-files. The status refreshes as soon as a command finishes in that repository.
+files. The status refreshes as soon as a command finishes in that repository. Add any folder by hand (`A`) or
+remove one you do not want (⋯ → Remove from list).
 
 </td>
 </tr>
@@ -232,7 +233,9 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
-  `a` add a project folder · `r` rescan / `R` refresh AI · `m` system · `s` settings · `q` quit.
+  `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
+  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI ·
+  `m` system · `s` settings · `q` quit.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
   the wheel scrolls the page · `esc` back to the page you came from.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
@@ -293,7 +296,8 @@ shell_first = true       # alt+. alt+, alt+t alt+s alt+p go to the shell in a te
 [projects]
 roots = []               # empty = Desktop, Documents, source/repos, projects, code, dev, src, repos …
 max_depth = 4
-exclude = []
+exclude = []             # folder names the scan skips
+# Projects added with A and removed with ⋯ → Remove from list are kept in state.json, not here.
 
 [ai]
 enabled = true
@@ -313,8 +317,8 @@ show = true              # false hides it from Home (Settings → Quick launch)
 **Actions** for bindings: `bridge system settings new_tab close_tab next_tab prev_tab tab_1…tab_9 move_tab_left
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
-refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder send_prefix
-passthrough update dismiss_update`.
+refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
+remove_project send_prefix passthrough update dismiss_update`.
 
 </details>
 

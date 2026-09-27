@@ -351,7 +351,7 @@ impl Workspaces {
     }
 }
 
-/// UI state: whether the welcome screen was seen, pinned projects.
+/// UI state: whether the welcome screen was seen, pinned, hidden and manually added projects.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct UiStateData {
@@ -359,6 +359,10 @@ pub struct UiStateData {
     /// The prefix key was pressed at least once: the status bar stops pointing it out.
     pub prefix_used: bool,
     pub pins: Vec<String>,
+    /// Projects removed from the list: the scan skips these paths.
+    pub hidden: Vec<String>,
+    /// Folders added as projects by hand: always listed, even when the scan does not find them.
+    pub added: Vec<String>,
     /// Last update check (unix seconds) and the version found.
     pub update_checked: i64,
     pub update_latest: String,
@@ -403,6 +407,43 @@ impl UiState {
         };
         self.save();
         pinned
+    }
+
+    pub fn is_hidden(&self, path: &Path) -> bool {
+        self.data.hidden.iter().any(|h| crate::util::same_path(Path::new(h), path))
+    }
+
+    /// Removes a project from the list for good: hidden from every scan, unpinned and
+    /// dropped from the manually added folders.
+    pub fn hide_project(&mut self, path: &Path) {
+        let key = path.to_string_lossy().into_owned();
+        self.data.pins.retain(|p| !p.eq_ignore_ascii_case(&key));
+        self.data.added.retain(|a| !crate::util::same_path(Path::new(a), path));
+        if !self.is_hidden(path) {
+            self.data.hidden.push(key);
+        }
+        self.save();
+    }
+
+    /// Adds a folder as a project by hand (and shows it again if it was hidden).
+    /// Returns false when it was already added.
+    pub fn add_project(&mut self, path: &Path) -> bool {
+        let was_hidden = self.is_hidden(path);
+        self.data.hidden.retain(|h| !crate::util::same_path(Path::new(h), path));
+        let known = self.data.added.iter().any(|a| crate::util::same_path(Path::new(a), path));
+        if !known {
+            self.data.added.push(path.to_string_lossy().into_owned());
+        }
+        self.save();
+        !known || was_hidden
+    }
+
+    /// Hidden and manually added projects, as the project scan applies them.
+    pub fn manual_projects(&self) -> crate::projects::Manual {
+        crate::projects::Manual {
+            hidden: self.data.hidden.clone(),
+            added: self.data.added.iter().filter(|a| !a.is_empty()).map(PathBuf::from).collect(),
+        }
     }
 }
 
@@ -481,6 +522,39 @@ impl UsageHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Removed and manually added projects survive a restart; removing unpins, adding a
+    /// removed project brings it back, and paths compare like the file system does.
+    #[test]
+    fn hidden_and_added_projects_round_trip() {
+        let dir = std::env::temp_dir().join(format!("noble-manual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("state.json");
+        let (a, b) = (dir.join("alpha"), dir.join("beta"));
+        let mut ui = UiState::load(file.clone());
+        ui.toggle_pin(&a);
+        ui.hide_project(&a);
+        assert!(ui.is_hidden(&a) && !ui.is_pinned(&a), "removing unpins");
+        assert!(ui.add_project(&b));
+        assert!(!ui.add_project(&b), "added once");
+        let back = UiState::load(file.clone());
+        assert!(back.is_hidden(&a));
+        assert_eq!(back.manual_projects().added, vec![b.clone()]);
+        assert_eq!(back.manual_projects().hidden, vec![a.to_string_lossy().into_owned()]);
+        // A trailing separator names the same folder.
+        assert!(back.is_hidden(Path::new(&format!("{}{}", a.display(), std::path::MAIN_SEPARATOR))));
+        // Windows and macOS ignore case in paths; Linux does not.
+        let upper = PathBuf::from(a.to_string_lossy().to_uppercase());
+        assert_eq!(back.is_hidden(&upper), cfg!(any(windows, target_os = "macos")));
+        // Adding a removed project shows it again; removing an added one forgets it.
+        assert!(ui.add_project(&a));
+        assert!(!ui.is_hidden(&a));
+        ui.hide_project(&b);
+        let back = UiState::load(file);
+        assert_eq!(back.manual_projects().added, vec![a.clone()]);
+        assert!(back.is_hidden(&b) && !back.is_hidden(&a));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn usage_history_merges_and_resamples() {

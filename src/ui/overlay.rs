@@ -79,13 +79,32 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 &[("❯ ", th.accent()), (&p.value, th.accent_bold()), (cursor, th.accent())],
                 inner.width.saturating_sub(2),
             );
-            hud::put_right(
-                buf,
-                inner.right().saturating_sub(1),
-                inner.bottom().saturating_sub(1),
-                "⏎ save · esc cancel",
-                th.dim(),
-            );
+            let add = p.purpose.is_add();
+            if add {
+                // Choice line above the input: one project or a folder to scan (tab / click).
+                let project = matches!(p.purpose, crate::app::PromptPurpose::AddProject);
+                let mut cx = x;
+                let end = inner.right().saturating_sub(1);
+                for (mode, label) in [(true, "one project"), (false, "folder of projects (scan)")] {
+                    let on = mode == project;
+                    let start = cx;
+                    let (dot, style) = if on { ("● ", th.accent_bold()) } else { ("○ ", th.dim()) };
+                    cx = hud::put_spans(buf, cx, inner.y, &[(dot, style), (label, style)], end.saturating_sub(cx));
+                    if cx > start {
+                        hits.push((Rect::new(start, inner.y, cx - start, 1), Hit::PromptMode(mode)));
+                    }
+                    cx = hud::put(buf, cx, inner.y, "   ", th.dim(), end.saturating_sub(cx));
+                }
+            }
+            // The longest hint that fits (a narrow window drops "tab switch" first).
+            let hints: &[&str] = if add {
+                &["tab switch · ⏎ add · esc cancel", "⏎ add · esc cancel"]
+            } else {
+                &["⏎ save · esc cancel"]
+            };
+            if let Some(hint) = hints.iter().find(|h| util::width(h) + 2 <= inner.width as usize) {
+                hud::put_right(buf, inner.right().saturating_sub(1), inner.bottom().saturating_sub(1), hint, th.dim());
+            }
         }
     }
 }
@@ -579,7 +598,8 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
         ("t", "terminal in home folder"),
         ("o", "open folder in file manager"),
         ("w", "save open tabs as a workspace"),
-        ("a", "add a folder to scan for projects"),
+        ("a  A", "add a folder to scan for projects · add one project folder"),
+        ("⋯  remove", "Remove from list: hide a project for good (A adds it back)"),
         ("r  R", "rescan projects · refresh AI usage"),
         ("m  s", "system · settings"),
         ("p  ?  q", "commands · help · quit"),

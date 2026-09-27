@@ -111,6 +111,7 @@ fn demo_app(w: u16, h: u16) -> App {
         branch: Some(branch.into()),
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
+        repo: true,
     };
     app.handle(AppEvent::Projects(vec![
         mk(
@@ -1144,6 +1145,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
         branch: Some("main".into()),
         last_active: Some(SystemTime::now()),
         git: None,
+        repo: true,
     });
     app.handle(AppEvent::Projects(projects));
     let probe = if cfg!(windows) { "cmd /c echo claude-probe" } else { "echo claude-probe" };
@@ -1794,6 +1796,97 @@ fn project_actions_from_keyboard() {
     key(&mut app, KeyCode::Right);
     key(&mut app, KeyCode::Down);
     assert_eq!(app.bridge.proj_act, None);
+}
+
+/// Removing a project from the ⋯ menu hides it for good (a rescan does not bring it back, a
+/// pin goes with it); `A` adds any folder as a project — a plain folder too — and brings a
+/// removed one back. The state stays in memory (`UiState::memory` in headless mode).
+#[test]
+fn remove_and_add_projects() {
+    use noble::app::{Hit, Overlay};
+    let base = std::env::temp_dir().join(format!("noble-add-remove-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (demo, plain) = (base.join("demo"), base.join("plain notes"));
+    std::fs::create_dir_all(&demo).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    let mut app = demo_app(110, 30);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    let mut scanned = app.projects.clone();
+    scanned.push(Project {
+        name: "demo".into(),
+        path: demo.clone(),
+        branch: Some("main".into()),
+        last_active: Some(SystemTime::now()),
+        git: None,
+        repo: true,
+    });
+    app.handle(AppEvent::Projects(scanned.clone()));
+    // Pin it, then remove it with → → ⏎ and the last menu item.
+    app.toggle_pin(&demo);
+    app.bridge.proj_sel = 0;
+    assert_eq!(app.selected_project().unwrap().path, demo, "pinned projects come first");
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Right);
+    render(&mut app, 110, 30);
+    key(&mut app, KeyCode::Enter);
+    let text = render(&mut app, 110, 30);
+    save("menu-project-remove-110x30", &text);
+    let Some(Overlay::Menu(menu)) = &app.overlay else { panic!("menu: {text}") };
+    let remove = menu.items.iter().position(|i| i.label == "Remove from list").expect("remove item");
+    assert!(text.contains("Remove from list"), "{text}");
+    let row = find_hit(&app, |h| *h == Hit::MenuItem(remove)).unwrap();
+    click(&mut app, row.x + 1, row.y);
+    assert!(app.overlay.is_none());
+    assert!(!app.projects.iter().any(|p| p.path == demo), "gone from the list");
+    assert!(!app.ui_state.is_pinned(&demo), "removing unpins");
+    assert!(app.toasts.iter().any(|t| t.text.contains("removed demo from Projects")));
+    // A rescan finds it again: it stays hidden.
+    app.handle(AppEvent::Projects(scanned.clone()));
+    assert!(!app.projects.iter().any(|p| p.path == demo), "hidden after a rescan");
+    // `A` opens the add prompt in project mode; tab and a click switch the mode.
+    key(&mut app, KeyCode::Char('A'));
+    let text = render(&mut app, 110, 30);
+    save("add-project-110x30", &text);
+    assert!(text.contains("ADD PROJECT") && text.contains("● one project"), "{text}");
+    key(&mut app, KeyCode::Tab);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("ADD FOLDER TO SCAN") && text.contains("● folder of projects"), "{text}");
+    let project_mode = find_hit(&app, |h| *h == Hit::PromptMode(true)).expect("mode choice");
+    click(&mut app, project_mode.x + 1, project_mode.y);
+    let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("prompt closed by the click") };
+    assert_eq!(p.title, "ADD PROJECT");
+    for size in [(60, 12), (30, 8)] {
+        save(&format!("add-project-{}x{}", size.0, size.1), &render(&mut app, size.0, size.1));
+    }
+    // A plain folder (no git) is added and selected; a missing one is refused.
+    for c in plain.display().to_string().chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    key(&mut app, KeyCode::Enter);
+    let sel = app.selected_project().expect("added project selected");
+    assert_eq!(sel.path, plain);
+    assert!(!sel.repo && sel.git.is_none());
+    let text = render(&mut app, 160, 45);
+    save("project-plain-folder-160x45", &text);
+    assert!(text.contains("plain notes") && text.contains("not a git repository"), "{text}");
+    let before = app.projects.len();
+    app.add_project(&base.join("gone").display().to_string());
+    assert_eq!(app.projects.len(), before);
+    assert!(app.toasts.iter().any(|t| t.text.starts_with("not a folder")));
+    app.add_project(&plain.display().to_string());
+    assert_eq!(app.projects.len(), before, "not listed twice");
+    // The scan thread merges added folders into every scan (simulated here).
+    app.handle(AppEvent::Projects(app.ui_state.manual_projects().apply(scanned.clone())));
+    assert!(app.projects.iter().any(|p| p.path == plain), "added folder survives a rescan");
+    // Adding the removed project brings it back for good.
+    app.add_project(&demo.display().to_string());
+    app.handle(AppEvent::Projects(app.ui_state.manual_projects().apply(scanned)));
+    assert!(app.projects.iter().any(|p| p.path == demo), "shown again");
+    // The palette's remove acts on the selected project.
+    let sel = app.selected_project().unwrap().path.clone();
+    app.run(Action::RemoveProject);
+    assert!(!app.projects.iter().any(|p| p.path == sel));
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Claude Code hook: when a background session asks for permission the tab is

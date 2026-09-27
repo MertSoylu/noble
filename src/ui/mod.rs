@@ -369,7 +369,7 @@ fn hints(app: &App) -> Vec<(String, String)> {
             vec![
                 h("→", "pin / more"),
                 h("t", "terminal"),
-                h("a", "add folder"),
+                h("a A", "add folder / project"),
                 h("r", "rescan"),
                 h("s", "settings"),
                 h("?", "help"),
