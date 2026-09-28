@@ -150,11 +150,17 @@ A few rules hold the design together:
 
 ## Common changes
 
-- **New action:** add it to `Action` in `src/keys.rs` (plus `ALL`, `id`, `title`, `group`), handle it in
-  `App::run`, and optionally bind a default key.
-- **New theme:** append it to `THEMES` in `src/theme.rs`. It shows up in Settings automatically.
+- **New action:** add it to `Action` in `src/keys.rs` (plus `ALL`, a fixed-size array whose length you bump,
+  `id`, `title`, `group`), handle it in `App::run` (`src/app/ops.rs`), and optionally bind a default key. An
+  action that only makes sense inside a pane also goes into the `in_term` list in `palette_items`
+  (`src/app/palette.rs`).
+- **New theme:** append it to `THEMES` in `src/theme.rs` (a fixed-size array: bump its length). It shows up in
+  Settings automatically. The WCAG contrast test in `theme.rs` must pass, and the theme count ("22 themes") in
+  `DEFAULT_CONFIG` (`src/config.rs`) and the README must be updated.
 - **New AI provider:** add `detect` / `fetch` functions and a `ProviderDef` in `src/ai/providers.rs`, plus a test
-  that parses a sample payload. Read credentials only from files the provider's own CLI already keeps.
+  that parses a sample payload. Also add it to the allow-list in `config::parse`, `AiCfg::default`,
+  `DEFAULT_CONFIG` and `app::PROVIDER_KEYS`. Read credentials only from files the provider's own CLI already
+  keeps.
 - **New quick-launch default:** add it to `DEFAULT_LAUNCHERS` in `src/config.rs` (and the commented template).
   Older configs pick it up automatically.
 

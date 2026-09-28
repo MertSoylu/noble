@@ -58,7 +58,12 @@ pub struct HookRecord {
     pub subagents: usize,
 }
 
+/// `~/.claude/settings.json`; `None` without a home directory or when `ai::ISOLATED_ENV` is set
+/// (tests that run the real binary must never install, upgrade or remove the user's hooks).
 pub fn settings_path() -> Option<PathBuf> {
+    if crate::ai::isolated() {
+        return None;
+    }
     Some(dirs::home_dir()?.join(".claude").join("settings.json"))
 }
 

@@ -93,7 +93,8 @@ pub struct Confirm {
 }
 
 pub enum PromptPurpose {
-    RenameTab(usize),
+    /// The tab holding this pane (an index would go stale when another tab closes).
+    RenameTab(PaneId),
     SaveWorkspace,
     /// New root folder to scan projects in.
     AddRoot,
@@ -959,6 +960,13 @@ impl App {
         }
     }
 
+    /// The state of every pane with a hook record (in pane order), to see whether it changed.
+    fn hook_states(&self) -> Vec<(PaneId, Option<AgentState>)> {
+        let mut states: Vec<_> = self.agent_hooks.iter().map(|(p, rec)| (*p, hook_state(rec))).collect();
+        states.sort_by_key(|(p, _)| *p);
+        states
+    }
+
     /// Processes the hook records: notifies when a changed state is in a background tab.
     pub fn apply_hook_records(&mut self, records: HashMap<PaneId, crate::hooks::HookRecord>) {
         let visible: Vec<PaneId> = match self.view {
@@ -987,7 +995,13 @@ impl App {
             }
             live.insert(pane, rec);
         }
+        let before = self.hook_states();
         self.agent_hooks = live;
+        // Only Home shows the agent states, and it redraws by the clock only (once a minute on battery):
+        // a changed state has to ask for its own frame.
+        if self.view == View::Bridge && self.hook_states() != before {
+            self.dirty = true;
+        }
         for (pane, rec) in changed {
             let notice = match hook_state(&rec) {
                 Some(AgentState::NeedsYou) => {

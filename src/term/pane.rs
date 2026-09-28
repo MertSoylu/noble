@@ -47,12 +47,17 @@ impl Callbacks {
 }
 
 /// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
+///
+/// vt100 does not report how many lines scrolled out of a full scrollback, so `line` drifts once the
+/// scrollback is full. `text` (the marked cells when the link closed) lets a lookup discard a link
+/// whose line no longer holds that text instead of returning the wrong address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hyperlink {
     pub line: usize,
     pub from: u16,
     pub to: u16,
     pub url: String,
+    pub text: String,
 }
 
 /// Maximum number of OSC 8 links kept.
@@ -65,6 +70,19 @@ fn history_len(screen: &mut vt100::Screen) -> usize {
     let len = screen.scrollback();
     screen.set_scrollback(current);
     len
+}
+
+/// Text of columns `from..to` on an absolute line (0 = oldest scrollback line), or `None` if the line
+/// is gone. The visible scroll position is preserved.
+fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: u16) -> Option<String> {
+    let current = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let history = screen.scrollback();
+    let (row, offset) = if line >= history { (line - history, 0) } else { (0, history - line) };
+    screen.set_scrollback(offset);
+    let text = screen.rows(from, to.saturating_sub(from)).nth(row);
+    screen.set_scrollback(current);
+    text
 }
 
 impl vt100::Callbacks for Callbacks {
@@ -116,12 +134,18 @@ impl vt100::Callbacks for Callbacks {
                 let line = history_len(screen) + row as usize;
                 if let Some((l0, c0, open)) = self.open_link.take() {
                     let cols = screen.size().1;
+                    // A span whose line already left the scrollback cannot be verified later: dropped.
+                    let mut span = |line: usize, from: u16, to: u16| {
+                        if let Some(text) = span_text(screen, line, from, to) {
+                            self.push_link(Hyperlink { line, from, to, url: open.clone(), text });
+                        }
+                    };
                     if line == l0 {
-                        self.push_link(Hyperlink { line, from: c0, to: col, url: open });
+                        span(line, c0, col);
                     } else {
                         // Line-spanning link: end of the first line and start of the last.
-                        self.push_link(Hyperlink { line: l0, from: c0, to: cols, url: open.clone() });
-                        self.push_link(Hyperlink { line, from: 0, to: col, url: open });
+                        span(l0, c0, cols);
+                        span(line, 0, col);
                     }
                 }
                 if !url.is_empty() {
@@ -179,6 +203,13 @@ impl Callbacks {
             self.notice = Some(util::truncate(&text, 120));
         }
     }
+}
+
+/// The bytes a paste sends. Inside bracketed paste every ESC is dropped: a pasted `ESC[201~` would
+/// otherwise end the paste early and run the rest as typed input (other terminals sanitize the same way).
+fn paste_payload(text: &str, bracketed: bool) -> String {
+    let body = text.replace("\r\n", "\r").replace('\n', "\r");
+    if bracketed { format!("\x1b[200~{}\x1b[201~", body.replace('\x1b', "")) } else { body }
 }
 
 /// Turns an OSC 7 URL into a local path: `file://host/C:/x` → `C:/x`.
@@ -737,12 +768,7 @@ impl Pane {
     /// Pastes text; wraps it in bracketed paste when the app wants that.
     pub fn paste(&self, text: &str) {
         let bracketed = lock(&self.parser).screen().bracketed_paste();
-        let body = text.replace("\r\n", "\r").replace('\n', "\r");
-        if bracketed {
-            self.write(format!("\x1b[200~{body}\x1b[201~").as_bytes());
-        } else {
-            self.write(body.as_bytes());
-        }
+        self.write(paste_payload(text, bracketed).as_bytes());
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -881,18 +907,9 @@ impl Pane {
 
     /// The OSC 8 link at on-screen (row, col): address and column span.
     pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<(String, u16, u16)> {
-        let mut p = lock(&self.parser);
-        let offset = p.screen().scrollback();
-        let line = history_len(p.screen_mut()).saturating_sub(offset) + row as usize;
-        p.callbacks()
-            .hyperlinks
-            .iter()
-            .rev()
-            .find(|h| h.line == line && col >= h.from && col < h.to)
-            .map(|h| (h.url.clone(), h.from, h.to))
+        hyperlink_in(&mut lock(&self.parser), row, col)
     }
 
-    /// Visible line text (for link detection).
     /// What is still running in the pane (its label), if closing it would stop something:
     /// a full-screen app, a command started at the prompt, or a launcher command before its first prompt.
     pub fn busy(&self) -> Option<String> {
@@ -903,11 +920,31 @@ impl Pane {
         (alt || command).then(|| if label == self.shell_label { "a command".into() } else { label })
     }
 
+    /// Visible line text (for link detection).
     pub fn visible_row(&self, row: u16) -> Option<String> {
         let p = lock(&self.parser);
         let cols = p.screen().size().1;
         p.screen().rows(0, cols).nth(row as usize)
     }
+}
+
+/// The OSC 8 link at on-screen (row, col): address and column span.
+fn hyperlink_in(p: &mut vt100::Parser<Callbacks>, row: u16, col: u16) -> Option<(String, u16, u16)> {
+    let offset = p.screen().scrollback();
+    let line = history_len(p.screen_mut()).saturating_sub(offset) + row as usize;
+    let screen = p.screen();
+    p.callbacks()
+        .hyperlinks
+        .iter()
+        .rev()
+        // The text check rejects links whose absolute line drifted (full scrollback).
+        .find(|h| {
+            h.line == line
+                && col >= h.from
+                && col < h.to
+                && screen.rows(h.from, h.to - h.from).nth(row as usize).is_some_and(|t| t == h.text)
+        })
+        .map(|h| (h.url.clone(), h.from, h.to))
 }
 
 /// A search match: absolute line (0 = oldest scrollback line) and column span.
@@ -1159,12 +1196,42 @@ mod tests {
         parser.process(b"see \x1b]8;id=1;https://example.com/a;b\x1b\\docs\x1b]8;;\x1b\\ now");
         let links = &parser.callbacks().hyperlinks;
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0], Hyperlink { line: 0, from: 4, to: 8, url: "https://example.com/a;b".into() });
+        assert_eq!(
+            links[0],
+            Hyperlink { line: 0, from: 4, to: 8, url: "https://example.com/a;b".into(), text: "docs".into() }
+        );
         // The absolute line number stays fixed while the screen scrolls.
         parser.process(b"\r\n\n\n\n\n\n\x1b]8;;file:///tmp/x.rs\x07x.rs\x1b]8;;\x07");
         let last = parser.callbacks().hyperlinks.back().unwrap().clone();
         assert_eq!((last.from, last.to), (0, 4));
         assert!(last.line >= 6, "{last:?}");
+    }
+
+    /// Once the scrollback is full its length stops growing while lines still scroll out, so a stored
+    /// absolute line drifts: the link must not answer for text that is no longer there.
+    #[test]
+    fn osc8_hyperlink_is_not_returned_after_the_scrollback_drifts() {
+        let mut parser = vt100::Parser::new_with_callbacks(4, 40, 3, Callbacks::default());
+        // Fill the scrollback (3 lines) first, then write a link on the bottom row.
+        parser.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
+        parser.process(b"\x1b]8;;https://a.example/\x1b\\alpha\x1b]8;;\x1b\\");
+        assert_eq!(hyperlink_in(&mut parser, 3, 2).map(|l| l.0).as_deref(), Some("https://a.example/"));
+        // Two more lines scroll out: the link moved up to row 1 while the scrollback length is unchanged.
+        parser.process(b"\r\nx\r\ny");
+        assert_eq!(hyperlink_in(&mut parser, 3, 2), None);
+        assert_eq!(hyperlink_in(&mut parser, 1, 2), None);
+        // A link written after the drift still works.
+        parser.process(b"\r\n\x1b]8;;https://b.example/\x1b\\beta\x1b]8;;\x1b\\");
+        assert_eq!(hyperlink_in(&mut parser, 3, 1).map(|l| l.0).as_deref(), Some("https://b.example/"));
+    }
+
+    #[test]
+    fn bracketed_paste_drops_escape_characters() {
+        // A pasted end marker must not close the paste early.
+        let evil = "ls\x1b[201~\nrm -rf x";
+        assert_eq!(paste_payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
+        assert_eq!(paste_payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
+        assert_eq!(paste_payload("a\r\nb\nc", false), "a\rb\rc");
     }
 
     #[test]

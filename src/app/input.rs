@@ -631,7 +631,7 @@ impl App {
         self.system.selected_pid = Some(procs[next].pid);
     }
 
-    // ─── Fare ───────────────────────────────────────────────────────────────
+    // ─── Mouse ──────────────────────────────────────────────────────────────
 
     fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
         self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())

@@ -18,9 +18,11 @@ pub enum MenuCmd {
     CopyText(String),
     OpenFolder(PathBuf),
     OpenCode(PathBuf),
-    RenameTab(usize),
-    CloseTab(usize),
-    MoveTab(usize, i32),
+    // Tabs are named by one of their panes, not by index: a tab can close (its shell exits) while
+    // the menu is open, which would shift every index after it.
+    RenameTab(PaneId),
+    CloseTab(PaneId),
+    MoveTab(PaneId, i32),
     OpenProject(PathBuf),
     Launch(usize, PathBuf),
     GitPull(PathBuf),
@@ -66,18 +68,19 @@ impl App {
             return;
         }
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
-        let mut items = vec![item("Rename…", &hint(crate::keys::Action::RenameTab), MenuCmd::RenameTab(i))];
+        let key = self.tabs[i].focus;
+        let mut items = vec![item("Rename…", &hint(crate::keys::Action::RenameTab), MenuCmd::RenameTab(key))];
         if i > 0 {
-            items.push(item("Move left", &hint(crate::keys::Action::MoveTabLeft), MenuCmd::MoveTab(i, -1)));
+            items.push(item("Move left", &hint(crate::keys::Action::MoveTabLeft), MenuCmd::MoveTab(key, -1)));
         }
         if i + 1 < self.tabs.len() {
-            items.push(item("Move right", &hint(crate::keys::Action::MoveTabRight), MenuCmd::MoveTab(i, 1)));
+            items.push(item("Move right", &hint(crate::keys::Action::MoveTabRight), MenuCmd::MoveTab(key, 1)));
         }
-        if let Some(cwd) = self.panes.get(&self.tabs[i].focus).map(|p| p.cwd()) {
+        if let Some(cwd) = self.panes.get(&key).map(|p| p.cwd()) {
             items.push(item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())));
             items.push(item("Open folder", "", MenuCmd::OpenFolder(cwd)));
         }
-        items.push(item("Close tab", &hint(crate::keys::Action::CloseTab), MenuCmd::CloseTab(i)));
+        items.push(item("Close tab", &hint(crate::keys::Action::CloseTab), MenuCmd::CloseTab(key)));
         self.open_menu(self.tab_title(i), x, y, items);
     }
 
@@ -155,11 +158,22 @@ impl App {
             MenuCmd::CopyText(text) => self.set_clipboard(&text, true),
             MenuCmd::OpenFolder(path) => self.open_in_explorer(&path),
             MenuCmd::OpenCode(path) => self.open_in_code(&path),
-            MenuCmd::RenameTab(i) => self.rename_tab_prompt(i),
-            MenuCmd::CloseTab(i) => self.request_close_tab(i),
-            MenuCmd::MoveTab(i, d) => {
-                let to = (i as i32 + d).clamp(0, self.tabs.len() as i32 - 1) as usize;
-                self.move_tab(i, to);
+            // The tab may be gone by now (its shell exited while the menu was open): nothing to do then.
+            MenuCmd::RenameTab(pane) => {
+                if let Some(i) = self.tab_of(pane) {
+                    self.rename_tab_prompt(i);
+                }
+            }
+            MenuCmd::CloseTab(pane) => {
+                if let Some(i) = self.tab_of(pane) {
+                    self.request_close_tab(i);
+                }
+            }
+            MenuCmd::MoveTab(pane, d) => {
+                if let Some(i) = self.tab_of(pane) {
+                    let to = i.saturating_add_signed(d as isize).min(self.tabs.len() - 1);
+                    self.move_tab(i, to);
+                }
             }
             MenuCmd::OpenProject(path) => self.open_project_shell(path),
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
@@ -174,7 +188,7 @@ impl App {
         let n = m.items.len();
         match k.code {
             KeyCode::Esc => self.overlay = None,
-            KeyCode::Up | KeyCode::Char('k') => m.selected = (m.selected + n - 1) % n.max(1),
+            KeyCode::Up | KeyCode::Char('k') => m.selected = (m.selected + n.max(1) - 1) % n.max(1),
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => m.selected = (m.selected + 1) % n.max(1),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(it) = m.items.get(m.selected).filter(|it| it.enabled).cloned() {
@@ -194,9 +208,10 @@ impl App {
     }
 
     pub fn rename_tab_prompt(&mut self, i: usize) {
-        let value = self.tabs.get(i).and_then(|t| t.name.clone()).unwrap_or_default();
+        let Some(tab) = self.tabs.get(i) else { return };
+        let (value, key) = (tab.name.clone().unwrap_or_default(), tab.focus);
         self.overlay =
-            Some(Overlay::Prompt(Prompt { title: "RENAME TAB".into(), value, purpose: PromptPurpose::RenameTab(i) }));
+            Some(Overlay::Prompt(Prompt { title: "RENAME TAB".into(), value, purpose: PromptPurpose::RenameTab(key) }));
     }
 
     /// Moves a tab from order `from` to order `to`; the visible tab follows.

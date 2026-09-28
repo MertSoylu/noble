@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::theme::{self, TermScheme, WINDOWS_TERMINAL};
 
-/// Okunan ayarlar.
+/// Settings read from Windows Terminal.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WtImport {
     /// `settings.json` → `schemes` (ids "wt:<name>").
@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = r##"{
-        // yorum
+        // comment
         "defaultProfile": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}",
         "profiles": {
             "defaults": { "colorScheme": "Dark+" },

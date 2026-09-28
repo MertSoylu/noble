@@ -94,12 +94,7 @@ impl App {
             Action::RescanProjects => self.rescan_projects(),
             Action::RenameTab => {
                 if let View::Term(i) = self.view {
-                    let value = self.tabs.get(i).and_then(|t| t.name.clone()).unwrap_or_default();
-                    self.overlay = Some(Overlay::Prompt(Prompt {
-                        title: "RENAME TAB".into(),
-                        value,
-                        purpose: PromptPurpose::RenameTab(i),
-                    }));
+                    self.rename_tab_prompt(i);
                 }
             }
             Action::SaveWorkspace => {
@@ -159,7 +154,7 @@ impl App {
         }
     }
 
-    // ─── Sekmeler ───────────────────────────────────────────────────────────
+    // ─── Tabs ───────────────────────────────────────────────────────────────
 
     /// `keys.passthrough = "once"` (otherwise "lock").
     pub fn pass_once(&self) -> bool {
@@ -223,9 +218,12 @@ impl App {
         }
         // Launcher tabs ("project · claude") say what is running while it runs; once it
         // has exited (or after a restore) they are named after the project like any other.
-        let (base, launcher) = match t.origin.split_once(" · ") {
-            Some((base, _)) => (base, true),
-            None => (t.origin.as_str(), false),
+        // The launcher name is the last part: a folder called "a · b" stays whole. Only a tab that
+        // started a command counts as a launcher tab; a plain tab in such a folder has no launcher part.
+        let started_command = t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.command.is_some()));
+        let (base, launcher) = match t.origin.rsplit_once(" · ") {
+            Some((base, _)) if started_command => (base, true),
+            _ => (t.origin.as_str(), false),
         };
         if launcher && t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.launch_running())) {
             return t.origin.clone();
@@ -672,9 +670,10 @@ impl App {
     pub fn submit_prompt(&mut self, prompt: Prompt) {
         let value = prompt.value.trim().to_string();
         match prompt.purpose {
-            PromptPurpose::RenameTab(i) => {
-                if let Some(t) = self.tabs.get_mut(i) {
-                    t.name = (!value.is_empty()).then_some(value);
+            PromptPurpose::RenameTab(pane) => {
+                // The tab may have closed while the prompt was open.
+                if let Some(ti) = self.tab_of(pane) {
+                    self.tabs[ti].name = (!value.is_empty()).then_some(value);
                 }
             }
             PromptPurpose::AddRoot => self.add_project_root(&value),

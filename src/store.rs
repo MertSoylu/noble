@@ -1,4 +1,5 @@
-//! Small persistent data: recent dirs (frecency), session and saved workspaces.
+//! Small persistent data: recent dirs (frecency), session, saved workspaces, UI state (`UiState`: welcome,
+//! pinned/hidden/added projects, update notice) and AI usage history (`UsageHistory`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,7 +19,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
 }
 
 /// Atomic write: temp file first, then rename.
-fn write_json<T: Serialize>(file: &Path, value: &T) {
+pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -81,7 +82,7 @@ impl Recent {
     pub fn record(&mut self, path: &Path) {
         let key = Self::key(path);
         let t = now();
-        match self.entries.iter_mut().find(|e| e.path.eq_ignore_ascii_case(&key)) {
+        match self.entries.iter_mut().find(|e| crate::util::same_path(Path::new(&e.path), path)) {
             Some(e) => {
                 e.count = e.count.saturating_add(1);
                 e.last = t;
@@ -98,7 +99,7 @@ impl Recent {
     }
 
     pub fn remove(&mut self, path: &str) {
-        self.entries.retain(|e| e.path != path);
+        self.entries.retain(|e| !crate::util::same_path(Path::new(&e.path), Path::new(path)));
         self.rebuild();
         self.save();
     }
@@ -391,15 +392,14 @@ impl UiState {
     }
 
     pub fn is_pinned(&self, path: &Path) -> bool {
-        let key = path.to_string_lossy();
-        self.data.pins.iter().any(|p| p.eq_ignore_ascii_case(&key))
+        self.data.pins.iter().any(|p| crate::util::same_path(Path::new(p), path))
     }
 
     /// Toggles the pin; returns the new state.
     pub fn toggle_pin(&mut self, path: &Path) -> bool {
         let key = path.to_string_lossy().into_owned();
         let pinned = if self.is_pinned(path) {
-            self.data.pins.retain(|p| !p.eq_ignore_ascii_case(&key));
+            self.data.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
             false
         } else {
             self.data.pins.push(key);
@@ -417,7 +417,7 @@ impl UiState {
     /// dropped from the manually added folders.
     pub fn hide_project(&mut self, path: &Path) {
         let key = path.to_string_lossy().into_owned();
-        self.data.pins.retain(|p| !p.eq_ignore_ascii_case(&key));
+        self.data.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
         self.data.added.retain(|a| !crate::util::same_path(Path::new(a), path));
         if !self.is_hidden(path) {
             self.data.hidden.push(key);
@@ -569,7 +569,7 @@ mod tests {
         h.record(&k, 1_000 + HISTORY_KEEP_SECS + 5_000, 5);
         assert_eq!(h.series[&k].len(), 1);
         assert_eq!(h.resample("x/none", 0, 10, 2), vec![None, None]);
-        // 30 dakikada %10 → %40 kalan 2 saatte dolar.
+        // 10% in 30 minutes with 40% left: the quota runs out in 2 hours at that pace.
         let mut p = UsageHistory::memory();
         p.record("c/5H", 10_000, 50);
         p.record("c/5H", 11_800, 60);
@@ -601,6 +601,33 @@ mod tests {
         assert_eq!(again.entries.len(), 1);
         assert_eq!(again.top(5).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Recent entries and pins compare paths like the file system does (`util::same_path`): a trailing
+    /// separator is the same folder everywhere, a different case only on Windows and macOS.
+    #[test]
+    fn recent_and_pins_compare_paths_platform_aware() {
+        let base = std::env::temp_dir().join("Noble-Same-Path");
+        let slash = PathBuf::from(format!("{}{}", base.display(), std::path::MAIN_SEPARATOR));
+        let upper = PathBuf::from(base.to_string_lossy().to_uppercase());
+        let ignores_case = cfg!(any(windows, target_os = "macos"));
+
+        let mut r = Recent::memory();
+        r.record(&base);
+        r.record(&slash);
+        assert_eq!(r.entries.len(), 1, "a trailing separator names the same folder");
+        assert_eq!(r.entries[0].count, 2);
+        r.record(&upper);
+        assert_eq!(r.entries.len(), if ignores_case { 1 } else { 2 }, "case only matters on Linux");
+        r.remove(&slash.to_string_lossy());
+        assert_eq!(r.entries.len(), if ignores_case { 0 } else { 1 });
+
+        let mut ui = UiState::memory();
+        assert!(ui.toggle_pin(&base));
+        assert!(ui.is_pinned(&slash));
+        assert_eq!(ui.is_pinned(&upper), ignores_case);
+        assert!(!ui.toggle_pin(&slash), "unpinned through the other spelling");
+        assert!(ui.data.pins.is_empty());
     }
 
     /// Corrupt or hostile data files load as empty/defaults (or as the valid values they hold),

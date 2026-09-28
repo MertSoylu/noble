@@ -3626,3 +3626,146 @@ fn restored_launch_tab_reruns_its_command() {
     }
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// A tab menu or rename prompt names its tab by pane, not by index: when another tab closes
+/// (its shell exits) while the menu is open, the command still hits the tab it was opened for,
+/// and once every tab is gone nothing panics.
+#[test]
+fn tab_menu_and_prompt_survive_tabs_closing() {
+    use noble::app::{MenuCmd, Overlay};
+    let mut app = demo_app(110, 30);
+    for name in ["first", "second", "third"] {
+        app.new_tab(std::env::temp_dir(), None, Some(name.into()));
+    }
+    let first = app.tabs[0].focus;
+    let menu_cmd = |app: &App, label: &str| match &app.overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().find(|i| i.label.starts_with(label)).map(|i| i.cmd.clone()),
+        _ => None,
+    };
+
+    // Rename: the menu for "third" (index 2) is open when "first" exits; "third" is index 1 now.
+    app.open_tab_menu(2, 5, 5);
+    let rename = menu_cmd(&app, "Rename").expect("rename item");
+    app.handle(AppEvent::PtyExit(first));
+    assert_eq!(app.tabs.len(), 2);
+    app.run_menu(rename);
+    let Some(Overlay::Prompt(mut prompt)) = app.overlay.take() else { panic!("no rename prompt") };
+    prompt.value = "renamed".into();
+    app.submit_prompt(prompt);
+    assert_eq!(app.tabs[1].name.as_deref(), Some("renamed"));
+    assert_eq!(app.tabs[0].name, None, "the wrong tab was renamed");
+
+    // A rename prompt whose tab closes meanwhile is dropped, not applied to a neighbour.
+    app.run(Action::GoTab(1));
+    app.run(Action::RenameTab);
+    let Some(Overlay::Prompt(mut prompt)) = app.overlay.take() else { panic!("no rename prompt") };
+    let gone = app.tabs[0].focus;
+    app.handle(AppEvent::PtyExit(gone));
+    prompt.value = "late".into();
+    app.submit_prompt(prompt);
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].name.as_deref(), Some("renamed"), "the prompt renamed another tab");
+
+    // Close tab and move tab: the menu was opened for a tab that is gone by the time it runs.
+    app.new_tab(std::env::temp_dir(), None, Some("extra".into()));
+    let (keep, extra) = (app.tabs[0].focus, app.tabs[1].focus);
+    app.open_tab_menu(0, 5, 5);
+    let (mv, close) = (menu_cmd(&app, "Move right").expect("move item"), menu_cmd(&app, "Close").expect("close"));
+    app.handle(AppEvent::PtyExit(keep));
+    assert_eq!(app.tabs.len(), 1);
+    app.run_menu(mv);
+    assert_eq!(app.tabs[0].focus, extra, "moving a vanished tab changed the rest");
+    app.run_menu(close);
+    assert_eq!(app.tabs.len(), 1, "a vanished tab's close command closed another tab");
+
+    // Every tab gone: the queued commands do nothing (a clamp into an empty list used to panic).
+    app.handle(AppEvent::PtyExit(extra));
+    assert!(app.tabs.is_empty());
+    app.run_menu(MenuCmd::MoveTab(extra, 1));
+    app.run_menu(MenuCmd::CloseTab(extra));
+    app.run_menu(MenuCmd::RenameTab(extra));
+    assert!(app.overlay.is_none());
+}
+
+/// Keys in a menu with no items do nothing (the selection arithmetic used to underflow).
+#[test]
+fn empty_menu_keys_do_not_panic() {
+    use noble::app::{Menu, Overlay};
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(Overlay::Menu(Menu { title: "empty".into(), x: 0, y: 0, items: Vec::new(), selected: 0 }));
+    for code in [KeyCode::Up, KeyCode::Char('k'), KeyCode::Down, KeyCode::Tab, KeyCode::Enter] {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    assert!(matches!(app.overlay, Some(Overlay::Menu(_))));
+}
+
+/// A hook state change that shows on Home asks for a redraw itself (on battery Home only redraws by
+/// the minute); a repeated state, or one on a screen that does not show it, does not.
+#[test]
+fn agent_state_change_marks_the_frame_dirty() {
+    use noble::hooks::HookRecord;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    let rec = |event: &str, ts: i64| HookRecord { event: event.into(), message: None, ts, subagents: 0 };
+    let now = chrono::Utc::now().timestamp();
+
+    // In the terminal the state is not on screen.
+    app.take_dirty();
+    app.apply_hook_records([(pane, rec("prompt", now))].into());
+    assert!(!app.take_dirty(), "an invisible state change woke the screen");
+
+    app.run(Action::Bridge);
+    app.take_dirty();
+    app.apply_hook_records([(pane, rec("prompt", now + 1))].into());
+    assert!(!app.take_dirty(), "the same state again redrew");
+    // Working -> Idle without a toast.
+    app.apply_hook_records([(pane, rec("session-start", now + 2))].into());
+    assert!(app.toasts.is_empty());
+    assert!(app.take_dirty(), "the state change on Home did not ask for a frame");
+    // The record going away (session ended) changes Home too.
+    app.apply_hook_records(Default::default());
+    assert!(app.take_dirty());
+}
+
+/// The palette lists the key a tab is really bound to, not a fixed alt+N.
+#[test]
+fn palette_tab_hints_follow_rebinds() {
+    use noble::app::Overlay;
+    let hint_of = |app: &mut App| {
+        app.overlay = None;
+        app.run(Action::Palette);
+        let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+        p.all.iter().find(|i| i.title.starts_with("Tab 1:")).expect("tab item").hint.clone()
+    };
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    assert_eq!(hint_of(&mut app), "alt+1");
+
+    let mut cfg = Config::default();
+    cfg.general.animations = false;
+    cfg.keys.direct_bindings.insert("alt+1".into(), "none".into());
+    cfg.keys.direct_bindings.insert("f2".into(), "tab_1".into());
+    let mut app = App::headless(cfg, (110, 30));
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    assert_eq!(hint_of(&mut app), "f2");
+
+    let mut cfg = Config::default();
+    cfg.keys.direct_bindings.insert("alt+1".into(), "none".into());
+    cfg.keys.prefix_bindings.insert("1".into(), "none".into());
+    let mut app = App::headless(cfg, (110, 30));
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    assert_eq!(hint_of(&mut app), "", "an unbound tab shows no key");
+}
+
+/// A folder whose name contains " · " keeps its whole name as the tab title.
+#[test]
+fn tab_title_keeps_folder_names_with_separator() {
+    let mut app = demo_app(110, 30);
+    app.cfg.terminal.tab_follows_cwd = false;
+    app.new_tab(std::env::temp_dir(), None, Some("proj · notes".into()));
+    assert_eq!(app.tab_title(0), "proj · notes");
+    // A launcher tab keeps naming what runs while it runs.
+    app.new_tab(std::env::temp_dir(), Some("echo hi"), Some("proj · notes · claude".into()));
+    assert_eq!(app.tab_title(1), "proj · notes · claude");
+}

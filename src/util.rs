@@ -215,7 +215,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 }
 
 /// When the process `pid` started (seconds since the epoch), or `None` if it is not running.
-/// Same on Windows and Linux (sysinfo); only that one process is read.
+/// Same on Windows, Linux and macOS (sysinfo); only that one process is read.
 pub fn process_start(pid: u32) -> Option<u64> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let pid = Pid::from_u32(pid);

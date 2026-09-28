@@ -26,6 +26,9 @@ impl Harness {
         cmd.arg("--no-boot");
         cmd.env("NOBLE_HOME", home);
         cmd.env("NOBLE_NO_UPDATE_CHECK", "1");
+        // `NOBLE_HOME` does not move the real home: without this the binary would read the developer's AI
+        // credentials, call the providers and upgrade the hooks in the real ~/.claude/settings.json.
+        cmd.env(noble::ai::ISOLATED_ENV, "1");
         cmd.cwd(home);
         let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);

@@ -22,11 +22,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo fmt` — `rustfmt.toml` (max_width 120)
 - `cargo deny check` — RustSec advisories, license allow-list, bans and sources (`deny.toml`; install with
   `cargo install cargo-deny --locked`). A new dependency's license must be added to `deny.toml` after review.
-- CI: `.github/workflows/ci.yml` (Windows, Linux and macOS: fmt + clippy `-D warnings` + all tests, Linux with
-  zsh and fish installed, macOS with fish and the system bash 3.2; plus a static musl build, `cargo check` with
-  the `rust-version` toolchain on all three, and cargo-deny), `audit.yml` (weekly advisory check), `release.yml`
-  (Windows x86_64, Linux x86_64/ARM64 musl, macOS ARM64/x86_64 binaries plus a `<archive>.sha256` each on a
-  `v*` tag; `gh workflow run release.yml --ref <branch>` builds them all without publishing)
+- CI: `.github/workflows/` — `ci.yml` (fmt, clippy `-D warnings` and tests on Windows/Linux/macOS, `shellcheck
+  install.sh`, a static linux-musl build, MSRV, cargo-deny), `audit.yml`,
+  `release.yml` (`gh workflow run release.yml --ref <branch>` builds without publishing)
 - MSRV: `rust-version` in `Cargo.toml` is the oldest Rust the CI `msrv` job builds with; raise it (and the
   README/CONTRIBUTING mentions) when a dependency needs a newer one
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
@@ -63,8 +61,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   hand-written.
 - After a UI change run `cargo test --test render` and review the `target/audit/*.txt` dumps (overflow,
   alignment, small sizes: 160×45 … 30×8).
-- Drawing functions only use the `ui/hud.rs` primitives (bounds-safe); never write to the `Buffer` by index.
-- State only changes on the main thread; background jobs send an `AppEvent`.
+- Drawing functions write to the `Buffer` only through the `ui/hud.rs` primitives or a bounds-checked
+  `buf.cell_mut(..)` (as in `ui/mod.rs`, `ui/overlay.rs`); never index it. `ui::draw` also updates layout state
+  (`sync_layout`, `hits`, the slide animation), so it is not a pure function of `App`.
+- State only changes on the main thread; background jobs send an `AppEvent`. The one deliberate exception:
+  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself.
 - Network/CLI errors never panic: providers return `Err(String)`, the UI shows the cache with "~".
 
 ## Architecture (parts that span several files)
@@ -78,11 +79,13 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   something visible (e.g. a sensor event while in a terminal returns `false`); anything that changes over time
   (clock, animation, spinner, toast timeout, cursor blink) must be added to `App::redraw_after`, otherwise it
   freezes on screen. Non-event changes are reported via `dirty`/`take_dirty`.
-  ≤60 fps under output; an idle terminal redraws once a minute, Home once a second.
+  ≤60 fps under output; an idle terminal redraws once a minute, Home once a second (off battery only).
 - **Background work follows what is visible:** sensors via `SensorMode` (System: 1 s including the process
   list, Home: 1 s — 2 s on battery, otherwise 5 s), git status when a command finishes / Home opens / for a
-  changed repo, AI quota only while Home is open (`AiReq::Visible`, immediately on entering). On battery
-  (`App::on_battery`) the Home clock has no seconds and does not blink.
+  changed repo, AI quota only while Home is open (`AiReq::Visible`; entering Home fetches at once only if the
+  last fetch is older than 30 s, `AiReq::Refresh` — config change, R key — fetches even while Home is hidden).
+  The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`) the Home clock has no
+  seconds and does not blink.
   When adding periodic work, run it only while the relevant screen is open; measure with
   `cargo test --release --test e2e idle -- --ignored --nocapture` (CPU ms per minute).
 - **Mouse/hit-test:** `ui/*` drawing functions fill `hits: Vec<(Rect, Hit)>` while drawing; `app/input.rs`
@@ -91,13 +94,15 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
   shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/input.rs` xterm key/mouse encoding and AltGr
   handling.
-- **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT`; bash (`--rcfile`),
-  zsh (`ZDOTDIR`) and fish (`--init-command`) get scripts from `term/integration.rs`, written to
-  `<data>/shell/` before a pane starts (`ShellSpec::prepared`). The scripts source the user's own config first,
-  then emit OSC 7 on every prompt; Git Bash/Cygwin paths are turned into Windows paths.
+- **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT` (only when
+  `PROMPT` is not already set in NOBLE's environment); bash (`--rcfile`; login arguments use the separate
+  `bash_login` script), zsh (`ZDOTDIR`) and fish (`--init-command`) get scripts from `term/integration.rs`,
+  written to `<data>/shell/` before a pane starts (`ShellSpec::prepared`). The scripts source the user's own
+  config first, then emit OSC 7 on every prompt; Git Bash/Cygwin paths are turned into Windows paths. Arguments
+  that replace the config (`--norc`, `-f`, `-N`, `--rcfile`, `-c` …) disable the integration.
 - **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
   owning process); without a system clipboard copied text goes out as OSC 52.
-- **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133);
+- **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
   `App::on_pty_output` treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).
   OSC 9 text / OSC 777 and the bell put an `alert` (◆) on the tab the same way.
@@ -109,19 +114,22 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Claude hooks:** `hooks.rs` — when enabled in Settings, adds `noble hook <event>` to
   `~/.claude/settings.json` (writes a backup, removes only its own entries). `main.rs` handles this subcommand
   without opening the terminal; state is written to `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files,
-  which `App::tick` reads once a second (`apply_hook_records` → `AgentState`). `session-end` deletes the
-  record, and the prompt signal clears the pane's agent (`App::clear_agent`; older records are ignored) and its
-  window title; the launcher command only names the agent until the first prompt (`Pane::launch_running`).
-  Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files (`SubagentStart`/`SubagentStop`);
-  while any exist the session stays Working after `Stop`. Idle-reminder notifications are not recorded.
-  `hooks::upgrade` adds newly added events to an older install at startup.
-  `hooks::prune` runs at startup. Never touch the real file in tests.
+  which `App::tick` reads at most once a second (`apply_hook_records` → `AgentState`; `tick` runs on every
+  event and at least every `IDLE_TICK` = 2 s, and this scan only while hooks are installed or records exist).
+  `session-end` deletes the record, and the prompt signal clears the pane's agent (`App::clear_agent`; older
+  records are ignored) and its window title; the launcher command only names the agent until the first prompt
+  (`Pane::launch_running`). Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files
+  (`SubagentStart`/`SubagentStop`); while any exist the session stays Working after `Stop`. Idle-reminder and
+  `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `hooks::upgrade` adds newly added
+  events to an older install at startup. `hooks::prune` runs at startup. Never touch the real file in tests:
+  `NOBLE_HOME` does not move `~/.claude`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS` (`ai::isolated`), which
+  turns off the hooks settings path and AI credential detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
-- **Persistence:** `config.rs` live-reloaded `config.toml` (error = toast, never a crash); `store.rs` stores
-  recent dirs, the session, workspaces, AI usage history and UI state (`state.json`: welcome seen, pinned,
-  hidden and manually added projects — the scan thread gets the last two as `projects::Manual`) with atomic
-  JSON writes. The session file is shared by every window of a build: each window (`store::instance_id`)
+- **Persistence:** `config.rs` live-reloaded `config.toml` (`App::tick` polls its mtime every 2 s; error =
+  toast, never a crash); `store.rs` stores recent dirs, the session, workspaces, AI usage history and UI state
+  (`state.json`: welcome seen, pinned, hidden and manually added projects — the scan thread gets the last two as
+  `projects::Manual`) with atomic JSON writes (`store::write_json`, also used for `ai-cache.json`). The session file is shared by every window of a build: each window (`store::instance_id`)
   merges only its own tabs in (`session_save`, under a `.lock` file), and only the first window of a run
   restores (`session_begin`, liveness via pid + process start time).
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
@@ -130,11 +138,18 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `noble update`). `noble update` downloads the `release.yml` archive for the platform and its `.sha256`,
   verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
   without checksums are refused), unpacks it with the system `tar` and swaps the binary (the running one is
-  renamed to `*.old`, removed on the next launch).
+  renamed to `*.old`, falling back to `.old2` … `.old9` when one cannot be deleted). Linux/macOS delete the
+  old binary right after the swap; only Windows leaves it, `update::cleanup_old` removes it on the next launch.
 
 ## Extension points
-- New action: add it to `Action` in `src/keys.rs` (+ `ALL`, `id`, `title`, `group`), handle it in `App::run`,
-  optionally bind a default key.
-- New theme: append to `THEMES` in `src/theme.rs` — it appears in Settings automatically.
-- New AI provider: `detect`/`fetch` + `ProviderDef` in `src/ai/providers.rs`, plus a payload test.
-  Tokens only go to their own provider; they are never displayed, logged or refreshed.
+- New action: add it to `Action` in `src/keys.rs` (+ `ALL`, a fixed-size array whose length must be bumped,
+  `id`, `title`, `group`), handle it in `App::run` (`src/app/ops.rs`), optionally bind a default key. An action
+  that only makes sense inside a pane also goes into the `in_term` list in `palette_items`
+  (`src/app/palette.rs`), otherwise it shows up in the palette on every screen.
+- New theme: append to `THEMES` in `src/theme.rs` (a fixed-size `[Theme; N]` array: bump `N`) — it appears in
+  Settings automatically. The WCAG contrast test in `theme.rs` (`theme_contrast_meets_wcag`) must pass, and the
+  theme count ("22 themes") in `config.rs` `DEFAULT_CONFIG` and the README must be updated.
+- New AI provider: `detect`/`fetch` + `ProviderDef` in `src/ai/providers.rs`, plus a payload test; also the
+  allow-list in `config::parse`, `AiCfg::default`, `DEFAULT_CONFIG` and `app::PROVIDER_KEYS` (the render test
+  `every_provider_is_configurable` checks the Settings rows). Tokens only go to their own provider; they are
+  never displayed, logged or refreshed.

@@ -298,17 +298,28 @@ pub fn load_cache(file: &Path) -> HashMap<String, CacheEntry> {
     std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
+/// Several windows run a collector and share this file: the write is atomic (temp file + rename),
+/// so a reader never sees a half-written cache.
 fn save_cache(file: &Path, cache: &HashMap<String, CacheEntry>) {
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(text) = serde_json::to_string_pretty(cache) {
-        let _ = std::fs::write(file, text);
-    }
+    crate::store::write_json(file, cache);
+}
+
+/// Environment variable that keeps NOBLE away from the user's real machine-wide integrations: the AI
+/// collector never reads credentials or calls the network, and the Claude Code hooks never touch
+/// `~/.claude/settings.json`. `NOBLE_HOME` only moves NOBLE's own config and data, so the end-to-end
+/// tests (which run the real binary) set this as well. Unset in production; any value turns it on.
+pub const ISOLATED_ENV: &str = "NOBLE_NO_SYSTEM_INTEGRATIONS";
+
+/// Is [`ISOLATED_ENV`] set?
+pub fn isolated() -> bool {
+    std::env::var_os(ISOLATED_ENV).is_some()
 }
 
 /// Ids of the providers installed on this machine (even if not signed in).
 pub fn installed_providers() -> Vec<&'static str> {
+    if isolated() {
+        return Vec::new();
+    }
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let env = Env::new(home);
     providers::registry().into_iter().filter(|d| (d.detect)(&env) != Presence::NotInstalled).map(|d| d.id).collect()
@@ -351,23 +362,42 @@ pub fn fetch_due(visible: bool, last: Option<Instant>, every: Duration, now: Ins
     visible && last.is_none_or(|t| now.duration_since(t) >= every)
 }
 
+/// How long the collector waits for a request before it looks at the clock again.
+/// `None` = until a request arrives: a hidden panel or a disabled collector has nothing to do on its
+/// own (waking up anyway would spin, as `last` never advances while nothing is fetched).
+fn wait_time(enabled: bool, visible: bool, last: Option<Instant>, every: Duration, now: Instant) -> Option<Duration> {
+    if !enabled || !visible {
+        return None;
+    }
+    Some(last.map_or(Duration::ZERO, |t| every.saturating_sub(now.duration_since(t))))
+}
+
 /// Collector thread: detect → fetch → send → write cache → wait.
 /// Runs only while the quota panel is visible.
-pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, tx: Tx, requests: Receiver<AiReq>) {
+pub fn spawn(
+    shared_cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>,
+    cache_file: PathBuf,
+    tx: Tx,
+    requests: Receiver<AiReq>,
+) {
     let _ = std::thread::Builder::new().name("ai".into()).spawn(move || {
         let Some(home) = dirs::home_dir() else { return };
         let mut cache = load_cache(&cache_file);
         let mut visible = false;
         let mut last_fetch: Option<Instant> = None;
+        // The settings as they are right now (the app updates them before it sends `Refresh`).
+        let load = || {
+            let c = shared_cfg.lock().map(|c| c.clone()).unwrap_or_default();
+            let every = Duration::from_secs(c.refresh_minutes.clamp(1, 240) * 60);
+            let enabled = c.enabled && !isolated();
+            (c, every, enabled)
+        };
         loop {
-            let cfg = cfg.lock().map(|c| c.clone()).unwrap_or_default();
-            let every = Duration::from_secs(cfg.refresh_minutes.clamp(1, 240) * 60);
-            // Wait: indefinitely while hidden, until the next refresh while visible.
-            let msg = if visible {
-                let left = last_fetch.map_or(Duration::ZERO, |t| every.saturating_sub(t.elapsed()));
-                requests.recv_timeout(left)
-            } else {
-                requests.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            let (_, every, enabled) = load();
+            // Wait: indefinitely while hidden or disabled, until the next refresh while visible.
+            let msg = match wait_time(enabled, visible, last_fetch, every, Instant::now()) {
+                Some(left) => requests.recv_timeout(left),
+                None => requests.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             let mut manual = false;
             // Panel just appeared: fetch immediately if the data is older than 30 s.
@@ -387,10 +417,12 @@ pub fn spawn(cfg: std::sync::Arc<std::sync::Mutex<AiCfg>>, cache_file: PathBuf, 
             while let Ok(m) = requests.try_recv() {
                 handle(m, &mut visible);
             }
+            // Re-read: the config may have changed while waiting (e.g. AI just turned off).
+            let (cfg, every, enabled) = load();
             let now = Instant::now();
             let stale = last_fetch.is_none_or(|t| now.duration_since(t) >= FRESH_ENOUGH);
             let due = manual || (entered && visible && stale) || fetch_due(visible, last_fetch, every, now);
-            if !cfg.enabled || !due {
+            if !enabled || !due {
                 continue;
             }
             last_fetch = Some(now);
@@ -502,6 +534,41 @@ mod tests {
         assert!(fetch_due(true, None, every, now), "first view fetches immediately");
         assert!(!fetch_due(true, Some(now - Duration::from_secs(10)), every, now));
         assert!(fetch_due(true, Some(now - Duration::from_secs(301)), every, now));
+    }
+
+    #[test]
+    fn disabled_or_hidden_collector_sleeps_until_asked() {
+        let now = Instant::now();
+        let every = Duration::from_secs(300);
+        // Regression: disabled + visible + never fetched used to return a zero wait forever (100% CPU).
+        assert_eq!(wait_time(false, true, None, every, now), None);
+        assert_eq!(wait_time(false, true, Some(now - Duration::from_secs(900)), every, now), None);
+        assert_eq!(wait_time(true, false, None, every, now), None);
+        assert_eq!(wait_time(true, true, None, every, now), Some(Duration::ZERO));
+        let left = wait_time(true, true, Some(now - Duration::from_secs(100)), every, now);
+        assert_eq!(left, Some(Duration::from_secs(200)));
+        // Overdue: fetch right away, never a negative wait.
+        assert_eq!(wait_time(true, true, Some(now - Duration::from_secs(900)), every, now), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn cache_is_written_atomically() {
+        let dir = std::env::temp_dir().join(format!("noble-ai-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("ai-cache.json");
+        let mut cache = HashMap::new();
+        cache.insert(
+            "claude".to_string(),
+            CacheEntry { usage: Usage { windows: vec![], plan: Some("max".into()), note: None }, fetched_at: 7 },
+        );
+        save_cache(&file, &cache);
+        save_cache(&file, &cache);
+        assert_eq!(load_cache(&file).get("claude").map(|e| e.fetched_at), Some(7));
+        // No temp files are left behind after the rename.
+        let names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["ai-cache.json".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

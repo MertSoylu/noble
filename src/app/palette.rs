@@ -109,7 +109,12 @@ impl App {
             items.push(PaletteItem {
                 title: format!("Tab {}: {}", i + 1, self.tab_title(i)),
                 group: "TAB",
-                hint: if i < 9 { format!("alt+{}", i + 1) } else { String::new() },
+                // The key actually bound to the tab (rebinds count), none for tabs past the ninth.
+                hint: u8::try_from(i + 1)
+                    .ok()
+                    .filter(|n| *n <= 9)
+                    .and_then(|n| self.keymap.hint(Action::GoTab(n)))
+                    .unwrap_or_default(),
                 cmd: PaletteCmd::GoTab(i + 1),
             });
         }

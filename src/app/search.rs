@@ -7,7 +7,30 @@ use super::input::ctrl_held;
 use super::{App, LinkHover, SearchState, ToastLevel};
 use crate::term::layout::PaneId;
 use crate::term::link;
-use crate::term::pane::find_matches;
+use crate::term::pane::{Match, find_matches};
+
+/// How many lines dropped off the top since `old` was computed: the shift that makes most old matches
+/// reappear (same column, `shift` lines higher) in `new`. `0` when nothing lines up better than no shift.
+fn scrolled_out(old: &[Match], new: &[Match]) -> usize {
+    use std::collections::HashSet;
+    let Some(first) = new.first() else { return 0 };
+    let known: HashSet<(usize, u16)> = new.iter().map(|m| (m.line, m.col)).collect();
+    let score =
+        |k: usize| old.iter().filter(|m| m.line.checked_sub(k).is_some_and(|l| known.contains(&(l, m.col)))).count();
+    // The oldest surviving match is the first new one, so the shift is one of these distances.
+    let mut candidates: Vec<usize> = old.iter().filter_map(|m| m.line.checked_sub(first.line)).collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates.truncate(256);
+    let mut best = (score(0), 0);
+    for k in candidates.into_iter().filter(|&k| k > 0) {
+        let s = score(k);
+        if s > best.0 {
+            best = (s, k);
+        }
+    }
+    best.1
+}
 
 impl App {
     /// Opens the search bar in the focused pane (keeps the query if already open).
@@ -41,13 +64,18 @@ impl App {
         let (lines, history) = p.all_lines();
         let matches = find_matches(&lines, &s.query);
         let s = self.search.as_mut().expect("search open");
-        // When the scrollback fills up and old lines drop, absolute line numbers shift.
-        let shift = history as isize - s.history as isize;
+        // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
+        // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
+        // scrollback is the fallback when the matches do not line up.
+        let dropped = match scrolled_out(&s.matches, &matches) {
+            0 => (s.history as isize - history as isize).max(0) as usize,
+            n => n,
+        };
         let previous = s.current.and_then(|i| s.matches.get(i)).copied();
         s.current = match previous {
             Some(m) => {
-                let line = m.line as isize + shift.min(0);
-                matches.iter().position(|n| n.line as isize == line && n.col == m.col)
+                let line = m.line.checked_sub(dropped);
+                line.and_then(|line| matches.iter().position(|n| n.line == line && n.col == m.col))
             }
             None => None,
         }
@@ -180,5 +208,36 @@ impl App {
                 .map(|(_, row, from, to)| LinkHover { pane, row, from, to }),
             _ => None,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(line: usize, col: u16) -> Match {
+        Match { line, col, width: 3 }
+    }
+
+    /// A full scrollback keeps its length while lines drop off the top: the shift comes from the matches.
+    #[test]
+    fn scrolled_out_recovers_the_dropped_lines() {
+        let old = [m(10, 0), m(40, 4), m(41, 0), m(90, 2)];
+        // Seven lines dropped: matches moved up, one new match appeared at the bottom.
+        let new = [m(3, 4), m(34, 0), m(83, 2), m(95, 0)];
+        assert_eq!(scrolled_out(&old, &new), 7);
+        // The oldest match itself scrolled out.
+        let new = [m(33, 4), m(34, 0), m(83, 2)];
+        assert_eq!(scrolled_out(&old, &new), 7);
+    }
+
+    #[test]
+    fn scrolled_out_is_zero_when_nothing_moved() {
+        let old = [m(10, 0), m(20, 0), m(30, 0)];
+        assert_eq!(scrolled_out(&old, &old), 0);
+        // Growing history only appends matches.
+        assert_eq!(scrolled_out(&old, &[m(10, 0), m(20, 0), m(30, 0), m(50, 1)]), 0);
+        assert_eq!(scrolled_out(&[], &old), 0);
+        assert_eq!(scrolled_out(&old, &[]), 0);
     }
 }
