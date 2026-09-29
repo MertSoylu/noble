@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-29
+
 ### Added
 - Home: remove a project from the list for good with ⋯ → **Remove from list** (or "Remove Selected Project
   from List" in the command palette). It stays hidden after a rescan and a restart, is unpinned, and the folder
@@ -22,6 +24,12 @@ All notable changes to NOBLE are documented here. The format is based on
   tagline, checklist, progress bar and "PRESS ANY KEY" are gone. Any key or click still skips it.
 
 ### Fixed
+- The AI collector no longer busy-loops while it is disabled or hidden, and `ai-cache.json` is written atomically.
+- The tab menu and rename prompt track tabs by pane id, so a closed tab can no longer leave a stale index or panic;
+  empty menus no longer underflow. Agent state changes redraw Home, palette tab hints follow key rebinds and
+  folder names containing " · " keep their tab title.
+- Bracketed paste strips ESC from the payload, drifted OSC 8 links no longer resolve to the wrong URL, and search
+  keeps its match once the scrollback is full.
 - Claude Code status hooks: a session whose subagents (background ones too) are still running stays
   **working** instead of turning into **needs you** / **your turn** when Claude's main answer ends, and no
   "Claude finished" notice fires until Claude answers again. Claude's idle reminder ("Claude is waiting for your
