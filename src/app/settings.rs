@@ -500,24 +500,138 @@ impl App {
         self.persist("keys", "prefix", &format!("\"{prefix}\""));
     }
 
-    /// Opens the welcome screen with the current prefix selected.
+    /// Opens the welcome screen with the current settings selected.
     pub fn show_welcome(&mut self) {
-        let prefix = PREFIXES.iter().position(|p| p.eq_ignore_ascii_case(self.cfg.keys.prefix.trim())).unwrap_or(0);
-        self.overlay = Some(super::Overlay::Welcome { prefix });
+        self.overlay = Some(super::Overlay::Welcome(self.welcome_setup()));
     }
 
-    /// Closes the welcome; with `apply` the selected prefix takes effect. Never shown again.
-    pub fn finish_welcome(&mut self, prefix: usize, apply: bool) {
-        self.overlay = None;
-        if apply
-            && let Some(p) = PREFIXES.get(prefix)
-            && !p.eq_ignore_ascii_case(self.cfg.keys.prefix.trim())
-        {
-            self.set_prefix(p);
-            self.toast(ToastLevel::Ok, format!("prefix · {p}"));
+    /// The welcome setup for the current settings (also rebuilt when the config file is
+    /// reloaded while the card is open, so its previews never outlive the file's values).
+    fn welcome_setup(&self) -> super::WelcomeSetup {
+        let prefix = PREFIXES.iter().position(|p| p.eq_ignore_ascii_case(self.cfg.keys.prefix.trim())).unwrap_or(0);
+        let theme = THEMES.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
+        let current = self.cfg.terminal.colors.clone();
+        // Same row as the scheme selector: 0 is "Follow theme".
+        let colors = self
+            .term_schemes
+            .iter()
+            .position(|s| crate::theme::find_scheme(std::slice::from_ref(s), &current).is_some())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let mut shells = shell_options();
+        // A shell set in the config that is not in the list stays selectable (and selected), so
+        // ⏎ never replaces it with "auto".
+        if !shells.contains(&self.cfg.terminal.shell) {
+            shells.push(self.cfg.terminal.shell.clone());
         }
-        self.ui_state.data.welcomed = true;
-        self.ui_state.save();
+        let shell = shells.iter().position(|s| *s == self.cfg.terminal.shell).unwrap_or(0);
+        super::WelcomeSetup {
+            row: 0,
+            theme,
+            colors,
+            shell,
+            prefix,
+            schemes: self.scheme_options(),
+            shells,
+            original_theme: self.theme.name.to_string(),
+            original_colors: current,
+            colors_at_open: colors,
+            prefix_at_open: prefix,
+        }
+    }
+
+    /// The config file changed while the welcome card is open: the card starts over from the
+    /// new values (its previews are dropped), keeping the selected row.
+    pub(super) fn refresh_welcome(&mut self) {
+        if let Some(super::Overlay::Welcome(old)) = &self.overlay {
+            let row = old.row;
+            let mut w = self.welcome_setup();
+            w.row = row.min(w.rows().len() - 1);
+            self.overlay = Some(super::Overlay::Welcome(w));
+        }
+    }
+
+    /// Display name of a shell option (`shell_options`): "" is auto, a full path is Git Bash.
+    pub fn shell_option_label(&self, shell: &str) -> String {
+        let path = std::path::Path::new(shell);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        if shell.is_empty() {
+            format!("auto ({})", self.shell.label())
+        } else if cfg!(windows) && shell.contains(['/', '\\']) && stem.as_deref() == Some("bash") {
+            // Only Windows lists a full path (Git Bash); Linux/macOS list program names.
+            "Git Bash".into()
+        } else if shell.contains(['/', '\\']) {
+            // Any other full path (set in the config by hand): its program name.
+            stem.unwrap_or_else(|| shell.to_string())
+        } else {
+            shell.to_string()
+        }
+    }
+
+    /// Changes a welcome setup row by `dir` (wrapping); theme and terminal colors preview at once.
+    pub(super) fn welcome_step(&mut self, w: &mut super::WelcomeSetup, row: super::WelcomeRow, dir: i32) {
+        let step = |i: usize, n: usize| (i as i32 + dir).rem_euclid(n.max(1) as i32) as usize;
+        match row {
+            super::WelcomeRow::Theme => {
+                w.theme = step(w.theme, THEMES.len());
+                self.preview_theme(w.theme);
+            }
+            super::WelcomeRow::Colors => {
+                w.colors = step(w.colors, w.schemes.len());
+                if let Some(name) = w.schemes.get(w.colors) {
+                    self.cfg.terminal.colors = name.clone();
+                }
+            }
+            super::WelcomeRow::Shell => w.shell = step(w.shell, w.shells.len()),
+            super::WelcomeRow::Prefix => w.prefix = step(w.prefix, PREFIXES.len()),
+        }
+    }
+
+    /// Closes the welcome. With `apply` the choices are saved to the config, otherwise the
+    /// previews are undone. Either way it is never shown again.
+    pub fn finish_welcome(&mut self, w: &super::WelcomeSetup, apply: bool) {
+        self.overlay = None;
+        // Undo the previews first: `cfg` then holds what the config file says.
+        self.cfg.terminal.colors = w.original_colors.clone();
+        self.theme = crate::theme::Theme::by_name(&w.original_theme, self.cfg.general.transparent);
+        if apply {
+            let mut c = self.cfg.clone();
+            let mut edits: Vec<(&str, &str, String)> = Vec::new();
+            if let Some(t) = THEMES.get(w.theme)
+                && t.name != w.original_theme
+            {
+                c.general.theme = t.name.to_string();
+                edits.push(("general", "theme", format!("\"{}\"", t.name)));
+            }
+            if w.colors != w.colors_at_open
+                && let Some(name) = w.schemes.get(w.colors)
+            {
+                c.terminal.colors = name.clone();
+                edits.push(("terminal", "colors", format!("\"{name}\"")));
+            }
+            if let Some(shell) = w.shells.get(w.shell)
+                && *shell != c.terminal.shell
+            {
+                c.terminal.shell = shell.clone();
+                let escaped = shell.replace('\\', "\\\\").replace('"', "\\\"");
+                edits.push(("terminal", "shell", format!("\"{escaped}\"")));
+            }
+            if let Some(p) = PREFIXES.get(w.prefix)
+                && w.prefix != w.prefix_at_open
+                && !p.eq_ignore_ascii_case(c.keys.prefix.trim())
+            {
+                c.keys.prefix = p.to_string();
+                edits.push(("keys", "prefix", format!("\"{p}\"")));
+            }
+            if !edits.is_empty() {
+                self.apply_config(c);
+                for (section, key, value) in &edits {
+                    self.persist(section, key, value);
+                }
+                self.toast(ToastLevel::Ok, "all set · change any of it later in Settings");
+            }
+        }
+        self.edit_ui_state(|d| d.welcomed = true);
     }
 
     /// Adds a root folder to the project scan. If the list is empty (auto mode) the
@@ -612,8 +726,20 @@ impl App {
         self.toast(ToastLevel::Ok, format!("removed {name} from Projects · A on Home adds it back"));
     }
 
+    /// Changes `state.json` (see `UiState::modify`). The write also reads back what other
+    /// windows changed, so when the hidden/added projects differ afterwards the scan thread
+    /// gets the new lists.
+    pub(crate) fn edit_ui_state<T>(&mut self, f: impl FnOnce(&mut crate::store::UiStateData) -> T) -> T {
+        let before = self.ui_state.manual_projects();
+        let out = self.ui_state.modify(f);
+        if self.ui_state.manual_projects() != before {
+            self.sync_manual_projects();
+        }
+        out
+    }
+
     /// Hands the hidden/added projects to the scan thread (the next scan applies them).
-    fn sync_manual_projects(&self) {
+    pub(super) fn sync_manual_projects(&self) {
         if let Some(s) = &self.services
             && let Ok(mut m) = s.proj_manual.lock()
         {

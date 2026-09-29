@@ -19,7 +19,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     }
     hits.push((area, Hit::Backdrop));
     match ov {
-        Overlay::Welcome { prefix } => welcome(buf, area, app, *prefix, hits),
+        Overlay::Welcome(ws) => welcome(buf, area, app, ws, hits),
         Overlay::Palette(st) => palette(buf, area, app, st, hits),
         Overlay::Schemes(p) => schemes(buf, area, app, p, hits),
         Overlay::Themes(p) => themes(buf, area, app, p, hits),
@@ -162,17 +162,19 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
 
 /// Short descriptions of the prefix options (`PREFIXES` order).
 const PREFIX_NOTES: [&str; 4] = [
-    "tmux style · shell's ctrl+a (line start) takes 2 presses",
-    "tmux default · shell's ctrl+b (char back) takes 2 presses",
+    "tmux style · shell's ctrl+a takes 2 presses",
+    "tmux default · shell's ctrl+b takes 2 presses",
     "PowerShell's ctrl+space menu takes 2 presses",
     "rarely used by shells · stays out of your way",
 ];
 
-/// First launch card: what was found, the most important keys and the prefix choice.
-fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(Rect, Hit)>) {
+/// First launch card: what was found, a short setup (theme, terminal colors, shell, prefix)
+/// and the most important keys. At small sizes the key list is cut before the setup rows.
+fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetup, hits: &mut Vec<(Rect, Hit)>) {
+    use crate::app::WelcomeRow;
     let th = &app.theme;
     let w = 66.min(area.width.saturating_sub(2));
-    let h = 17.min(area.height.saturating_sub(1));
+    let h = 18.min(area.height.saturating_sub(1));
     let rect = centered(area, w, h);
     hits.push((rect, Hit::Inert));
     let inner = boxed(buf, rect, "WELCOME TO NOBLE", th, th.accent);
@@ -181,25 +183,121 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(
     }
     let x = inner.x + 2;
     let iw = inner.width.saturating_sub(4);
-    let mut y = inner.y + 1;
-    let bottom = inner.bottom();
+    // A short window skips the padding and the projects line so the setup rows stay visible.
+    let roomy = inner.height >= 14;
+    let mut y = inner.y + u16::from(roomy);
+    // The last row belongs to the Start button.
+    let bottom = inner.bottom().saturating_sub(1);
     let line = |buf: &mut Buffer, y: u16, spans: &[(&str, Style)]| {
         if y < bottom {
             hud::put_spans(buf, x, y, spans, iw);
         }
     };
-    let found = if !app.projects_loaded {
-        "looking for your git projects…".to_string()
-    } else if app.projects.is_empty() {
-        "no git projects found yet — press a on Home to add a folder".to_string()
-    } else {
-        format!("found {} git projects", app.projects.len())
-    };
-    line(buf, y, &[("● ", th.accent2()), (&found, th.text())]);
+    if roomy {
+        let found = if !app.projects_loaded {
+            "looking for your git projects…".to_string()
+        } else if app.projects.is_empty() {
+            "no git projects found yet — press a on Home to add a folder".to_string()
+        } else {
+            format!("found {} git projects", app.projects.len())
+        };
+        line(buf, y, &[("● ", th.accent2()), (&found, th.text())]);
+        y += 2;
+    }
+    let rows = ws.rows();
+    // Too short for the heading and every row (30×8): the rows win, the heading goes.
+    if bottom.saturating_sub(y) as usize > rows.len() {
+        line(buf, y, &[("SET UP", th.accent_bold()), ("  ↑↓ choose · ←→ change", th.dim())]);
+        y += 1;
+    }
+    // Setup rows: label column, then the value between ‹ › (the prefix as chips).
+    // A narrow card uses short labels so the values keep some room.
+    let short = iw < 44;
+    let label_w: u16 = if short { 8 } else { 17 };
+    let vx = x + label_w;
+    let vend = x + iw;
+    let theme_label = crate::theme::THEMES.get(ws.theme).map_or("", |t| t.label);
+    // The prefix chips need room for all four; otherwise the prefix is a ‹ value › row too.
+    let chips_w: u16 = crate::app::PREFIXES.iter().map(|p| util::width(p) as u16 + 3).sum();
+    let chips = vend.saturating_sub(vx) >= chips_w;
+    for (i, row) in rows.into_iter().enumerate() {
+        if y >= bottom {
+            break;
+        }
+        let on = i == ws.row;
+        hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::WelcomeRow(i)));
+        if on {
+            hud::put(buf, x - 1, y, "▌", th.accent(), 1);
+        }
+        let label = match (row, short) {
+            (WelcomeRow::Theme, _) => "Theme",
+            (WelcomeRow::Colors, false) => "Terminal colors",
+            (WelcomeRow::Colors, true) => "Colors",
+            (WelcomeRow::Shell, _) => "Shell",
+            (WelcomeRow::Prefix, false) => "Prefix key",
+            (WelcomeRow::Prefix, true) => "Prefix",
+        };
+        hud::put(buf, x, y, label, if on { th.accent_bold() } else { th.text() }, label_w.min(iw));
+        if row == WelcomeRow::Prefix && chips {
+            let mut cx = vx;
+            for (pi, p) in crate::app::PREFIXES.iter().enumerate() {
+                let style = if pi == ws.prefix {
+                    Style::default().fg(th.on_accent).bg(th.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(th.fg).bg(th.sel_bg)
+                };
+                let start = cx;
+                cx = hud::put(buf, cx, y, &format!(" {p} "), style, vend.saturating_sub(cx));
+                if cx > start {
+                    hits.push((Rect::new(start, y, cx - start, 1), Hit::WelcomePrefix(pi)));
+                }
+                cx += 1;
+            }
+            y += 1;
+            if y < bottom {
+                hud::put(
+                    buf,
+                    vx,
+                    y,
+                    PREFIX_NOTES.get(ws.prefix).copied().unwrap_or(""),
+                    th.dim(),
+                    vend.saturating_sub(vx),
+                );
+            }
+        } else {
+            let value = match row {
+                WelcomeRow::Theme => theme_label.to_string(),
+                WelcomeRow::Colors => ws.schemes.get(ws.colors).map(|s| app.scheme_label(s)).unwrap_or_default(),
+                WelcomeRow::Shell => ws.shells.get(ws.shell).map(|s| app.shell_option_label(s)).unwrap_or_default(),
+                WelcomeRow::Prefix => crate::app::PREFIXES.get(ws.prefix).copied().unwrap_or_default().to_string(),
+            };
+            let arrow = if on { th.accent_bold() } else { th.dim() };
+            // ‹ value ›, the value padded so the right arrow stays put while cycling.
+            let value_w = 24.min(vend.saturating_sub(vx + 4) as usize);
+            let left_end = hud::put(buf, vx, y, "‹ ", arrow, vend.saturating_sub(vx));
+            let text_end = hud::put(
+                buf,
+                left_end,
+                y,
+                &util::pad_right(&util::truncate(&value, value_w), value_w),
+                if on { th.accent_bold() } else { th.text() },
+                vend.saturating_sub(left_end),
+            );
+            let right_end = hud::put(buf, text_end, y, " ›", arrow, vend.saturating_sub(text_end));
+            // Clicking the value itself steps forward, like the right arrow.
+            if text_end > left_end {
+                hits.push((Rect::new(left_end, y, text_end - left_end, 1), Hit::WelcomeStep(i, 1)));
+            }
+            if left_end > vx {
+                hits.push((Rect::new(vx, y, left_end - vx, 1), Hit::WelcomeStep(i, -1)));
+            }
+            if right_end > text_end {
+                hits.push((Rect::new(text_end, y, right_end - text_end, 1), Hit::WelcomeStep(i, 1)));
+            }
+        }
+        y += 1;
+    }
     y += 1;
-    let colors = format!("terminal colors: {}", app.scheme_label(&app.cfg.terminal.colors));
-    line(buf, y, &[("● ", th.accent2()), (&colors, th.text())]);
-    y += 2;
     for (key, what) in [
         ("⏎", "open a terminal in the selected project"),
         ("c  x", "start Claude / Codex right there"),
@@ -209,32 +307,15 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, sel: usize, hits: &mut Vec<(
         line(buf, y, &[(&util::pad_right(key, 8), th.accent_bold()), (what, th.text())]);
         y += 1;
     }
-    y += 1;
-    line(buf, y, &[("PREFIX KEY", th.accent_bold()), ("  splits, tabs and more start with it", th.dim())]);
-    y += 1;
-    if y < bottom {
-        let mut cx = x;
-        for (i, p) in crate::app::PREFIXES.iter().enumerate() {
-            let label = format!(" {p} ");
-            let style = if i == sel {
-                Style::default().fg(th.on_accent).bg(th.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(th.fg).bg(th.sel_bg)
-            };
-            let start = cx;
-            cx = hud::put(buf, cx, y, &label, style, (x + iw).saturating_sub(cx));
-            hits.push((Rect::new(start, y, cx - start, 1), Hit::WelcomePrefix(i)));
-            cx += 1;
-        }
-        y += 1;
-    }
-    line(buf, y, &[(PREFIX_NOTES.get(sel).copied().unwrap_or(""), th.dim())]);
-    let by = inner.bottom() - 1;
-    if by > y {
-        let start = x;
+    // Always drawn (the rows above stop short of it): the way out must stay visible.
+    let by = bottom;
+    if by > inner.y {
         let end = hud::button(buf, x, by, "⏎", "Start", th, true);
-        hits.push((Rect::new(start, by, end - start, 1), Hit::WelcomeDone));
-        hud::put_right(buf, x + iw, by, "←→ prefix · esc skip", th.dim());
+        hits.push((Rect::new(x, by, end - x, 1), Hit::WelcomeDone));
+        let hint = "esc keep defaults";
+        if end + 2 + util::width(hint) as u16 <= x + iw {
+            hud::put_right(buf, x + iw, by, hint, th.dim());
+        }
     }
 }
 

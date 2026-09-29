@@ -218,11 +218,11 @@ impl App {
         }
         // Launcher tabs ("project · claude") say what is running while it runs; once it
         // has exited (or after a restore) they are named after the project like any other.
-        // The launcher name is the last part: a folder called "a · b" stays whole. Only a tab that
-        // started a command counts as a launcher tab; a plain tab in such a folder has no launcher part.
-        let started_command = t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.command.is_some()));
+        // The launcher name is the last part: a folder called "a · b" stays whole. Only a tab opened
+        // by a launcher counts (`Tab::launched`, which outlives the launcher's pane in a split tab);
+        // a plain tab in such a folder has no launcher part.
         let (base, launcher) = match t.origin.rsplit_once(" · ") {
-            Some((base, _)) if started_command => (base, true),
+            Some((base, _)) if t.launched => (base, true),
             _ => (t.origin.as_str(), false),
         };
         if launcher && t.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.launch_running())) {
@@ -307,8 +307,12 @@ impl App {
     pub fn new_tab(&mut self, cwd: PathBuf, command: Option<&str>, origin: Option<String>) {
         let (rows, cols) = self.fresh_size();
         if let Some(id) = self.spawn_pane(&cwd, command, rows, cols) {
+            // A command with its own title is a launcher tab: the title ends in " · <launcher>".
+            let launched = command.is_some() && origin.is_some();
             let origin = origin.unwrap_or_else(|| dir_name(&cwd));
-            self.tabs.push(Tab::new(id, origin));
+            let mut tab = Tab::new(id, origin);
+            tab.launched = launched;
+            self.tabs.push(tab);
             self.view = View::Term(self.tabs.len() - 1);
             self.recent.record(&cwd);
         }
@@ -398,7 +402,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "CLOSE TAB".into(),
             body: format!("{what} still running — close the tab?"),
-            action: ConfirmAction::CloseTab(ids[0]),
+            action: ConfirmAction::CloseTab(tab.id),
         }));
     }
 
@@ -641,7 +645,7 @@ impl App {
             ConfirmAction::Quit => self.quit = true,
             ConfirmAction::ClosePane(id) => self.close_pane(id),
             ConfirmAction::CloseTab(id) => {
-                if let Some(ti) = self.tab_of(id) {
+                if let Some(ti) = self.tab_index(id) {
                     self.remove_tab(ti);
                 }
             }
@@ -670,9 +674,9 @@ impl App {
     pub fn submit_prompt(&mut self, prompt: Prompt) {
         let value = prompt.value.trim().to_string();
         match prompt.purpose {
-            PromptPurpose::RenameTab(pane) => {
+            PromptPurpose::RenameTab(id) => {
                 // The tab may have closed while the prompt was open.
-                if let Some(ti) = self.tab_of(pane) {
+                if let Some(ti) = self.tab_index(id) {
                     self.tabs[ti].name = (!value.is_empty()).then_some(value);
                 }
             }
@@ -717,11 +721,20 @@ impl App {
             tabs: self
                 .tabs
                 .iter()
-                .map(|t| SavedTab {
-                    name: t.name.clone(),
-                    origin: t.origin.clone(),
-                    layout: self.save_node(&t.root),
-                    focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
+                .map(|t| {
+                    let layout = self.save_node(&t.root);
+                    // A launcher tab whose launcher pane is gone restores as a plain tab, so it is
+                    // saved under the project name alone (`open_workspace` marks it by its panes).
+                    let origin = match t.origin.rsplit_once(" · ") {
+                        Some((base, _)) if t.launched && !has_launch(&layout) => base.to_string(),
+                        _ => t.origin.clone(),
+                    };
+                    SavedTab {
+                        name: t.name.clone(),
+                        origin,
+                        layout,
+                        focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
+                    }
                 })
                 .collect(),
         }
@@ -802,6 +815,8 @@ impl App {
                 let mut tab = Tab::new(focus, t.origin.clone());
                 tab.root = root;
                 tab.name = t.name.clone();
+                // A saved quick-launch pane runs its launcher again, so the tab is a launcher tab.
+                tab.launched = has_launch(&t.layout);
                 self.tabs.push(tab);
                 opened += 1;
             }
@@ -820,5 +835,13 @@ impl App {
             self.view = View::Term(before);
             self.toast(ToastLevel::Ok, format!("workspace '{}' · {opened} tabs", ws.name));
         }
+    }
+}
+
+/// Does a saved layout hold a quick-launch pane (one that runs its launcher again on restore)?
+fn has_launch(n: &SavedNode) -> bool {
+    match n {
+        SavedNode::Leaf { launch, .. } => launch.is_some(),
+        SavedNode::Split { a, b, .. } => has_launch(a) || has_launch(b),
     }
 }

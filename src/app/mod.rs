@@ -74,8 +74,8 @@ impl Default for SystemState {
 pub enum ConfirmAction {
     Quit,
     ClosePane(PaneId),
-    /// The tab holding this pane.
-    CloseTab(PaneId),
+    /// The tab by its stable id (its panes may close before the confirmation).
+    CloseTab(crate::term::TabId),
     Paste {
         pane: PaneId,
         text: String,
@@ -93,8 +93,9 @@ pub struct Confirm {
 }
 
 pub enum PromptPurpose {
-    /// The tab holding this pane (an index would go stale when another tab closes).
-    RenameTab(PaneId),
+    /// The tab by its stable id (an index would go stale when another tab closes, a pane id when
+    /// that pane closes in a split tab).
+    RenameTab(crate::term::TabId),
     SaveWorkspace,
     /// New root folder to scan projects in.
     AddRoot,
@@ -150,11 +151,57 @@ pub struct ThemePicker {
     pub original: String,
 }
 
+/// A row of the first launch setup card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WelcomeRow {
+    Theme,
+    Colors,
+    Shell,
+    Prefix,
+}
+
+/// First launch setup: theme and terminal colors preview live, the rest applies on ⏎; esc
+/// undoes the previews and keeps the defaults.
+pub struct WelcomeSetup {
+    /// Selected row (`WelcomeSetup::rows` order).
+    pub row: usize,
+    /// Indexes into `THEMES`, `schemes`, `shells` and `PREFIXES`.
+    pub theme: usize,
+    pub colors: usize,
+    pub shell: usize,
+    pub prefix: usize,
+    /// `App::scheme_options` and `settings::shell_options` when the card opened.
+    pub schemes: Vec<String>,
+    pub shells: Vec<String>,
+    /// Theme and terminal colors before the card opened (restored by esc).
+    pub original_theme: String,
+    pub original_colors: String,
+    /// `colors` when the card opened: only a changed choice is written to the config.
+    pub colors_at_open: usize,
+    /// `prefix` when the card opened: a custom prefix (not in `PREFIXES`) is only replaced when
+    /// another one is picked.
+    pub prefix_at_open: usize,
+}
+
+impl WelcomeSetup {
+    /// The rows shown: terminal colors and shell only when there is something to choose.
+    pub fn rows(&self) -> Vec<WelcomeRow> {
+        let mut rows = vec![WelcomeRow::Theme];
+        if self.schemes.len() > 1 {
+            rows.push(WelcomeRow::Colors);
+        }
+        // `shells[0]` is "auto": a choice needs at least two installed shells.
+        if self.shells.len() > 2 {
+            rows.push(WelcomeRow::Shell);
+        }
+        rows.push(WelcomeRow::Prefix);
+        rows
+    }
+}
+
 pub enum Overlay {
-    /// First launch: short intro and prefix key choice (`PREFIXES` order).
-    Welcome {
-        prefix: usize,
-    },
+    /// First launch: short setup (theme, terminal colors, shell, prefix key) and the main keys.
+    Welcome(WelcomeSetup),
     Palette(PaletteState),
     Schemes(SchemePicker),
     Themes(ThemePicker),
@@ -228,6 +275,9 @@ pub enum Hit {
     PaletteItem(usize),
     ConfirmYes,
     ConfirmNo,
+    /// Welcome card: a setup row (`WelcomeSetup::rows` order), its ‹ › arrows and a prefix chip.
+    WelcomeRow(usize),
+    WelcomeStep(usize, i32),
     WelcomePrefix(usize),
     WelcomeDone,
     MenuItem(usize),
@@ -802,9 +852,11 @@ impl App {
                 self.ai.sort_by_key(|s| order(s.id));
             }
             AppEvent::Update(Ok(version)) => {
-                self.ui_state.data.update_checked = chrono::Utc::now().timestamp();
-                self.ui_state.data.update_latest = version.clone();
-                self.ui_state.save();
+                let checked = chrono::Utc::now().timestamp();
+                self.edit_ui_state(|d| {
+                    d.update_checked = checked;
+                    d.update_latest = version.clone();
+                });
                 self.set_latest_version(&version);
             }
             // No network or GitHub did not answer: retry in an hour.
@@ -910,8 +962,7 @@ impl App {
     /// Dismisses the notice: never shown again for the same version.
     pub fn dismiss_update(&mut self) {
         if let Some(v) = self.update_available.take() {
-            self.ui_state.data.update_skipped = v;
-            self.ui_state.save();
+            self.edit_ui_state(|d| d.update_skipped = v);
         }
     }
 
@@ -985,11 +1036,13 @@ impl App {
                 crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
                 continue;
             }
-            // Only a new event notifies; the subagent count changing alone does not.
-            let new_event = self
-                .agent_hooks
-                .get(&pane)
-                .is_none_or(|old| (&old.event, &old.message, old.ts) != (&rec.event, &rec.message, rec.ts));
+            // A new event notifies, and so does the state changing without one: the last
+            // background subagent ending after `stop` turns Working into Idle with the same
+            // event. A count change that keeps the state (2 subagents to 1) does not.
+            let new_event = self.agent_hooks.get(&pane).is_none_or(|old| {
+                (&old.event, &old.message, old.ts) != (&rec.event, &rec.message, rec.ts)
+                    || hook_state(old) != hook_state(&rec)
+            });
             if new_event {
                 changed.push((pane, rec.clone()));
             }
@@ -1109,7 +1162,21 @@ impl App {
 
     fn set_projects(&mut self, mut list: Vec<Project>) {
         // The scan thread already drops hidden projects; one hidden since it started is dropped here.
-        self.ui_state.manual_projects().filter(&mut list);
+        let manual = self.ui_state.manual_projects();
+        manual.filter(&mut list);
+        // A folder added by hand after the scan started is missing from its result: keep the
+        // entry `add_project` listed (while the folder exists) until a later scan includes it.
+        let missing: Vec<Project> = self
+            .projects
+            .iter()
+            .filter(|p| self.ui_state.is_added(&p.path) && !manual.is_hidden(&p.path))
+            .filter(|p| !list.iter().any(|q| crate::util::same_path(&q.path, &p.path)) && p.path.is_dir())
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            list.extend(missing);
+            crate::projects::sort_projects(&mut list);
+        }
         // Keep the previous git info (so a re-scan does not flicker).
         for p in &mut list {
             if let Some(old) = self.projects.iter().find(|o| o.path == p.path) {
@@ -1428,6 +1495,14 @@ impl App {
             return;
         }
         self.apply_config(loaded.config);
+        // An open welcome card or theme/scheme selector previews on top of the old values: it starts
+        // over from the file, so esc cannot put the stale values back.
+        self.refresh_welcome();
+        match self.overlay {
+            Some(Overlay::Themes(_)) => self.open_theme_picker(),
+            Some(Overlay::Schemes(_)) => self.open_scheme_picker(),
+            _ => {}
+        }
         if announce || self.keymap.warnings.is_empty() {
             self.toast(ToastLevel::Ok, "config reloaded");
         }

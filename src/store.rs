@@ -28,8 +28,10 @@ pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let tmp =
             file.with_extension(format!("json.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, file);
+        // A failed write (disk full) or rename (target locked on Windows, a directory in its
+        // place) must not leave the temp file behind.
+        if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, file).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -371,8 +373,26 @@ pub struct UiStateData {
     pub update_skipped: String,
 }
 
+impl UiStateData {
+    pub fn is_pinned(&self, path: &Path) -> bool {
+        self.pins.iter().any(|p| crate::util::same_path(Path::new(p), path))
+    }
+
+    pub fn is_hidden(&self, path: &Path) -> bool {
+        self.hidden.iter().any(|h| crate::util::same_path(Path::new(h), path))
+    }
+}
+
+/// How long a UI state write waits for another window's lock (normally held for milliseconds)
+/// before it writes without it: the main thread must not stall for long.
+const UI_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// `state.json`, shared by every window. Each change is a read-modify-write under
+/// `state.json.lock` (`modify`), so a window never overwrites what another one wrote since it
+/// started (its pins, hidden or added projects, the update check …).
 pub struct UiState {
     file: Option<PathBuf>,
+    /// The state as last read or written. Change it only through `modify`.
     pub data: UiStateData,
 }
 
@@ -385,57 +405,70 @@ impl UiState {
         UiState { file: None, data: UiStateData::default() }
     }
 
-    pub fn save(&self) {
-        if let Some(f) = &self.file {
-            write_json(f, &self.data);
-        }
+    /// Applies one change: under the lock the file is read again (other windows may have
+    /// written it), `f` changes only what it is about, and the result is written atomically
+    /// and becomes the in-memory state, other windows' changes included. A missing or
+    /// unreadable file starts from the in-memory state. Without a file (tests) only memory changes.
+    pub fn modify<T>(&mut self, f: impl FnOnce(&mut UiStateData) -> T) -> T {
+        let Some(file) = self.file.clone() else { return f(&mut self.data) };
+        let current = &self.data;
+        let (data, out) = with_lock_waiting(&file, UI_LOCK_WAIT, || {
+            let mut data: UiStateData = read_json(&file).unwrap_or_else(|| current.clone());
+            let out = f(&mut data);
+            write_json(&file, &data);
+            (data, out)
+        });
+        self.data = data;
+        out
     }
 
     pub fn is_pinned(&self, path: &Path) -> bool {
-        self.data.pins.iter().any(|p| crate::util::same_path(Path::new(p), path))
+        self.data.is_pinned(path)
     }
 
     /// Toggles the pin; returns the new state.
     pub fn toggle_pin(&mut self, path: &Path) -> bool {
         let key = path.to_string_lossy().into_owned();
-        let pinned = if self.is_pinned(path) {
-            self.data.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
-            false
-        } else {
-            self.data.pins.push(key);
-            true
-        };
-        self.save();
-        pinned
+        self.modify(|d| {
+            if d.is_pinned(path) {
+                d.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
+                false
+            } else {
+                d.pins.push(key);
+                true
+            }
+        })
     }
 
     pub fn is_hidden(&self, path: &Path) -> bool {
-        self.data.hidden.iter().any(|h| crate::util::same_path(Path::new(h), path))
+        self.data.is_hidden(path)
     }
 
     /// Removes a project from the list for good: hidden from every scan, unpinned and
     /// dropped from the manually added folders.
     pub fn hide_project(&mut self, path: &Path) {
         let key = path.to_string_lossy().into_owned();
-        self.data.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
-        self.data.added.retain(|a| !crate::util::same_path(Path::new(a), path));
-        if !self.is_hidden(path) {
-            self.data.hidden.push(key);
-        }
-        self.save();
+        self.modify(|d| {
+            d.pins.retain(|p| !crate::util::same_path(Path::new(p), path));
+            d.added.retain(|a| !crate::util::same_path(Path::new(a), path));
+            if !d.is_hidden(path) {
+                d.hidden.push(key);
+            }
+        })
     }
 
     /// Adds a folder as a project by hand (and shows it again if it was hidden).
     /// Returns false when it was already added.
     pub fn add_project(&mut self, path: &Path) -> bool {
-        let was_hidden = self.is_hidden(path);
-        self.data.hidden.retain(|h| !crate::util::same_path(Path::new(h), path));
-        let known = self.data.added.iter().any(|a| crate::util::same_path(Path::new(a), path));
-        if !known {
-            self.data.added.push(path.to_string_lossy().into_owned());
-        }
-        self.save();
-        !known || was_hidden
+        self.modify(|d| {
+            let was_hidden = d.is_hidden(path);
+            d.hidden.retain(|h| !crate::util::same_path(Path::new(h), path));
+            let known = d.added.iter().any(|a| crate::util::same_path(Path::new(a), path));
+            if !known {
+                d.added.push(path.to_string_lossy().into_owned());
+            }
+            !known || was_hidden
+        })
     }
 
     /// Hidden and manually added projects, as the project scan applies them.
@@ -444,6 +477,11 @@ impl UiState {
             hidden: self.data.hidden.clone(),
             added: self.data.added.iter().filter(|a| !a.is_empty()).map(PathBuf::from).collect(),
         }
+    }
+
+    /// Is this folder one of the manually added projects?
+    pub fn is_added(&self, path: &Path) -> bool {
+        self.data.added.iter().any(|a| !a.is_empty() && crate::util::same_path(Path::new(a), path))
     }
 }
 
@@ -556,6 +594,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Two windows share `state.json`: a change made by one survives a later, unrelated write
+    /// by the other (which loaded the file before that change), and the other window sees it.
+    #[test]
+    fn ui_state_writes_keep_other_windows_changes() {
+        let dir = std::env::temp_dir().join(format!("noble-ui-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("state.json");
+        let (a, b, c) = (dir.join("alpha"), dir.join("beta"), dir.join("gamma"));
+        let mut one = UiState::load(file.clone());
+        let mut two = UiState::load(file.clone());
+        one.hide_project(&a);
+        one.add_project(&b);
+        one.toggle_pin(&b);
+        // The second window still holds the state from before and writes unrelated fields.
+        two.modify(|d| d.prefix_used = true);
+        two.modify(|d| {
+            d.update_checked = 42;
+            d.update_latest = "9.9.9".into();
+        });
+        two.modify(|d| d.update_skipped = "9.9.9".into());
+        two.toggle_pin(&c);
+        assert!(two.is_hidden(&a) && two.is_pinned(&b), "the other window's changes are read back");
+        let back = UiState::load(file.clone());
+        assert!(back.is_hidden(&a), "hidden project survived");
+        assert_eq!(back.manual_projects().added, vec![b.clone()]);
+        assert!(back.is_pinned(&b) && back.is_pinned(&c));
+        assert!(back.data.prefix_used);
+        assert_eq!((back.data.update_checked, back.data.update_skipped.as_str()), (42, "9.9.9"));
+        // And the other way round: the first window's next write keeps the second one's fields.
+        one.modify(|d| d.welcomed = true);
+        let back = UiState::load(file.clone());
+        assert!(back.data.welcomed && back.data.prefix_used && back.is_pinned(&c));
+        assert!(!file.with_extension("json.lock").exists(), "the lock is released");
+        // Many windows writing at once: every change lands.
+        let writers: Vec<_> = (0..6)
+            .map(|i| {
+                let (file, path) = (file.clone(), dir.join(format!("p{i}")));
+                std::thread::spawn(move || UiState::load(file).hide_project(&path))
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        let back = UiState::load(file);
+        assert!((0..6).all(|i| back.is_hidden(&dir.join(format!("p{i}")))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn usage_history_merges_and_resamples() {
         let mut h = UsageHistory::memory();
@@ -628,6 +712,29 @@ mod tests {
         assert_eq!(ui.is_pinned(&upper), ignores_case);
         assert!(!ui.toggle_pin(&slash), "unpinned through the other spelling");
         assert!(ui.data.pins.is_empty());
+    }
+
+    /// A write that cannot be moved into place (a directory sits at the target, on every
+    /// platform) leaves the old content and no temp file behind; a normal write leaves none either.
+    #[test]
+    fn write_json_cleans_up_its_temp_file() {
+        let dir = std::env::temp_dir().join(format!("noble-store-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blocked = dir.join("blocked.json");
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        write_json(&blocked, &[1, 2, 3]);
+        assert!(blocked.is_dir(), "the directory in the way is untouched");
+        let ok = dir.join("ok.json");
+        write_json(&ok, &[1, 2, 3]);
+        assert_eq!(read_json::<Vec<i32>>(&ok), Some(vec![1, 2, 3]));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Corrupt or hostile data files load as empty/defaults (or as the valid values they hold),

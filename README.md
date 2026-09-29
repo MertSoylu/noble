@@ -154,8 +154,11 @@ git clone https://github.com/MertSoylu/noble && cd noble
 cargo install --path .
 ```
 
-Then run `noble`. On the first launch a short welcome card shows what NOBLE found, the four keys worth knowing
-and a choice of prefix key, so it doesn't clash with your shell.
+Then run `noble`. On the first launch a short welcome card shows what NOBLE found and the four keys worth
+knowing, and lets you set up the basics in a few keystrokes: the theme and terminal colors (previewed live as
+you cycle them with ←→), the shell when more than one is installed (PowerShell, cmd, Git Bash on Windows; bash,
+zsh, fish … on Linux and macOS) and a prefix key that doesn't clash with your shell. ⏎ keeps your choices, esc
+keeps the defaults; everything can be changed later in Settings.
 
 **Updating:** NOBLE checks GitHub for a new release once a day and shows it at the bottom right. Click
 **update** there, or run `noble update` (`noble update --check` only reports). It downloads the prebuilt

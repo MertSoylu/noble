@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{App, Overlay, Prompt, PromptPurpose, ToastLevel, View};
+use crate::term::TabId;
 use crate::term::layout::{Dir, PaneId};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -18,11 +19,12 @@ pub enum MenuCmd {
     CopyText(String),
     OpenFolder(PathBuf),
     OpenCode(PathBuf),
-    // Tabs are named by one of their panes, not by index: a tab can close (its shell exits) while
-    // the menu is open, which would shift every index after it.
-    RenameTab(PaneId),
-    CloseTab(PaneId),
-    MoveTab(PaneId, i32),
+    // Tabs are named by their stable id, not by index or pane: a tab can close (its shell exits)
+    // while the menu is open, which would shift every index after it, and in a split tab the pane
+    // the menu was opened from can close while the tab lives on.
+    RenameTab(TabId),
+    CloseTab(TabId),
+    MoveTab(TabId, i32),
     OpenProject(PathBuf),
     Launch(usize, PathBuf),
     GitPull(PathBuf),
@@ -68,7 +70,7 @@ impl App {
             return;
         }
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
-        let key = self.tabs[i].focus;
+        let key = self.tabs[i].id;
         let mut items = vec![item("Rename…", &hint(crate::keys::Action::RenameTab), MenuCmd::RenameTab(key))];
         if i > 0 {
             items.push(item("Move left", &hint(crate::keys::Action::MoveTabLeft), MenuCmd::MoveTab(key, -1)));
@@ -76,7 +78,7 @@ impl App {
         if i + 1 < self.tabs.len() {
             items.push(item("Move right", &hint(crate::keys::Action::MoveTabRight), MenuCmd::MoveTab(key, 1)));
         }
-        if let Some(cwd) = self.panes.get(&key).map(|p| p.cwd()) {
+        if let Some(cwd) = self.panes.get(&self.tabs[i].focus).map(|p| p.cwd()) {
             items.push(item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())));
             items.push(item("Open folder", "", MenuCmd::OpenFolder(cwd)));
         }
@@ -159,18 +161,18 @@ impl App {
             MenuCmd::OpenFolder(path) => self.open_in_explorer(&path),
             MenuCmd::OpenCode(path) => self.open_in_code(&path),
             // The tab may be gone by now (its shell exited while the menu was open): nothing to do then.
-            MenuCmd::RenameTab(pane) => {
-                if let Some(i) = self.tab_of(pane) {
+            MenuCmd::RenameTab(tab) => {
+                if let Some(i) = self.tab_index(tab) {
                     self.rename_tab_prompt(i);
                 }
             }
-            MenuCmd::CloseTab(pane) => {
-                if let Some(i) = self.tab_of(pane) {
+            MenuCmd::CloseTab(tab) => {
+                if let Some(i) = self.tab_index(tab) {
                     self.request_close_tab(i);
                 }
             }
-            MenuCmd::MoveTab(pane, d) => {
-                if let Some(i) = self.tab_of(pane) {
+            MenuCmd::MoveTab(tab, d) => {
+                if let Some(i) = self.tab_index(tab) {
                     let to = i.saturating_add_signed(d as isize).min(self.tabs.len() - 1);
                     self.move_tab(i, to);
                 }
@@ -209,7 +211,7 @@ impl App {
 
     pub fn rename_tab_prompt(&mut self, i: usize) {
         let Some(tab) = self.tabs.get(i) else { return };
-        let (value, key) = (tab.name.clone().unwrap_or_default(), tab.focus);
+        let (value, key) = (tab.name.clone().unwrap_or_default(), tab.id);
         self.overlay =
             Some(Overlay::Prompt(Prompt { title: "RENAME TAB".into(), value, purpose: PromptPurpose::RenameTab(key) }));
     }
@@ -260,6 +262,8 @@ impl App {
 
     pub fn toggle_pin(&mut self, path: &Path) {
         let pinned = self.ui_state.toggle_pin(path);
+        // The write read back other windows' changes, hidden/added projects included.
+        self.sync_manual_projects();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.sort_pinned();
         self.toast(ToastLevel::Ok, if pinned { format!("pinned {name}") } else { format!("unpinned {name}") });

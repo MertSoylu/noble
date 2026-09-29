@@ -1398,10 +1398,10 @@ fn welcome_card_picks_prefix() {
     render(&mut app, 110, 30);
     // Clicking the background does not close the card; clicking the ctrl+g chip picks it.
     click(&mut app, 1, 29);
-    assert!(matches!(app.overlay, Some(Overlay::Welcome { .. })));
+    assert!(matches!(app.overlay, Some(Overlay::Welcome(_))));
     let chip = find_hit(&app, |h| *h == Hit::WelcomePrefix(3)).expect("ctrl+g chip");
     click(&mut app, chip.x + 1, chip.y);
-    assert!(matches!(app.overlay, Some(Overlay::Welcome { prefix: 3 })));
+    assert!(matches!(&app.overlay, Some(Overlay::Welcome(w)) if w.prefix == 3));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.overlay.is_none());
     assert_eq!(app.cfg.keys.prefix, "ctrl+g");
@@ -1409,6 +1409,152 @@ fn welcome_card_picks_prefix() {
     // The new prefix actually works.
     app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     assert!(app.prefix_armed);
+}
+
+/// Welcome setup: the theme previews while cycling and is kept by ⏎; esc undoes the preview.
+#[test]
+fn welcome_card_sets_theme() {
+    use noble::app::{Hit, Overlay};
+    let key = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    // ⏎ keeps the theme picked with →.
+    let mut app = demo_app(110, 30);
+    let before = app.theme.name;
+    app.show_welcome();
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("SET UP") && text.contains("Theme") && text.contains("Prefix key"), "{text}");
+    key(&mut app, KeyCode::Right);
+    let picked = app.theme.name;
+    assert_ne!(picked, before, "→ previews the next theme");
+    assert!(render(&mut app, 110, 30).contains(app.theme.label));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.theme.name, picked);
+    assert_eq!(app.cfg.general.theme, picked);
+
+    // esc undoes the preview and leaves the config alone.
+    let mut app = demo_app(110, 30);
+    let cfg_theme = app.cfg.general.theme.clone();
+    app.show_welcome();
+    render(&mut app, 110, 30);
+    // A click on the right arrow of the theme row steps it too.
+    let arrow = find_hit(&app, |h| *h == Hit::WelcomeStep(0, 1)).expect("theme › arrow");
+    click(&mut app, arrow.x, arrow.y);
+    assert_ne!(app.theme.name, before);
+    key(&mut app, KeyCode::Down);
+    assert!(matches!(&app.overlay, Some(Overlay::Welcome(w)) if w.row == 1));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.theme.name, before);
+    assert_eq!(app.cfg.general.theme, cfg_theme);
+    assert!(app.ui_state.data.welcomed);
+}
+
+/// Welcome setup: esc undoes the terminal colors preview too, a config reload while the card
+/// is open drops the previews (the file wins), and ⏎ keeps a custom shell and prefix the card
+/// did not touch.
+#[test]
+fn welcome_card_undoes_previews() {
+    use noble::app::{Overlay, WelcomeRow};
+    let key = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    let row_of = |app: &App, r: WelcomeRow| match &app.overlay {
+        Some(Overlay::Welcome(w)) => w.rows().iter().position(|x| *x == r),
+        _ => None,
+    };
+    // esc: the colors go back to the config value.
+    let mut app = demo_app(110, 30);
+    let colors = app.cfg.terminal.colors.clone();
+    app.show_welcome();
+    let row = row_of(&app, WelcomeRow::Colors).expect("colors row (the built-in schemes)");
+    for _ in 0..row {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Right);
+    assert_ne!(app.cfg.terminal.colors, colors, "→ previews a scheme");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.cfg.terminal.colors, colors);
+
+    // The config file changes while the card previews a theme and a scheme.
+    let dir = std::env::temp_dir().join(format!("noble-welcome-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("config.toml");
+    std::fs::write(&file, "[general]\ntheme = \"synth\"\n").unwrap();
+    let mut app = demo_app(110, 30);
+    assert_ne!(app.theme.name, "synth");
+    app.paths.config = file;
+    app.show_welcome();
+    key(&mut app, KeyCode::Right);
+    for _ in 0..row {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Right);
+    app.reload_config(false);
+    assert_eq!(app.theme.name, "synth", "the file's theme, not the preview");
+    assert_eq!(app.cfg.terminal.colors, colors, "the file's colors, not the preview");
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Welcome(w))
+            if noble::theme::THEMES[w.theme].name == "synth" && w.row == row),
+        "the card starts over from the file"
+    );
+    render(&mut app, 110, 30);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!((app.theme.name, app.cfg.terminal.colors.as_str()), ("synth", colors.as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A custom shell and prefix survive ⏎ when only the theme changed.
+    let mut app = demo_app(110, 30);
+    let shell = if cfg!(windows) { r"C:\Tools\myshell.exe" } else { "/opt/tools/myshell" };
+    app.cfg.terminal.shell = shell.into();
+    app.cfg.keys.prefix = "ctrl+q".into();
+    app.show_welcome();
+    if let Some(r) = row_of(&app, WelcomeRow::Shell) {
+        let text = render(&mut app, 110, 30);
+        assert!(text.contains("myshell"), "the custom shell is listed by name\n{text}");
+        assert!(r > 0);
+    }
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.cfg.terminal.shell, shell);
+    assert_eq!(app.cfg.keys.prefix, "ctrl+q");
+}
+
+/// The theme and scheme selectors start over from the file when the config reloads while
+/// they preview: esc afterwards keeps the file's values instead of the stale ones.
+#[test]
+fn pickers_follow_a_config_reload() {
+    let key = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    let dir = std::env::temp_dir().join(format!("noble-picker-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("config.toml");
+    std::fs::write(&file, "[general]\ntheme = \"synth\"\n").unwrap();
+
+    let mut app = demo_app(110, 30);
+    assert_ne!(app.theme.name, "synth");
+    app.paths.config = file.clone();
+    app.open_theme_picker();
+    key(&mut app, KeyCode::Down);
+    app.reload_config(false);
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Themes(_))), "the selector stays open");
+    render(&mut app, 110, 30);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.theme.name, "synth", "esc keeps the file's theme");
+
+    let mut app = demo_app(110, 30);
+    let colors = app.cfg.terminal.colors.clone();
+    app.paths.config = file;
+    app.open_scheme_picker();
+    key(&mut app, KeyCode::Down);
+    assert_ne!(app.cfg.terminal.colors, colors, "↓ previews a scheme");
+    app.reload_config(false);
+    render(&mut app, 110, 30);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.cfg.terminal.colors, colors, "esc keeps the file's colors");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Adding a project folder: a prompt opens, an invalid path is rejected and a
@@ -1906,6 +2052,10 @@ fn remove_and_add_projects() {
     assert!(app.toasts.iter().any(|t| t.text.starts_with("not a folder")));
     app.add_project(&plain.display().to_string());
     assert_eq!(app.projects.len(), before, "not listed twice");
+    // A scan that started before the add returns without the folder: it stays listed.
+    app.handle(AppEvent::Projects(scanned.clone()));
+    assert!(app.projects.iter().any(|p| p.path == plain), "a stale scan keeps the hand-added folder");
+    assert!(!app.projects.iter().any(|p| p.path == demo), "hidden ones stay hidden");
     // The scan thread merges added folders into every scan (simulated here).
     app.handle(AppEvent::Projects(app.ui_state.manual_projects().apply(scanned.clone())));
     assert!(app.projects.iter().any(|p| p.path == plain), "added folder survives a rescan");
@@ -1965,8 +2115,8 @@ fn claude_hook_states_drive_sessions() {
 }
 
 /// Claude's `Stop` fires when the main answer ends even while background subagents still
-/// run: the session stays "working" without a notice until they are done, and only
-/// Claude's next answer says it finished. A permission request still needs you.
+/// run: the session stays "working" without a notice until the last one is done, then it
+/// says Claude finished. A permission request still needs you.
 #[test]
 fn claude_subagents_keep_the_session_working() {
     use noble::app::AgentState;
@@ -1983,24 +2133,34 @@ fn claude_subagents_keep_the_session_working() {
         ts,
         subagents,
     };
+    // Each step returns the state and the notices that step raised.
     let mut apply = |event: &str, ts: i64, subagents: usize| {
+        app.toasts.clear();
         app.apply_hook_records([(pane, rec(event, ts, subagents))].into());
-        (app.agent_state(pane).map(|(_, s)| s), app.toasts.len())
+        let notices: Vec<String> = app.toasts.iter().map(|t| t.text.clone()).collect();
+        (app.agent_state(pane).map(|(_, s)| s), notices)
     };
-    assert_eq!(apply("prompt", now, 0), (Some(AgentState::Working), 0));
-    assert_eq!(apply("prompt", now, 2), (Some(AgentState::Working), 0), "two subagents started");
-    assert_eq!(apply("stop", now + 1, 2), (Some(AgentState::Working), 0), "main answer ended, subagents run");
-    assert_eq!(apply("stop", now + 1, 1), (Some(AgentState::Working), 0));
-    assert_eq!(apply("stop", now + 1, 0), (Some(AgentState::Idle), 0), "a count change alone never notifies");
-    assert_eq!(apply("stop", now + 2, 0), (Some(AgentState::Idle), 1), "Claude answered the results");
-    assert!(app.toasts.iter().any(|t| t.text.contains("Claude finished")));
-    app.toasts.clear();
-    let mut apply = |event: &str, ts: i64, subagents: usize| {
-        app.apply_hook_records([(pane, rec(event, ts, subagents))].into());
-        app.agent_state(pane).map(|(_, s)| s)
-    };
-    assert_eq!(apply("notification", now + 3, 1), Some(AgentState::NeedsYou), "a subagent asks for permission");
-    assert!(app.toasts.iter().any(|t| t.text.contains("needs your permission")));
+    let finished = |n: &[String]| n.len() == 1 && n[0].contains("Claude finished");
+    let (state, n) = apply("prompt", now, 0);
+    assert_eq!((state, n.len()), (Some(AgentState::Working), 0));
+    let (state, n) = apply("prompt", now, 2);
+    assert_eq!((state, n.len()), (Some(AgentState::Working), 0), "two subagents started");
+    let (state, n) = apply("stop", now + 1, 2);
+    assert_eq!((state, n.len()), (Some(AgentState::Working), 0), "main answer ended, subagents run");
+    let (state, n) = apply("stop", now + 1, 1);
+    assert_eq!((state, n.len()), (Some(AgentState::Working), 0), "working to working never notifies");
+    // The record's event stays the same when the last subagent ends; the state change notifies.
+    let (state, n) = apply("stop", now + 1, 0);
+    assert_eq!(state, Some(AgentState::Idle));
+    assert!(finished(&n), "the last subagent finished: {n:?}");
+    let (state, n) = apply("stop", now + 1, 0);
+    assert_eq!((state, n.len()), (Some(AgentState::Idle), 0), "reading it again does not re-notify");
+    let (state, n) = apply("stop", now + 2, 0);
+    assert_eq!(state, Some(AgentState::Idle));
+    assert!(finished(&n), "Claude answered the results: {n:?}");
+    let (state, n) = apply("notification", now + 3, 1);
+    assert_eq!(state, Some(AgentState::NeedsYou), "a subagent asks for permission");
+    assert!(n.iter().any(|t| t.contains("needs your permission")), "{n:?}");
     assert!(app.tabs[0].alert);
 }
 
@@ -3627,7 +3787,7 @@ fn restored_launch_tab_reruns_its_command() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// A tab menu or rename prompt names its tab by pane, not by index: when another tab closes
+/// A tab menu or rename prompt names its tab by its stable id, not by index: when another tab closes
 /// (its shell exits) while the menu is open, the command still hits the tab it was opened for,
 /// and once every tab is gone nothing panics.
 #[test]
@@ -3668,7 +3828,7 @@ fn tab_menu_and_prompt_survive_tabs_closing() {
 
     // Close tab and move tab: the menu was opened for a tab that is gone by the time it runs.
     app.new_tab(std::env::temp_dir(), None, Some("extra".into()));
-    let (keep, extra) = (app.tabs[0].focus, app.tabs[1].focus);
+    let (keep, extra, extra_tab) = (app.tabs[0].focus, app.tabs[1].focus, app.tabs[1].id);
     app.open_tab_menu(0, 5, 5);
     let (mv, close) = (menu_cmd(&app, "Move right").expect("move item"), menu_cmd(&app, "Close").expect("close"));
     app.handle(AppEvent::PtyExit(keep));
@@ -3681,9 +3841,59 @@ fn tab_menu_and_prompt_survive_tabs_closing() {
     // Every tab gone: the queued commands do nothing (a clamp into an empty list used to panic).
     app.handle(AppEvent::PtyExit(extra));
     assert!(app.tabs.is_empty());
-    app.run_menu(MenuCmd::MoveTab(extra, 1));
-    app.run_menu(MenuCmd::CloseTab(extra));
-    app.run_menu(MenuCmd::RenameTab(extra));
+    app.run_menu(MenuCmd::MoveTab(extra_tab, 1));
+    app.run_menu(MenuCmd::CloseTab(extra_tab));
+    app.run_menu(MenuCmd::RenameTab(extra_tab));
+    assert!(app.overlay.is_none());
+}
+
+/// In a split tab the pane a tab menu, rename prompt or close confirmation was opened from can
+/// close while the tab lives on: the command still reaches that tab (it used to do nothing).
+#[test]
+fn tab_commands_survive_their_pane_closing_in_a_split_tab() {
+    use noble::app::{ConfirmAction, MenuCmd, Overlay};
+    let mut app = demo_app(110, 30);
+    for name in ["left", "split"] {
+        app.new_tab(std::env::temp_dir(), None, Some(name.into()));
+    }
+    app.run(Action::SplitRight);
+    assert_eq!(app.tabs[1].panes().len(), 2);
+    let menu_cmd = |app: &App, label: &str| match &app.overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().find(|i| i.label.starts_with(label)).map(|i| i.cmd.clone()),
+        _ => None,
+    };
+
+    // Menu: opened from the focused (new) pane, which closes before the command runs.
+    app.open_tab_menu(1, 5, 5);
+    let (rename, mv) = (menu_cmd(&app, "Rename").expect("rename"), menu_cmd(&app, "Move left").expect("move"));
+    let focused = app.tabs[1].focus;
+    app.close_pane(focused);
+    assert_eq!(app.tabs[1].panes().len(), 1, "the tab should survive");
+    app.run_menu(rename);
+    let Some(Overlay::Prompt(mut prompt)) = app.overlay.take() else { panic!("no rename prompt") };
+    // The prompt, too, outlives another pane of its tab closing.
+    app.run(Action::SplitDown);
+    let focused = app.tabs[1].focus;
+    app.close_pane(focused);
+    prompt.value = "renamed".into();
+    app.submit_prompt(prompt);
+    assert_eq!(app.tabs[1].name.as_deref(), Some("renamed"), "the rename was dropped");
+    assert_eq!(app.tabs[0].name, None);
+    app.run_menu(mv);
+    assert_eq!(app.tabs[0].name.as_deref(), Some("renamed"), "the move was dropped");
+
+    // Close confirmation: the pane that was focused when it was asked has closed since.
+    app.run(Action::GoTab(1));
+    app.run(Action::SplitRight);
+    let (id, focused) = (app.tabs[0].id, app.tabs[0].focus);
+    app.close_pane(focused);
+    app.confirm(ConfirmAction::CloseTab(id));
+    assert_eq!(app.tabs.len(), 1, "the close was dropped");
+    assert_eq!(app.tabs[0].origin, "left", "the wrong tab was closed");
+    // A closed tab's id resolves to nothing.
+    app.confirm(ConfirmAction::CloseTab(id));
+    app.run_menu(MenuCmd::RenameTab(id));
+    assert_eq!(app.tabs.len(), 1);
     assert!(app.overlay.is_none());
 }
 
@@ -3768,4 +3978,27 @@ fn tab_title_keeps_folder_names_with_separator() {
     // A launcher tab keeps naming what runs while it runs.
     app.new_tab(std::env::temp_dir(), Some("echo hi"), Some("proj · notes · claude".into()));
     assert_eq!(app.tab_title(1), "proj · notes · claude");
+}
+
+/// A launcher tab split in two drops the launcher from its title once the launcher's pane is
+/// closed (the other pane never ran a command), and is saved under the project name alone.
+#[test]
+fn launcher_suffix_goes_with_its_pane_in_a_split_tab() {
+    let mut app = demo_app(110, 30);
+    app.cfg.terminal.tab_follows_cwd = false;
+    app.new_tab(std::env::temp_dir(), Some("echo hi"), Some("proj · claude".into()));
+    let launcher = app.tabs[0].focus;
+    app.run(Action::SplitRight);
+    app.close_pane(launcher);
+    assert_eq!(app.tabs[0].panes().len(), 1);
+    let title = app.tab_title(0);
+    assert!(title.starts_with("proj") && !title.contains("claude"), "stale launcher title: {title:?}");
+    let saved = app.snapshot("s");
+    assert_eq!(saved.tabs[0].origin, "proj", "saved with the stale launcher name");
+
+    // A plain tab in a folder named with the separator is not a launcher tab.
+    app.new_tab(std::env::temp_dir(), None, Some("proj · notes".into()));
+    app.run(Action::SplitRight);
+    assert_eq!(app.snapshot("s").tabs[1].origin, "proj · notes");
+    assert!(app.tab_title(1).starts_with("proj · notes"), "{:?}", app.tab_title(1));
 }

@@ -6,6 +6,25 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- The first launch welcome card is now a short setup: pick the theme and terminal colors (the whole UI previews
+  them as you cycle with ←→ or click ‹ ›), the shell when more than one is installed, and the prefix key. ⏎
+  saves the choices, esc keeps the defaults and undoes the preview. On a small window the setup rows stay
+  visible and the key list is dropped.
+
+### Fixed
+- Claude Code status: a background tab now gets its "Claude finished" notice when the last subagent ends after
+  Claude's answer (it was lost before). Hooks installed from a path that contains " hook " are upgraded correctly.
+- Several NOBLE windows no longer undo each other's removed, added or pinned projects: every `state.json` write
+  re-reads the file under a lock and changes only its own field.
+- A project added by hand no longer vanishes when a scan that started before the add finishes.
+- Tab menu, rename and close work on the right tab after the pane they were opened from closes in a split tab,
+  and a launcher tab's title drops the launcher name once that pane is gone.
+- Search stays fast while a command prints a lot with the search bar open, and a failed atomic write (state
+  files, Claude Code's `settings.json`) no longer leaves a temporary file behind.
+- The theme and terminal color selectors start over from the file when `config.toml` changes while they are
+  open, so esc no longer puts the old values back.
+
 ## [1.6.0] - 2026-09-29
 
 ### Added

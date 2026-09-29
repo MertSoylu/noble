@@ -102,14 +102,18 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if path.exists() {
+    if path.is_file() {
         let backup = path.with_extension("json.noble-bak");
         std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.noble-tmp");
-    std::fs::write(&tmp, text + "\n").map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // A failed write or rename must not leave the temporary file next to the user's settings.
+    let result = std::fs::write(&tmp, text + "\n").and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|e| e.to_string())
 }
 
 /// Are the hooks installed for every event?
@@ -146,7 +150,10 @@ pub fn upgrade(path: &Path) -> Result<(), String> {
         let entry = list.iter().find(|e| is_noble_hook(e))?;
         entry.pointer("/hooks")?.as_array()?.iter().find_map(|h| {
             let command = h.get("command")?.as_str()?;
-            command.split_once(MARKER).map(|(base, _)| base.to_string())
+            // The last " hook " is ours: the executable's path may contain one too
+            // (`C:\my hook tools\noble.exe`), and what follows it must be one of our events.
+            let (base, arg) = command.rsplit_once(MARKER)?;
+            EVENTS.iter().any(|(_, a)| *a == arg.trim()).then(|| base.to_string())
         })
     });
     match base {
@@ -323,6 +330,19 @@ mod tests {
         d
     }
 
+    /// A failed write leaves no temporary file next to the settings (a directory in the way
+    /// makes the rename fail on every platform).
+    #[test]
+    fn write_settings_cleans_up_its_temp_file() {
+        let dir = temp("tmp");
+        let blocked = dir.join("settings.json");
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        assert!(write_settings(&blocked, &serde_json::json!({})).is_err());
+        assert!(blocked.is_dir(), "the directory in the way is untouched");
+        assert!(!dir.join("settings.json.noble-tmp").exists(), "temp file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn install_keeps_other_settings_and_is_idempotent() {
         let dir = temp("install");
@@ -497,6 +517,28 @@ mod tests {
         upgrade(&other).unwrap();
         assert_eq!(std::fs::read_to_string(&other).unwrap(), r#"{ "model": "opus" }"#);
         assert!(!is_installed(&other));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The executable's path may itself contain " hook ": the upgrade keeps the whole path
+    /// as the command base instead of cutting it at the first match.
+    #[test]
+    fn upgrade_keeps_a_base_path_that_contains_hook() {
+        let dir = temp("upgrade-path");
+        let file = dir.join("settings.json");
+        let base = r#""/opt/my hook tools/noble""#;
+        let mut hooks = serde_json::Map::new();
+        for (event, arg) in &EVENTS[..5] {
+            hooks.insert(
+                event.to_string(),
+                json!([{ "hooks": [ { "type": "command", "command": format!("{base} hook {arg}") } ] }]),
+            );
+        }
+        std::fs::write(&file, serde_json::to_string(&json!({ "hooks": hooks })).unwrap()).unwrap();
+        upgrade(&file).unwrap();
+        assert!(is_installed(&file));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["SubagentStart"][0]["hooks"][0]["command"], format!("{base} hook subagent-start"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

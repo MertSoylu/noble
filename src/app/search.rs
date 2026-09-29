@@ -9,19 +9,38 @@ use crate::term::layout::PaneId;
 use crate::term::link;
 use crate::term::pane::{Match, find_matches};
 
+/// How many old matches on each side of the selected one decide the shift in `scrolled_out`.
+const SHIFT_WINDOW: usize = 64;
+/// How many shifts `scrolled_out` tries at most.
+const SHIFT_CANDIDATES: usize = 256;
+
 /// How many lines dropped off the top since `old` was computed: the shift that makes most old matches
-/// reappear (same column, `shift` lines higher) in `new`. `0` when nothing lines up better than no shift.
-fn scrolled_out(old: &[Match], new: &[Match]) -> usize {
+/// around the selected one (`old[selected]`) reappear (same column, `shift` lines higher) in `new`.
+/// `0` when nothing lines up better than no shift.
+///
+/// Runs for every output batch while the search is open, so only a window of old matches around the
+/// selection is scored (the one the search has to keep), not all of them for every candidate shift.
+fn scrolled_out(old: &[Match], new: &[Match], selected: usize) -> usize {
     use std::collections::HashSet;
     let Some(first) = new.first() else { return 0 };
+    if selected >= old.len() {
+        return 0;
+    }
+    let window = &old[selected.saturating_sub(SHIFT_WINDOW)..(selected + SHIFT_WINDOW + 1).min(old.len())];
     let known: HashSet<(usize, u16)> = new.iter().map(|m| (m.line, m.col)).collect();
     let score =
-        |k: usize| old.iter().filter(|m| m.line.checked_sub(k).is_some_and(|l| known.contains(&(l, m.col)))).count();
-    // The oldest surviving match is the first new one, so the shift is one of these distances.
-    let mut candidates: Vec<usize> = old.iter().filter_map(|m| m.line.checked_sub(first.line)).collect();
-    candidates.sort_unstable();
-    candidates.dedup();
-    candidates.truncate(256);
+        |k: usize| window.iter().filter(|m| m.line.checked_sub(k).is_some_and(|l| known.contains(&(l, m.col)))).count();
+    // The oldest surviving match is the first new one, so the shift is one of these distances. The
+    // matches are sorted by line, so the smallest distances come first.
+    let mut candidates: Vec<usize> = Vec::with_capacity(SHIFT_CANDIDATES);
+    for k in old.iter().filter_map(|m| m.line.checked_sub(first.line)) {
+        if candidates.last() != Some(&k) {
+            if candidates.len() == SHIFT_CANDIDATES {
+                break;
+            }
+            candidates.push(k);
+        }
+    }
     let mut best = (score(0), 0);
     for k in candidates.into_iter().filter(|&k| k > 0) {
         let s = score(k);
@@ -67,13 +86,14 @@ impl App {
         // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
         // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
         // scrollback is the fallback when the matches do not line up.
-        let dropped = match scrolled_out(&s.matches, &matches) {
-            0 => (s.history as isize - history as isize).max(0) as usize,
-            n => n,
-        };
-        let previous = s.current.and_then(|i| s.matches.get(i)).copied();
+        // Without a selection nothing has to be kept, so the shift is not worked out at all.
+        let previous = s.current.and_then(|i| Some((i, *s.matches.get(i)?)));
         s.current = match previous {
-            Some(m) => {
+            Some((i, m)) => {
+                let dropped = match scrolled_out(&s.matches, &matches, i) {
+                    0 => (s.history as isize - history as isize).max(0) as usize,
+                    n => n,
+                };
                 let line = m.line.checked_sub(dropped);
                 line.and_then(|line| matches.iter().position(|n| n.line == line && n.col == m.col))
             }
@@ -225,19 +245,38 @@ mod tests {
         let old = [m(10, 0), m(40, 4), m(41, 0), m(90, 2)];
         // Seven lines dropped: matches moved up, one new match appeared at the bottom.
         let new = [m(3, 4), m(34, 0), m(83, 2), m(95, 0)];
-        assert_eq!(scrolled_out(&old, &new), 7);
+        assert_eq!(scrolled_out(&old, &new, 3), 7);
         // The oldest match itself scrolled out.
         let new = [m(33, 4), m(34, 0), m(83, 2)];
-        assert_eq!(scrolled_out(&old, &new), 7);
+        assert_eq!(scrolled_out(&old, &new, 2), 7);
     }
 
     #[test]
     fn scrolled_out_is_zero_when_nothing_moved() {
         let old = [m(10, 0), m(20, 0), m(30, 0)];
-        assert_eq!(scrolled_out(&old, &old), 0);
+        assert_eq!(scrolled_out(&old, &old, 1), 0);
         // Growing history only appends matches.
-        assert_eq!(scrolled_out(&old, &[m(10, 0), m(20, 0), m(30, 0), m(50, 1)]), 0);
-        assert_eq!(scrolled_out(&[], &old), 0);
-        assert_eq!(scrolled_out(&old, &[]), 0);
+        assert_eq!(scrolled_out(&old, &[m(10, 0), m(20, 0), m(30, 0), m(50, 1)], 2), 0);
+        assert_eq!(scrolled_out(&[], &old, 0), 0);
+        assert_eq!(scrolled_out(&old, &[], 0), 0);
+        // A selection that is not an old match (none to keep) never scores anything.
+        assert_eq!(scrolled_out(&old, &old, 3), 0);
+    }
+
+    /// Many matches: only the window around the selection is scored, so matches far from it
+    /// that line up with another shift do not outvote the ones next to it.
+    #[test]
+    fn scrolled_out_scores_only_around_the_selection() {
+        // 5000 matches, one every 3 lines, with varying columns so a wrong shift does not line up.
+        let old: Vec<Match> = (0..5000).map(|i| m(i * 3, (i % 5) as u16)).collect();
+        // Around the selection four matches (12 lines) dropped off the top; the many matches below
+        // line up with a shift of 3 instead.
+        let new: Vec<Match> = (0..4999)
+            .map(|i| if i < 1000 { (old[i + 4], 12) } else { (old[i + 1], 3) })
+            .map(|(x, k)| m(x.line - k, x.col))
+            .collect();
+        assert!(new.windows(2).all(|w| w[0].line < w[1].line));
+        assert_eq!(scrolled_out(&old, &new, 100), 12);
+        assert_eq!(scrolled_out(&old, &new, 4000), 3);
     }
 }

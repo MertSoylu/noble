@@ -116,8 +116,7 @@ impl App {
         if chord == self.keymap.prefix {
             self.prefix_armed = true;
             if !self.ui_state.data.prefix_used {
-                self.ui_state.data.prefix_used = true;
-                self.ui_state.save();
+                self.edit_ui_state(|d| d.prefix_used = true);
             }
             return;
         }
@@ -220,23 +219,22 @@ impl App {
             },
             // Menu keys are handled in `menu_key`; they never reach here.
             Overlay::Menu(_) => true,
-            Overlay::Welcome { prefix } => {
-                let n = super::settings::PREFIXES.len();
+            Overlay::Welcome(w) => {
+                let rows = w.rows();
+                let n = rows.len();
                 match k.code {
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        let p = *prefix;
-                        self.finish_welcome(p, true);
+                        self.finish_welcome(w, true);
                         return;
                     }
                     KeyCode::Esc => {
-                        let p = *prefix;
-                        self.finish_welcome(p, false);
+                        self.finish_welcome(w, false);
                         return;
                     }
-                    KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => *prefix = (*prefix + n - 1) % n,
-                    KeyCode::Right | KeyCode::Down | KeyCode::Tab | KeyCode::Char('l' | 'j') => {
-                        *prefix = (*prefix + 1) % n
-                    }
+                    KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => w.row = (w.row + n - 1) % n,
+                    KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => w.row = (w.row + 1) % n,
+                    KeyCode::Left | KeyCode::Char('h') => self.welcome_step(w, rows[w.row.min(n - 1)], -1),
+                    KeyCode::Right | KeyCode::Char('l') => self.welcome_step(w, rows[w.row.min(n - 1)], 1),
                     _ => {}
                 }
                 true
@@ -641,6 +639,11 @@ impl App {
         self.tabs.iter().position(|t| t.root.contains(pane))
     }
 
+    /// The current index of a tab by its stable id; `None` once it has closed.
+    pub(super) fn tab_index(&self, id: crate::term::TabId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
     fn forward_mouse(&self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
         let Some(p) = self.panes.get(&pane) else { return false };
         let (mode, enc) = {
@@ -896,15 +899,30 @@ impl App {
                 }
             }
             Hit::ConfirmNo => self.overlay = None,
+            Hit::WelcomeRow(i) => {
+                if let Some(Overlay::Welcome(w)) = &mut self.overlay {
+                    w.row = i;
+                }
+            }
+            Hit::WelcomeStep(i, dir) => {
+                // Taken out for the step (it previews on `self`), then put back.
+                if let Some(Overlay::Welcome(mut w)) = self.overlay.take() {
+                    if let Some(row) = w.rows().get(i).copied() {
+                        w.row = i;
+                        self.welcome_step(&mut w, row, dir);
+                    }
+                    self.overlay = Some(Overlay::Welcome(w));
+                }
+            }
             Hit::WelcomePrefix(i) => {
-                if let Some(Overlay::Welcome { prefix }) = &mut self.overlay {
-                    *prefix = i;
+                if let Some(Overlay::Welcome(w)) = &mut self.overlay {
+                    w.prefix = i;
+                    w.row = w.rows().iter().position(|r| *r == super::WelcomeRow::Prefix).unwrap_or(w.row);
                 }
             }
             Hit::WelcomeDone => {
-                if let Some(Overlay::Welcome { prefix }) = &self.overlay {
-                    let p = *prefix;
-                    self.finish_welcome(p, true);
+                if let Some(Overlay::Welcome(w)) = self.overlay.take() {
+                    self.finish_welcome(&w, true);
                 }
             }
         }
