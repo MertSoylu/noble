@@ -155,15 +155,22 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
             hud::tint_frame(buf, hud::Outline::closed(*rect), th.accent);
         }
         Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_) => {
-            // A pane button (" ◫", " ✕ "): its glyph turns into a small chip, close in the error color.
+            // A pane button (" ◫", " ✕ "): the glyph turns into a small chip, close in the error color.
             // Inverted, so the glyph stays readable in every theme (the error or accent color as text
-            // on the hover background is too faint in some of them).
+            // on the hover background is too faint in some of them). Many fonts draw these symbols wider
+            // than one cell, spilling into the cell on their right, so the chip covers the glyph and the
+            // space after it (every button is followed by a space cell).
             let style = match hit {
                 Hit::PaneClose(_) => Style::default().fg(th.bg).bg(th.crit),
                 _ => Style::default().fg(th.on_accent).bg(th.accent),
             };
-            if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
-                c.set_style(style.add_modifier(Modifier::BOLD));
+            for dx in 1..3u16 {
+                if let Some(c) = buf.cell_mut((rect.x.saturating_add(dx), rect.y)) {
+                    c.set_style(style);
+                    if dx == 1 {
+                        c.set_style(Style::default().add_modifier(Modifier::BOLD));
+                    }
+                }
             }
         }
         Hit::ScrollLive(_) => {

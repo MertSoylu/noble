@@ -83,6 +83,12 @@ fn session_line(app: &App) -> String {
     }
 }
 
+/// Running version, e.g. "v1.7.0" or "v1.7.0 dev" for the dev build.
+fn version_label() -> String {
+    let dev = if util::is_dev_build() { " dev" } else { "" };
+    format!("v{}{dev}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Big clock + greeting (5 rows).
 fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     use chrono::Timelike;
@@ -111,7 +117,8 @@ fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     let greet = format!("{}, {}", greeting(now.hour()), capitalize(&app.operator));
     hud::put(buf, tx, y, &greet, th.text().add_modifier(Modifier::BOLD), w);
     hud::put(buf, tx, y + 1, &now.format("%A, %d %B").to_string(), th.dim(), w);
-    hud::put(buf, tx, y + 2, &session_line(app), th.dim(), w);
+    let session = format!("{} · {}", session_line(app), version_label());
+    hud::put(buf, tx, y + 2, &session, th.dim(), w);
 }
 
 /// One-line clock + greeting (narrow windows).
@@ -129,6 +136,7 @@ fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     let x = area.x + 1;
     let x = hud::put(buf, x, y, &now.format(fmt).to_string(), th.accent_bold(), area.width);
     let greet = format!("   {}, {} · {}", greeting(now.hour()), capitalize(&app.operator), now.format("%a %d %b"));
+    let greet = format!("{greet} · {}", version_label());
     hud::put(buf, x, y, &greet, th.dim(), area.right().saturating_sub(x));
 }
 

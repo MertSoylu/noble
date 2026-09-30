@@ -208,6 +208,27 @@ fn demo_app(w: u16, h: u16) -> App {
 const SIZES: [(u16, u16); 7] = [(160, 45), (120, 34), (110, 30), (90, 28), (76, 24), (56, 18), (30, 8)];
 
 #[test]
+fn bridge_shows_the_version() {
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    // Big hero (160x45) and compact hero (90x28) both show it; small sizes must not overflow.
+    for (w, h) in [(160, 45), (110, 30), (90, 28)] {
+        let mut app = demo_app(w, h);
+        let text = render(&mut app, w, h);
+        assert!(
+            text.contains(&version),
+            "{w}x{h}
+{text}"
+        );
+    }
+    for (w, h) in SIZES {
+        let mut app = demo_app(w, h);
+        let text = render(&mut app, w, h);
+        assert!(text.lines().count() <= h as usize, "{w}x{h}");
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "{w}x{h}");
+    }
+}
+
+#[test]
 fn bridge_renders_at_all_sizes() {
     for (w, h) in SIZES {
         let mut app = demo_app(w, h);
@@ -4986,6 +5007,11 @@ fn pane_buttons_show_on_focus_and_hover() {
         let (text, buf) = render_buf(&mut app, 110, 30);
         let cell = &buf[(r.x + 1, r.y)];
         assert_eq!((cell.fg, cell.bg), colors, "{b:?}");
+        // The chip also covers the space after the glyph (fonts draw the glyph wide, spilling
+        // right), but not the space before it.
+        let side = &buf[(r.x + 2, r.y)];
+        assert_eq!((side.fg, side.bg), colors, "{b:?} chip cell after");
+        assert_ne!(buf[(r.x, r.y)].bg, colors.1, "{b:?} chip cell before");
         let key = app.keymap.term_hint(b.action(), false).unwrap();
         let want = format!("{} {} · {key}", b.glyph(false), b.what(false));
         assert!(status(&text).contains(&want), "{want:?} not in {:?}", status(&text));
