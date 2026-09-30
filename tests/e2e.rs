@@ -264,3 +264,34 @@ fn idle_terminal_cpu_is_low() {
     drop(h);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `noble <dir>` needs an existing folder: anything else prints an error and exits non-zero before the
+/// terminal is touched. A second folder and unknown options are refused too; `--help` describes the argument.
+#[test]
+fn folder_argument_is_validated() {
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+            .args(args)
+            .env("NOBLE_HOME", std::env::temp_dir().join("noble-e2e-args"))
+            .output()
+            .unwrap()
+    };
+    let missing = std::env::temp_dir().join("noble-no-such-folder-xyz");
+    let out = run(&[missing.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not a directory"));
+
+    let file = std::env::temp_dir().join(format!("noble-arg-file-{}", std::process::id()));
+    std::fs::write(&file, "x").unwrap();
+    assert!(!run(&[file.to_str().unwrap()]).status.success(), "a file is not a folder");
+    let _ = std::fs::remove_file(&file);
+
+    let out = run(&["--nonsense"]);
+    assert!(!out.status.success());
+    let dir = std::env::temp_dir();
+    let out = run(&[dir.to_str().unwrap(), dir.to_str().unwrap()]);
+    assert!(!out.status.success(), "only one folder");
+
+    let help = String::from_utf8_lossy(&run(&["--help"]).stdout).into_owned();
+    assert!(help.contains("<dir>"), "{help}");
+}

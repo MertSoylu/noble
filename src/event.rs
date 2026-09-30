@@ -24,6 +24,9 @@ pub enum AppEvent {
     Ai(Box<ProviderState>),
     /// Update check: the latest published release or an error.
     Update(Result<String, String>),
+    /// The OS asks NOBLE to end (SIGHUP/SIGTERM, or the console closing / logoff / shutdown on
+    /// Windows): the normal shutdown path runs, which saves the session.
+    Quit,
 }
 
 pub type Tx = std::sync::mpsc::Sender<AppEvent>;

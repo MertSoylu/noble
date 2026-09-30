@@ -6,6 +6,44 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- `noble <folder>` (for example `noble .`) opens NOBLE with a shell tab in that folder.
+- The session is saved a couple of seconds after tabs, splits or directories change, and also when the terminal
+  window is closed, the process gets SIGHUP/SIGTERM, or Windows logs off or shuts down.
+- Saved workspaces can be deleted from the command palette; saving says when it replaced a workspace or dropped
+  the oldest one at the limit of 20.
+- Launch an AI agent in a split next to the focused pane (pane menu and palette).
+- Background notifications (agent needs you, done, long command finished) are also forwarded to the outer
+  terminal as OSC 9 / OSC 777 desktop notifications when NOBLE is not in front.
+- One-time offer to enable Claude status hooks after the first Claude launch.
+- Double-click selects a word, triple-click a line, and the pane menu has Copy for the current selection.
+- Narrow Home (under 92 columns) shows a one-line AI quota strip and the number of agents that need you.
+- Home keeps a provider whose AI login expired, showing its cached usage dimmed with a "run <cli> to refresh" hint.
+- Settings: a short description of the selected setting; click the left half of a value or right-click to step back.
+- Single-line prompts get cursor editing (arrows, home/end, delete, ctrl+a/e/u) and placeholders.
+- Commands with nothing to act on now say why in a toast.
+
+### Changed
+- Shift+Enter sends ESC CR so AI CLIs insert a newline (needs an outer terminal that reports Shift).
+- Confirmation dialogs no longer accept Enter; press y to confirm, n or esc to cancel.
+- The add-project prompt validates on Enter and keeps your text when the path is wrong.
+- On Home the status bar keeps "? help" longest, and its "commands" chip opens the palette when clicked.
+- Palette launchers in a terminal use the focused pane's directory.
+- The welcome card lists launcher keys only for installed CLIs, and System calls the kill key "terminate".
+- Home computes agent sessions once per frame instead of once per project row.
+- Claude hooks setup keeps the first backup of `settings.json` and only recognises NOBLE's own hook commands.
+- Background git status no longer takes the index lock, never prompts for credentials, and is killed if it hangs.
+- A dead network share can no longer freeze the UI: working directories and recent folders are checked once
+  with a time limit instead of on every frame or new tab.
+
+### Fixed
+- Saving a setting no longer turns a multi-line array such as `roots = [...]` in `config.toml` into a broken
+  file, and config saves are atomic.
+- ctrl+click no longer opens links with unknown schemes from terminal output; the address is copied instead.
+- Linux battery readout ignores wireless mice and other device batteries.
+- Programs NOBLE launches (browser, editor, file manager) no longer linger as zombie processes on Linux and macOS.
+- Saved workspaces and recent folders from several open windows no longer overwrite each other.
+
 ## [1.7.0] - 2026-09-30
 
 ### Added

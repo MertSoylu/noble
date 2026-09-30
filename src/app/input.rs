@@ -51,6 +51,9 @@ impl App {
             Event::Mouse(m) => self.on_mouse(m),
             Event::Resize(w, h) => self.size = (w, h),
             Event::Paste(text) => self.on_paste(&text),
+            // Only reported when the outer terminal supports focus reporting (`main` asks for it).
+            Event::FocusGained => self.window_focused = Some(true),
+            Event::FocusLost => self.window_focused = Some(false),
             _ => {}
         }
     }
@@ -65,8 +68,7 @@ impl App {
                 return;
             }
             Some(Overlay::Prompt(p)) => {
-                let line: String = text.lines().next().unwrap_or("").chars().take(p.purpose.max_len()).collect();
-                p.value.push_str(&line);
+                p.insert(text.lines().next().unwrap_or(""));
                 return;
             }
             Some(_) => return,
@@ -386,7 +388,8 @@ impl App {
                 _ => true,
             },
             Overlay::Confirm(_) => match k.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                // Enter is deliberately not "yes": these dialogs guard destructive actions, so only y confirms.
+                KeyCode::Char('y' | 'Y') => {
                     if let Overlay::Confirm(c) = ov {
                         self.confirm(c.action);
                     }
@@ -409,17 +412,43 @@ impl App {
                     true
                 }
                 KeyCode::Backspace => {
-                    p.value.pop();
+                    p.backspace();
+                    true
+                }
+                KeyCode::Delete => {
+                    p.delete();
+                    true
+                }
+                KeyCode::Left => {
+                    p.move_cursor(p.cursor.saturating_sub(1));
+                    true
+                }
+                KeyCode::Right => {
+                    p.move_cursor(p.cursor + 1);
+                    true
+                }
+                KeyCode::Home => {
+                    p.move_cursor(0);
+                    true
+                }
+                KeyCode::End => {
+                    p.move_cursor(usize::MAX);
+                    true
+                }
+                KeyCode::Char('a') if ctrl => {
+                    p.move_cursor(0);
+                    true
+                }
+                KeyCode::Char('e') if ctrl => {
+                    p.move_cursor(usize::MAX);
                     true
                 }
                 KeyCode::Char('u') if ctrl => {
-                    p.value.clear();
+                    p.clear();
                     true
                 }
                 KeyCode::Char(c) if !ctrl => {
-                    if p.value.chars().count() < p.purpose.max_len() {
-                        p.value.push(c);
-                    }
+                    p.insert(c.encode_utf8(&mut [0u8; 4]));
                     true
                 }
                 _ => true,
@@ -737,6 +766,8 @@ impl App {
         let double =
             self.last_click.is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
         self.last_click = Some((Instant::now(), x, y));
+        // 1 → 2 → 3 → back to 1 while the clicks keep coming quickly on the same cell.
+        self.click_streak = if double { self.click_streak % 3 + 1 } else { 1 };
         // A click ends a pending prefix (the next key is a plain key again).
         self.prefix_armed = false;
         // A click ends the keyboard focus on a project's quick actions.
@@ -796,6 +827,7 @@ impl App {
                     self.toggle_zoom(ti, p);
                     // A third click starts over rather than undoing the zoom.
                     self.last_click = None;
+                    self.click_streak = 0;
                 }
             }
             Hit::MenuItem(i) => {
@@ -817,8 +849,11 @@ impl App {
             }
             Hit::Update => self.start_update(),
             Hit::UpdateDismiss => self.dismiss_update(),
+            Hit::HooksOffer => self.accept_hooks_offer(),
+            Hit::HooksOfferDismiss => self.hooks_offer = false,
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
+            Hit::Palette => self.run(Action::Palette),
             Hit::Pane { pane, inner } => {
                 if let Some(ti) = self.tab_of(pane) {
                     self.tabs[ti].focus = pane;
@@ -837,11 +872,30 @@ impl App {
                             for p in self.panes.values_mut() {
                                 p.selection = None;
                             }
-                            if let Some(p) = self.panes.get_mut(&pane) {
-                                let at = (y.saturating_sub(inner.y), x.saturating_sub(inner.x));
-                                p.selection = Some(Selection { anchor: at, head: at });
+                            let at = (y.saturating_sub(inner.y), x.saturating_sub(inner.x));
+                            // Double click selects the word, triple click the line; a plain click
+                            // starts a drag selection. (With mouse reporting on and no shift, the
+                            // click went to the app above.)
+                            let multi = match self.click_streak {
+                                2 => self.panes.get(&pane).and_then(|p| p.word_selection(at.0, at.1)),
+                                3 => self.panes.get(&pane).and_then(|p| p.line_selection(at.0)),
+                                _ => None,
+                            };
+                            if let Some(sel) = multi {
+                                if let Some(p) = self.panes.get_mut(&pane) {
+                                    p.selection = Some(sel);
+                                }
+                                if self.cfg.terminal.copy_on_select
+                                    && let Some(t) = self.panes.get(&pane).and_then(|p| p.selected_text())
+                                {
+                                    self.set_clipboard(&t, true);
+                                }
+                            } else {
+                                if let Some(p) = self.panes.get_mut(&pane) {
+                                    p.selection = Some(Selection { anchor: at, head: at });
+                                }
+                                self.drag = Some(Drag::Select { pane, inner });
                             }
-                            self.drag = Some(Drag::Select { pane, inner });
                         }
                     }
                     MouseButton::Right | MouseButton::Middle => {
@@ -898,7 +952,8 @@ impl App {
             Hit::Setting(i) => {
                 self.settings_sel = i;
                 if let Some(item) = self.settings_items().get(i).copied() {
-                    self.activate_setting(item, 1);
+                    let dir = self.setting_click_dir(i, item, x, btn);
+                    self.activate_setting(item, dir);
                 }
             }
             Hit::LaunchShow(i) | Hit::LaunchKey(i) => {
@@ -982,6 +1037,25 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Which way a click on a settings row steps: right click and the left half of a "‹ value ›"
+    /// chip go backward, everything else forward.
+    fn setting_click_dir(&self, i: usize, item: super::SettingItem, x: u16, btn: MouseButton) -> i32 {
+        if btn == MouseButton::Right {
+            return -1;
+        }
+        let super::SettingItem::Setting(key) = item else { return 1 };
+        if key.is_toggle() || key.opens_popup() {
+            return 1;
+        }
+        let Some(row) = self.hits.iter().rev().find(|(_, h)| *h == Hit::Setting(i)).map(|(r, _)| *r) else {
+            return 1;
+        };
+        // The chip is drawn right-aligned, two columns inside the row (see `ui::settings::setting_row`).
+        let w = crate::util::width(&format!("‹ {} ›", self.setting_value(key))) as u16;
+        let start = row.right().saturating_sub(2).saturating_sub(w);
+        if x >= start && x < start + w / 2 { -1 } else { 1 }
     }
 
     fn mouse_drag(&mut self, m: &MouseEvent) {

@@ -46,26 +46,23 @@ impl App {
                 let cwd = self.current_cwd().unwrap_or_else(home);
                 self.new_tab(cwd, None, None);
             }
-            Action::CloseTab => {
-                if let View::Term(i) = self.view {
-                    self.request_close_tab(i);
-                }
-            }
+            Action::CloseTab => match self.view {
+                View::Term(i) => self.request_close_tab(i),
+                _ => self.no_op("no tab here — open a terminal tab first"),
+            },
             Action::NextTab => self.cycle_tab(1),
             Action::PrevTab => self.cycle_tab(-1),
             Action::GoTab(n) => self.go_tab(n as usize),
             Action::SplitRight => self.split(Dir::Row),
             Action::SplitDown => self.split(Dir::Col),
-            Action::ClosePane => {
-                if let Some(id) = self.focused_pane() {
-                    self.request_close_pane(id);
-                }
-            }
-            Action::Zoom => {
-                if let (View::Term(ti), Some(id)) = (self.view, self.focused_pane()) {
-                    self.toggle_zoom(ti, id);
-                }
-            }
+            Action::ClosePane => match self.focused_pane() {
+                Some(id) => self.request_close_pane(id),
+                None => self.no_op("no pane here — open a terminal tab first"),
+            },
+            Action::Zoom => match (self.view, self.focused_pane()) {
+                (View::Term(ti), Some(id)) => self.toggle_zoom(ti, id),
+                _ => self.no_op("no pane here — open a terminal tab first"),
+            },
             Action::FocusLeft => self.focus_dir(Direction::Left),
             Action::FocusRight => self.focus_dir(Direction::Right),
             Action::FocusUp => self.focus_dir(Direction::Up),
@@ -92,21 +89,20 @@ impl App {
             }
             Action::RefreshAi => self.refresh_ai(),
             Action::RescanProjects => self.rescan_projects(),
-            Action::RenameTab => {
-                if let View::Term(i) = self.view {
-                    self.rename_tab_prompt(i);
-                }
-            }
+            Action::RenameTab => match self.view {
+                View::Term(i) => self.rename_tab_prompt(i),
+                _ => self.no_op("no tab here — open a terminal tab first"),
+            },
             Action::SaveWorkspace => {
                 if self.tabs.is_empty() {
                     self.toast(ToastLevel::Warn, "no terminal tabs to save");
                 } else {
                     let value = self.tabs.iter().map(|t| t.origin.clone()).collect::<Vec<_>>().join(" + ");
-                    self.overlay = Some(Overlay::Prompt(Prompt {
-                        title: "SAVE WORKSPACE AS".into(),
-                        value: crate::util::truncate(&value, 32),
-                        purpose: PromptPurpose::SaveWorkspace,
-                    }));
+                    self.overlay = Some(Overlay::Prompt(Prompt::new(
+                        "SAVE WORKSPACE AS",
+                        crate::util::truncate(&value, 32),
+                        PromptPurpose::SaveWorkspace,
+                    )));
                 }
             }
             Action::ScrollUp => self.scroll_page(1),
@@ -129,14 +125,17 @@ impl App {
                     p.write(&bytes);
                 }
             }
-            Action::MoveTabLeft | Action::MoveTabRight => {
-                if let View::Term(i) = self.view {
-                    let to = if action == Action::MoveTabLeft { i.checked_sub(1) } else { Some(i + 1) };
-                    if let Some(to) = to {
-                        self.move_tab(i, to);
+            Action::MoveTabLeft | Action::MoveTabRight => match self.view {
+                View::Term(i) => {
+                    let left = action == Action::MoveTabLeft;
+                    let to = if left { i.checked_sub(1) } else { Some(i + 1).filter(|t| *t < self.tabs.len()) };
+                    match to {
+                        Some(to) => self.move_tab(i, to),
+                        None => self.no_op(if left { "already the first tab" } else { "already the last tab" }),
                     }
                 }
-            }
+                _ => self.no_op("no tab here — open a terminal tab first"),
+            },
             Action::PaneMenu => {
                 if let Some(pane) = self.focused_pane() {
                     // The same menu as a right-click on the pane title, opened below the title.
@@ -368,21 +367,33 @@ impl App {
     }
 
     pub(super) fn split(&mut self, dir: Dir) {
+        self.split_with(dir, None);
+    }
+
+    /// The working directory of the focused pane in the visible terminal tab.
+    pub fn focused_cwd(&self) -> Option<PathBuf> {
+        let tab = self.current_tab()?;
+        self.panes.get(&tab.focus).map(|p| p.cwd())
+    }
+
+    /// Splits the focused pane; `command` (already wrapped for the shell) runs in the new pane.
+    /// Returns the new pane when the split happened.
+    fn split_with(&mut self, dir: Dir, command: Option<&str>) -> Option<PaneId> {
         let body = self.body();
         let Some(tab) = self.current_tab() else {
             self.toast(ToastLevel::Info, "open a terminal tab first");
-            return;
+            return None;
         };
         let (rects, _) = tab.root.layout(body);
         let focus = tab.focus;
-        let Some(rect) = rects.iter().find(|(id, _)| *id == focus).map(|(_, r)| *r) else { return };
+        let rect = rects.iter().find(|(id, _)| *id == focus).map(|(_, r)| *r)?;
         let fits = match dir {
             Dir::Row => rect.width / 2 >= MIN_W,
             Dir::Col => rect.height / 2 > MIN_H,
         };
         if !fits {
             self.toast(ToastLevel::Warn, "not enough room to split");
-            return;
+            return None;
         }
         // The new pane's size: lay out the tree as it will be after the split.
         let mut after = tab.root.clone();
@@ -391,13 +402,38 @@ impl App {
         let inner = crate::ui::pane_outline(tile.unwrap_or(rect), body).inner();
         let (rows, cols) = (inner.height, inner.width);
         let cwd = self.panes.get(&focus).map(|p| p.cwd()).unwrap_or_else(home);
-        if let Some(new) = self.spawn_pane(&cwd, None, rows, cols)
-            && let Some(tab) = self.current_tab_mut()
-        {
+        let new = self.spawn_pane(&cwd, command, rows, cols)?;
+        if let Some(tab) = self.current_tab_mut() {
             tab.root.split(focus, new, dir);
             tab.focus = new;
             tab.zoomed = false;
         }
+        Some(new)
+    }
+
+    /// Runs a launcher in a new split next to the focused pane, in that pane's directory.
+    pub fn launch_in_split(&mut self, idx: usize) {
+        let Some((launcher, available)) = self.launchers.get(idx).cloned() else { return };
+        if !available {
+            self.toast(
+                ToastLevel::Warn,
+                format!("{} is not installed ('{}' not on PATH)", launcher.name, launcher.command),
+            );
+            return;
+        }
+        let command = self.shell.invocation(&launcher.command);
+        // Side by side, like "Split right"; the pane remembers the launcher so a restored session runs it again.
+        if let Some(new) = self.split_with(Dir::Row, Some(&command))
+            && let Some(p) = self.panes.get_mut(&new)
+        {
+            p.launcher = Some(launcher.command.clone());
+        }
+        self.note_agent_offer(&launcher.command);
+    }
+
+    /// A command that has nothing to act on: says why in a short toast instead of doing nothing silently.
+    pub fn no_op(&mut self, reason: &str) {
+        self.toast(ToastLevel::Info, reason);
     }
 
     /// Closes a pane the user asked to close; asks first while something still runs in it.
@@ -456,6 +492,7 @@ impl App {
         let body = self.body();
         let Some(tab) = self.tabs.get_mut(ti) else { return };
         if tab.panes().len() < 2 {
+            self.no_op("only one pane — nothing to zoom");
             return;
         }
         tab.focus = pane;
@@ -542,6 +579,7 @@ impl App {
         {
             p.launcher = Some(launcher.command.clone());
         }
+        self.note_agent_offer(&launcher.command);
     }
 
     pub fn open_project_shell(&mut self, path: PathBuf) {
@@ -562,7 +600,7 @@ impl App {
         } else {
             "xdg-open"
         };
-        match std::process::Command::new(program).arg(path).spawn() {
+        match crate::util::spawn_detached(std::process::Command::new(program).arg(path)) {
             Ok(_) => self.toast(ToastLevel::Info, format!("opened {}", crate::util::tilde(path))),
             Err(_) => self.toast(ToastLevel::Error, "could not open file manager"),
         }
@@ -611,11 +649,11 @@ impl App {
             return;
         }
         let result = if cfg!(windows) {
-            std::process::Command::new("notepad").arg(&path).spawn()
+            crate::util::spawn_detached(std::process::Command::new("notepad").arg(&path))
         } else if cfg!(target_os = "macos") {
-            std::process::Command::new("open").arg("-t").arg(&path).spawn()
+            crate::util::spawn_detached(std::process::Command::new("open").arg("-t").arg(&path))
         } else {
-            std::process::Command::new("xdg-open").arg(&path).spawn()
+            crate::util::spawn_detached(std::process::Command::new("xdg-open").arg(&path))
         };
         match result {
             Ok(_) => self
@@ -664,6 +702,14 @@ impl App {
         }));
     }
 
+    pub fn request_delete_workspace(&mut self, name: String) {
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "DELETE WORKSPACE".into(),
+            body: name.clone(),
+            action: ConfirmAction::DeleteWorkspace(name),
+        }));
+    }
+
     pub fn confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::Quit => self.quit = true,
@@ -679,6 +725,13 @@ impl App {
                     p.paste(&text);
                 }
             }
+            ConfirmAction::DeleteWorkspace(name) => {
+                if self.workspaces.remove(&name) {
+                    self.toast(ToastLevel::Ok, format!("workspace '{name}' deleted"));
+                } else {
+                    self.toast(ToastLevel::Warn, format!("workspace '{name}' not found"));
+                }
+            }
             ConfirmAction::Kill { pid, name } => match &self.services {
                 Some(s) => {
                     let _ = s.sensor_req.send(SensorRequest::Kill { pid });
@@ -690,13 +743,27 @@ impl App {
 
     /// The add prompt: one project folder (`project`) or a folder to scan for repos.
     pub fn open_add_prompt(&mut self, project: bool) {
-        let mut p = Prompt { title: String::new(), value: String::new(), purpose: PromptPurpose::AddRoot };
+        let mut p = Prompt::new(String::new(), String::new(), PromptPurpose::AddRoot);
         p.set_add_mode(project);
         self.overlay = Some(Overlay::Prompt(p));
     }
 
     pub fn submit_prompt(&mut self, prompt: Prompt) {
         let value = prompt.value.trim().to_string();
+        // The add prompts validate first: on an error the prompt stays open with the typed text.
+        let check = match prompt.purpose {
+            PromptPurpose::AddRoot => Self::resolve_folder(&value).map(|_| ()),
+            PromptPurpose::AddProject => Self::resolve_folder(&value).and_then(|p| {
+                crate::projects::project_at(&p).map(|_| ()).ok_or_else(|| format!("not a folder: {}", p.display()))
+            }),
+            _ => Ok(()),
+        };
+        if let Err(e) = check {
+            let mut prompt = prompt;
+            prompt.error = Some(e);
+            self.overlay = Some(Overlay::Prompt(prompt));
+            return;
+        }
         match prompt.purpose {
             PromptPurpose::RenameTab(id) => {
                 // The tab may have closed while the prompt was open.
@@ -712,8 +779,13 @@ impl App {
                 }
                 let ws = self.snapshot(&value);
                 let panes = ws.pane_count();
-                self.workspaces.upsert(ws);
-                self.toast(ToastLevel::Ok, format!("workspace '{value}' saved · {panes} panes"));
+                let out = self.workspaces.upsert(ws);
+                let verb = if out.replaced { "replaced" } else { "saved" };
+                let mut msg = format!("workspace '{value}' {verb} · {panes} panes");
+                if let Some(old) = out.dropped {
+                    msg.push_str(&format!(" · limit of {} reached, dropped '{old}'", crate::store::MAX_WORKSPACES));
+                }
+                self.toast(ToastLevel::Ok, msg);
             }
         }
     }

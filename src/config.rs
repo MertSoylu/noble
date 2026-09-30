@@ -462,6 +462,47 @@ pub fn mtime_of(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// The part of a `key = value` line after the first `=` outside quotes (the whole line when none).
+fn strip_value(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '=' => return &line[i + 1..],
+            None => {}
+        }
+    }
+    line
+}
+
+/// Bracket depth (`[` / `{`) after `line`, starting from `depth`; brackets inside strings and
+/// comments do not count. Multi-line strings are not supported (the quote state resets per line).
+fn bracket_depth(line: &str, mut depth: usize) -> usize {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '#' => break,
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
+    }
+    depth
+}
+
 /// Updates a `key = value` line in a section preserving its comments; appends the
 /// line at the end of the section when missing, and creates the section at the end
 /// of the file when it does not exist.
@@ -471,7 +512,8 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
     let mut in_section = false;
     let mut section_seen = false;
     let mut done = false;
-    for line in text.lines() {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             if in_section && !done {
@@ -499,6 +541,12 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
                 };
                 out.push(padded);
                 done = true;
+                // A multi-line array/table value: drop its continuation lines too.
+                let mut depth = bracket_depth(strip_value(line), 0);
+                while depth > 0 {
+                    let Some(next) = lines.next() else { break };
+                    depth = bracket_depth(next, depth);
+                }
                 continue;
             }
         }
@@ -571,6 +619,32 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The provider list is spelled out in several places; all of them must match the `ai::providers` registry
+    /// (a new provider added to one place only would silently vanish from config, Settings or the defaults).
+    #[test]
+    fn provider_lists_match_the_registry() {
+        let ids: Vec<&str> = crate::ai::providers::registry().iter().map(|p| p.id).collect();
+        fn owned(v: &[String]) -> Vec<&str> {
+            v.iter().map(String::as_str).collect()
+        }
+        // `AiCfg::default`
+        assert_eq!(owned(&AiCfg::default().providers), ids);
+        // `DEFAULT_CONFIG`
+        assert_eq!(owned(&parse(DEFAULT_CONFIG).unwrap().ai.providers), ids);
+        // The Settings rows (`app::PROVIDER_KEYS`)
+        let keys: Vec<&str> = crate::app::PROVIDER_KEYS.iter().map(|k| k.provider_id()).collect();
+        assert_eq!(keys, ids);
+        // The allow-list in `parse` keeps every registry id and drops unknown ones.
+        let quoted: Vec<String> = ids.iter().map(|i| format!("\"{i}\"")).collect();
+        let text = format!(
+            "[ai]
+providers = [{}, \"bogus\"]
+",
+            quoted.join(", ")
+        );
+        assert_eq!(owned(&parse(&text).unwrap().ai.providers), ids);
+    }
 
     #[test]
     fn default_template_parses() {
@@ -764,6 +838,26 @@ providers = [\"claude\", \"gemini\"]
                 assert!(parse(&out).is_ok(), "{text:?}\n→\n{out}");
             }
         }
+    }
+
+    /// A multi-line array value is replaced as a whole: no orphan continuation lines stay behind.
+    #[test]
+    fn set_value_replaces_multiline_arrays() {
+        let text = "[projects]
+roots = [
+  \"~/a\",   # first ] tricky
+  \"~/b]\",
+]  # tail
+max_depth = 3
+
+[general]
+theme = \"ice\"
+";
+        let out = set_value(text, "projects", "roots", "[\"~/x\"]");
+        assert_eq!(out.matches("~/a").count(), 0, "{out}");
+        assert!(out.contains("roots = [\"~/x\"]") && out.contains("max_depth = 3"), "{out}");
+        assert_eq!(parse(&out).map(|c| c.projects.max_depth), Ok(3), "{out}");
+        assert_eq!(strip_value("roots = [\"a=b\"]"), " [\"a=b\"]");
     }
 
     #[test]

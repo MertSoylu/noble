@@ -112,6 +112,16 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`Pane::command_ran`: the C mark, or for cmd.exe and bash 3.2 a typed line and the last Enter) becomes
   `Pane::last_result`, shown in the pane title (`ui/terminal.rs` `result_badge`), and a running one shows a
   live timer whose redraws `App::redraw_after` schedules (`pane::live_timer_next`).
+- **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
+  `agent_sessions_by_project`, the one-time hooks offer); the state types stay in `app/mod.rs`.
+- **Session auto-save / termination:** `App::tick` compares the tabs with the last saved session and writes a
+  change that lasted 2 s (short lock wait). `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
+  close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
+- **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
+  skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
+- **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
+  (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
+  no prompts, timeout via `ai::run_command`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme

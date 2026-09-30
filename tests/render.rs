@@ -814,6 +814,8 @@ fn settings_back_arrows_scroll_and_dim() {
     // The wheel scrolls the page, the selection stays; a key scrolls back to it.
     app.settings_sel = 0;
     key(&mut app, KeyCode::Home);
+    // A toast from an earlier key (e.g. "no tab here") would cover the marker.
+    app.toasts.clear();
     let text = render(&mut app, 110, 30);
     assert!(text.contains("Theme") && text.contains("↓ more") && !text.contains("↑ more"), "{text}");
     for _ in 0..20 {
@@ -1168,6 +1170,8 @@ fn background_tab_notification_marks_tab() {
     app.handle(AppEvent::PtyOutput);
     assert!(app.tabs[0].alert.is_some());
     assert!(app.outer_bell);
+    // The same message is queued for the outer terminal's desktop notification (OSC 9 / 777).
+    assert!(app.outer_notice.as_deref().is_some_and(|t| t.contains("Build finished")), "{:?}", app.outer_notice);
     assert!(app.toasts.iter().any(|t| t.text.contains("Build finished")), "toast missing");
     let text = render(&mut app, 110, 30);
     save("terminal-alert-110x30", &text);
@@ -1731,7 +1735,6 @@ fn passthrough_sends_shortcuts_to_the_app() {
 #[test]
 fn risky_terminal_actions_ask_first() {
     use noble::app::Overlay;
-    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("busy".into()));
     let id = app.focused_pane().unwrap();
@@ -1774,7 +1777,7 @@ fn risky_terminal_actions_ask_first() {
     assert!(app.overlay.is_none());
 
     app.run(Action::CloseTab);
-    app.on_key(enter);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
 }
 
@@ -5183,4 +5186,406 @@ fn prefix_is_cancelled_by_other_input() {
     app.on_key(ctrl_a());
     app.on_key(ctrl_a());
     assert!(!app.prefix_armed);
+}
+
+/// Test provider state that reports a session (login) that has expired, with cached numbers.
+fn expired_state(id: &'static str, name: &'static str, hint: &'static str, used: u8) -> AppEvent {
+    AppEvent::Ai(Box::new(ProviderState {
+        id,
+        name,
+        login_hint: hint,
+        presence: Presence::Ready,
+        status: Status::Expired,
+        usage: Some(Usage {
+            windows: vec![Window { label: "5H".into(), used, resets_at: None }],
+            plan: None,
+            note: None,
+        }),
+        fetched_at: Some(chrono::Utc::now().timestamp() - 3600),
+    }))
+}
+
+/// An expired login stays on Home: cached bars dimmed with "~" and a one-line hint (not hidden like "no plan").
+#[test]
+fn expired_login_stays_on_home_with_a_hint() {
+    let mut app = demo_app(160, 45);
+    app.handle(expired_state("codex", "Codex", "codex login", 18));
+    let text = render(&mut app, 160, 45);
+    save("bridge-expired-160x45", &text);
+    assert!(text.contains("Codex ~1h"), "{text}");
+    assert!(text.contains("~18%"), "{text}");
+    assert!(text.contains("expired · run codex login to refresh"), "{text}");
+    for (w, h) in SIZES {
+        save(&format!("bridge-expired-{w}x{h}"), &render(&mut app, w, h));
+    }
+    // Without cached numbers the hint replaces the bars.
+    app.handle(AppEvent::Ai(Box::new(ProviderState {
+        id: "codex",
+        name: "Codex",
+        login_hint: "codex login",
+        presence: Presence::Ready,
+        status: Status::Expired,
+        usage: None,
+        fetched_at: None,
+    })));
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("Codex") && text.contains("run codex login to refresh"), "{text}");
+}
+
+/// One-column Home (80-91 columns) has no AI panel: a compact strip carries the quota instead.
+#[test]
+fn narrow_home_shows_a_quota_strip() {
+    let mut app = demo_app(80, 24);
+    let text = render(&mut app, 80, 24);
+    save("bridge-strip-80x24", &text);
+    assert!(text.contains("claude 71%") && text.contains("codex ~92%"), "{text}");
+    app.handle(expired_state("kilo", "Kilo", "kilo auth login", 40));
+    let text = render(&mut app, 80, 24);
+    assert!(text.contains("kilo expired"), "{text}");
+    for (w, h) in [(91, 24), (80, 24), (60, 20), (56, 18), (40, 14), (30, 8)] {
+        save(&format!("bridge-strip-{w}x{h}"), &render(&mut app, w, h));
+    }
+    // Wide Home has the panel, so no strip (the summary would repeat it).
+    let wide = render(&mut app, 160, 45);
+    assert!(!wide.contains("claude 71%"), "{wide}");
+}
+
+/// "? help" is the first hint on Home, so it is the last to go when the bar is narrow.
+#[test]
+fn status_bar_keeps_help_longest() {
+    let mut app = demo_app(120, 30);
+    let wide = render(&mut app, 120, 30);
+    assert!(wide.lines().last().unwrap().contains("? help"), "{wide}");
+    for w in [70u16, 56, 50] {
+        let text = render(&mut app, w, 24);
+        let last = text.lines().last().unwrap();
+        assert!(last.contains("? help"), "{w}: {last}");
+    }
+    let text = render(&mut app, 50, 24);
+    assert!(!text.lines().last().unwrap().contains("pin / more"), "{text}");
+}
+
+/// The "commands" chip on the status bar opens the palette; System calls the kill key "terminate".
+#[test]
+fn status_bar_palette_chip_is_clickable() {
+    use noble::app::{Hit, Overlay};
+    let mut app = demo_app(110, 30);
+    render(&mut app, 110, 30);
+    let chip = find_hit(&app, |h| *h == Hit::Palette).expect("palette chip");
+    assert_eq!(chip.y, 29);
+    click(&mut app, chip.x + 1, chip.y);
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
+    app.overlay = None;
+    app.view = View::System;
+    let text = render(&mut app, 110, 30);
+    let last = text.lines().last().unwrap();
+    assert!(last.contains("terminate") && !last.contains("end task"), "{last}");
+}
+
+/// The welcome card lists launcher keys only for CLIs that are installed.
+#[test]
+fn welcome_card_lists_only_installed_launchers() {
+    use noble::config::Launcher;
+    let mut app = demo_app(110, 30);
+    app.launchers = vec![
+        (Launcher { key: "c".into(), name: "claude".into(), command: "claude".into(), show: true }, true),
+        (Launcher { key: "x".into(), name: "codex".into(), command: "codex".into(), show: true }, false),
+    ];
+    app.show_welcome();
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("start Claude right there") && !text.contains("Codex"), "{text}");
+    for l in &mut app.launchers {
+        l.1 = false;
+    }
+    let text = render(&mut app, 110, 30);
+    assert!(!text.contains("right there") && text.contains("command palette"), "{text}");
+}
+
+/// The session is saved a couple of seconds after the tabs change, without quitting (a crash or a
+/// kill keeps it), and an unchanged session is not written again.
+#[test]
+fn session_is_saved_shortly_after_tabs_change() {
+    let data = session_dir("autosave");
+    let mut app = session_app(&data, false, session_cfg());
+    app.session_autosave = true;
+    assert!(app.session_save_due().is_none(), "nothing changed: no wake-up needed");
+    app.new_tab(data.clone(), None, Some("autosaved".into()));
+    std::thread::sleep(Duration::from_millis(1100));
+    app.tick();
+    assert!(session_origins(&data, false).is_empty(), "debounced: not saved at once");
+    assert!(app.session_save_due().is_some(), "a save is waiting");
+    std::thread::sleep(Duration::from_millis(2100));
+    app.tick();
+    assert_eq!(session_origins(&data, false), ["autosaved"]);
+    assert!(app.session_save_due().is_none(), "saved: no wake-up needed");
+
+    // Unchanged tabs are not written again.
+    let file = data.join(session_file(false));
+    let first = std::fs::metadata(&file).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    app.tick();
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), first);
+
+    // Closing the last tab is a change too.
+    app.remove_tab(0);
+    std::thread::sleep(Duration::from_millis(1100));
+    app.tick();
+    std::thread::sleep(Duration::from_millis(2100));
+    app.tick();
+    assert!(session_origins(&data, false).is_empty());
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Workspaces can be deleted from the palette (after a confirmation), and saving says when it replaced
+/// a workspace of the same name or dropped the oldest one at the limit.
+#[test]
+fn workspaces_delete_replace_and_limit_are_announced() {
+    use noble::app::{Overlay, PaletteCmd, PromptPurpose};
+    let mut app = demo_app(110, 30);
+    app.workspaces.list.clear();
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    let save_as = |app: &mut App, name: &str| {
+        let p = noble::app::Prompt::new(String::new(), name.into(), PromptPurpose::SaveWorkspace);
+        app.submit_prompt(p);
+        toast_texts(app).last().cloned().unwrap_or_default()
+    };
+    assert!(save_as(&mut app, "alpha").contains("saved"));
+    assert!(save_as(&mut app, "ALPHA").contains("replaced"), "same name, any case");
+    assert_eq!(app.workspaces.list.len(), 1);
+    for i in 0..19 {
+        save_as(&mut app, &format!("w{i}"));
+    }
+    assert_eq!(app.workspaces.list.len(), 20);
+    let msg = save_as(&mut app, "overflow");
+    assert!(msg.contains("dropped 'ALPHA'"), "{msg}");
+    assert_eq!(app.workspaces.list.len(), 20);
+
+    // Palette: a delete entry per workspace, guarded by the confirm dialog.
+    app.run(Action::Palette);
+    let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+    let item = p.all.iter().find(|i| i.title == "Delete Workspace: overflow").expect("delete entry");
+    assert_eq!(item.cmd, PaletteCmd::DeleteWorkspace("overflow".into()));
+    app.overlay = None;
+    app.run_palette(PaletteCmd::DeleteWorkspace("overflow".into()));
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    assert!(render(&mut app, 110, 30).contains("DELETE WORKSPACE"));
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.workspaces.list.len(), 20, "esc keeps it");
+    app.run_palette(PaletteCmd::DeleteWorkspace("overflow".into()));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))), "enter must not confirm");
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.workspaces.list.iter().all(|w| w.name != "overflow"));
+    assert!(toast_texts(&app).iter().any(|t| t.contains("deleted")), "{:?}", toast_texts(&app));
+}
+
+/// Add-project prompt: an invalid path keeps the prompt open with the text and the error inside it;
+/// the cursor edits in the middle of the text.
+#[test]
+fn prompt_validates_on_enter_and_edits_at_the_cursor() {
+    use noble::app::Overlay;
+    let k = |app: &mut App, code: KeyCode| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut app = demo_app(110, 30);
+    app.open_add_prompt(true);
+    let empty = render(&mut app, 110, 30);
+    assert!(empty.contains("path, e.g."), "placeholder: {empty}");
+    for c in "Z:/nope/here".chars() {
+        k(&mut app, KeyCode::Char(c));
+    }
+    k(&mut app, KeyCode::Enter);
+    let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("prompt closed on an invalid path") };
+    assert_eq!(p.value, "Z:/nope/here");
+    assert!(p.error.as_deref().is_some_and(|e| e.contains("not a folder")));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("not a folder: Z:/nope/here"), "{text}");
+    for size in [(60, 12), (30, 8)] {
+        render(&mut app, size.0, size.1);
+    }
+    // Editing clears the error; Home / Right / Delete / typing work at the cursor.
+    k(&mut app, KeyCode::Home);
+    k(&mut app, KeyCode::Right);
+    k(&mut app, KeyCode::Delete);
+    for c in "ab".chars() {
+        k(&mut app, KeyCode::Char(c));
+    }
+    k(&mut app, KeyCode::End);
+    k(&mut app, KeyCode::Left);
+    k(&mut app, KeyCode::Backspace);
+    let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("prompt gone") };
+    assert_eq!(p.value, "Zab/nope/hee");
+    assert!(p.error.is_none());
+    // A valid folder closes the prompt.
+    let dir = std::env::temp_dir();
+    if let Some(Overlay::Prompt(p)) = &mut app.overlay {
+        p.clear();
+        p.insert(&dir.display().to_string());
+    }
+    k(&mut app, KeyCode::Enter);
+    assert!(app.overlay.is_none(), "valid folder submits");
+}
+
+/// Commands with nothing to act on say why instead of doing nothing.
+#[test]
+fn no_op_commands_explain_themselves() {
+    use noble::keys::Action;
+    let mut app = demo_app(110, 30);
+    for (action, want) in [
+        (Action::CloseTab, "no tab here"),
+        (Action::RenameTab, "no tab here"),
+        (Action::MoveTabLeft, "no tab here"),
+        (Action::Zoom, "no pane here"),
+    ] {
+        app.toasts.clear();
+        app.run(action);
+        assert!(toast_texts(&app).iter().any(|t| t.contains(want)), "{action:?}: {:?}", toast_texts(&app));
+    }
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    app.toasts.clear();
+    app.run(Action::Zoom);
+    assert!(toast_texts(&app).iter().any(|t| t.contains("nothing to zoom")), "{:?}", toast_texts(&app));
+    app.toasts.clear();
+    app.run(Action::MoveTabRight);
+    assert!(toast_texts(&app).iter().any(|t| t.contains("last tab")), "{:?}", toast_texts(&app));
+}
+
+/// A click on the left half of a "‹ value ›" chip steps backward, the right half (and the label) forward;
+/// a right click steps backward.
+#[test]
+fn settings_click_direction() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::{Hit, SettingItem, SettingKey};
+    let mut app = demo_app(110, 40);
+    app.open_settings();
+    let pos =
+        |app: &App, k: SettingKey| app.settings_items().iter().position(|i| *i == SettingItem::Setting(k)).unwrap();
+    let i = pos(&app, SettingKey::AiRefresh);
+    app.settings_sel = i;
+    let text = render(&mut app, 110, 40);
+    assert!(text.contains("How often usage is fetched"), "description of the selection: {text}");
+    let row = find_hit(&app, |h| *h == Hit::Setting(i)).expect("row");
+    let before = app.setting_value(SettingKey::AiRefresh);
+    let chip_w = noble::util::width(&format!("‹ {before} ›")) as u16;
+    let start = row.right() - 2 - chip_w;
+    click(&mut app, start, row.y);
+    let back = app.setting_value(SettingKey::AiRefresh);
+    assert_ne!(back, before);
+    render(&mut app, 110, 40);
+    click(&mut app, start + chip_w - 1, row.y);
+    assert_eq!(app.setting_value(SettingKey::AiRefresh), before, "right half steps forward again");
+    render(&mut app, 110, 40);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Right), row.x + 3, row.y);
+    assert_eq!(app.setting_value(SettingKey::AiRefresh), back, "right click steps backward");
+    for (w, h) in [(60, 12), (30, 8)] {
+        render(&mut app, w, h);
+    }
+}
+
+/// Double click selects a word, triple click the line; the pane menu offers Copy while a selection exists.
+#[test]
+fn double_and_triple_click_select_word_and_line() {
+    use noble::app::{Hit, Overlay};
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    let id = app.focused_pane().unwrap();
+    app.panes[&id].parser().process(b"\x1b[2J\x1b[Hfoo ~/code/app bar");
+    render(&mut app, 110, 30);
+    let inner = find_hit_inner(&app).expect("pane");
+    // Path characters stay in the word: "~/code/app" starts at column 4.
+    click(&mut app, inner.x + 6, inner.y);
+    click(&mut app, inner.x + 6, inner.y);
+    assert_eq!(app.panes[&id].selected_text().as_deref(), Some("~/code/app"));
+    click(&mut app, inner.x + 6, inner.y);
+    assert_eq!(app.panes[&id].selected_text().as_deref(), Some("foo ~/code/app bar"));
+    // The pane menu (title right click) starts with Copy.
+    render(&mut app, 110, 30);
+    let title = find_hit(&app, |h| matches!(h, Hit::PaneTitle(_))).expect("title");
+    mouse(&mut app, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right), title.x + 2, title.y);
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("no menu") };
+    assert_eq!(m.items[0].label, "Copy");
+}
+
+/// Launchers next to a pane: the pane menu and the palette offer "in split" (the focused pane's directory);
+/// in a terminal the palette's launch entries target the focused pane ("here"), on Home the selected project.
+#[test]
+fn launcher_in_split_and_palette_targets() {
+    use noble::app::{MenuCmd, PaletteCmd};
+    let mut app = demo_app(120, 32);
+    let probe = if cfg!(windows) { "cmd /c echo SPLIT_PROBE_OK" } else { "echo SPLIT_PROBE_OK" };
+    app.launchers = vec![(
+        noble::config::Launcher { key: "z".into(), name: "probe".into(), command: probe.into(), show: true },
+        true,
+    )];
+    // Home: the entry names the selected project.
+    let project = app.selected_project().map(|p| p.name.clone()).expect("demo project");
+    let titles: Vec<String> = app.palette_items().into_iter().map(|i| i.title).collect();
+    assert!(titles.contains(&format!("Launch probe in {project}")), "{titles:?}");
+    assert!(!titles.iter().any(|t| t.contains("in split") || t.ends_with("here")), "{titles:?}");
+
+    let dir = std::env::temp_dir();
+    app.new_tab(dir.clone(), None, Some("host".into()));
+    let pane = app.tabs[0].focus;
+    // Terminal: here / in split, both aimed at the focused pane.
+    let items = app.palette_items();
+    let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+    assert!(titles.contains(&"Launch probe here") && titles.contains(&"Launch probe in split"), "{titles:?}");
+    assert!(!titles.iter().any(|t| t.starts_with("Launch probe in ") && *t != "Launch probe in split"), "{titles:?}");
+    let here = items.iter().find(|i| i.title == "Launch probe here").unwrap();
+    assert_eq!(here.cmd, PaletteCmd::Launch { launcher: 0, path: app.focused_cwd().unwrap() });
+    assert!(items.iter().any(|i| i.cmd == PaletteCmd::LaunchSplit(0)));
+
+    // The pane menu offers it too.
+    app.open_pane_menu(pane, 10, 5);
+    let has = match &app.overlay {
+        Some(noble::app::Overlay::Menu(m)) => m.items.iter().any(|it| it.cmd == MenuCmd::LaunchSplit(pane, 0)),
+        _ => false,
+    };
+    assert!(has, "pane menu lacks the launcher");
+    app.run_menu(MenuCmd::LaunchSplit(pane, 0));
+    assert_eq!(app.tabs.len(), 1);
+    let panes = app.tabs[0].panes();
+    assert_eq!(panes.len(), 2, "split expected");
+    let new = app.tabs[0].focus;
+    assert_ne!(new, pane);
+    assert_eq!(app.panes[&new].launcher.as_deref(), Some(probe));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        app.pump();
+        if app.panes[&new].parser().screen().contents().lines().any(|l| l.trim() == "SPLIT_PROBE_OK") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "launcher output never appeared");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The one-time "Show Claude status in NOBLE?" notice: bottom right, click enables (same path as Settings;
+/// headless only toasts), the x dismisses. An available update takes the slot first.
+#[test]
+fn hooks_offer_notice() {
+    use noble::app::Hit;
+    let mut app = demo_app(120, 32);
+    assert!(!render(&mut app, 120, 32).contains("Show Claude status"));
+    app.hooks_offer = true;
+    let text = render(&mut app, 120, 32);
+    save("hooks-offer-120x32", &text);
+    assert!(text.lines().nth(30).unwrap().contains("Show Claude status in NOBLE?"), "{text}");
+    for (w, h) in [(80, 24), (40, 12), (30, 8)] {
+        save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
+    }
+    render(&mut app, 120, 32);
+    let enable = find_hit(&app, |h| *h == Hit::HooksOffer).expect("enable hit");
+    click(&mut app, enable.x + 1, enable.y);
+    assert!(!app.hooks_offer, "clicking answers the offer");
+    assert!(!app.hooks_installed, "headless never touches ~/.claude");
+    assert!(!render(&mut app, 120, 32).contains("Show Claude status in NOBLE?"));
+
+    app.hooks_offer = true;
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    let text = render(&mut app, 120, 32);
+    assert!(text.contains("99.0.0") && !text.contains("Show Claude status"), "{text}");
+    app.dismiss_update();
+    render(&mut app, 120, 32);
+    let close = find_hit(&app, |h| *h == Hit::HooksOfferDismiss).expect("dismiss hit");
+    click(&mut app, close.x, close.y);
+    assert!(!app.hooks_offer);
 }

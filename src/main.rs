@@ -22,8 +22,10 @@ const IDLE_TICK: Duration = Duration::from_secs(2);
 fn usage() {
     println!(
         "NOBLE {} — retro-futurist HUD terminal workspace\n\n\
-         USAGE: noble [--config <path>] [--no-boot]\n       \
+         USAGE: noble [--config <path>] [--no-boot] [<dir>]\n       \
                 noble update [--check]\n\n\
+         ARGUMENTS:\n  \
+           <dir>             open a shell tab in this folder (`noble .` for the current one)\n\n\
          COMMANDS:\n  \
            update            download and install the latest release\n\n\
          OPTIONS:\n  \
@@ -41,6 +43,7 @@ fn restore_terminal() {
     let mut out = stdout();
     #[cfg(not(windows))]
     let _ = execute!(out, crossterm::event::DisableBracketedPaste);
+    let _ = execute!(out, crossterm::event::DisableFocusChange);
     let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, crossterm::cursor::Show);
     let _ = out.flush();
 }
@@ -64,6 +67,7 @@ fn main() -> anyhow::Result<()> {
     }
     let mut config_override: Option<PathBuf> = None;
     let mut no_boot = false;
+    let mut start_arg: Option<String> = None;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -86,9 +90,26 @@ fn main() -> anyhow::Result<()> {
                 println!("config: {}\ndata:   {}", p.config.display(), p.data.display());
                 return Ok(());
             }
-            other => anyhow::bail!("unknown argument '{other}' (try --help)"),
+            other if other.starts_with('-') && other != "-" => anyhow::bail!("unknown argument '{other}' (try --help)"),
+            // One folder to open a shell tab in (`noble .`).
+            other if start_arg.is_none() => start_arg = Some(other.to_string()),
+            _ => anyhow::bail!("only one folder can be given (try --help)"),
         }
     }
+    // Checked before the terminal is touched, so the error is a plain message and a non-zero exit code.
+    let start_dir = match start_arg {
+        Some(arg) => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match noble::util::resolve_start_dir(&arg, &cwd, dirs::home_dir().as_deref()) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    eprintln!("noble: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        None => None,
+    };
     let paths = Paths::resolve(config_override);
 
     enable_raw_mode()?;
@@ -97,6 +118,8 @@ fn main() -> anyhow::Result<()> {
         out,
         EnterAlternateScreen,
         EnableMouseCapture,
+        // Focus reports (FocusGained / FocusLost) let notifications skip a window that is in front.
+        crossterm::event::EnableFocusChange,
         crossterm::terminal::SetTitle(if noble::util::is_dev_build() { "NOBLE dev" } else { "NOBLE" })
     )?;
     // Unix: pastes arrive as one `Event::Paste`. crossterm's Windows console input has no
@@ -120,12 +143,12 @@ fn main() -> anyhow::Result<()> {
         }
     }));
 
-    let result = run(paths, no_boot);
+    let result = run(paths, no_boot, start_dir);
     restore_terminal();
     result
 }
 
-fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
+fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     terminal.clear()?;
     let (tx, rx) = mpsc::channel::<AppEvent>();
@@ -139,10 +162,16 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
             }
         })?;
     }
+    // SIGHUP/SIGTERM (Unix) and console close/logoff/shutdown (Windows) end the loop like a quit.
+    noble::termination::install(tx.clone());
     let size = terminal.size()?;
     let mut app = App::start(paths, tx, (size.width, size.height));
     if no_boot {
         app.boot = None;
+    }
+    if let Some(dir) = start_dir {
+        // After the session restore, so the requested folder ends up focused.
+        app.open_project_shell(dir);
     }
 
     // Drawing happens in only two cases: when an event arrives that changed
@@ -151,10 +180,13 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
     // timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
     let mut last_draw = Instant::now() - FRAME;
     let mut pending = true;
+    let mut draw_error = None;
     loop {
         let timed = app.redraw_after().map(|d| Instant::now() + d);
         let wake = if pending { Some(last_draw + FRAME) } else { timed };
         let wait = wake.map(|w| w.saturating_duration_since(Instant::now())).unwrap_or(IDLE_TICK).min(IDLE_TICK);
+        // Unsaved tab changes: wake up in time for the session save (nothing changed: no extra wake-up).
+        let wait = app.session_save_due().map_or(wait, |d| wait.min(d));
         match rx.recv_timeout(wait) {
             Ok(ev) => pending |= app.handle(ev),
             Err(RecvTimeoutError::Timeout) => {}
@@ -178,7 +210,20 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
             // Frame limit: draw on the next round.
             pending = true;
         } else if due {
-            terminal.draw(|f| noble::ui::draw(f, &mut app))?;
+            // A failed draw (the terminal is gone) still ends through `shutdown`, which saves the session.
+            if let Err(e) = terminal.draw(|f| noble::ui::draw(f, &mut app)) {
+                draw_error = Some(e);
+                break;
+            }
+            // Desktop notification through the outer terminal; skipped while the window is known to be in front.
+            if let Some(text) = app.outer_notice.take()
+                && app.window_focused != Some(true)
+                && noble::outer::supported(cfg!(windows), std::env::var_os("TERM_PROGRAM").is_some())
+            {
+                let mut out = stdout();
+                let _ = out.write_all(noble::outer::sequences(&text).as_bytes());
+                let _ = out.flush();
+            }
             if std::mem::take(&mut app.outer_bell) {
                 // Bell to the outer terminal: Windows Terminal marks the tab, the taskbar flashes.
                 let mut out = stdout();
@@ -190,5 +235,5 @@ fn run(paths: Paths, no_boot: bool) -> anyhow::Result<()> {
         }
     }
     app.shutdown();
-    Ok(())
+    draw_error.map_or(Ok(()), |e| Err(e.into()))
 }

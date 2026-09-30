@@ -1,6 +1,7 @@
 //! Application state and event dispatch. Drawing lives in the `ui` module;
 //! everything here mutates state and nothing writes to the screen directly.
 
+mod agents;
 mod input;
 mod menu;
 mod ops;
@@ -84,6 +85,8 @@ pub enum ConfirmAction {
         pid: u32,
         name: String,
     },
+    /// The saved workspace by name (another window may have changed the list meanwhile).
+    DeleteWorkspace(String),
 }
 
 pub struct Confirm {
@@ -122,9 +125,65 @@ pub struct Prompt {
     pub title: String,
     pub value: String,
     pub purpose: PromptPurpose,
+    /// Cursor position as a character index into `value` (0..=len).
+    pub cursor: usize,
+    /// Validation error of the last submit, shown inside the prompt.
+    pub error: Option<String>,
 }
 
 impl Prompt {
+    /// A prompt with the cursor at the end of `value`.
+    pub fn new(title: impl Into<String>, value: String, purpose: PromptPurpose) -> Self {
+        let cursor = value.chars().count();
+        Prompt { title: title.into(), value, purpose, cursor, error: None }
+    }
+
+    fn byte_at(&self, chars: usize) -> usize {
+        self.value.char_indices().nth(chars).map_or(self.value.len(), |(i, _)| i)
+    }
+
+    /// Inserts text at the cursor, respecting the length limit; clears the error.
+    pub fn insert(&mut self, text: &str) {
+        let room = self.purpose.max_len().saturating_sub(self.value.chars().count());
+        let text: String = text.chars().take(room).collect();
+        if text.is_empty() {
+            return;
+        }
+        let at = self.byte_at(self.cursor);
+        self.value.insert_str(at, &text);
+        self.cursor += text.chars().count();
+        self.error = None;
+    }
+
+    /// Deletes the character before the cursor.
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let at = self.byte_at(self.cursor - 1);
+            self.value.remove(at);
+            self.cursor -= 1;
+            self.error = None;
+        }
+    }
+
+    /// Deletes the character under the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.value.chars().count() {
+            let at = self.byte_at(self.cursor);
+            self.value.remove(at);
+            self.error = None;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+        self.error = None;
+    }
+
+    pub fn move_cursor(&mut self, to: usize) {
+        self.cursor = to.min(self.value.chars().count());
+    }
+
     /// Switches the add prompt between one project (`project`) and a folder to scan; the
     /// typed path stays (Tab or a click on the choice line).
     pub fn set_add_mode(&mut self, project: bool) {
@@ -243,6 +302,8 @@ pub enum Hit {
     Tab(usize),
     TabClose(usize),
     NewTab,
+    /// "commands" chip at the right end of the status bar: opens the command palette.
+    Palette,
     Pane {
         pane: PaneId,
         inner: Rect,
@@ -297,6 +358,9 @@ pub enum Hit {
     /// Update notice at the bottom right: update / dismiss.
     Update,
     UpdateDismiss,
+    /// One-time offer to enable the Claude status hooks: enable / dismiss.
+    HooksOffer,
+    HooksOfferDismiss,
 }
 
 pub(crate) enum Drag {
@@ -436,18 +500,8 @@ pub fn next_waiting_agent(order: &[(PaneId, Option<AgentState>)], current: Optio
         .find_map(|want| (0..n).map(|k| &order[(start + k) % n]).find(|(_, s)| *s == Some(want)).map(|(p, _)| *p))
 }
 
-/// A Claude session's state from its last hook event. While subagents still run the
-/// session is working even after the main answer ended (`stop`); a question from Claude
-/// or one of its subagents (a permission prompt) still needs you.
-fn hook_state(rec: &crate::hooks::HookRecord) -> Option<AgentState> {
-    let state = match rec.event.as_str() {
-        "prompt" => AgentState::Working,
-        "notification" => AgentState::NeedsYou,
-        "stop" | "session-start" => AgentState::Idle,
-        _ => return None,
-    };
-    Some(if state == AgentState::Idle && rec.subagents > 0 { AgentState::Working } else { state })
-}
+/// Open AI sessions per project path: (agent, most urgent state).
+pub type AgentsByProject = std::collections::HashMap<std::path::PathBuf, Vec<(&'static str, AgentState)>>;
 
 /// A row of the session list.
 #[derive(Clone, Debug, PartialEq)]
@@ -535,6 +589,8 @@ pub struct App {
     pub last_body: Option<ratatui::buffer::Buffer>,
     pub(crate) drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
+    /// Consecutive quick clicks on the same cell: 1 single, 2 double (word), 3 triple (line).
+    click_streak: u8,
     pub size: (u16, u16),
     tx: Tx,
     /// Event receiver in headless mode (tests drain it with `pump`).
@@ -574,6 +630,8 @@ pub struct App {
     last_hook_scan: Instant,
     /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
     pub hooks_installed: bool,
+    /// The one-time "show Claude status in NOBLE?" notice is up (`note_agent_offer`).
+    pub hooks_offer: bool,
     /// Last mode reported to the sensor thread (based on the visible screen).
     sensor_mode: Option<SensorMode>,
     /// The previous frame's view (to catch the return to Home).
@@ -592,11 +650,30 @@ pub struct App {
     quota_warned: std::collections::HashSet<(String, String, Option<i64>)>,
     /// Send BEL once to the outer terminal (flashes the taskbar).
     pub outer_bell: bool,
+    /// Text of the notification to forward to the outer terminal (OSC 9 / 777, see `outer`); taken by the frame loop.
+    pub outer_notice: Option<String>,
+    /// Whether the NOBLE window has focus, as far as the outer terminal reports it (`None`: no report yet).
+    pub window_focused: Option<bool>,
     /// A newer published release (announced bottom right).
     pub update_available: Option<String>,
     /// Next update check (`None`: no checking, e.g. headless mode, `noble-dev`).
     next_update_check: Option<Instant>,
+    /// Periodic session save (`autosave_session`). Off in headless mode and tests unless they switch it on.
+    pub session_autosave: bool,
+    /// The tabs as last written to the session file (or restored from it).
+    session_saved: Vec<crate::store::SavedTab>,
+    /// Since when the tabs differ from `session_saved`; the save follows `SESSION_SAVE_DELAY` later.
+    session_dirty_since: Option<Instant>,
+    /// When the tabs were last compared with `session_saved`.
+    session_checked: Instant,
 }
+
+/// How long the tabs must have differed from the saved session before it is written again (debounce).
+const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
+/// How often the tabs are compared with the saved session.
+const SESSION_CHECK_EVERY: Duration = Duration::from_secs(1);
+/// How long the periodic save waits for another window's session lock (the main thread must not stall).
+const SESSION_AUTOSAVE_LOCK_WAIT: Duration = Duration::from_secs(1);
 
 fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
     list.iter()
@@ -685,6 +762,7 @@ impl App {
             app.toast(ToastLevel::Warn, w);
         }
         app.restore_last_session();
+        app.session_autosave = true;
         app
     }
 
@@ -706,7 +784,8 @@ impl App {
         // What actually opened (directories that fell back to home included) replaces the
         // taken-over tabs right away, so a crash keeps them as they are now.
         let tabs = self.snapshot("last session").tabs;
-        crate::store::session_save(&file, &self.instance, tabs, false);
+        crate::store::session_save(&file, &self.instance, tabs.clone(), false);
+        self.session_saved = tabs;
     }
 
     fn build(
@@ -766,6 +845,7 @@ impl App {
             last_body: None,
             drag: None,
             last_click: None,
+            click_streak: 0,
             size,
             tx,
             rx: None,
@@ -789,6 +869,7 @@ impl App {
             agent_working_since: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_installed: false,
+            hooks_offer: false,
             sensor_mode: None,
             last_view: None,
             sensor_on_battery: false,
@@ -798,8 +879,14 @@ impl App {
             battery_warned: 100,
             quota_warned: Default::default(),
             outer_bell: false,
+            outer_notice: None,
+            window_focused: None,
             update_available: None,
             next_update_check: None,
+            session_autosave: false,
+            session_saved: Vec::new(),
+            session_dirty_since: None,
+            session_checked: Instant::now(),
             cfg,
         }
     }
@@ -835,7 +922,11 @@ impl App {
     /// the screen: battery friendly.
     pub fn handle(&mut self, ev: AppEvent) -> bool {
         let shown = match &ev {
-            AppEvent::Input(_) | AppEvent::PtyExit(_) | AppEvent::KillResult { .. } | AppEvent::Update(_) => true,
+            AppEvent::Input(_)
+            | AppEvent::PtyExit(_)
+            | AppEvent::KillResult { .. }
+            | AppEvent::Update(_)
+            | AppEvent::Quit => true,
             AppEvent::PtyOutput => false,
             AppEvent::SensorStatic(_) | AppEvent::Sensors(_) => matches!(self.view, View::Bridge | View::System),
             AppEvent::Projects(_) | AppEvent::Git(..) | AppEvent::Ai(_) => {
@@ -861,6 +952,7 @@ impl App {
     fn apply(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::Input(e) => self.on_input(e),
+            AppEvent::Quit => self.quit = true,
             AppEvent::PtyOutput => return self.on_pty_output(),
             AppEvent::PtyExit(id) => {
                 if let Some(cwd) = self.panes.get(&id).map(|p| p.cwd()) {
@@ -1084,217 +1176,6 @@ impl App {
         }
     }
 
-    /// The state and running subagents of every pane with a hook record (in pane order), to see
-    /// whether they changed.
-    fn hook_states(&self) -> Vec<(PaneId, Option<AgentState>, usize)> {
-        let mut states: Vec<_> = self.agent_hooks.iter().map(|(p, rec)| (*p, hook_state(rec), rec.subagents)).collect();
-        states.sort_by_key(|(p, ..)| *p);
-        states
-    }
-
-    /// Processes the hook records: notifies when a changed state is in a background tab.
-    pub fn apply_hook_records(&mut self, records: HashMap<PaneId, crate::hooks::HookRecord>) {
-        let visible: Vec<PaneId> = match self.view {
-            View::Term(i) => self.tabs.get(i).map(|t| t.panes()).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let mut changed = Vec::new();
-        let mut live = HashMap::new();
-        for (pane, rec) in records {
-            // Orphans (pane closed or never ours), finished sessions, and records from
-            // before the pane's shell prompt came back (the agent has exited since).
-            let stale = !self.panes.contains_key(&pane)
-                || rec.event == crate::hooks::SESSION_END
-                || self.agent_cleared.get(&pane).is_some_and(|&t| rec.ts <= t);
-            if stale {
-                crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
-                continue;
-            }
-            // A new event notifies, and so does the state changing without one: the last
-            // background subagent ending after `stop` turns Working into Idle with the same
-            // event. A count change that keeps the state (2 subagents to 1) does not.
-            let new_event = self.agent_hooks.get(&pane).is_none_or(|old| {
-                (&old.event, &old.message, old.ts) != (&rec.event, &rec.message, rec.ts)
-                    || hook_state(old) != hook_state(&rec)
-            });
-            if new_event {
-                changed.push((pane, rec.clone()));
-            }
-            live.insert(pane, rec);
-        }
-        // A session that stays Working keeps the time it started working; a new stretch starts
-        // at the record that turned it Working.
-        let since: HashMap<PaneId, i64> = live
-            .iter()
-            .filter(|(_, rec)| hook_state(rec) == Some(AgentState::Working))
-            .map(|(pane, rec)| {
-                let was_working = self.agent_hooks.get(pane).and_then(hook_state) == Some(AgentState::Working);
-                let kept = self.agent_working_since.get(pane).copied().filter(|_| was_working);
-                (*pane, kept.unwrap_or(rec.ts))
-            })
-            .collect();
-        self.agent_working_since = since;
-        let before = self.hook_states();
-        self.agent_hooks = live;
-        // The states show on Home, in the pane titles and as the tab strip's dots (the top bar is on
-        // every screen), and those only redraw by the clock (once a minute on battery): a changed state
-        // asks for its own frame. A changed subagent count ("+2") only shows in a visible pane's title.
-        let after = self.hook_states();
-        let state_of = |v: &[(PaneId, Option<AgentState>, usize)]| -> Vec<(PaneId, Option<AgentState>)> {
-            v.iter().map(|(p, s, _)| (*p, *s)).collect()
-        };
-        let shown = |v: &[(PaneId, Option<AgentState>, usize)]| -> Vec<(PaneId, usize)> {
-            v.iter().filter(|(p, ..)| visible.contains(p)).map(|(p, _, n)| (*p, *n)).collect()
-        };
-        if state_of(&after) != state_of(&before) || shown(&after) != shown(&before) {
-            self.dirty = true;
-        }
-        for (pane, rec) in changed {
-            let notice = match hook_state(&rec) {
-                Some(AgentState::NeedsYou) => {
-                    Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into()))
-                }
-                Some(AgentState::Idle) if rec.event == "stop" => Some("Claude finished".into()),
-                _ => None,
-            };
-            let Some(notice) = notice else { continue };
-            let sig = PaneSignal {
-                id: pane,
-                visible: visible.contains(&pane),
-                bell: false,
-                notice: None,
-                started: None,
-                finished: None,
-                cwd: None,
-                exit: None,
-                failed: false,
-            };
-            if sig.visible {
-                continue;
-            }
-            let signal = PaneSignal { notice: Some(notice), ..sig };
-            self.notify(&signal);
-        }
-    }
-
-    /// The pane's shell prompt came back, so whatever agent ran there has exited:
-    /// its hook record goes, and records written until now are ignored if they show up
-    /// later (a hook finishing its write just as the agent exits).
-    ///
-    /// Only the shell emits the prompt marks (OSC 7 / 9;9 / 133); Claude Code sets
-    /// the title and OSC 9;4 progress but none of these, so a running agent is not
-    /// cleared by it. Should one ever emit them, its next hook event (every prompt,
-    /// notification and stop) writes a newer record and the state comes back.
-    fn clear_agent(&mut self, pane: PaneId) {
-        self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
-        self.agent_working_since.remove(&pane);
-        if self.agent_hooks.remove(&pane).is_some() {
-            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
-        }
-    }
-
-    /// Forgets a closed pane's agent state and deletes its hook record.
-    pub(crate) fn forget_agent(&mut self, pane: PaneId) {
-        self.agent_cleared.remove(&pane);
-        self.agent_working_since.remove(&pane);
-        if self.agent_hooks.remove(&pane).is_some() {
-            crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
-        }
-    }
-
-    /// The AI agent running in a pane and its state: from Claude's hook record, else
-    /// guessed from the launcher command (while it still runs) or the window title.
-    pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
-        if let Some(rec) = self.agent_hooks.get(&pane) {
-            return hook_state(rec).map(|state| ("claude", state));
-        }
-        let p = self.panes.get(&pane)?;
-        // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
-        let command = p.command.as_deref().filter(|_| p.launch_running());
-        let kind = crate::ai::agent_kind(command, &p.label())?;
-        // Only a notice (bell, notification) means the agent asks for the user; a finished or failed command does not.
-        let alert = self.tabs.iter().any(|t| t.alert == Some(TabAlert::Notice) && t.root.contains(pane));
-        Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
-    }
-
-    /// The agent part of a pane's title: its state, how long it has been working and its subagents.
-    pub fn agent_badge(&self, pane: PaneId) -> Option<AgentBadge> {
-        let (kind, state) = self.agent_state(pane)?;
-        let rec = self.agent_hooks.get(&pane);
-        let working_since = (state == AgentState::Working)
-            .then(|| self.agent_working_since.get(&pane).copied().or(rec.map(|r| r.ts)))
-            .flatten();
-        Some(AgentBadge { kind, state, working_since, subagents: rec.map_or(0, |r| r.subagents) })
-    }
-
-    /// The most urgent agent state among a tab's panes (the dot in the tab strip).
-    pub fn tab_agent_state(&self, tab: usize) -> Option<AgentState> {
-        let tab = self.tabs.get(tab)?;
-        tab.panes().into_iter().filter_map(|p| self.agent_state(p).map(|(_, s)| s)).max_by_key(AgentState::urgency)
-    }
-
-    /// Panes drawn in the visible terminal tab (only the focused one while zoomed).
-    pub fn visible_panes(&self) -> Vec<PaneId> {
-        match self.view {
-            View::Term(i) => self.tabs.get(i).map(|t| if t.zoomed { vec![t.focus] } else { t.panes() }),
-            _ => None,
-        }
-        .unwrap_or_default()
-    }
-
-    /// Working agents spin (`hud::agent_spinner`) only while one in a visible pane is live
-    /// (`agent_live`) and not on battery; otherwise they show a static "…" and ask for no extra frames.
-    pub fn agent_spinning(&self) -> bool {
-        !self.on_battery() && self.visible_panes().into_iter().any(|p| self.agent_live(p))
-    }
-
-    /// The pane's agent is working and shows it: its pane printed something within `AGENT_LIVE`
-    /// (an agent's own screen animates while it works). A session stays Working after an interrupt
-    /// (Esc sends no hook event) or with a leftover subagent marker; such a stale state must not
-    /// keep the screen redrawing.
-    pub fn agent_live(&self, pane: PaneId) -> bool {
-        matches!(self.agent_state(pane), Some((_, AgentState::Working)))
-            && self.panes.get(&pane).and_then(|p| p.last_output).is_some_and(|t| t.elapsed() < AGENT_LIVE)
-    }
-
-    /// AI sessions across all tabs (in tab order).
-    pub fn all_agent_sessions(&self) -> Vec<AgentSession> {
-        let mut out = Vec::new();
-        for (ti, tab) in self.tabs.iter().enumerate() {
-            for pane in tab.panes() {
-                let Some((kind, state)) = self.agent_state(pane) else { continue };
-                let cwd = self.panes.get(&pane).map(|p| p.cwd()).unwrap_or_default();
-                let place = crate::projects::project_containing(&self.projects, &cwd)
-                    .map(|p| p.name.clone())
-                    .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .unwrap_or_default();
-                out.push(AgentSession { tab: ti, pane, kind, place, state });
-            }
-        }
-        out
-    }
-
-    /// Open AI sessions in the project: (agent, state). If the same agent is in
-    /// several panes, the state needing most attention is shown.
-    pub fn agent_sessions(&self, project: &std::path::Path) -> Vec<(&'static str, AgentState)> {
-        let rank = |s: AgentState| s.urgency();
-        let mut out: Vec<(&'static str, AgentState)> = Vec::new();
-        for s in self.all_agent_sessions() {
-            let Some(p) = self.panes.get(&s.pane) else { continue };
-            let here = crate::projects::project_containing(&self.projects, &p.cwd())
-                .is_some_and(|pr| pr.path.as_path() == project);
-            if !here {
-                continue;
-            }
-            match out.iter_mut().find(|(k, _)| *k == s.kind) {
-                Some(entry) if rank(s.state) > rank(entry.1) => entry.1 = s.state,
-                Some(_) => {}
-                None => out.push((s.kind, s.state)),
-            }
-        }
-        out
-    }
-
     fn set_projects(&mut self, mut list: Vec<Project>) {
         // The scan thread already drops hidden projects; one hidden since it started is dropped here.
         let manual = self.ui_state.manual_projects();
@@ -1465,6 +1346,7 @@ impl App {
         }
         let Some(message) = message else { return };
         if self.cfg.terminal.notify {
+            self.outer_notice = Some(message.clone());
             self.toast(ToastLevel::Info, message);
             self.outer_bell = true;
         }
@@ -1642,6 +1524,7 @@ impl App {
             self.next_update_check = Some(now + Duration::from_secs(crate::update::CHECK_INTERVAL as u64));
             crate::update::spawn_check(self.tx.clone());
         }
+        self.autosave_session();
         if self.services.is_some() && self.last_cfg_check.elapsed() >= Duration::from_secs(2) {
             self.last_cfg_check = now;
             let m = config::mtime_of(&self.paths.config);
@@ -1714,6 +1597,39 @@ impl App {
         }
     }
 
+    /// Keeps the session file current while NOBLE runs, so a crash, a kill or a power loss loses
+    /// at most a few seconds of tabs, splits and directories. The tabs are compared with what was
+    /// last saved at most once a second (`tick` runs on every event and at least every 2 s, so an
+    /// idle NOBLE gains no wake-ups); a difference that lasts `SESSION_SAVE_DELAY` is written.
+    fn autosave_session(&mut self) {
+        if !self.session_autosave || !self.cfg.terminal.restore_session {
+            return;
+        }
+        if self.session_checked.elapsed() < SESSION_CHECK_EVERY {
+            return;
+        }
+        self.session_checked = Instant::now();
+        let tabs = self.snapshot("last session").tabs;
+        if tabs == self.session_saved {
+            self.session_dirty_since = None;
+            return;
+        }
+        let since = *self.session_dirty_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= SESSION_SAVE_DELAY {
+            let file = self.paths.data_file(self.session_file());
+            crate::store::session_save_waiting(&file, &self.instance, tabs.clone(), false, SESSION_AUTOSAVE_LOCK_WAIT);
+            self.session_saved = tabs;
+            self.session_dirty_since = None;
+        }
+    }
+
+    /// When the main loop must wake up for the session save: only while unsaved changes wait.
+    pub fn session_save_due(&self) -> Option<Duration> {
+        let since = self.session_dirty_since?;
+        let due = (since + SESSION_SAVE_DELAY).max(self.session_checked + SESSION_CHECK_EVERY);
+        Some(due.saturating_duration_since(Instant::now()))
+    }
+
     /// Session file: separate so `noble-dev` does not overwrite the stable build's tabs.
     fn session_file(&self) -> &'static str {
         if self.dev { "session-dev.json" } else { "session.json" }
@@ -1727,6 +1643,8 @@ impl App {
             crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();
+        // Windows: lets the console-close handler return (the process ends then); on Unix nothing waits for it.
+        crate::termination::finished();
     }
 
     /// The ongoing drag kind (for hover effects).

@@ -18,21 +18,28 @@ fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
     serde_json::from_str(crate::util::strip_bom(&text)).ok()
 }
 
-/// Atomic write: temp file first, then rename.
-pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
+/// Atomic text write: temp file first, then rename. A failed write or rename leaves no temp file behind.
+pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // A name of its own per write: windows saving the same file at once must not share it.
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+    let tmp = file.with_extension(format!("{ext}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    // A failed write (disk full) or rename (target locked on Windows, a directory in its
+    // place) must not leave the temp file behind.
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Atomic JSON write (see [`write_text`]); errors are ignored.
+pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
     if let Ok(text) = serde_json::to_string_pretty(value) {
-        // A name of its own per write: windows saving the same file at once must not share it.
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let tmp =
-            file.with_extension(format!("json.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-        // A failed write (disk full) or rename (target locked on Windows, a directory in its
-        // place) must not leave the temp file behind.
-        if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, file).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        let _ = write_text(file, &text);
     }
 }
 
@@ -58,11 +65,29 @@ pub struct Recent {
     cache: Vec<RecentEntry>,
 }
 
+/// How long the startup check of the recent directories waits for a slow (network) path.
+const RECENT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// One locked read-modify-write of a JSON list shared by every window (see `UiState::modify`):
+/// the file is read again under `<file>.lock`, `f` changes the list, the result is written
+/// atomically. A missing or unreadable file starts from `current`. Returns the new list.
+fn modify_list<T, R>(file: &Path, current: &[T], f: impl FnOnce(&mut Vec<T>) -> R) -> (Vec<T>, R)
+where
+    T: Clone + Serialize + for<'de> Deserialize<'de>,
+{
+    with_lock_waiting(file, UI_LOCK_WAIT, || {
+        let mut list: Vec<T> = read_json(file).unwrap_or_else(|| current.to_vec());
+        let out = f(&mut list);
+        write_json(file, &list);
+        (list, out)
+    })
+}
+
 impl Recent {
     pub fn load(file: PathBuf) -> Recent {
         let entries = read_json(&file).unwrap_or_default();
         let mut r = Recent { file: Some(file), entries, cache: Vec::new() };
-        r.rebuild();
+        r.rebuild(None);
         r
     }
 
@@ -70,9 +95,23 @@ impl Recent {
         Recent { file: None, entries: Vec::new(), cache: Vec::new() }
     }
 
-    fn rebuild(&mut self) {
+    /// Re-sorts the list of existing directories. A directory already in the cache is not
+    /// looked at again, and neither is `trusted` (the one just opened), so a new tab never
+    /// waits for a dead network share; a path seen for the first time (startup, or another
+    /// window's entry) is checked in parallel with a time limit (`util::usable_dirs`).
+    fn rebuild(&mut self, trusted: Option<&str>) {
         let t = now();
-        let mut list: Vec<RecentEntry> = self.entries.iter().filter(|e| Path::new(&e.path).is_dir()).cloned().collect();
+        let known: std::collections::HashSet<&str> =
+            self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
+        let unknown: Vec<PathBuf> =
+            self.entries.iter().filter(|e| !known.contains(e.path.as_str())).map(|e| PathBuf::from(&e.path)).collect();
+        let usable = crate::util::usable_dirs(&unknown, RECENT_PROBE_TIMEOUT, |p| p.is_dir());
+        let mut list: Vec<RecentEntry> = self
+            .entries
+            .iter()
+            .filter(|e| known.contains(e.path.as_str()) || usable.contains(Path::new(&e.path)))
+            .cloned()
+            .collect();
         list.sort_by(|a, b| b.score(t).total_cmp(&a.score(t)));
         self.cache = list;
     }
@@ -81,40 +120,55 @@ impl Recent {
         path.display().to_string()
     }
 
+    /// Applies one change to the entry list: with a file, as a locked read-modify-write so
+    /// another window's entries are kept; without one (tests) only memory changes.
+    fn modify<R>(&mut self, f: impl FnOnce(&mut Vec<RecentEntry>) -> R) -> R {
+        match self.file.clone() {
+            Some(file) => {
+                let (list, out) = modify_list(&file, &self.entries, f);
+                self.entries = list;
+                out
+            }
+            None => f(&mut self.entries),
+        }
+    }
+
     pub fn record(&mut self, path: &Path) {
         let key = Self::key(path);
         let t = now();
-        match self.entries.iter_mut().find(|e| crate::util::same_path(Path::new(&e.path), path)) {
-            Some(e) => {
-                e.count = e.count.saturating_add(1);
-                e.last = t;
+        let trusted = self.modify(|entries| {
+            let idx = match entries.iter().position(|e| crate::util::same_path(Path::new(&e.path), path)) {
+                Some(i) => {
+                    entries[i].count = entries[i].count.saturating_add(1);
+                    entries[i].last = t;
+                    i
+                }
+                None => {
+                    entries.push(RecentEntry { path: key, count: 1, last: t });
+                    entries.len() - 1
+                }
+            };
+            let trusted = entries[idx].path.clone();
+            // Drop the lowest scoring entries.
+            if entries.len() > 60 {
+                entries.sort_by(|a, b| b.score(t).total_cmp(&a.score(t)));
+                entries.truncate(50);
             }
-            None => self.entries.push(RecentEntry { path: key, count: 1, last: t }),
-        }
-        // Drop the lowest scoring entries.
-        if self.entries.len() > 60 {
-            self.entries.sort_by(|a, b| b.score(t).total_cmp(&a.score(t)));
-            self.entries.truncate(50);
-        }
-        self.rebuild();
-        self.save();
+            trusted
+        });
+        self.rebuild(Some(&trusted));
     }
 
     pub fn remove(&mut self, path: &str) {
-        self.entries.retain(|e| !crate::util::same_path(Path::new(&e.path), Path::new(path)));
-        self.rebuild();
-        self.save();
+        self.modify(|entries| {
+            entries.retain(|e| !crate::util::same_path(Path::new(&e.path), Path::new(path)));
+        });
+        self.rebuild(None);
     }
 
     /// Existing directories, by score.
     pub fn top(&self, n: usize) -> Vec<RecentEntry> {
         self.cache.iter().take(n).cloned().collect()
-    }
-
-    fn save(&self) {
-        if let Some(f) = &self.file {
-            write_json(f, &self.entries);
-        }
     }
 }
 
@@ -214,7 +268,13 @@ pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
 /// Merges a window's tabs into the session file: replaces what this window saved before and
 /// keeps the other windows' tabs. `leaving`: the window is closing.
 pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
-    with_lock(file, || {
+    session_save_waiting(file, me, tabs, leaving, LOCK_WAIT);
+}
+
+/// `session_save` with its own limit for waiting on another window's lock: the periodic
+/// save on the main thread waits far less than a closing window does.
+pub fn session_save_waiting(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool, wait: Duration) {
+    with_lock_waiting(file, wait, || {
         let mut session: Session = read_json(file).unwrap_or_default();
         session.tabs.retain(|t| t.instance != me);
         session.tabs.extend(tabs.into_iter().map(|tab| SessionTab { instance: me.to_string(), tab }));
@@ -323,6 +383,18 @@ pub struct Workspaces {
     pub list: Vec<Workspace>,
 }
 
+/// Most saved workspaces kept; saving one more drops the oldest.
+pub const MAX_WORKSPACES: usize = 20;
+
+/// What `Workspaces::upsert` did besides adding the entry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UpsertOutcome {
+    /// A workspace with the same name existed and was replaced.
+    pub replaced: bool,
+    /// The oldest workspace, dropped because the list was full.
+    pub dropped: Option<String>,
+}
+
 impl Workspaces {
     pub fn load(file: PathBuf) -> Workspaces {
         let list = read_json(&file).unwrap_or_default();
@@ -333,24 +405,40 @@ impl Workspaces {
         Workspaces { file: None, list: Vec::new() }
     }
 
-    /// Replaces the entry with the same name, or inserts it at the top.
-    pub fn upsert(&mut self, mut ws: Workspace) {
-        ws.saved_at = now();
-        self.list.retain(|w| !w.name.eq_ignore_ascii_case(&ws.name));
-        self.list.insert(0, ws);
-        self.list.truncate(20);
-        self.save();
-    }
-
-    pub fn remove(&mut self, name: &str) {
-        self.list.retain(|w| w.name != name);
-        self.save();
-    }
-
-    fn save(&self) {
-        if let Some(f) = &self.file {
-            write_json(f, &self.list);
+    /// Applies one change to the list: with a file, as a locked read-modify-write so another
+    /// window's workspaces are kept; without one (tests) only memory changes.
+    fn modify<R>(&mut self, f: impl FnOnce(&mut Vec<Workspace>) -> R) -> R {
+        match self.file.clone() {
+            Some(file) => {
+                let (list, out) = modify_list(&file, &self.list, f);
+                self.list = list;
+                out
+            }
+            None => f(&mut self.list),
         }
+    }
+
+    /// Replaces the entry with the same name, or inserts it at the top.
+    pub fn upsert(&mut self, mut ws: Workspace) -> UpsertOutcome {
+        ws.saved_at = now();
+        self.modify(|list| {
+            let before = list.len();
+            list.retain(|w| !w.name.eq_ignore_ascii_case(&ws.name));
+            let replaced = list.len() != before;
+            list.insert(0, ws);
+            let dropped = (list.len() > MAX_WORKSPACES).then(|| list.pop().map(|w| w.name)).flatten();
+            list.truncate(MAX_WORKSPACES);
+            UpsertOutcome { replaced, dropped }
+        })
+    }
+
+    /// Deletes the workspace with this name; false when there was none.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.modify(|list| {
+            let before = list.len();
+            list.retain(|w| w.name != name);
+            list.len() != before
+        })
     }
 }
 
@@ -371,6 +459,8 @@ pub struct UiStateData {
     pub update_latest: String,
     /// The version whose notice was dismissed: hidden until the next release.
     pub update_skipped: String,
+    /// The Claude status hooks were offered once (after the first Claude launch): never offered again.
+    pub hooks_offered: bool,
 }
 
 impl UiStateData {
@@ -893,6 +983,71 @@ mod tests {
         // Our pid, but another start time: the pid was reused, the window is gone.
         assert!(!instance_alive(&format!("{}-1-0", std::process::id())));
         assert!(!instance_alive("garbage"));
+    }
+
+    fn ws(name: &str) -> Workspace {
+        Workspace { name: name.into(), saved_at: 0, tabs: Vec::new() }
+    }
+
+    /// Two windows saving workspaces / recent directories into one file keep each other's entries
+    /// (a locked read-modify-write), and the list limit and replace/delete are reported.
+    #[test]
+    fn workspaces_and_recent_merge_between_windows() {
+        let dir = std::env::temp_dir().join(format!("noble-store-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("workspaces.json");
+        let mut a = Workspaces::load(file.clone());
+        let mut b = Workspaces::load(file.clone());
+        assert_eq!(a.upsert(ws("from-a")), UpsertOutcome::default());
+        assert_eq!(b.upsert(ws("from-b")), UpsertOutcome::default());
+        let names: Vec<_> = Workspaces::load(file.clone()).list.into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["from-b", "from-a"], "window b did not overwrite window a's workspace");
+        assert_eq!(b.list.len(), 2, "b sees a's workspace right away");
+
+        assert!(a.upsert(ws("FROM-B")).replaced);
+        assert!(a.remove("from-a"));
+        assert!(!a.remove("from-a"), "already gone");
+        assert_eq!(Workspaces::load(file.clone()).list.len(), 1);
+
+        for i in 0..MAX_WORKSPACES {
+            let out = a.upsert(ws(&format!("w{i}")));
+            // FROM-B is the oldest of the 20th save on.
+            assert_eq!(out.dropped.as_deref(), (i == MAX_WORKSPACES - 1).then_some("FROM-B"), "{i}");
+        }
+        assert_eq!(a.list.len(), MAX_WORKSPACES);
+
+        let recent_file = dir.join("recent.json");
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let mut ra = Recent::load(recent_file.clone());
+        let mut rb = Recent::load(recent_file.clone());
+        ra.record(&one);
+        rb.record(&two);
+        assert_eq!(Recent::load(recent_file).entries.len(), 2, "both windows' directories are kept");
+        assert_eq!(rb.top(5).len(), 2, "b lists a's directory, checked once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory that disappears is dropped at the next start, not with every new tab.
+    #[test]
+    fn recent_checks_directories_at_load_not_at_record() {
+        let dir = std::env::temp_dir().join(format!("noble-store-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (gone, kept) = (dir.join("gone"), dir.join("kept"));
+        std::fs::create_dir_all(&gone).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        let file = dir.join("recent.json");
+        let mut r = Recent::load(file.clone());
+        r.record(&gone);
+        r.record(&kept);
+        std::fs::remove_dir_all(&gone).unwrap();
+        r.record(&kept);
+        assert_eq!(r.top(5).len(), 2, "no stat per new tab: still listed");
+        assert_eq!(Recent::load(file).top(5).len(), 1, "a restart drops it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

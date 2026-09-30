@@ -127,7 +127,7 @@ fn claude_fetch(env: &Env) -> Result<Usage, String> {
     if let Some(exp) = num(&creds, &["expiresAt"])
         && (exp / 1000.0) as i64 <= now()
     {
-        return Err("session expired".into());
+        return Err(super::SESSION_EXPIRED.into());
     }
     let auth = format!("Bearer {token}");
     let data = http_json(

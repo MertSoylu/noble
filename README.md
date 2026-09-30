@@ -112,7 +112,9 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
 (a dead network share) opens in home instead. With several NOBLE windows open, each one saves its own tabs and
 the next launch brings back all of them; a window opened while another is running starts empty. Quick-launch
-tabs run their command (e.g. `claude`) again. Save named workspaces and reopen them from the palette.
+tabs run their command (e.g. `claude`) again. The session is saved a couple of seconds after every change and
+when the window closes, the process is terminated or the OS logs off. Save named workspaces, reopen or delete
+them from the palette. `noble .` (or `noble <folder>`) opens a shell tab in that folder.
 
 </td>
 </tr>
@@ -245,16 +247,21 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
   prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI ·
   `m` system · `s` settings · `q` quit.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
-  the wheel scrolls the page · `esc` back to the page you came from.
+  click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
   `K` or `del` terminate (asks first) · `esc` back.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
+- **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
+  confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
+  (needs an outer terminal that reports Shift). The pane menu and palette can launch an agent in a split.
+- **Notifications:** background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
+  while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
   middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
-  drag dividers · drag to select text (copied on release) · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
+  drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
   scrolled back, click the position bar in the pane's last column to jump there, or the `↓ live` chip (any key
   typed into the pane works too) to return to the newest output; the wheel keeps scrolling over both ·
   `shift+drag` selects even inside apps that capture the mouse.
@@ -362,7 +369,7 @@ fill up before it resets.
 
 Without help NOBLE can only guess whether a Claude session is busy. Turn on
 **Settings → Terminal → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
-(a backup is written next to it; turning the setting off removes exactly those entries). Claude then runs
+(a backup is written next to it once; the first Claude launch offers to turn this on; turning the setting off removes exactly those entries). Claude then runs
 `noble hook <event>` on prompt / stop / notification / subagent start and stop / session start / session end.
 The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
 The Home screen then lists every Claude session as **working**, **needs you** or **your turn**, and a

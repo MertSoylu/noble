@@ -11,9 +11,15 @@ pub enum PaletteCmd {
     Action(Action),
     GoTab(usize),
     OpenProject(PathBuf),
-    Launch { launcher: usize, path: PathBuf },
+    Launch {
+        launcher: usize,
+        path: PathBuf,
+    },
+    /// A launcher in a new split of the focused pane.
+    LaunchSplit(usize),
     Theme(&'static str),
     Workspace(usize),
+    DeleteWorkspace(String),
     OpenDir(PathBuf),
 }
 
@@ -118,7 +124,23 @@ impl App {
                 cmd: PaletteCmd::GoTab(i + 1),
             });
         }
-        if let Some(p) = self.selected_project() {
+        if let Some(cwd) = self.focused_cwd().filter(|_| in_term) {
+            // In a terminal the launchers act on the focused pane's directory, not on Home's selected project.
+            for (i, l) in self.quick_launchers() {
+                items.push(PaletteItem {
+                    title: format!("Launch {} here", l.name),
+                    group: "RUN",
+                    hint: String::new(),
+                    cmd: PaletteCmd::Launch { launcher: i, path: cwd.clone() },
+                });
+                items.push(PaletteItem {
+                    title: format!("Launch {} in split", l.name),
+                    group: "RUN",
+                    hint: String::new(),
+                    cmd: PaletteCmd::LaunchSplit(i),
+                });
+            }
+        } else if let Some(p) = self.selected_project().filter(|_| !in_term) {
             for (i, l) in self.quick_launchers() {
                 items.push(PaletteItem {
                     title: format!("Launch {} in {}", l.name, p.name),
@@ -142,6 +164,12 @@ impl App {
                 group: "WORK",
                 hint: format!("{} tabs", w.tabs.len()),
                 cmd: PaletteCmd::Workspace(i),
+            });
+            items.push(PaletteItem {
+                title: format!("Delete Workspace: {}", w.name),
+                group: "WORK",
+                hint: String::new(),
+                cmd: PaletteCmd::DeleteWorkspace(w.name.clone()),
             });
         }
         for e in self.recent.top(12) {
@@ -179,8 +207,10 @@ impl App {
             PaletteCmd::GoTab(n) => self.go_tab(n),
             PaletteCmd::OpenProject(p) => self.open_project_shell(p),
             PaletteCmd::Launch { launcher, path } => self.launch(launcher, Some(path)),
+            PaletteCmd::LaunchSplit(i) => self.launch_in_split(i),
             PaletteCmd::Theme(name) => self.set_theme(name),
             PaletteCmd::Workspace(i) => self.restore_workspace(i),
+            PaletteCmd::DeleteWorkspace(name) => self.request_delete_workspace(name),
             PaletteCmd::OpenDir(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.new_tab(p, None, Some(name));

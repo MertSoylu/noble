@@ -139,8 +139,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     if offset > 0 {
         hud::put_right(buf, x + iw, inner.y, "↑ more", th.dim());
     }
-    if offset + rows < lines.len() {
+    let more = offset + rows < lines.len();
+    if more {
         hud::put_right(buf, x + iw, inner.bottom() - 1, "↓ more", th.dim());
+    }
+    // What the selected setting does, on the bottom row (left of the "more" marker).
+    if let SettingItem::Setting(key) = items[sel] {
+        let room = iw.saturating_sub(if more { 8 } else { 0 });
+        hud::put(buf, x, inner.bottom() - 1, &util::truncate(key.description(), room as usize), th.dim(), room);
     }
 }
 

@@ -650,6 +650,25 @@ impl Selection {
     }
 }
 
+/// The word around `col` in a row of characters (blank = ' ', the second half of a wide character =
+/// '\0'): the inclusive column range, or `None` on a blank. Quotes and brackets end a word; path and
+/// URL characters (`/ . : - _ ~ \\ ...`) stay in it so a double click picks a whole path or address.
+pub fn word_range(row: &[char], col: usize) -> Option<(usize, usize)> {
+    let word = |c: char| c == '\0' || !(c.is_whitespace() || "\"'`()[]{}<>|;,".contains(c));
+    if !row.get(col).copied().is_some_and(word) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && word(row[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < row.len() && word(row[end + 1]) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
@@ -660,6 +679,8 @@ pub struct Pane {
     /// (row, col)
     pub size: (u16, u16),
     pub start_cwd: PathBuf,
+    /// The last directory the shell reported, checked once (`cwd`): (reported text, usable path).
+    cwd_checked: Mutex<Option<(String, PathBuf)>>,
     pub shell_label: String,
     pub command: Option<String>,
     /// The quick-launch command (as configured, e.g. `claude`) this pane was opened with;
@@ -743,6 +764,9 @@ pub struct SpawnSpec<'a> {
     pub cols: u16,
     pub scrollback: usize,
 }
+
+/// How long a newly reported working directory may take to answer before it counts as unusable.
+const CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -843,6 +867,7 @@ impl Pane {
             dirty,
             size: (rows, cols),
             start_cwd: cwd,
+            cwd_checked: Mutex::new(None),
             shell_label: spec.shell.label(),
             command: spec.command.map(str::to_string),
             launcher: None,
@@ -948,9 +973,23 @@ impl Pane {
         process_label(&p.callbacks().title, &self.shell_label)
     }
 
+    /// The directory the shell reported, or the start directory when it is not usable. Each newly
+    /// reported directory is checked once (time-limited, `util::usable_dirs`) and the answer is
+    /// kept, so drawing never touches the disk and a dead network share cannot freeze the UI.
     pub fn cwd(&self) -> PathBuf {
-        let p = lock(&self.parser);
-        p.callbacks().cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| self.start_cwd.clone())
+        let reported = lock(&self.parser).callbacks().cwd.clone();
+        let Some(reported) = reported else { return self.start_cwd.clone() };
+        let mut checked = lock(&self.cwd_checked);
+        if let Some((raw, path)) = checked.as_ref()
+            && *raw == reported
+        {
+            return path.clone();
+        }
+        let dir = PathBuf::from(&reported);
+        let usable = util::usable_dirs(std::slice::from_ref(&dir), CWD_PROBE_TIMEOUT, |p| p.is_dir()).contains(&dir);
+        let path = if usable { dir } else { self.start_cwd.clone() };
+        *checked = Some((reported, path.clone()));
+        path
     }
 
     /// Name of the folder the shell last reported (or started in). No file system access, so
@@ -999,6 +1038,33 @@ impl Pane {
 
     pub fn take_notice(&self) -> Option<String> {
         lock(&self.parser).callbacks_mut().notice.take()
+    }
+
+    /// The visible characters of a row (blank = ' ', second half of a wide character = '\0').
+    fn row_chars(&self, row: u16) -> Vec<char> {
+        let p = lock(&self.parser);
+        let screen = p.screen();
+        let (_, cols) = screen.size();
+        (0..cols)
+            .map(|c| match screen.cell(row, c) {
+                Some(cell) if cell.is_wide_continuation() => '\0',
+                Some(cell) => cell.contents().chars().next().unwrap_or(' '),
+                None => ' ',
+            })
+            .collect()
+    }
+
+    /// Selection of the word under (row, col), for a double click.
+    pub fn word_selection(&self, row: u16, col: u16) -> Option<Selection> {
+        let (s, e) = word_range(&self.row_chars(row), col as usize)?;
+        Some(Selection { anchor: (row, s as u16), head: (row, e as u16) })
+    }
+
+    /// Selection of the whole row up to its last character, for a triple click.
+    pub fn line_selection(&self, row: u16) -> Option<Selection> {
+        let chars = self.row_chars(row);
+        let end = chars.iter().rposition(|c| *c != ' ')?;
+        Some(Selection { anchor: (row, 0), head: (row, end as u16) })
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -1150,6 +1216,18 @@ impl Drop for Pane {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn word_range_picks_paths_and_stops_at_delimiters() {
+        let row: Vec<char> = "cd ~/code/app; echo \"hi there\"  ".chars().collect();
+        assert_eq!(word_range(&row, 4), Some((3, 12)), "a path is one word");
+        assert_eq!(word_range(&row, 3), Some((3, 12)));
+        assert_eq!(word_range(&row, 2), None, "blank");
+        assert_eq!(word_range(&row, 100), None, "past the row");
+        let s = row.iter().collect::<String>();
+        let hi = s.find("hi").unwrap();
+        assert_eq!(word_range(&row, hi), Some((hi, hi + 1)), "quotes end the word");
+    }
+
     use super::*;
 
     #[test]

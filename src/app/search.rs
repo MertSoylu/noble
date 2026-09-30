@@ -192,6 +192,16 @@ impl App {
                 line.map(|l| format!("{base}:{l}")).unwrap_or(base)
             }
         };
+        // A scheme the OS could hand to any registered app (`ms-msdt:`, `vscode:`, custom handlers) is never
+        // opened from terminal output: the address is copied instead.
+        if let link::Link::Url(url) = &target
+            && !link::is_openable_url(url)
+        {
+            let url = url.clone();
+            self.set_clipboard(&url, false);
+            self.toast(ToastLevel::Info, format!("copied, not opened — {}", crate::util::truncate(&url, 50)));
+            return true;
+        }
         // Without a graphical session: URLs go to the clipboard, files to a terminal editor.
         if !crate::util::has_desktop() {
             match &target {

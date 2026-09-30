@@ -58,7 +58,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
     let cursor = slide(buf, body, app).then_some(cursor).flatten();
     if area.height >= 2 {
-        status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &hits);
+        status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &mut hits);
     }
     update_notice(buf, area, app, &mut hits);
     toasts(buf, area, app);
@@ -567,20 +567,21 @@ fn hints(app: &App) -> Vec<(String, String)> {
             if app.bridge.proj_act.is_some() {
                 return vec![h("←→", "choose"), h("⏎", "apply"), h("esc", "back")];
             }
+            // Hints are dropped from the end when the bar is narrow: "? help" comes first so it survives longest.
             vec![
-                h("→", "pin / more"),
-                h("t", "terminal"),
+                h("?", "help"),
                 h("a A", "add folder / project"),
+                h("t", "terminal"),
                 h("r", "rescan"),
                 h("s", "settings"),
-                h("?", "help"),
+                h("→", "pin / more"),
             ]
         }
         View::System => {
             if app.system.filtering {
                 return vec![h("type", "filter"), h("⏎", "done"), h("esc", "clear")];
             }
-            vec![h("↑↓", "select"), h("c m p n", "sort"), h("/", "filter"), h("K", "end task"), h("esc", "home")]
+            vec![h("↑↓", "select"), h("c m p n", "sort"), h("/", "filter"), h("K", "terminate"), h("esc", "home")]
         }
         View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
         View::Term(_) if app.search.is_some() => {
@@ -639,27 +640,38 @@ fn current_tip(app: &App) -> String {
 /// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's
 /// row (bottom right) so it never covers the shell's last line; elsewhere it sits just above the bar.
 struct NoticePlan {
+    /// A new release (button: update) or the one-time hooks offer (button: enable).
+    hooks: bool,
+    button: &'static str,
     text: String,
     width: u16,
     y: u16,
 }
 
 const NOTICE_BUTTON: &str = " update ";
+const OFFER_BUTTON: &str = " enable ";
 const NOTICE_CLOSE: &str = " × ";
 
 fn notice_plan(app: &App, area: Rect) -> Option<NoticePlan> {
-    let version = app.update_notice()?;
+    // A new release wins; the hooks offer waits until it is gone.
+    let version = app.update_notice();
+    if version.is_none() && !app.hooks_offer_notice() {
+        return None;
+    }
     if area.height < 6 || area.width < 30 || app.overlay.is_some() {
         return None;
     }
     let in_term = matches!(app.view, View::Term(_));
-    let fixed = (1 + util::width(NOTICE_BUTTON) + util::width(NOTICE_CLOSE) + 1) as u16;
-    let long = format!(" ↑ NOBLE {version} is available ");
-    let short = format!(" ↑ {version} ");
+    let (hooks, button) = if version.is_some() { (false, NOTICE_BUTTON) } else { (true, OFFER_BUTTON) };
+    let fixed = (1 + util::width(button) + util::width(NOTICE_CLOSE) + 1) as u16;
+    let (long, short) = match version {
+        Some(v) => (format!(" ↑ NOBLE {v} is available "), format!(" ↑ {v} ")),
+        None => (" Show Claude status in NOBLE? ".to_string(), " Claude status? ".to_string()),
+    };
     let room = area.width.saturating_sub(fixed + 2) / 2;
     let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
     let width = fixed + util::width(&text) as u16;
-    Some(NoticePlan { text, width, y: area.bottom() - if in_term { 1 } else { 2 } })
+    Some(NoticePlan { hooks, button, text, width, y: area.bottom() - if in_term { 1 } else { 2 } })
 }
 
 /// Key chip and description: the key in the accent color, what it does dim.
@@ -678,7 +690,7 @@ fn hint_spans<'a>(
 
 /// The one-row bottom bar: a mode badge (only while the prefix is armed), key hints, then the tip and the
 /// palette shortcut on the right. Whatever does not fit is dropped from the end, never cut in half.
-fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &[(Rect, Hit)]) {
+fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let base = Style::default().bg(th.raised);
     hud::fill(buf, area, base);
@@ -712,6 +724,8 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &[(Rect, Hit)]) {
             ],
             right_w,
         );
+        // The chip opens the palette, like its shortcut.
+        hits.push((Rect::new(start, y, right_w, 1), Hit::Palette));
     }
 
     let mut x = area.x + 1;
@@ -770,15 +784,15 @@ fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, 
         buf,
         x,
         y,
-        NOTICE_BUTTON,
+        plan.button,
         Style::default().fg(th.on_accent).bg(th.accent2).add_modifier(Modifier::BOLD),
         w,
     );
-    hits.push((Rect::new(x0, y, x - x0, 1), Hit::Update));
+    hits.push((Rect::new(x0, y, x - x0, 1), if plan.hooks { Hit::HooksOffer } else { Hit::Update }));
     let cx = x;
     x = hud::put(buf, x, y, NOTICE_CLOSE, bg.fg(th.dim), w);
     hud::put(buf, x, y, " ", bg, 1);
-    hits.push((Rect::new(cx, y, x - cx, 1), Hit::UpdateDismiss));
+    hits.push((Rect::new(cx, y, x - cx, 1), if plan.hooks { Hit::HooksOfferDismiss } else { Hit::UpdateDismiss }));
 }
 
 fn toasts(buf: &mut Buffer, area: Rect, app: &App) {

@@ -12,6 +12,8 @@ use crate::term::layout::{Dir, PaneId};
 pub enum MenuCmd {
     Paste(PaneId),
     Split(PaneId, Dir),
+    /// Launcher index run in a new split next to the pane.
+    LaunchSplit(PaneId, usize),
     Zoom(PaneId),
     Search(PaneId),
     Passthrough(PaneId),
@@ -97,18 +99,29 @@ impl App {
         };
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
         use crate::keys::Action as A;
-        let items = vec![
+        let mut items = Vec::new();
+        // Copy is offered while there is a selection (without copy_on_select there is no other way).
+        if let Some(text) = p.selected_text() {
+            items.push(item("Copy", "", MenuCmd::CopyText(text)));
+        }
+        items.extend([
             item("Paste", "right-click", MenuCmd::Paste(pane)),
             item("Search scrollback", &hint(A::Search), MenuCmd::Search(pane)),
             item("Split right", &hint(A::SplitRight), MenuCmd::Split(pane, Dir::Row)),
             item("Split down", &hint(A::SplitDown), MenuCmd::Split(pane, Dir::Col)),
             item("Zoom / restore", &hint(A::Zoom), MenuCmd::Zoom(pane)),
+        ]);
+        // Quick launchers run next to this pane, in its directory.
+        for (i, l) in self.quick_launchers() {
+            items.push(item(&format!("Launch {} in split", l.name), "", MenuCmd::LaunchSplit(pane, i)));
+        }
+        items.extend([
             item(pass_label, &hint(A::Passthrough), MenuCmd::Passthrough(pane)),
             item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())),
             item("Open folder", "", MenuCmd::OpenFolder(cwd.clone())),
             item("Open in VS Code", "", MenuCmd::OpenCode(cwd)),
             item("Close pane", &hint(A::ClosePane), MenuCmd::ClosePane(pane)),
-        ];
+        ]);
         self.open_menu(label, x, y, items);
     }
 
@@ -139,6 +152,11 @@ impl App {
             MenuCmd::Split(pane, dir) => {
                 if self.focus_pane(pane) {
                     self.split(dir);
+                }
+            }
+            MenuCmd::LaunchSplit(pane, i) => {
+                if self.focus_pane(pane) {
+                    self.launch_in_split(i);
                 }
             }
             MenuCmd::Zoom(pane) => {
@@ -212,8 +230,7 @@ impl App {
     pub fn rename_tab_prompt(&mut self, i: usize) {
         let Some(tab) = self.tabs.get(i) else { return };
         let (value, key) = (tab.name.clone().unwrap_or_default(), tab.id);
-        self.overlay =
-            Some(Overlay::Prompt(Prompt { title: "RENAME TAB".into(), value, purpose: PromptPurpose::RenameTab(key) }));
+        self.overlay = Some(Overlay::Prompt(Prompt::new("RENAME TAB", value, PromptPurpose::RenameTab(key))));
     }
 
     /// Moves a tab from order `from` to order `to`; the visible tab follows.
@@ -247,8 +264,8 @@ impl App {
             return;
         };
         let mut cmd = crate::util::command_for(&code);
-        cmd.arg(path).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        match cmd.spawn() {
+        cmd.arg(path);
+        match crate::util::spawn_detached(&mut cmd) {
             Ok(_) => self.toast(ToastLevel::Info, format!("opening {} in VS Code", crate::util::tilde(path))),
             Err(_) => self.toast(ToastLevel::Error, "could not start VS Code"),
         }

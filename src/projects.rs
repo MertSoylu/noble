@@ -306,26 +306,32 @@ pub fn parse_status(output: &str) -> GitInfo {
     info
 }
 
-fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
-    let status = util::command_for(git)
+/// Longest a background `git` call may take before it is killed (a hung network mount, a stuck hook).
+const GIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Runs `git -C <path> <args>` in the background: no optional locks (a status refresh must not take
+/// the index lock a foreground `git commit` needs), no credential prompts, killed after [`GIT_TIMEOUT`].
+/// `None` on failure or timeout; stdout is capped by `ai::run_command`.
+fn git_run(path: &Path, git: &Path, args: &[&str]) -> Option<String> {
+    let mut cmd = util::command_for(git);
+    cmd.arg("--no-optional-locks")
         .arg("-C")
         .arg(path)
-        .args(["status", "--porcelain=v1", "-b", "--untracked-files=normal"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !status.status.success() {
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    crate::ai::run_command(cmd, GIT_TIMEOUT).ok()
+}
+
+fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
+    // A non-zero exit (not a repo) prints nothing useful; `git status` on a repo always prints the branch line.
+    let status = git_run(path, git, &["status", "--porcelain=v1", "-b", "--untracked-files=normal"])?;
+    if status.trim().is_empty() {
         return None;
     }
-    let mut info = parse_status(&String::from_utf8_lossy(&status.stdout));
-    if let Ok(log) = util::command_for(git)
-        .arg("-C")
-        .arg(path)
-        .args(["log", &format!("-{MAX_COMMITS}"), "--format=%h%x1f%ct%x1f%an%x1f%s"])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        info.commits = parse_log(&String::from_utf8_lossy(&log.stdout));
+    let mut info = parse_status(&status);
+    if let Some(log) = git_run(path, git, &["log", &format!("-{MAX_COMMITS}"), "--format=%h%x1f%ct%x1f%an%x1f%s"]) {
+        info.commits = parse_log(&log);
         if let Some(c) = info.commits.first() {
             info.last_commit = Some(c.time);
             info.last_subject = Some(c.subject.clone());

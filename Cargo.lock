@@ -733,11 +733,13 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "signal-hook",
  "sysinfo",
  "toml",
  "unicode-width",
  "ureq",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

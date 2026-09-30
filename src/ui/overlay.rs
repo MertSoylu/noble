@@ -58,8 +58,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 buf,
                 no_x,
                 y,
-                &[(" n ", Style::default().fg(th.fg).bg(th.line).add_modifier(Modifier::BOLD)), (" cancel", th.dim())],
-                20,
+                &[
+                    (" n/esc ", Style::default().fg(th.fg).bg(th.line).add_modifier(Modifier::BOLD)),
+                    (" cancel", th.dim()),
+                ],
+                24,
             );
             hits.push((Rect::new(no_x, y, end - no_x, 1), Hit::ConfirmNo));
         }
@@ -72,13 +75,58 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let y = inner.y + 1;
             let ms = app.started.elapsed().as_millis();
             let cursor = if (ms / 500).is_multiple_of(2) { "▏" } else { " " };
-            hud::put_spans(
-                buf,
-                x,
-                y,
-                &[("❯ ", th.accent()), (&p.value, th.accent_bold()), (cursor, th.accent())],
-                inner.width.saturating_sub(2),
-            );
+            let split = p.value.char_indices().nth(p.cursor).map_or(p.value.len(), |(i, _)| i);
+            let (before, after) = p.value.split_at(split);
+            let field_w = inner.width.saturating_sub(2);
+            if p.value.is_empty() {
+                // Placeholder while empty.
+                let hint = match p.purpose {
+                    crate::app::PromptPurpose::AddRoot | crate::app::PromptPurpose::AddProject => {
+                        "path, e.g. ~/code/app"
+                    }
+                    crate::app::PromptPurpose::RenameTab(_) => "tab name (empty = automatic)",
+                    crate::app::PromptPurpose::SaveWorkspace => "workspace name",
+                };
+                hud::put_spans(buf, x, y, &[("❯ ", th.accent()), (cursor, th.accent()), (hint, th.dim())], field_w);
+            } else {
+                // Long values scroll: the part before the cursor keeps its tail visible.
+                let room = (field_w as usize).saturating_sub(3);
+                let mut kept: Vec<char> = Vec::new();
+                let mut used = 0usize;
+                for c in before.chars().rev() {
+                    let w = util::width(&c.to_string());
+                    if used + w > room {
+                        break;
+                    }
+                    used += w;
+                    kept.push(c);
+                }
+                kept.reverse();
+                let before_shown: String = kept.into_iter().collect();
+                let after_shown = util::truncate(after, room.saturating_sub(used).max(1));
+                hud::put_spans(
+                    buf,
+                    x,
+                    y,
+                    &[
+                        ("❯ ", th.accent()),
+                        (&before_shown, th.accent_bold()),
+                        (cursor, th.accent()),
+                        (&after_shown, th.accent_bold()),
+                    ],
+                    field_w,
+                );
+            }
+            if let Some(err) = &p.error {
+                hud::put(
+                    buf,
+                    x,
+                    inner.y + 2,
+                    &util::truncate(err, field_w as usize),
+                    Style::default().fg(th.crit),
+                    field_w,
+                );
+            }
             let add = p.purpose.is_add();
             if add {
                 // Choice line above the input: one project or a folder to scan (tab / click).
@@ -102,7 +150,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             } else {
                 &["⏎ save · esc cancel"]
             };
-            if let Some(hint) = hints.iter().find(|h| util::width(h) + 2 <= inner.width as usize) {
+            if p.error.is_none()
+                && let Some(hint) = hints.iter().find(|h| util::width(h) + 2 <= inner.width as usize)
+            {
                 hud::put_right(buf, inner.right().saturating_sub(1), inner.bottom().saturating_sub(1), hint, th.dim());
             }
         }
@@ -298,12 +348,17 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
         y += 1;
     }
     y += 1;
-    for (key, what) in [
-        ("⏎", "open a terminal in the selected project"),
-        ("c  x", "start Claude / Codex right there"),
-        ("alt+p", "command palette — everything is in there"),
-        ("?", "every shortcut · ctrl+click opens links"),
-    ] {
+    // The launcher line lists only the CLIs that are installed (and shown); none installed, no line.
+    let launchers: Vec<_> = app.quick_launchers().map(|(_, l)| l).collect();
+    let mut keys = vec![("⏎".to_string(), "open a terminal in the selected project".to_string())];
+    if !launchers.is_empty() {
+        let keys_text = launchers.iter().map(|l| l.key.as_str()).collect::<Vec<_>>().join("  ");
+        let names = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect::<Vec<_>>().join(" / ");
+        keys.push((keys_text, format!("start {names} right there")));
+    }
+    keys.push(("alt+p".into(), "command palette — everything is in there".into()));
+    keys.push(("?".into(), "every shortcut · ctrl+click opens links".into()));
+    for (key, what) in &keys {
         line(buf, y, &[(&util::pad_right(key, 8), th.accent_bold()), (what, th.text())]);
         y += 1;
     }

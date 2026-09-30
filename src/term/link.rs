@@ -164,19 +164,19 @@ fn app_bundle_cli(name: &str) -> Option<PathBuf> {
     [Some(PathBuf::from("/Applications")), user_apps].into_iter().flatten().map(|d| d.join(inner)).find(|p| p.is_file())
 }
 
+/// Schemes a URL may have to be handed to the OS: web pages and mail. Anything else (custom protocol
+/// handlers, `ms-*:`, `javascript:` …) is only copied, never opened.
+pub fn is_openable_url(url: &str) -> bool {
+    let Some((scheme, _)) = url.trim().split_once(':') else { return false };
+    ["http", "https", "mailto"].iter().any(|s| scheme.eq_ignore_ascii_case(s))
+}
+
 /// Opens a link in an external app: URLs in the browser, `file:line` in the first editor
 /// found that can jump to a line (VS Code, Cursor, Windsurf, Zed), other files with the
 /// system's default application.
 pub fn open(link: &Link) -> Result<(), String> {
-    use std::process::{Command, Stdio};
-    let spawn = |mut c: Command| {
-        c.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    };
+    use std::process::Command;
+    let spawn = |mut c: Command| crate::util::spawn_detached(&mut c).map_err(|e| e.to_string());
     let system = |target: &std::ffi::OsStr| {
         let mut c = if cfg!(windows) {
             // `start` interprets '&' inside a URL; rundll32 takes the text as it is.
@@ -192,6 +192,7 @@ pub fn open(link: &Link) -> Result<(), String> {
         c
     };
     match link {
+        Link::Url(url) if !is_openable_url(url) => Err("this kind of link is not opened".to_string()),
         Link::Url(url) => spawn(system(std::ffi::OsStr::new(url))),
         Link::File { path, line, col } => {
             if path.is_file()
@@ -214,6 +215,16 @@ pub fn open(link: &Link) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_and_mail_urls_are_openable() {
+        for ok in ["http://a.b", "HTTPS://a.b/x?y=1", "mailto:me@x.y"] {
+            assert!(is_openable_url(ok), "{ok}");
+        }
+        for bad in ["ms-msdt:/id x", "vscode://x", "javascript:alert(1)", "ssh://h", "file:///etc/passwd", "nope", ""] {
+            assert!(!is_openable_url(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn tokens_are_cut_at_delimiters() {

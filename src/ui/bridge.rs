@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 
 use super::hud;
 use crate::ai::{ProviderState, Status};
-use crate::app::{AgentState, App, Hit, ProjectAct};
+use crate::app::{AgentState, AgentsByProject, App, Hit, ProjectAct};
 use crate::theme::Theme;
 use crate::util;
 
@@ -21,12 +21,20 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     }
     let area = if area.width >= 60 { Rect::new(area.x + 1, area.y, area.width - 2, area.height) } else { area };
     let two_col = area.width >= 92 && area.height >= 16;
+    // Collected once per frame: the project rows, the AI panel and the quota strip all read it.
+    let sessions = app.all_agent_sessions();
+    let agents = app.agent_sessions_by_project(&sessions);
     if !two_col {
         let hero_h = if area.height >= 14 { 3 } else { 0 };
         if hero_h > 0 {
             hero_compact(buf, Rect::new(area.x, area.y, area.width, hero_h), app);
         }
-        projects(buf, Rect::new(area.x, area.y + hero_h, area.width, area.height - hero_h), app, hits);
+        // One column has no AI panel: a one-line strip keeps quota and "needs you" in sight.
+        let strip_h = u16::from(
+            hero_h > 0 && area.height >= 16 && quota_strip(buf, area.x, area.y + hero_h, area.width, app, &sessions),
+        );
+        let top = hero_h + strip_h;
+        projects(buf, Rect::new(area.x, area.y + top, area.width, area.height - top), app, &agents, hits);
         return;
     }
     let right_w = ((area.width as f32 * 0.34) as u16).clamp(34, 46);
@@ -39,10 +47,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     } else {
         hero_compact(buf, Rect::new(left.x, left.y, left.width, hero_h), app);
     }
-    projects(buf, Rect::new(left.x, left.y + hero_h, left.width, left.height - hero_h), app, hits);
+    projects(buf, Rect::new(left.x, left.y + hero_h, left.width, left.height - hero_h), app, &agents, hits);
 
     let signed_in = signed_in(app);
-    let sessions = app.all_agent_sessions();
     let room = right.height.saturating_sub(hero_h + 10);
     let shown = !signed_in.is_empty() || !sessions.is_empty();
     let ai_h = if shown { ai_height(app, &signed_in, sessions.len()).min(room + hero_h) } else { 0 };
@@ -160,6 +167,44 @@ fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     );
 }
 
+/// The one-line quota summary of narrow Home: "◆ 2 need you · claude 71% · codex 92%~". Whole items only,
+/// dropped from the end when they do not fit. Returns `false` (drawing nothing) when there is nothing to say.
+fn quota_strip(buf: &mut Buffer, x: u16, y: u16, w: u16, app: &App, sessions: &[crate::app::AgentSession]) -> bool {
+    let th = &app.theme;
+    let needs = sessions.iter().filter(|s| s.state == AgentState::NeedsYou).count();
+    let mut items: Vec<(String, Style)> = Vec::new();
+    if needs > 0 {
+        let verb = if needs == 1 { "needs" } else { "need" };
+        items.push((format!("◆ {needs} {verb} you"), Style::default().fg(th.warn).add_modifier(Modifier::BOLD)));
+    }
+    for p in signed_in(app) {
+        let (text, style) = match (&p.status, p.peak()) {
+            (Status::Expired, _) => (format!("{} expired", p.id), th.dim()),
+            (Status::Ok, Some(pct)) => (format!("{} {pct}%", p.id), Style::default().fg(th.level(pct as f64))),
+            (_, Some(pct)) => (format!("{} ~{pct}%", p.id), th.dim()),
+            (_, None) => (format!("{} …", p.id), th.dim()),
+        };
+        items.push((text, style));
+    }
+    if items.is_empty() || w < 8 {
+        return false;
+    }
+    let sep = "  ·  ";
+    let end = x + w;
+    let mut cx = x + 1;
+    for (i, (text, style)) in items.iter().enumerate() {
+        let need = util::width(text) as u16 + if i > 0 { util::width(sep) as u16 } else { 0 };
+        if cx + need > end {
+            break;
+        }
+        if i > 0 {
+            cx = hud::put(buf, cx, y, sep, Style::default().fg(th.line), end.saturating_sub(cx));
+        }
+        cx = hud::put(buf, cx, y, text, *style, end.saturating_sub(cx));
+    }
+    true
+}
+
 fn ago(t: SystemTime) -> String {
     util::fmt_ago(SystemTime::now().duration_since(t).unwrap_or_default())
 }
@@ -169,7 +214,7 @@ fn ago_ts(ts: i64) -> String {
     util::fmt_ago(Duration::from_secs(now.saturating_sub(ts).max(0) as u64))
 }
 
-fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
+fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let vis = app.visible_projects();
     let total = app.projects.len();
@@ -291,7 +336,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let mut cx = x + 1;
             let name_style = if selected { th.accent_bold() } else { th.text() };
             // Open Claude/Codex session in the project: next to the name, ◆ when it needs attention, ● while running.
-            let sessions = app.agent_sessions(&p.path);
+            let sessions = agents.get(&p.path).map_or(&[][..], Vec::as_slice);
             let marker =
                 sessions.iter().map(|(_, st)| *st).max_by_key(|st| state_rank(*st)).map(|st| state_glyph(st, th));
             let pinned = app.ui_state.is_pinned(&p.path);
@@ -399,7 +444,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             };
             let mut parts: Vec<(String, Style)> =
                 git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c))).collect();
-            for (kind, state) in app.agent_sessions(&p.path) {
+            for &(kind, state) in agents.get(&p.path).into_iter().flatten() {
                 let (_, color) = state_glyph(state, th);
                 parts.push((format!("{kind} {}", state.label()), Style::default().fg(color)));
             }
@@ -628,7 +673,7 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize) -> u16 {
     }
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
-        let note = u16::from(matches!(p.status, Status::Error(_)));
+        let note = u16::from(matches!(p.status, Status::Error(_) | Status::Expired));
         let pace = u16::from(pace_line(app, p).is_some());
         h += 1 + rows + note + pace + 1;
     }
@@ -666,6 +711,13 @@ fn cache_age(p: &ProviderState) -> Option<String> {
     }
     let age = ago_ts(p.fetched_at?);
     (age != "now").then(|| format!("~{age}"))
+}
+
+/// One line for an expired login that fits `w` cells: "expired · run claude to refresh", or without
+/// "to refresh" when the panel is narrow.
+fn expired_hint(p: &ProviderState, w: u16) -> String {
+    let full = format!("expired · run {} to refresh", p.login_hint);
+    if util::width(&full) as u16 <= w { full } else { format!("expired · run {}", p.login_hint) }
 }
 
 fn ai_panel(
@@ -757,17 +809,24 @@ fn ai_panel(
             _ => {
                 let msg = match &p.status {
                     Status::Error(e) => e.clone(),
+                    Status::Expired => expired_hint(p, w),
                     _ => "connecting…".into(),
                 };
                 hud::put(buf, x, y, &msg, th.dim(), w);
                 y += 1;
             }
         }
-        if let (Status::Error(e), Some(_)) = (&p.status, &p.usage)
+        let has_bars = p.usage.as_ref().is_some_and(|u| !u.windows.is_empty());
+        let cached_note = match (&p.status, &p.usage) {
+            (Status::Error(e), Some(_)) => Some(e.clone()),
+            (Status::Expired, Some(_)) if has_bars => Some(expired_hint(p, w)),
+            _ => None,
+        };
+        if let Some(note) = cached_note
             && y < bottom
         {
             // The age of the cached numbers is on the name row.
-            hud::put(buf, x, y, e, th.dim(), w);
+            hud::put(buf, x, y, &note, th.dim(), w);
             y += 1;
         }
         if let Some(text) = pace_line(app, p)

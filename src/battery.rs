@@ -85,40 +85,46 @@ pub fn from_windows(ac: u8, flag: u8, percent: u8, life_secs: u32) -> Option<Bat
     Some(Battery { percent: percent as f32, state, secs_left, secs_to_full: None })
 }
 
-/// Linux: reads the first `type == Battery` entry.
+/// Linux: reads the system battery. Entries with `scope=Device` (wireless mice, keyboards, phones)
+/// are skipped, and `BAT*` names are preferred over other `type == Battery` entries.
 pub fn read_linux(root: &std::path::Path) -> Option<Battery> {
     let entries = std::fs::read_dir(root).ok()?;
-    for e in entries.flatten() {
-        let dir = e.path();
-        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
-        let num = |name: &str| read(name).and_then(|s| s.parse::<f64>().ok());
-        if read("type").as_deref() != Some("Battery") {
-            continue;
-        }
-        let percent = num("capacity")? as f32;
-        let status = read("status").unwrap_or_default();
-        let state = match status.as_str() {
-            "Charging" => PowerState::Charging,
-            "Full" => PowerState::Full,
-            "Not charging" => PowerState::PluggedIn,
-            _ => PowerState::Discharging,
-        };
-        // Time from energy (µWh/µW) or charge (µAh/µA).
-        let (now, full, rate) = match (num("energy_now"), num("energy_full"), num("power_now")) {
-            (Some(n), Some(f), Some(r)) => (n, f, r),
-            _ => {
-                (num("charge_now").unwrap_or(0.0), num("charge_full").unwrap_or(0.0), num("current_now").unwrap_or(0.0))
-            }
-        };
-        let hours = |amount: f64| (rate > 0.0 && amount > 0.0).then(|| (amount / rate * 3600.0) as u64);
-        return Some(Battery {
-            percent,
-            state,
-            secs_left: if state == PowerState::Discharging { hours(now) } else { None },
-            secs_to_full: if state == PowerState::Charging { hours(full - now) } else { None },
-        });
+    let mut dirs: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    // BAT* first, then the rest; the name order keeps the pick stable between reads.
+    dirs.sort_by_key(|d| {
+        let name = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        (!name.starts_with("BAT"), name)
+    });
+    dirs.iter().find_map(|dir| read_supply(dir))
+}
+
+/// One `power_supply` directory as a battery; `None` for other types, device batteries or unreadable ones.
+fn read_supply(dir: &std::path::Path) -> Option<Battery> {
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
+    let num = |name: &str| read(name).and_then(|s| s.parse::<f64>().ok());
+    if read("type").as_deref() != Some("Battery") || read("scope").as_deref() == Some("Device") {
+        return None;
     }
-    None
+    let percent = num("capacity")? as f32;
+    let status = read("status").unwrap_or_default();
+    let state = match status.as_str() {
+        "Charging" => PowerState::Charging,
+        "Full" => PowerState::Full,
+        "Not charging" => PowerState::PluggedIn,
+        _ => PowerState::Discharging,
+    };
+    // Time from energy (µWh/µW) or charge (µAh/µA).
+    let (now, full, rate) = match (num("energy_now"), num("energy_full"), num("power_now")) {
+        (Some(n), Some(f), Some(r)) => (n, f, r),
+        _ => (num("charge_now").unwrap_or(0.0), num("charge_full").unwrap_or(0.0), num("current_now").unwrap_or(0.0)),
+    };
+    let hours = |amount: f64| (rate > 0.0 && amount > 0.0).then(|| (amount / rate * 3600.0) as u64);
+    Some(Battery {
+        percent,
+        state,
+        secs_left: if state == PowerState::Discharging { hours(now) } else { None },
+        secs_to_full: if state == PowerState::Charging { hours(full - now) } else { None },
+    })
 }
 
 /// macOS `pmset -g batt` output: "-InternalBattery-0 (id=…)\t85%; discharging; 4:12 remaining present: true".
@@ -273,6 +279,57 @@ mod tests {
         }
         let b = read_linux(&root).unwrap();
         assert_eq!((b.percent, b.state, b.secs_left), (50.0, PowerState::Discharging, Some(9_000)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A wireless mouse (`scope=Device`) listed before the laptop battery must not be picked.
+    #[test]
+    fn linux_sysfs_skips_device_batteries() {
+        let root = std::env::temp_dir().join(format!("noble-bat-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let make = |name: &str, scope: Option<&str>, capacity: &str| {
+            let d = root.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("type"),
+                "Battery
+",
+            )
+            .unwrap();
+            std::fs::write(
+                d.join("capacity"),
+                format!(
+                    "{capacity}
+"
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                d.join("status"),
+                "Discharging
+",
+            )
+            .unwrap();
+            if let Some(scope) = scope {
+                std::fs::write(
+                    d.join("scope"),
+                    format!(
+                        "{scope}
+"
+                    ),
+                )
+                .unwrap();
+            }
+        };
+        make("hidpp_battery_0", Some("Device"), "17");
+        make("BAT1", Some("System"), "64");
+        assert_eq!(read_linux(&root).map(|b| b.percent), Some(64.0));
+        // Only a device battery: no system battery at all.
+        std::fs::remove_dir_all(root.join("BAT1")).unwrap();
+        assert!(read_linux(&root).is_none());
+        // A non-BAT name without a scope still counts when no BAT* exists.
+        make("battery", None, "40");
+        assert_eq!(read_linux(&root).map(|b| b.percent), Some(40.0));
         let _ = std::fs::remove_dir_all(&root);
     }
 

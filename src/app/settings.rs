@@ -92,6 +92,35 @@ impl SettingKey {
         }
     }
 
+    /// One short line about the setting, shown under the list while it is selected.
+    pub fn description(&self) -> &'static str {
+        match self {
+            SettingKey::Theme => "Color theme of the whole interface",
+            SettingKey::Transparent => "Let the terminal's own background show through",
+            SettingKey::Boot => "Play the startup animation on launch",
+            SettingKey::Animations => "Slide, zoom and pulse effects",
+            SettingKey::Clock24 => "24-hour instead of AM/PM clock on Home",
+            SettingKey::Seconds => "Show seconds on the Home clock (off on battery)",
+            SettingKey::Shell => "Program that new terminal panes start",
+            SettingKey::Restore => "Reopen the tabs of the last session on launch",
+            SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
+            SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
+            SettingKey::Notify => "Alert when a long command ends in a background tab",
+            SettingKey::TermColors => "Color scheme used inside terminal panes",
+            SettingKey::Prefix => "Key that starts NOBLE's command chords",
+            SettingKey::Passthrough => "Which shortcuts full-screen apps receive",
+            SettingKey::ShellFirst => "Keep editing keys such as ctrl+w for the shell",
+            SettingKey::AiEnabled => "Show AI quota cards on Home",
+            SettingKey::Claude | SettingKey::Codex | SettingKey::Antigravity => "Show this provider's usage on Home",
+            SettingKey::OpenCodeGo | SettingKey::Kilo | SettingKey::CommandCode => "Show this provider's usage on Home",
+            SettingKey::QuickLaunch => "Choose the AI CLIs offered as launchers",
+            SettingKey::AiRefresh => "How often usage is fetched while Home is open",
+            SettingKey::AiWarn => "Warn when a quota reaches this percentage",
+            SettingKey::ClaudeHooks => "Show Claude Code's live state on its tab",
+            SettingKey::Updates => "Look for a newer NOBLE release once a day",
+        }
+    }
+
     /// The provider id in `ai::providers` ("" when it is not a provider).
     pub fn provider_id(&self) -> &'static str {
         match self {
@@ -288,7 +317,7 @@ impl App {
 
     /// Writes the edited config; a failure is reported (the change then only lasts this session).
     fn write_config(&mut self, text: String) {
-        match std::fs::write(&self.paths.config, text) {
+        match crate::store::write_text(&self.paths.config, &text) {
             Ok(()) => self.cfg_mtime = crate::config::mtime_of(&self.paths.config),
             Err(e) => {
                 let path = crate::util::tilde(&self.paths.config);
@@ -655,8 +684,8 @@ impl App {
     }
 
     /// A folder typed into the add prompt (`~` expands to the home folder, a relative path is
-    /// taken from the home folder); an error toast and `None` when it is not a folder.
-    fn prompt_folder(&mut self, raw: &str) -> Option<std::path::PathBuf> {
+    /// taken from the home folder); the error text when it is not a folder.
+    pub fn resolve_folder(raw: &str) -> Result<std::path::PathBuf, String> {
         let raw = raw.trim().trim_matches('"');
         let home = dirs::home_dir().unwrap_or_default();
         let path = match raw.strip_prefix('~') {
@@ -665,11 +694,21 @@ impl App {
         };
         let path = if path.is_relative() && !raw.is_empty() { home.join(path) } else { path };
         if raw.is_empty() || !path.is_dir() {
-            self.toast(ToastLevel::Error, format!("not a folder: {raw}"));
-            return None;
+            return Err(format!("not a folder: {raw}"));
         }
         // Rebuilt from its components: a trailing separator or "." parts do not make a new path.
-        Some(path.components().collect())
+        Ok(path.components().collect())
+    }
+
+    /// Like `resolve_folder`, with an error toast and `None` when it is not a folder.
+    fn prompt_folder(&mut self, raw: &str) -> Option<std::path::PathBuf> {
+        match Self::resolve_folder(raw) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                self.toast(ToastLevel::Error, e);
+                None
+            }
+        }
     }
 
     /// Adds one folder as a project (a git repo or any other folder), kept in `state.json`

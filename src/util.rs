@@ -235,6 +235,23 @@ pub fn process_start(pid: u32) -> Option<u64> {
     sys.process(pid).map(|p| p.start_time())
 }
 
+/// The directory named by the `noble <dir>` command line argument: `~` and `~/x` expand to the
+/// home directory (a shell that did not expand it, e.g. cmd.exe), a relative path is taken from `cwd`.
+/// Errors with a message for anything that is not an existing directory.
+pub fn resolve_start_dir(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+    let separators = ['/', '\\'];
+    let rest = arg.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with(separators));
+    let path = match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(separators)),
+        _ => PathBuf::from(arg),
+    };
+    // `absolute` rather than `canonicalize`, which gives `\\?\` paths on Windows; the current
+    // directory is passed in (not read) so this stays testable.
+    let path = if path.is_absolute() { path } else { cwd.join(path) };
+    let path = std::path::absolute(&path).unwrap_or(path);
+    if path.is_dir() { Ok(path) } else { Err(format!("'{arg}' is not a directory")) }
+}
+
 /// Which of `dirs` pass `probe` within `timeout`; all are probed in parallel. A stat on a
 /// network share that stopped answering (SMB/UNC on Windows, NFS/SMB/sshfs mounts on Linux)
 /// can block for tens of seconds; a probe that does not answer in time counts as unusable and
@@ -332,6 +349,25 @@ pub fn command_for(program: &Path) -> std::process::Command {
     cmd
 }
 
+/// Starts a program and does not wait for it (opening a browser, an editor, a file manager): all
+/// three standard streams go to null. The child is reaped on a small background thread so it never
+/// stays a zombie process.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    if cfg!(unix) {
+        // Unix (Linux/macOS): an unwaited child stays a zombie until NOBLE exits, so wait for it on a thread.
+        // If the thread cannot be started the child is left as it is (no worse than before).
+        let _ = std::thread::Builder::new().name("reap".into()).spawn(move || {
+            let _ = child.wait();
+        });
+    } else {
+        // Windows: dropping the handle is enough, the process table entry goes away with it.
+        drop(child);
+    }
+    Ok(())
+}
+
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Simple base64 encoder (to send OSC 52 to the outer terminal).
@@ -383,6 +419,25 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_dir_argument_resolves_relative_and_tilde() {
+        let base = std::env::temp_dir().join(format!("noble-startdir-{}", std::process::id()));
+        let sub = base.join("proj");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(resolve_start_dir("proj", &base, None).unwrap(), sub);
+        assert_eq!(resolve_start_dir(".", &sub, None).unwrap(), sub, "'.' has no trailing component");
+        assert_eq!(resolve_start_dir("~", Path::new("."), Some(&sub)).unwrap(), sub);
+        assert_eq!(resolve_start_dir("~/x", Path::new("."), Some(&base)).unwrap_err(), "'~/x' is not a directory");
+        assert_eq!(resolve_start_dir("~/proj", Path::new("."), Some(&base)).unwrap(), sub);
+        assert!(resolve_start_dir("~\\proj", Path::new("."), Some(&base)).is_ok());
+        assert_eq!(resolve_start_dir(&sub.to_string_lossy(), Path::new("."), None).unwrap(), sub);
+        assert!(resolve_start_dir("missing", &base, None).is_err());
+        // A file is not a directory.
+        std::fs::write(base.join("f.txt"), "x").unwrap();
+        assert!(resolve_start_dir("f.txt", &base, None).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn usable_dirs_gives_up_on_a_hanging_probe() {

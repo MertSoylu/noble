@@ -52,7 +52,22 @@ pub enum Status {
     Loading,
     Ok,
     SignIn,
+    /// Signed in, but the token no longer works: the cached numbers stay on Home, dimmed, with a hint.
+    Expired,
     Error(String),
+}
+
+/// The error text providers return for an expired or rejected login.
+pub const SESSION_EXPIRED: &str = "session expired";
+
+/// Maps a provider's fetch error to the status shown: an expired login stays on Home (cached bars and a
+/// hint), "no plan" (signed in, nothing metered) is hidden like a signed-out provider.
+pub fn failure_status(e: String) -> Status {
+    match e.as_str() {
+        SESSION_EXPIRED => Status::Expired,
+        "no plan" => Status::SignIn,
+        _ => Status::Error(e),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,7 +202,7 @@ pub fn http_json(env: &Env, method: Method<'_>, url: &str, headers: &[(&str, &st
     let text = resp.body_mut().read_to_string().unwrap_or_default();
     match status {
         200..=299 => serde_json::from_str(&text).map_err(|_| "unexpected response".to_string()),
-        401 | 403 => Err("session expired".into()),
+        401 | 403 => Err(SESSION_EXPIRED.into()),
         429 => Err("rate limited".into()),
         s => Err(format!("HTTP {s}")),
     }
@@ -261,13 +276,20 @@ pub fn stdio_rpc(
 /// Runs a program and returns its stdout; the process is killed on timeout.
 /// Output is capped at 1 MiB, stderr is not read (error text is never logged).
 pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String, String> {
-    use std::io::Read;
-    const CAP: u64 = 1 << 20;
     let mut cmd = util::command_for(program);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    run_command(cmd, timeout)
+}
+
+/// Runs a prepared command and returns its stdout; the process is killed on timeout.
+/// Stdout is piped and capped at 1 MiB, stderr is discarded.
+pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<String, String> {
+    use std::io::Read;
+    const CAP: u64 = 1 << 20;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = cmd.spawn().map_err(|_| "cli not runnable".to_string())?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
@@ -491,12 +513,9 @@ pub fn spawn(
                         name: def.name,
                         login_hint: def.login_hint,
                         presence: Presence::Ready,
-                        // "no plan": signed in but no metered plan → hidden from the panel.
-                        status: if e == "session expired" || e == "no plan" {
-                            Status::SignIn
-                        } else {
-                            Status::Error(e)
-                        },
+                        // "no plan": signed in but no metered plan → hidden from the panel;
+                        // an expired login stays visible with its cached numbers.
+                        status: failure_status(e),
                         usage: cached.as_ref().map(|c| c.usage.clone()),
                         fetched_at: cached.map(|c| c.fetched_at),
                     },
@@ -569,6 +588,23 @@ mod tests {
             std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec!["ai-cache.json".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expired_login_is_told_apart_from_no_plan() {
+        assert_eq!(failure_status(SESSION_EXPIRED.into()), Status::Expired);
+        assert_eq!(failure_status("no plan".into()), Status::SignIn);
+        assert_eq!(failure_status("offline".into()), Status::Error("offline".into()));
+        let expired = ProviderState {
+            id: "claude",
+            name: "Claude Code",
+            login_hint: "claude",
+            presence: Presence::Ready,
+            status: Status::Expired,
+            usage: None,
+            fetched_at: Some(1),
+        };
+        assert!(expired.is_stale(), "cached numbers of an expired login are stale");
     }
 
     #[test]

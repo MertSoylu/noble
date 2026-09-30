@@ -78,13 +78,23 @@ pub fn command_base() -> String {
     }
 }
 
+/// Is `command` NOBLE's own hook command: `<base> hook <arg>` where `<arg>` is one of the known
+/// events and `<base>` is `noble`, `noble-dev` or a (possibly quoted) path to a `noble` executable.
+fn is_noble_command(command: &str) -> bool {
+    // The last " hook " is ours: the executable's path may contain one too (`/opt/my hook tools/noble`).
+    let Some((base, arg)) = command.rsplit_once(MARKER) else { return false };
+    if !EVENTS.iter().any(|(_, a)| *a == arg.trim()) {
+        return false;
+    }
+    let base = base.trim().trim_matches('"');
+    let file = base.rsplit(['/', '\\']).next().unwrap_or(base).to_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+    stem == "noble" || stem == "noble-dev"
+}
+
 fn is_noble_hook(entry: &Value) -> bool {
     entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
-        hooks.iter().any(|h| {
-            h.get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|c| c.contains(MARKER) && c.to_lowercase().contains("noble"))
-        })
+        hooks.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(is_noble_command))
     })
 }
 
@@ -102,8 +112,10 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if path.is_file() {
-        let backup = path.with_extension("json.noble-bak");
+    // The backup keeps the file as it was before NOBLE first touched it; later writes must not
+    // overwrite it with an already edited copy.
+    let backup = path.with_extension("json.noble-bak");
+    if path.is_file() && !backup.exists() {
         std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
@@ -332,6 +344,44 @@ mod tests {
 
     /// A failed write leaves no temporary file next to the settings (a directory in the way
     /// makes the rename fail on every platform).
+    /// Only NOBLE's own command shape counts: another tool that merely mentions "noble" and " hook " does not.
+    #[test]
+    fn noble_command_shape_is_strict() {
+        for ok in [
+            "noble hook stop",
+            "noble-dev hook prompt",
+            "\"C:/Users/me/.cargo/bin/noble.exe\" hook session-end",
+            "\"/opt/my hook tools/noble\" hook notification",
+        ] {
+            assert!(is_noble_command(ok), "{ok}");
+        }
+        for bad in [
+            "my-noble-notifier hook stop",
+            "noblex hook stop",
+            "noble hook unknown-event",
+            "echo noble hook stop; rm -rf ~",
+            "python noble.py hook stop",
+            "noble stop",
+        ] {
+            assert!(!is_noble_command(bad), "{bad}");
+        }
+    }
+
+    /// The first backup (the user's original file) survives later writes.
+    #[test]
+    fn backup_is_written_only_once() {
+        let dir = std::env::temp_dir().join(format!("noble-hook-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{\"theme\": \"dark\"}").unwrap();
+        install(&file, "noble").unwrap();
+        uninstall(&file).unwrap();
+        let bak = std::fs::read_to_string(dir.join("settings.json.noble-bak")).unwrap();
+        assert_eq!(bak, "{\"theme\": \"dark\"}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_settings_cleans_up_its_temp_file() {
         let dir = temp("tmp");
