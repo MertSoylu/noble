@@ -6,13 +6,62 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-30
+
+### Added
+- Pane titles show how the last command ended: `✓ 2.4s`, or `✗ 1 · 12s` with the exit code when it failed
+  (cmd.exe cannot report a code, so only the time shows there). A command running longer than 2 s shows a
+  live timer instead (`◷ 0:07`, updated every second in its first minute and once a minute after that or on
+  battery). NOBLE's PowerShell, bash, zsh and fish hooks now report the exit code with OSC 133;D on every
+  prompt, and mark a typed command's start with OSC 133;C (bash 4.4+ `PS0`, zsh `preexec`, fish
+  `fish_preexec`, PowerShell through PSReadLine). Only that mark starts the clock and counts a command, so an
+  Enter on an empty, cleared or continuation line, the shell's first prompt and an Enter typed into a running
+  command do not count, and a multi-line command is timed from when it runs. cmd.exe and bash 3.2 have no such
+  mark: there the last Enter starts the clock. When a prompt reports two codes, the first (NOBLE's) wins.
+- Agent state in the terminal: a pane running an AI agent leads its title with its state (`⠋ claude · working
+  2m +2` with the running subagents, `◆ codex · needs you`, `● claude · your turn`, `○ claude` when unknown),
+  shortened on narrow panes, where the folder goes first. Each tab starts with a dot for the
+  most urgent state among its panes. The spinner only redraws (every 130 ms) while a working agent is in a
+  visible pane that printed something in the last 3 s and the laptop is plugged in; otherwise (on battery, or
+  a session left "working" by an interrupt) it is a still `…`. A changed Claude hook state now
+  redraws the terminal and the tab strip, not only Home.
+- New action `jump_to_agent` (Jump to Waiting Agent, prefix `a`): goes to the next pane across all tabs whose
+  agent needs you, else to the next one whose agent finished its answer, restoring a zoomed tab that shows
+  another pane; says "no agent is waiting" otherwise.
+
+- Typed tab markers in the top bar: `◆` notification, bell or agent needs you, `✗` a background command that
+  failed (non-zero exit code; the toast names the code when the command ran long), `✓` a long command that
+  finished, `•` output. The marker has its own cell after the title instead of overwriting its last letter, the
+  most urgent kind wins, and `+N` for tabs that do not fit keeps the most urgent hidden marker. The tab's
+  agent dot no longer repeats a `◆` notice.
+- A split tab shows its pane count (`⊞2`) after the title when the strip has room (only on the active tab in
+  compact mode), and the active tab is framed by accent bars (`▌work ×▐`) instead of relying on color alone.
+- Scrollback helpers, shown only while a pane is scrolled back: a position bar over the content's last column
+  (thumb sized by the visible share, search matches marked `•`, the selected one `●`; click it to jump) and a
+  `↓ live` chip at the bottom right, above the search bar, that counts the lines which arrived meanwhile
+  (`↓ live · 12`) and returns to the newest output when clicked. Small panes get only the chip. The status bar
+  says how to go back while the focused pane is scrolled back. The wheel keeps scrolling over the bar and the
+  chip, and a right or middle click there pastes as on the content.
+- Double-click a pane's title to zoom it (again to restore); middle-click a tab to close it (it asks first
+  while something still runs there, like the `×`).
+
 ### Changed
+- Pane title buttons: one bracketed cluster on the title line, `┤ ◫ ⊟ ⤢ ✕ ├` (split right, split down, zoom or
+  `◱` restore, close), shown on the focused pane and on the pane under the mouse; other panes keep a plain line
+  there and have no hidden click targets. A hovered button turns into a small inverted chip (close in the error
+  color), readable in every theme, and the status bar names it with its shortcut (`◫ split right · ctrl+a v`).
+  On a line two panes share, only the pane whose title row it is shows its buttons. When a title is narrow it
+  keeps, in this order, close, the key lock and agent glyph, the first letters of the name (`po…`), zoom and
+  the splits, the rest of the name, the agent state or last command result, the `KEYS`/`↑N`/`ZOOM` tag, and
+  last the folder, so even a small pane in a grid keeps its name and lock.
 - The first launch welcome card is now a short setup: pick the theme and terminal colors (the whole UI previews
   them as you cycle with ←→ or click ‹ ›), the shell when more than one is installed, and the prefix key. ⏎
   saves the choices, esc keeps the defaults and undoes the preview. On a small window the setup rows stay
   visible and the key list is dropped.
 
 ### Fixed
+- PowerShell: a prompt that shows the last command's status (oh-my-posh, the Windows Terminal shell
+  integration snippet) saw every command as successful inside NOBLE, because NOBLE's prompt wrapper reset `$?`.
 - Claude Code status: a background tab now gets its "Claude finished" notice when the last subagent ends after
   Claude's answer (it was lost before). Hooks installed from a path that contains " hook " are upgraded correctly.
 - Several NOBLE windows no longer undo each other's removed, added or pinned projects: every `state.json` write
@@ -269,7 +318,9 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/MertSoylu/noble/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/MertSoylu/noble/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/MertSoylu/noble/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/MertSoylu/noble/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/MertSoylu/noble/compare/v1.2.0...v1.3.0
