@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-30
+
 ### Added
 - `noble <folder>` (for example `noble .`) opens NOBLE with a shell tab in that folder.
 - The session is saved a couple of seconds after tabs, splits or directories change, and also when the terminal
@@ -356,7 +358,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/MertSoylu/noble/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/MertSoylu/noble/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/MertSoylu/noble/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/MertSoylu/noble/compare/v1.4.0...v1.5.0
