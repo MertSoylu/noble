@@ -56,6 +56,8 @@ impl App {
     }
 
     fn on_paste(&mut self, text: &str) {
+        // Pasted text is not a command key: a pending prefix is dropped.
+        self.prefix_armed = false;
         match &mut self.overlay {
             Some(Overlay::Palette(st)) => {
                 st.query.push_str(text.lines().next().unwrap_or(""));
@@ -83,6 +85,8 @@ impl App {
             return;
         }
         if self.overlay.is_some() {
+            // A prefix armed before the overlay opened must not fire after it closes.
+            self.prefix_armed = false;
             self.overlay_key(k);
             return;
         }
@@ -99,7 +103,10 @@ impl App {
         if self.prefix_armed {
             self.prefix_armed = false;
             if chord == self.keymap.prefix {
-                self.run(Action::SendPrefix);
+                // Prefix twice: the key itself goes to the shell (routed like a typed key, so the scrollback resets).
+                if in_term {
+                    self.term_key(k);
+                }
             } else if k.code != KeyCode::Esc {
                 match self.keymap.prefix_map.get(&chord).copied() {
                     Some(a) => self.run(a),
@@ -730,6 +737,8 @@ impl App {
         let double =
             self.last_click.is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
         self.last_click = Some((Instant::now(), x, y));
+        // A click ends a pending prefix (the next key is a plain key again).
+        self.prefix_armed = false;
         // A click ends the keyboard focus on a project's quick actions.
         self.bridge.proj_act = None;
         let Some(mut hit) = self.hit_at(x, y) else { return };

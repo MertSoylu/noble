@@ -114,11 +114,17 @@ fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     }
     let tx = tx + 3;
     let w = area.right().saturating_sub(tx);
-    let greet = format!("{}, {}", greeting(now.hour()), capitalize(&app.operator));
-    hud::put(buf, tx, y, &greet, th.text().add_modifier(Modifier::BOLD), w);
+    let greet = format!("{}, ", greeting(now.hour()));
+    hud::put_spans(buf, tx, y, &[(&greet, th.text()), (&capitalize(&app.operator), th.accent_bold())], w);
     hud::put(buf, tx, y + 1, &now.format("%A, %d %B").to_string(), th.dim(), w);
-    let session = format!("{} · {}", session_line(app), version_label());
-    hud::put(buf, tx, y + 2, &session, th.dim(), w);
+    let sep = Style::default().fg(th.line);
+    hud::put_spans(
+        buf,
+        tx,
+        y + 2,
+        &[(&session_line(app), th.dim()), ("  ·  ", sep), (&version_label(), Style::default().fg(th.accent_dim))],
+        w,
+    );
 }
 
 /// One-line clock + greeting (narrow windows).
@@ -135,9 +141,23 @@ fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     let y = area.y + area.height.saturating_sub(1) / 2;
     let x = area.x + 1;
     let x = hud::put(buf, x, y, &now.format(fmt).to_string(), th.accent_bold(), area.width);
-    let greet = format!("   {}, {} · {}", greeting(now.hour()), capitalize(&app.operator), now.format("%a %d %b"));
-    let greet = format!("{greet} · {}", version_label());
-    hud::put(buf, x, y, &greet, th.dim(), area.right().saturating_sub(x));
+    let sep = Style::default().fg(th.line);
+    let hello = format!("   {}, ", greeting(now.hour()));
+    let date = now.format("%a %d %b").to_string();
+    hud::put_spans(
+        buf,
+        x,
+        y,
+        &[
+            (&hello, th.text()),
+            (&capitalize(&app.operator), th.accent_bold()),
+            ("  ·  ", sep),
+            (&date, th.dim()),
+            ("  ·  ", sep),
+            (&version_label(), Style::default().fg(th.accent_dim)),
+        ],
+        area.right().saturating_sub(x),
+    );
 }
 
 fn ago(t: SystemTime) -> String {
@@ -198,8 +218,9 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let gaps = 1 + u16::from(status_w > 0) + u16::from(branch_w > 0);
     let name_w = w.saturating_sub(2 + branch_w + status_w + ago_w + gaps);
     let header = list_h >= 6 && branch_w > 0;
+    let rule = header && list_h >= 9;
     // If the list stays short, the selected project's card fills the space below.
-    let needed = u16::from(header) + vis.len() as u16;
+    let needed = u16::from(header) + u16::from(rule) + vis.len() as u16;
     let card_h = if app.projects_loaded && !vis.is_empty() && footer_h == 3 && w >= 40 && list_h >= needed + CARD_MIN {
         list_h - needed
     } else {
@@ -236,18 +257,24 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     } else {
         // Column headers above the list when there is room, dimmed.
         if header {
+            let head = th.dim().add_modifier(Modifier::BOLD);
             let mut hx = x + 1;
-            hud::put(buf, hx, y, "PROJECT", th.dim(), name_w);
+            hud::put(buf, hx, y, "PROJECT", head, name_w);
             hx += name_w + 1;
-            hud::put(buf, hx, y, "BRANCH", th.dim(), branch_w);
+            hud::put(buf, hx, y, "BRANCH", head, branch_w);
             hx += branch_w + 1;
             if status_w > 0 {
-                hud::put(buf, hx, y, "STATUS", th.dim(), status_w);
+                hud::put(buf, hx, y, "STATUS", head, status_w);
                 hx += status_w + 1;
             }
-            hud::put_right(buf, hx + ago_w, y, "LAST", th.dim());
+            hud::put_right(buf, hx + ago_w, y, "LAST", head);
             y += 1;
             list_h -= 1;
+            if rule {
+                hud::hline(buf, x, y, w, "─", th.line());
+                y += 1;
+                list_h -= 1;
+            }
         }
         let sel = app.bridge.proj_sel.min(vis.len() - 1);
         let offset = if sel >= list_h as usize { sel + 1 - list_h as usize } else { 0 };
@@ -255,9 +282,9 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let p = &app.projects[*idx];
             let ry = y + (row - offset) as u16;
             let selected = row == sel;
-            let bgc = if selected { th.sel_bg } else { th.bg };
+            let bgc = if selected { th.sel_strong() } else { th.bg };
             if selected {
-                hud::set_bg_row(buf, inner.x, ry, inner.width, th.sel_bg);
+                hud::set_bg_row(buf, inner.x, ry, inner.width, bgc);
                 hud::put(buf, inner.x, ry, "▌", Style::default().fg(th.accent).bg(bgc), 1);
             }
             let st = |s: Style| s.bg(bgc);
@@ -291,7 +318,15 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             if branch_w > 0 {
                 cx = hud::put(buf, cx, ry, " ", st(th.dim()), 1);
                 let branch = p.branch.clone().unwrap_or_default();
-                cx = hud::put(buf, cx, ry, &util::pad_right(&branch, branch_w as usize), st(th.dim()), branch_w);
+                cx = hud::put(
+                    buf,
+                    cx,
+                    ry,
+                    &util::pad_right(&branch, branch_w as usize),
+                    // On the tinted selected row the dim colors would lose contrast.
+                    st(Style::default().fg(if selected { th.fg } else { th.accent_dim })),
+                    branch_w,
+                );
             }
             if status_w > 0 {
                 cx = hud::put(buf, cx, ry, " ", st(th.dim()), 1);
@@ -310,7 +345,8 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             }
             cx = hud::put(buf, cx, ry, " ", st(th.dim()), 1);
             let a = p.last_active.map(ago).unwrap_or_default();
-            hud::put(buf, cx, ry, &util::pad_left(&a, ago_w as usize), st(th.dim()), ago_w);
+            let ago_style = if selected { Style::default().fg(th.fg) } else { th.dim() };
+            hud::put(buf, cx, ry, &util::pad_left(&a, ago_w as usize), st(ago_style), ago_w);
             hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Project(row)));
             // Quick actions on the right end of the selected or hovered row. They only cover the
             // "LAST" column (and the padding beside it); the git status stays visible.
@@ -336,15 +372,21 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         }
     }
 
+    let (mut card_used, mut card_top) = (0u16, 0u16);
     if card_h > 0
         && let Some(p) = app.selected_project()
     {
-        project_card(buf, Rect::new(inner.x, y + list_h, inner.width, card_h), app, p);
+        card_used = project_card(buf, Rect::new(inner.x, y + list_h, inner.width, card_h), app, p);
+        card_top = y + list_h;
     }
     if footer_h == 0 {
         return;
     }
     let by = inner.bottom() - 1;
+    // A faint rule above the summary anchors it to the action bar when the card leaves a gap.
+    if footer_h == 3 && card_h > 0 && by >= 3 && by - 3 > card_used && by - 3 > card_top {
+        hud::hline(buf, x, by - 3, w, "─", th.line());
+    }
     if footer_h == 3 {
         // Selected project: open AI sessions, the git status sentence and the last
         // commit (or the folder path when the card is open, since the card shows it).
@@ -355,19 +397,25 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 Some((s, None)) => format!("last commit: {s}"),
                 None => util::tilde(&p.path),
             };
-            let mut cx = x + 1;
-            for (text, color) in git_summary(p, th) {
-                cx = hud::put(buf, cx, by - 2, &text, Style::default().fg(color), (x + w).saturating_sub(cx));
-                cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
-            }
+            let mut parts: Vec<(String, Style)> =
+                git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c))).collect();
             for (kind, state) in app.agent_sessions(&p.path) {
                 let (_, color) = state_glyph(state, th);
-                let text = format!("{kind} {}", state.label());
-                cx = hud::put(buf, cx, by - 2, &text, Style::default().fg(color), (x + w).saturating_sub(cx));
-                cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
+                parts.push((format!("{kind} {}", state.label()), Style::default().fg(color)));
             }
-            let room = (x + w).saturating_sub(cx);
-            hud::put(buf, cx, by - 2, &util::truncate(&detail, room as usize), th.dim(), room);
+            parts.push((detail, th.dim()));
+            let mut cx = x + 1;
+            for (i, (text, style)) in parts.iter().enumerate() {
+                // A separator only goes before a part that still gets a few readable cells.
+                if i > 0 {
+                    if (x + w).saturating_sub(cx) < 3 + 4 {
+                        break;
+                    }
+                    cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
+                }
+                let room = (x + w).saturating_sub(cx);
+                cx = hud::put(buf, cx, by - 2, &util::truncate(text, room as usize), *style, room);
+            }
         }
     }
     let end = x + w;
@@ -397,20 +445,21 @@ const CARD_MIN: u16 = 6;
 
 /// The selected project's card: recent commits and changed files. The data comes
 /// from the `git status` / `git log` output the project scan already runs.
-fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Project) {
+fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Project) -> u16 {
     let th = &app.theme;
     let x = area.x + 1;
     let w = area.width.saturating_sub(2);
     let mut y = area.y;
     // Separator: "── noble-rs ─────────".
     hud::hline(buf, area.x, y, area.width, "─", Style::default().fg(th.line));
-    hud::put(buf, x + 1, y, &format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize)), th.dim(), w);
+    let title = format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize));
+    hud::put(buf, x + 1, y, &title, th.accent_bold(), w);
     y += 1;
     let rows = area.bottom().saturating_sub(y);
     let Some(g) = p.git.as_ref() else {
         let text = if p.repo { "checking git status…" } else { "not a git repository" };
         hud::put(buf, x, y + 1, text, th.dim(), w);
-        return;
+        return y + 1;
     };
     // Files in columns; the column width follows the longest path.
     let longest = g.changes.iter().map(|(_, f)| util::width(f)).max().unwrap_or(0) as u16;
@@ -425,12 +474,12 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
 
     y += 1;
     if commit_rows > 0 {
-        hud::put(buf, x, y, "RECENT COMMITS", th.dim(), w);
+        section_header(buf, x, y, w, "RECENT COMMITS", "", th);
         y += 1;
         for c in g.commits.iter().take(commit_rows as usize) {
             let right = format!("{:>4}  {}", ago_ts(c.time), util::truncate(&c.author, 12));
             let right_w = util::width(&right) as u16;
-            let mut cx = hud::put(buf, x, y, &c.hash, Style::default().fg(th.accent2), 8);
+            let mut cx = hud::put(buf, x, y, &c.hash, Style::default().fg(th.accent_dim), 8);
             cx += 1;
             let room = (x + w).saturating_sub(cx + right_w + 2);
             hud::put(buf, cx, y, &util::truncate(&c.subject, room as usize), th.text(), room);
@@ -440,16 +489,14 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
         y += 1;
     }
     if change_rows == 0 || y >= area.bottom() {
-        return;
+        return y;
     }
-    hud::put(buf, x, y, "CHANGES", th.dim(), w);
-    if g.dirty > 0 {
-        hud::put(buf, x + 8, y, &g.dirty.to_string(), Style::default().fg(th.warn), 6);
-    }
+    let count = if g.dirty > 0 { g.dirty.to_string() } else { String::new() };
+    section_header(buf, x, y, w, "CHANGES", &count, th);
     y += 1;
     if g.dirty == 0 {
         hud::put(buf, x, y, "✓ working tree clean", Style::default().fg(th.ok), w);
-        return;
+        return y;
     }
     let slots = change_rows as usize * cols;
     let all_fit = g.changes.len() >= g.dirty as usize && g.changes.len() <= slots;
@@ -469,6 +516,17 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
         let more = format!("+{hidden} more");
         hud::put(buf, x + col as u16 * col_w, y + row as u16, &more, th.dim(), col_w);
     }
+    y + change_rows
+}
+
+/// Section header: bold dim label, an optional warn count and a faint rule to the edge (as in Settings).
+fn section_header(buf: &mut Buffer, x: u16, y: u16, w: u16, label: &str, count: &str, th: &Theme) {
+    let mut cx = hud::put(buf, x, y, label, th.dim().add_modifier(Modifier::BOLD), w);
+    if !count.is_empty() {
+        cx = hud::put(buf, cx + 1, y, count, Style::default().fg(th.warn).add_modifier(Modifier::BOLD), 6);
+    }
+    let start = cx + 1;
+    hud::hline(buf, start, y, (x + w).saturating_sub(start), "─", th.line());
 }
 
 /// Single letter and color from a porcelain status code: M changed, A added, D deleted, ? new.
@@ -666,7 +724,8 @@ fn ai_panel(
         }
         let plan_x = match p.usage.as_ref().and_then(|u| u.plan.clone()) {
             Some(plan) => {
-                hud::put_right(buf, x + w, y, &capitalize(&plan.to_lowercase()), Style::default().fg(th.accent2))
+                let chip = format!(" {} ", capitalize(&plan.to_lowercase()));
+                hud::put_right(buf, x + w, y, &chip, Style::default().fg(th.accent2).bg(th.raised))
             }
             None => x + w,
         };
@@ -685,7 +744,7 @@ fn ai_panel(
                     }
                     let pct = win.used as f64;
                     let color = if ok { th.level(pct) } else { th.dim };
-                    hud::put(buf, x, y, &crate::ai::window_name(&win.label), th.dim(), 5);
+                    hud::put(buf, x, y, &crate::ai::window_name(&win.label), th.dim().add_modifier(Modifier::BOLD), 5);
                     let reset = win.resets_at.map(reset_in).unwrap_or_default();
                     let bar_w = w.saturating_sub(5 + 5 + 7);
                     hud::bar(buf, x + 5, y, bar_w, pct, color, th);
@@ -751,7 +810,7 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
         return;
     };
     let metric = |buf: &mut Buffer, y: u16, label: &str, pct: f64| {
-        hud::put(buf, x, y, label, th.dim(), 5);
+        hud::put(buf, x, y, label, th.dim().add_modifier(Modifier::BOLD), 5);
         let bar_w = w.saturating_sub(5 + 5);
         hud::bar(buf, x + 5, y, bar_w, pct, th.level(pct), th);
         hud::put_right(buf, x + w, y, &format!("{pct:.0}%"), Style::default().fg(th.level(pct)));
@@ -806,7 +865,7 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
             x,
             y,
             &[
-                ("NET  ", th.dim()),
+                ("NET  ", th.dim().add_modifier(Modifier::BOLD)),
                 ("↓ ", Style::default().fg(th.accent2)),
                 (&util::fmt_rate(last.rx_rate), th.text()),
                 ("   ↑ ", Style::default().fg(th.accent)),
@@ -818,6 +877,6 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
     }
     if y < bottom {
         let up = util::fmt_duration(Duration::from_secs(last.uptime));
-        hud::put_spans(buf, x, y, &[("UP   ", th.dim()), (&up, th.text())], w);
+        hud::put_spans(buf, x, y, &[("UP   ", th.dim().add_modifier(Modifier::BOLD)), (&up, th.text())], w);
     }
 }

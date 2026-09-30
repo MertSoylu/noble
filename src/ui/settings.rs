@@ -102,7 +102,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // A header cut off from its first row stays hidden.
             Line::Header(_) if n + 1 == visible.len() => {}
             Line::Header(h) => {
-                hud::put(buf, x, y, h, th.accent_bold(), iw);
+                // Section title followed by a faint rule to the edge of the page.
+                let tx = hud::put(buf, x, y, h, th.accent_bold(), iw);
+                let rule = (x + iw).saturating_sub(tx + 1);
+                if rule > 0 {
+                    hud::put(buf, tx + 1, y, &"─".repeat(rule as usize), th.line(), rule);
+                }
             }
             Line::Item(i) => {
                 let SettingItem::Setting(key) = items[*i] else { continue };
@@ -153,7 +158,13 @@ fn setting_row(buf: &mut Buffer, row: Rect, app: &App, key: SettingKey, selected
     let active = parent.is_none_or(|p| app.setting_on(p));
     let indent = if parent.is_some() { "  " } else { "" };
     let label = format!("{indent}{}", key.label());
-    let text = if active { th.text() } else { th.dim() };
+    let text = if !active {
+        th.dim()
+    } else if selected {
+        th.text().add_modifier(Modifier::BOLD)
+    } else {
+        th.text()
+    };
     hud::put(buf, x, y, &label, text.bg(bg), iw);
     // Rows that open a selector show a chip in the chosen colors.
     let look = match key {

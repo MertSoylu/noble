@@ -508,35 +508,54 @@ fn pane_button_hint(app: &App, hits: &[(Rect, Hit)]) -> Option<(String, String)>
     Some((button.glyph(zoomed).to_string(), text))
 }
 
+/// The keys that follow the prefix, from the keymap (the user's `prefix_bindings` included): an action
+/// without a binding is not listed. Pane commands (split, close, zoom, focus) only in a terminal.
+fn prefix_hints(app: &App) -> Vec<(String, String)> {
+    let km = &app.keymap;
+    let mut v: Vec<(String, String)> = Vec::new();
+    let add = |v: &mut Vec<(String, String)>, action: Action, what: &str| {
+        if let Some(k) = km.prefix_key(action) {
+            v.push((k, what.to_string()));
+        }
+    };
+    add(&mut v, Action::NewTab, "new tab");
+    if matches!(app.view, View::Term(_)) {
+        add(&mut v, Action::SplitRight, "split right");
+        add(&mut v, Action::SplitDown, "split down");
+        add(&mut v, Action::ClosePane, "close");
+        add(&mut v, Action::Zoom, "zoom");
+        // The four focus keys share one chip when they are the arrows.
+        let arrows = [Action::FocusLeft, Action::FocusRight, Action::FocusUp, Action::FocusDown]
+            .iter()
+            .all(|a| km.prefix_key(*a).is_some_and(|k| matches!(k.as_str(), "←" | "→" | "↑" | "↓")));
+        if arrows {
+            v.push(("←↑↓→".into(), "move focus".into()));
+        } else {
+            add(&mut v, Action::FocusNext, "next pane");
+        }
+    } else if !app.tabs.is_empty() {
+        match (km.prefix_key(Action::GoTab(1)), km.prefix_key(Action::GoTab(9))) {
+            (Some(a), Some(b)) => v.push((format!("{a}…{b}"), "go to tab".into())),
+            (Some(a), None) | (None, Some(a)) => v.push((a, "go to tab".into())),
+            _ => {}
+        }
+    }
+    if app.view != View::Bridge {
+        add(&mut v, Action::Bridge, "home");
+    }
+    if app.view != View::Settings {
+        add(&mut v, Action::Settings, "settings");
+    }
+    add(&mut v, Action::Palette, "commands");
+    add(&mut v, Action::Help, "all keys");
+    v
+}
+
 /// A few short hints for the context.
 fn hints(app: &App) -> Vec<(String, String)> {
     let h = |k: &str, v: &str| (k.to_string(), v.to_string());
     if app.prefix_armed {
-        // Pane commands (split, close, zoom, focus) only make sense in a terminal.
-        if matches!(app.view, View::Term(_)) {
-            return vec![
-                h("t", "new tab"),
-                h("v", "split right"),
-                h("s", "split down"),
-                h("x", "close"),
-                h("z", "zoom"),
-                h("arrows", "move focus"),
-                h("0", "home"),
-                h("?", "all keys"),
-            ];
-        }
-        let mut v = vec![h("t", "new tab")];
-        if !app.tabs.is_empty() {
-            v.push(h("1…9", "go to tab"));
-        }
-        if app.view != View::Bridge {
-            v.push(h("0", "home"));
-        }
-        if app.view != View::Settings {
-            v.push(h("S", "settings"));
-        }
-        v.extend([h(":", "commands"), h("?", "all keys")]);
-        return v;
+        return prefix_hints(app);
     }
     match app.view {
         View::Bridge => {
@@ -617,77 +636,147 @@ fn current_tip(app: &App) -> String {
     TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()].to_string()
 }
 
+/// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's
+/// row (bottom right) so it never covers the shell's last line; elsewhere it sits just above the bar.
+struct NoticePlan {
+    text: String,
+    width: u16,
+    y: u16,
+}
+
+const NOTICE_BUTTON: &str = " update ";
+const NOTICE_CLOSE: &str = " × ";
+
+fn notice_plan(app: &App, area: Rect) -> Option<NoticePlan> {
+    let version = app.update_notice()?;
+    if area.height < 6 || area.width < 30 || app.overlay.is_some() {
+        return None;
+    }
+    let in_term = matches!(app.view, View::Term(_));
+    let fixed = (1 + util::width(NOTICE_BUTTON) + util::width(NOTICE_CLOSE) + 1) as u16;
+    let long = format!(" ↑ NOBLE {version} is available ");
+    let short = format!(" ↑ {version} ");
+    let room = area.width.saturating_sub(fixed + 2) / 2;
+    let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
+    let width = fixed + util::width(&text) as u16;
+    Some(NoticePlan { text, width, y: area.bottom() - if in_term { 1 } else { 2 } })
+}
+
+/// Key chip and description: the key in the accent color, what it does dim.
+fn hint_spans<'a>(
+    k: &'a str,
+    v: &'a str,
+    th: &crate::theme::Theme,
+    key_color: ratatui::style::Color,
+) -> [(&'a str, Style); 3] {
+    [
+        (k, Style::default().fg(key_color).bg(th.raised).add_modifier(Modifier::BOLD)),
+        (" ", Style::default().bg(th.raised)),
+        (v, Style::default().fg(th.dim).bg(th.raised)),
+    ]
+}
+
+/// The one-row bottom bar: a mode badge (only while the prefix is armed), key hints, then the tip and the
+/// palette shortcut on the right. Whatever does not fit is dropped from the end, never cut in half.
 fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &[(Rect, Hit)]) {
     let th = &app.theme;
-    hud::fill(buf, area, Style::default().bg(th.raised));
+    let base = Style::default().bg(th.raised);
+    hud::fill(buf, area, base);
     let y = area.y;
+    // On a terminal tab the update notice takes the right end of this row.
+    let notice_w = notice_plan(app, Rect::new(area.x, 0, area.width, area.bottom()))
+        .filter(|p| p.y == y)
+        .map_or(0, |p| p.width + 1);
+    let edge = area.right().saturating_sub(notice_w);
     // In a terminal a shell key or a locked pane's shortcut goes to the app: show one that works there.
     let palette = if matches!(app.view, View::Term(_)) {
         app.keymap.term_hint(Action::Palette, app.focused_locked())
     } else {
         app.keymap.hint(Action::Palette)
     };
-    let right = format!("{} commands ", palette.unwrap_or_else(|| "ctrl+a :".into()));
-    let right_w = util::width(&right) as u16;
-    let limit = area.right().saturating_sub(right_w + 1);
-    let mut x = area.x + 1;
-    if app.prefix_armed {
-        x = hud::put(
+    let key = palette.unwrap_or_else(|| format!("{} :", app.keymap.prefix));
+    let right_w = (util::width(&key) + " commands ".len()) as u16;
+    let armed = app.prefix_armed;
+    // Armed: the bar is all about the next key, so the palette shortcut steps aside.
+    let show_right = !armed && area.width >= 50 && edge.saturating_sub(area.x) >= right_w + 12;
+    let limit = if show_right { edge.saturating_sub(right_w + 2) } else { edge };
+    if show_right {
+        let start = edge.saturating_sub(right_w);
+        hud::put_spans(
             buf,
-            x,
+            start,
             y,
-            &format!(" {} ", app.keymap.prefix),
-            Style::default().fg(th.on_accent).bg(th.warn).add_modifier(Modifier::BOLD),
-            limit.saturating_sub(x),
+            &[
+                (key.as_str(), Style::default().fg(th.accent).bg(th.raised).add_modifier(Modifier::BOLD)),
+                (" commands ", th.dim().bg(th.raised)),
+            ],
+            right_w,
         );
-        x += 1;
     }
-    let hover = if app.prefix_armed { None } else { pane_button_hint(app, hits) };
+
+    let mut x = area.x + 1;
+    if armed {
+        // A mode badge: reads as "the next key is a command", with the prefix key that started it.
+        let badge = Style::default().fg(th.on_accent).bg(th.warn).add_modifier(Modifier::BOLD);
+        x = hud::put(buf, x, y, " PREFIX ", badge, limit.saturating_sub(x));
+        x = hud::put(buf, x, y, &format!(" {}  ", app.keymap.prefix), th.dim().bg(th.raised), limit.saturating_sub(x));
+    }
+    let hover = if armed { None } else { pane_button_hint(app, hits) };
     let pane_button = hover.is_some();
-    for (k, v) in hover.map_or_else(|| hints(app), |h| vec![h]) {
-        let need = (util::width(&k) + util::width(&v) + 3) as u16;
-        if x + need > limit {
+    let list = hover.map_or_else(|| hints(app), |h| vec![h]);
+    let key_color = if armed { th.warn } else { th.accent };
+    let sep = "  ·  ";
+    let sep_w = util::width(sep) as u16;
+    // "esc cancel" always keeps its place at the end while armed.
+    let cancel_w = if armed { sep_w + 10 } else { 0 };
+    let mut first = true;
+    for (k, v) in &list {
+        let need = (util::width(k) + 1 + util::width(v)) as u16 + if first { 0 } else { sep_w };
+        if x + need + cancel_w > limit {
             break;
         }
-        x = hud::put(buf, x, y, &k, Style::default().fg(th.accent).bg(th.raised), need);
-        x = hud::put(buf, x, y, &format!(" {v}   "), Style::default().fg(th.dim).bg(th.raised), need);
+        if !first {
+            x = hud::put(buf, x, y, sep, th.dim().bg(th.raised), sep_w);
+        }
+        first = false;
+        x = hud::put_spans(buf, x, y, &hint_spans(k, v, th, key_color), limit.saturating_sub(x));
     }
-    if area.width >= 50 {
-        hud::put_right(buf, area.right(), y, &right, th.dim().bg(th.raised));
+    if armed && x + cancel_w <= limit {
+        x = hud::put(buf, x, y, sep, th.dim().bg(th.raised), sep_w);
+        hud::put_spans(buf, x, y, &hint_spans("esc", "cancel", th, key_color), limit.saturating_sub(x));
     }
-    // The hint shows only if it fits in the space left after the shortcut hints.
-    let tip = format!("tip: {}", current_tip(app));
-    let tip_w = util::width(&tip) as u16;
-    if !app.prefix_armed && !pane_button && x + tip_w + 4 <= limit {
-        hud::put_right(buf, limit.saturating_sub(2), y, &tip, Style::default().fg(th.accent_dim).bg(th.raised));
+    // The tip shows only in the space left after the hints, with a gap on both sides.
+    if !armed && !pane_button {
+        let tip = format!("tip: {}", current_tip(app));
+        let tip_w = util::width(&tip) as u16;
+        let right = limit.saturating_sub(1);
+        if x + tip_w + 4 <= right {
+            hud::put_right(buf, right, y, &tip, Style::default().fg(th.accent_dim).bg(th.raised));
+        }
     }
 }
 
 /// New version notice: bottom right, just above the status bar. On terminal tabs
-/// it drops to the right of the status bar so it never covers the shell's last line.
+/// it drops to the right of the status bar (which leaves room for it).
 fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
-    let Some(version) = app.update_notice() else { return };
-    if area.height < 6 || area.width < 30 || app.overlay.is_some() {
-        return;
-    }
+    let Some(plan) = notice_plan(app, area) else { return };
     let th = &app.theme;
-    let in_term = matches!(app.view, View::Term(_));
-    let y = area.bottom() - if in_term { 1 } else { 2 };
-    let (button, close) = (" update ", " × ");
-    let fixed = (1 + util::width(button) + util::width(close) + 1) as u16;
-    let long = format!(" ↑ NOBLE {version} is available ");
-    let short = format!(" ↑ {version} ");
-    let room = area.width.saturating_sub(fixed + 2) / 2;
-    let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
-    let w = fixed + util::width(&text) as u16;
+    let (y, w) = (plan.y, plan.width);
     let x0 = area.right().saturating_sub(w);
     let bg = Style::default().bg(th.raised);
     let mut x = hud::put(buf, x0, y, "▌", Style::default().fg(th.accent2).bg(th.raised), 1);
-    x = hud::put(buf, x, y, &text, bg.fg(th.fg).add_modifier(Modifier::BOLD), w);
-    x = hud::put(buf, x, y, button, Style::default().fg(th.on_accent).bg(th.accent2).add_modifier(Modifier::BOLD), w);
+    x = hud::put(buf, x, y, &plan.text, bg.fg(th.fg).add_modifier(Modifier::BOLD), w);
+    x = hud::put(
+        buf,
+        x,
+        y,
+        NOTICE_BUTTON,
+        Style::default().fg(th.on_accent).bg(th.accent2).add_modifier(Modifier::BOLD),
+        w,
+    );
     hits.push((Rect::new(x0, y, x - x0, 1), Hit::Update));
     let cx = x;
-    x = hud::put(buf, x, y, close, bg.fg(th.dim), w);
+    x = hud::put(buf, x, y, NOTICE_CLOSE, bg.fg(th.dim), w);
     hud::put(buf, x, y, " ", bg, 1);
     hits.push((Rect::new(cx, y, x - cx, 1), Hit::UpdateDismiss));
 }

@@ -762,19 +762,34 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
         (Some(i), n) => format!("{}/{n}", i + 1),
         (None, n) => format!("{n}"),
     };
-    let hint = "⏎↑ older  ↓ newer  esc close";
-    let right_w = util::width(&count) as u16 + if inner.width >= 60 { util::width(hint) as u16 + 3 } else { 0 };
-    let x = hud::put(buf, inner.x + 1, y, "find ", th.dim().bg(th.raised), inner.width);
+    // The hint's keys in the accent color, the words dim.
+    let hint: [(&str, bool); 6] =
+        [("⏎↑", true), (" older  ", false), ("↓", true), (" newer  ", false), ("esc", true), (" close", false)];
+    let hint_w: u16 = hint.iter().map(|(t, _)| util::width(t) as u16).sum();
+    let wide = inner.width >= 60;
+    let count_w = util::width(&count) as u16;
+    // The counter, then " │ " and the hint.
+    let right_w = count_w + if wide { hint_w + 3 } else { 0 };
+    let bg = th.raised;
+    let x = hud::put(buf, inner.x + 1, y, "find ", th.dim().bg(bg), inner.width);
     let room = inner.right().saturating_sub(x + right_w + 2);
     let query = util::truncate_left(&s.query, room.saturating_sub(1) as usize);
-    let x = hud::put(buf, x, y, &query, th.accent_bold().bg(th.raised), room);
-    hud::put(buf, x, y, "▏", th.accent().bg(th.raised), 1);
+    let x = hud::put(buf, x, y, &query, th.accent_bold().bg(bg), room);
+    hud::put(buf, x, y, "▏", th.accent().bg(bg), 1);
     let mut rx = inner.right().saturating_sub(1);
-    if inner.width >= 60 {
-        rx = hud::put_right(buf, rx, y, hint, th.dim().bg(th.raised)).saturating_sub(3);
+    if wide {
+        let hx = rx.saturating_sub(hint_w);
+        let spans: Vec<(&str, Style)> =
+            hint.iter().map(|&(t, key)| (t, if key { th.accent().bg(bg) } else { th.dim().bg(bg) })).collect();
+        hud::put_spans(buf, hx, y, &spans, hint_w);
+        // A thin divider between the counter and the hint (only when a counter is shown).
+        if count_w > 0 {
+            hud::put(buf, hx.saturating_sub(2), y, "│", th.line().bg(bg), 1);
+        }
+        rx = hx.saturating_sub(3);
     }
     let color = if s.matches.is_empty() && !s.query.is_empty() { th.warn } else { th.accent2 };
-    hud::put_right(buf, rx, y, &count, Style::default().fg(color).bg(th.raised));
+    hud::put_right(buf, rx, y, &count, Style::default().fg(color).bg(bg).add_modifier(Modifier::BOLD));
 }
 
 /// Linear interpolation between two rectangles.

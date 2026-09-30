@@ -445,6 +445,15 @@ impl Theme {
         Style::default().bg(self.sel_bg)
     }
 
+    /// Background of the selected row in a main list (Home projects): a clearer tint than `sel_bg`,
+    /// still weaker than `hover` so a hovered row stays distinct.
+    pub fn sel_strong(&self) -> Color {
+        match self.bg {
+            Color::Rgb(..) => Theme::mix(self.sel_bg, self.accent, 0.10),
+            _ => self.sel_bg,
+        }
+    }
+
     /// Background of a clickable item while it is hovered.
     pub fn hover(&self) -> Color {
         match self.bg {
@@ -781,6 +790,24 @@ mod contrast_tests {
             ("crit/bg", t.crit, t.bg, 3.0),
             ("accent2/bg", t.accent2, t.bg, 3.0),
         ]
+    }
+
+    /// The Home selected row (`sel_strong`): the bold project name (accent; kanagawa's accent is already
+    /// near 3:1 on `sel_bg`) and the branch and time (fg; the Solarized pair is an allowed near miss on `sel_bg`
+    /// already) stay readable on the stronger tint.
+    #[test]
+    fn strong_selection_stays_readable() {
+        let mut failures = Vec::new();
+        for t in THEMES.iter() {
+            let bg = t.sel_strong();
+            for (pair, fg, min) in [("accent", t.accent, 2.7), ("fg", t.fg, 3.8)] {
+                let r = contrast(fg, bg);
+                if r < min {
+                    failures.push(format!("{} {pair}/sel_strong {r:.2}", t.name));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]

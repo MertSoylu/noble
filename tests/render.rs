@@ -5130,3 +5130,57 @@ fn pane_title_rows_fit_every_layout() {
         app.run(Action::CloseTab);
     }
 }
+
+/// The armed-prefix hints come from the keymap: a rebound key is shown, an unbound action is not listed.
+#[test]
+fn prefix_hints_follow_the_keymap() {
+    use noble::keys::Keymap;
+    let ctrl_a = || KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let mut app = demo_app(120, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let mut cfg = app.cfg.keys.clone();
+    // Rebind split-right, drop zoom's prefix keys and close-pane's key.
+    cfg.prefix_bindings.insert("v".into(), "none".into());
+    cfg.prefix_bindings.insert("|".into(), "none".into());
+    cfg.prefix_bindings.insert("%".into(), "split_right".into());
+    cfg.prefix_bindings.insert("z".into(), "none".into());
+    cfg.prefix_bindings.insert("x".into(), "none".into());
+    app.keymap = Keymap::from_config(&cfg);
+    app.on_key(ctrl_a());
+    let text = render(&mut app, 120, 30);
+    save("status-prefix-rebound-120x30", &text);
+    let bar = text.lines().last().unwrap();
+    assert!(bar.contains("PREFIX") && bar.contains("% split right") && bar.contains("esc cancel"), "{bar}");
+    assert!(!bar.contains("zoom") && !bar.contains("close") && !bar.contains("v split"), "{bar}");
+    for (w, h) in SIZES {
+        let t = render(&mut app, w, h);
+        assert!(t.lines().last().unwrap().contains("PREFIX") || w < 20, "{w}x{h}");
+    }
+}
+
+/// A pending prefix is dropped by a click, a paste and an overlay, and Esc; prefix twice sends the key.
+#[test]
+fn prefix_is_cancelled_by_other_input() {
+    use crossterm::event::{Event, MouseButton, MouseEventKind};
+    let ctrl_a = || KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let mut app = demo_app(120, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    app.on_key(ctrl_a());
+    assert!(app.prefix_armed);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 60, 15);
+    assert!(!app.prefix_armed, "a click cancels");
+    app.on_key(ctrl_a());
+    app.handle(AppEvent::Input(Event::Paste("x".into())));
+    assert!(!app.prefix_armed, "a paste cancels");
+    app.on_key(ctrl_a());
+    app.overlay = Some(noble::app::Overlay::Launchers { selected: 0 });
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.prefix_armed, "an overlay key cancels");
+    app.on_key(ctrl_a());
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.prefix_armed && app.overlay.is_none());
+    // Prefix twice: not armed afterwards and no "not bound" toast.
+    app.on_key(ctrl_a());
+    app.on_key(ctrl_a());
+    assert!(!app.prefix_armed);
+}

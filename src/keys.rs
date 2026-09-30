@@ -546,6 +546,18 @@ impl Keymap {
         self.hint_where(action, |k| !locked && !self.shell_first.contains(k))
     }
 
+    /// The key that follows the prefix for an action (the shortest; a tie goes to the default binding
+    /// order, so "t" wins over "c" for a new tab). `None` when the action has no prefix binding.
+    pub fn prefix_key(&self, action: Action) -> Option<String> {
+        let order: Vec<Chord> = default_prefix_bindings().into_iter().map(|(k, _)| k).collect();
+        self.prefix_map
+            .iter()
+            .filter(|(_, a)| **a == action)
+            .map(|(k, _)| (k.to_string(), order.iter().position(|d| d == k).unwrap_or(usize::MAX)))
+            .min_by_key(|(s, pos)| (s.chars().count(), *pos, s.clone()))
+            .map(|(s, _)| s)
+    }
+
     fn hint_where(&self, action: Action, direct_ok: impl Fn(&Chord) -> bool) -> Option<String> {
         let direct = self
             .direct_map

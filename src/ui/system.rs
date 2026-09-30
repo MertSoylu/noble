@@ -183,6 +183,10 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
             &[("/ ", th.accent()), (&app.system.filter, th.accent_bold()), (cursor, th.accent())],
             w,
         );
+        // Match count on the right while a filter is active.
+        if !app.system.filter.is_empty() {
+            hud::put_right(buf, x + w, y, &format!("{} match", procs.len()), th.dim());
+        }
         y += 1;
     }
     // Columns: PID | NAME | CPU% + bar | MEM
@@ -233,6 +237,7 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         let bgc = if selected { th.sel_bg } else { th.bg };
         if selected {
             hud::set_bg_row(buf, inner.x, ry, inner.width, th.sel_bg);
+            hud::put(buf, inner.x, ry, "▌", Style::default().fg(th.accent).bg(th.sel_bg), 1);
         }
         let cpu = p.cpu as f64;
         let mut cx = x;
@@ -256,6 +261,29 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         hud::put(buf, cx, ry, &util::pad_left(&util::fmt_bytes(p.mem), mem_w as usize), th.text().bg(bgc), mem_w);
         hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Proc(p.pid)));
     }
-    let footer = "↑↓ select · c m p n sort · / filter · K terminate · esc back";
-    hud::put(buf, x, inner.bottom() - 1, &util::truncate(footer, w as usize), th.line(), w);
+    // Keys in the accent color, their meaning dimmed.
+    let (k, d) = (th.accent(), th.dim());
+    let sep = ("  ", d);
+    hud::put_spans(
+        buf,
+        x,
+        inner.bottom() - 1,
+        &[
+            ("↑↓", k),
+            (" select", d),
+            sep,
+            ("c m p n", k),
+            (" sort", d),
+            sep,
+            ("/", k),
+            (" filter", d),
+            sep,
+            ("K", k),
+            (" terminate", d),
+            sep,
+            ("esc", k),
+            (" back", d),
+        ],
+        w,
+    );
 }

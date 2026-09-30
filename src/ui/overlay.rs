@@ -580,7 +580,9 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     hud::put_right(buf, x + iw, inner.y, &format!("{}/{}", st.matches.len(), st.all.len()), th.dim());
     hud::hline(buf, inner.x, inner.y + 1, inner.width, "─", th.line());
     let list_y = inner.y + 2;
-    let rows = inner.bottom().saturating_sub(list_y + 1) as usize;
+    // A rule above the key hints when there is room for it.
+    let footer_rule = inner.height >= 8;
+    let rows = inner.bottom().saturating_sub(list_y + 1 + u16::from(footer_rule)) as usize;
     let offset = if st.selected >= rows { st.selected + 1 - rows } else { 0 };
     for (row, idx) in st.matches.iter().enumerate().skip(offset).take(rows) {
         let item = &st.all[*idx];
@@ -588,8 +590,11 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
         let selected = row == st.selected;
         let bgc = if selected { th.sel_bg } else { th.raised };
         hud::set_bg_row(buf, inner.x, y, inner.width, bgc);
-        let marker = if selected { "▶ " } else { "  " };
-        let cx = hud::put(buf, x, y, marker, th.accent().bg(bgc), 2);
+        // Same selection marker as every other list.
+        if selected {
+            hud::put(buf, inner.x, y, "▌", th.accent().bg(bgc), 1);
+        }
+        let cx = x + 2;
         let group_w = 6u16;
         let cx = hud::put(
             buf,
@@ -611,7 +616,13 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     if st.matches.is_empty() {
         hud::put(buf, x, list_y, "no matches", th.dim(), iw);
     }
-    hud::put(buf, x, inner.bottom() - 1, "↑↓ select · ⏎ run · esc close", th.line(), iw);
+    let fy = inner.bottom() - 1;
+    if footer_rule {
+        hud::hline(buf, inner.x, fy - 1, inner.width, "─", th.line());
+    }
+    // Keys in the accent color, their meaning dimmed.
+    let (k, d) = (th.accent2(), th.dim());
+    hud::put_spans(buf, x, fy, &[("↑↓", k), (" select  ", d), ("⏎", k), (" run  ", d), ("esc", k), (" close", d)], iw);
 }
 
 fn help_lines(app: &App) -> Vec<(String, String, bool)> {
@@ -741,7 +752,10 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, scroll: u16, hits: &mut Vec<(Re
     for (i, (k, d, header)) in lines.iter().skip(scroll).take(rows).enumerate() {
         let y = inner.y + i as u16;
         if *header {
-            hud::put(buf, x, y, k, th.accent_bold().bg(th.raised), inner.width - 2);
+            let end = hud::put(buf, x, y, k, th.accent_bold().bg(th.raised), inner.width - 2);
+            // A thin rule after the section name.
+            let rule_w = (inner.right().saturating_sub(1)).saturating_sub(end + 1);
+            hud::hline(buf, end + 1, y, rule_w, "─", th.line().bg(th.raised));
             continue;
         }
         hud::put(
