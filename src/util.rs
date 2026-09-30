@@ -56,6 +56,17 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
+/// Writes how long a command ran, compactly: "2.4s" (one decimal under 10 s), "12s", "1m05s", "1h02m".
+pub fn fmt_took(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..10 => format!("{s}.{}s", d.subsec_millis() / 100),
+        10..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
 /// Writes a past time in one compact unit: "now", "5m", "2h", "3d", "6w".
 pub fn fmt_ago(d: Duration) -> String {
     let s = d.as_secs();
@@ -461,6 +472,13 @@ mod tests {
         assert_eq!(fmt_duration(Duration::from_secs(4 * 86_400 + 3 * 3600)), "4d 3h");
         assert_eq!(fmt_ago(Duration::from_secs(30)), "now");
         assert_eq!(fmt_ago(Duration::from_secs(7200)), "2h");
+        let ms = Duration::from_millis;
+        assert_eq!(fmt_took(ms(40)), "0.0s");
+        assert_eq!(fmt_took(ms(2_460)), "2.4s");
+        assert_eq!(fmt_took(ms(9_999)), "9.9s");
+        assert_eq!(fmt_took(ms(12_700)), "12s");
+        assert_eq!(fmt_took(ms(65_000)), "1m05s");
+        assert_eq!(fmt_took(ms(3_720_000)), "1h02m");
     }
 
     #[test]

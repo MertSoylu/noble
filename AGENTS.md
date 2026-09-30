@@ -106,6 +106,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `App::on_pty_output` treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).
   OSC 9 text / OSC 777 and the bell put an `alert` (◆) on the tab the same way.
+  NOBLE's hooks send `OSC 133;D;<exit code>` before the directory (cmd.exe cannot; the first code of a prompt
+  wins) and `OSC 133;C` when a typed command starts (bash 4.4+ `PS0`, zsh `preexec`, fish `fish_preexec`,
+  pwsh's wrapped `PSConsoleHostReadLine`; `Pane::start_marks`/`ran`). A command that ran
+  (`Pane::command_ran`: the C mark, or for cmd.exe and bash 3.2 a typed line and the last Enter) becomes
+  `Pane::last_result`, shown in the pane title (`ui/terminal.rs` `result_badge`), and a running one shows a
+  live timer whose redraws `App::redraw_after` schedules (`pane::live_timer_next`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme

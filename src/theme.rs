@@ -769,13 +769,17 @@ mod contrast_tests {
 
     /// Foreground/background pairs the UI draws, with their minimum ratio: body text, dim text (3:1, used
     /// for secondary labels), accent text, text on the selection row, and chips (`on_accent` on `accent`).
-    fn pairs(t: &Theme) -> [(&'static str, Color, Color, f64); 5] {
+    /// Glyphs and marks need 3:1 (WCAG non-text contrast): the error color (the hovered close button's
+    /// chip) and `accent2` (search marks on the position bar).
+    fn pairs(t: &Theme) -> [(&'static str, Color, Color, f64); 7] {
         [
             ("fg/bg", t.fg, t.bg, 4.5),
             ("dim/bg", t.dim, t.bg, 3.0),
             ("accent/bg", t.accent, t.bg, 4.5),
             ("fg/sel_bg", t.fg, t.sel_bg, 4.5),
             ("on_accent/accent", t.on_accent, t.accent, 4.5),
+            ("crit/bg", t.crit, t.bg, 3.0),
+            ("accent2/bg", t.accent2, t.bg, 3.0),
         ]
     }
 

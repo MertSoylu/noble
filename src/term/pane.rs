@@ -27,6 +27,15 @@ pub struct Callbacks {
     /// The shell drew a new prompt (OSC 7 / 9;9 / 133): the previous command finished.
     /// See `Callbacks::shell_prompt` for what else that resets.
     pub prompt: bool,
+    /// Exit code of the command that just finished, from `OSC 133;D;<code>` (NOBLE's own hooks send it
+    /// before the directory report; cmd.exe cannot, so it stays `None` there). Taken with `prompt`.
+    /// The first code since the last take wins: NOBLE's hook reads the status before anything else
+    /// runs, and a user's prompt may send its own `133;D;<code>` right after with a different one.
+    pub exit: Option<i32>,
+    /// When the shell last said a command line starts running (`OSC 133;C`: bash's `PS0`, zsh
+    /// `preexec`, fish `fish_preexec`, PowerShell's read-line wrapper). It is not sent for an empty
+    /// line, so it tells a command that ran from an Enter that only brought the prompt back.
+    pub started: Option<std::time::Instant>,
     /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
     /// OSC 8 links (newest last, capped in number).
@@ -44,6 +53,13 @@ impl Callbacks {
         self.prompt = true;
         self.title.clear();
     }
+}
+
+/// An exit code as a shell prints it. PowerShell may report a Windows status such as `3221225786`
+/// (above `i32::MAX`): that is kept as the same 32 bits, the way `$LASTEXITCODE` shows it.
+fn parse_exit_code(raw: &[u8]) -> Option<i32> {
+    let text = std::str::from_utf8(raw).ok()?.trim();
+    text.parse::<i32>().ok().or_else(|| text.parse::<u32>().ok().map(|c| c as i32))
 }
 
 /// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
@@ -152,8 +168,21 @@ impl vt100::Callbacks for Callbacks {
                     self.open_link = Some((line, col, url));
                 }
             }
-            // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished.
-            [b"133", kind, ..] if matches!(kind.first(), Some(b'A' | b'D')) => self.shell_prompt(),
+            // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished,
+            // optionally with its exit code (`133;D;1`). A bare D keeps a code already reported, and
+            // so does a second code: the first one of a prompt is NOBLE's own (see `exit`).
+            [b"133", kind, rest @ ..] if matches!(kind.first(), Some(b'A' | b'D')) => {
+                if kind.first() == Some(&b'D')
+                    && let Some(code) = rest.first().and_then(|c| parse_exit_code(c))
+                {
+                    self.exit.get_or_insert(code);
+                }
+                self.shell_prompt();
+            }
+            // OSC 133;C: the command line typed at the prompt starts running.
+            [b"133", kind, ..] if kind.first() == Some(&b'C') => {
+                self.started = Some(std::time::Instant::now());
+            }
             _ => {}
         }
     }
@@ -485,6 +514,9 @@ impl ShellSpec {
         let mut env = Vec::new();
         match self.kind() {
             ShellKind::Cmd => {
+                // cmd.exe's PROMPT cannot show `%ERRORLEVEL%` (it is not expanded there), so cmd
+                // reports only the directory: its panes show how long a command took, without an
+                // exit code. PowerShell and the Unix shells also send OSC 133;D;<code>.
                 if std::env::var("PROMPT").is_err() {
                     env.push(("PROMPT".into(), r"$E]9;9;$P$E\$P$G".into()));
                 }
@@ -512,10 +544,17 @@ impl ShellSpec {
     }
 }
 
-/// Reports the working directory with OSC 9;9 on every prompt, wrapping the current
-/// prompt (oh-my-posh included). It contains no double quotes so command line
-/// quoting never breaks.
-pub const PWSH_CWD_HOOK: &str = r"$global:__nobleP=$function:prompt; function global:prompt { [Console]::Write([char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); & $global:__nobleP }";
+/// Reports the last command's exit code (OSC 133;D) and the working directory (OSC 9;9) on
+/// every prompt, wrapping the current prompt (oh-my-posh included). `$?` is read first, before
+/// anything resets it: success is 0, a failure is `$LASTEXITCODE` when a program set one, else 1
+/// (a failed cmdlet). A failure is handed on to the wrapped prompt (`Write-Error … Ignore` sets `$?`
+/// to false without printing or recording anything), so a prompt that reports its own status (the
+/// Windows Terminal snippet, oh-my-posh) still sees it. Once PSReadLine is loaded, its
+/// `PSConsoleHostReadLine` is wrapped too: a line that is not blank or only a comment marks the
+/// command's start (OSC 133;C) before it runs. `Get-Variable … -ErrorAction Ignore` and the
+/// `$global:__nobleR` set up front keep a profile's `Set-StrictMode` from breaking the prompt.
+/// It contains no double quotes so command line quoting never breaks.
+pub const PWSH_CWD_HOOK: &str = r"$global:__nobleR=$null; $global:__nobleP=$function:prompt; function global:prompt { $s=$?; if (-not $global:__nobleR -and (Test-Path Function:\PSConsoleHostReadLine)) { $global:__nobleR=$function:PSConsoleHostReadLine; function global:PSConsoleHostReadLine { $l=& $global:__nobleR; if ($l -notmatch '^\s*(#.*)?$') { [Console]::Write([char]27+']133;C'+[char]7) }; $l } }; $c=Get-Variable LASTEXITCODE -Scope Global -ValueOnly -ErrorAction Ignore; $e=1; if ($s) { $e=0 } elseif ($c) { $e=$c }; [Console]::Write([char]27+']133;D;'+$e+[char]7+[char]27+']9;9;'+$executionContext.SessionState.Path.CurrentLocation.ProviderPath+[char]27+'\'); if (-not $s) { Write-Error '' -ErrorAction Ignore }; & $global:__nobleP }";
 
 /// A PowerShell single-quoted string: nothing inside is expanded. PowerShell also takes the
 /// typographic quotes `‘ ’ ‚ ‛` as single quotes, so each of them is doubled too (a file
@@ -628,13 +667,72 @@ pub struct Pane {
     pub launcher: Option<String>,
     pub selection: Option<Selection>,
     pub pid: Option<u32>,
-    /// When the user last pressed Enter: to time the command
-    /// (reset when the prompt comes back).
+    /// When the command at the prompt started: the shell's `OSC 133;C` mark, or, for a shell that
+    /// sends none (cmd.exe, bash 3.2, PowerShell without PSReadLine), the last Enter pressed.
+    /// Reset when the prompt comes back.
     pub command_started: Option<std::time::Instant>,
     /// Key lock: NOBLE's direct shortcuts go to the app in this pane instead (prefix still works).
     pub passthrough: bool,
     /// A prompt signal arrived at least once: the shell integration works, so `command_started` is reliable.
     pub prompted: bool,
+    /// Keys other than Enter (or a paste) reached the shell since its last prompt: the next Enter runs
+    /// a command. An Enter on an empty line brings the prompt back too, but records no result.
+    /// Only a guess, used by shells that do not mark command starts (`start_marks`).
+    pub edited: bool,
+    /// The shell marks when a command starts (`OSC 133;C` seen at least once). Then only that mark
+    /// starts the clock and counts a command as run; Enter keys are not looked at.
+    pub start_marks: bool,
+    /// A command start mark arrived since the last prompt: the shell ran what was typed.
+    pub ran: bool,
+    /// When output last arrived (set on the main thread): a working agent's spinner only turns
+    /// while its pane shows it is busy.
+    pub last_output: Option<std::time::Instant>,
+    /// How the last command at the prompt ended; shown in the pane title until the next one starts.
+    pub last_result: Option<CommandResult>,
+    /// While scrolled back: the offset last chosen here and the lines that arrived before that
+    /// choice. vt100 raises the offset by one for every line that arrives meanwhile (the view stays
+    /// put), so the growth past the chosen offset is the new output below (`new_lines`).
+    /// Only the main thread scrolls, so a `Cell` is enough.
+    scroll_mark: std::cell::Cell<(usize, usize)>,
+}
+
+/// A finished command: exit code (`None` when the shell does not report one, cmd.exe) and run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandResult {
+    pub code: Option<i32>,
+    pub took: std::time::Duration,
+    /// When it finished.
+    pub at: std::time::Instant,
+}
+
+/// A running command shows its live timer in the pane title only after this long.
+pub const TIMER_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Live timer text for a command running for `elapsed`: none before `TIMER_AFTER`, then `0:07` with
+/// seconds for the first minute and `3m` / `1h02m` after it (it is redrawn once a minute then). On
+/// battery it is redrawn once a minute from the start, so the first minute shows the glyph alone.
+pub fn live_timer(elapsed: std::time::Duration, on_battery: bool) -> Option<String> {
+    let s = elapsed.as_secs();
+    Some(match s {
+        _ if elapsed < TIMER_AFTER => return None,
+        0..60 if on_battery => "◷".to_string(),
+        0..60 => format!("◷ 0:{s:02}"),
+        60..3600 => format!("◷ {}m", s / 60),
+        _ => format!("◷ {}h{:02}m", s / 3600, s % 3600 / 60),
+    })
+}
+
+/// When the text of `live_timer` changes next: at `TIMER_AFTER`, then every second of the first
+/// minute (every minute on battery), then at each full minute.
+pub fn live_timer_next(elapsed: std::time::Duration, on_battery: bool) -> std::time::Duration {
+    use std::time::Duration;
+    if elapsed < TIMER_AFTER {
+        return TIMER_AFTER - elapsed;
+    }
+    let step = if elapsed.as_secs() < 60 && !on_battery { 1 } else { 60 };
+    let into = Duration::new(elapsed.as_secs() % step, elapsed.subsec_nanos());
+    // A little past the change, so the redraw never lands just before it.
+    Duration::from_secs(step) - into + Duration::from_millis(5)
 }
 
 pub struct SpawnSpec<'a> {
@@ -753,6 +851,12 @@ impl Pane {
             command_started: None,
             passthrough: false,
             prompted: false,
+            edited: false,
+            start_marks: false,
+            ran: false,
+            last_output: None,
+            last_result: None,
+            scroll_mark: std::cell::Cell::new((0, 0)),
         })
     }
 
@@ -766,7 +870,8 @@ impl Pane {
     }
 
     /// Pastes text; wraps it in bracketed paste when the app wants that.
-    pub fn paste(&self, text: &str) {
+    pub fn paste(&mut self, text: &str) {
+        self.edited = true;
         let bracketed = lock(&self.parser).screen().bracketed_paste();
         self.write(paste_payload(text, bracketed).as_bytes());
     }
@@ -789,15 +894,43 @@ impl Pane {
     /// Scrolls the scrollback; positive = up (older).
     pub fn scroll(&self, delta: i32) {
         let mut p = lock(&self.parser);
-        let cur = p.screen().scrollback() as i32;
-        p.screen_mut().set_scrollback((cur + delta).max(0) as usize);
+        let cur = p.screen().scrollback() as i64;
+        self.set_offset(&mut p, (cur + delta as i64).max(0) as usize);
     }
 
     pub fn scroll_reset(&self) {
         let mut p = lock(&self.parser);
         if p.screen().scrollback() != 0 {
-            p.screen_mut().set_scrollback(0);
+            self.set_offset(&mut p, 0);
         }
+    }
+
+    /// Sets the scroll offset and keeps `scroll_mark` (the count of new lines below) in step.
+    fn set_offset(&self, p: &mut vt100::Parser<Callbacks>, offset: usize) {
+        let arrived = self.arrived(p.screen().scrollback());
+        p.screen_mut().set_scrollback(offset);
+        let now = p.screen().scrollback();
+        self.scroll_mark.set(if now == 0 { (0, 0) } else { (now, arrived) });
+    }
+
+    /// Lines that arrived since scrolling back, at the current offset `cur`.
+    fn arrived(&self, cur: usize) -> usize {
+        if cur == 0 {
+            return 0;
+        }
+        let (chosen, before) = self.scroll_mark.get();
+        before + cur.saturating_sub(chosen)
+    }
+
+    /// New output lines that arrived below the view while it was scrolled back (0 when live).
+    /// Once the scrollback is full the offset stops growing, so the count stops there too.
+    pub fn new_lines(&self) -> usize {
+        self.arrived(self.scroll_offset())
+    }
+
+    /// The scrollback length (lines above the screen), without moving the view.
+    pub fn history_len(&self) -> usize {
+        history_len(lock(&self.parser).screen_mut())
     }
 
     /// The launcher command the pane was opened with is still running: no prompt has come
@@ -837,8 +970,31 @@ impl Pane {
         std::mem::take(&mut lock(&self.parser).callbacks_mut().bell)
     }
 
-    pub fn take_prompt(&self) -> bool {
-        std::mem::take(&mut lock(&self.parser).callbacks_mut().prompt)
+    /// The prompt signal since the last call: `Some` with the exit code the shell reported with it
+    /// (`Some(None)` when it reported none).
+    pub fn take_prompt(&self) -> Option<Option<i32>> {
+        let mut p = lock(&self.parser);
+        let cb = p.callbacks_mut();
+        let exit = cb.exit.take();
+        std::mem::take(&mut cb.prompt).then_some(exit)
+    }
+
+    /// When the shell last marked a command start (`OSC 133;C`), once.
+    pub fn take_started(&self) -> Option<std::time::Instant> {
+        lock(&self.parser).callbacks_mut().started.take()
+    }
+
+    /// Whether the prompt that just came back ends a command that ran: one the shell marked as
+    /// started (`ran`), or, without such marks, a line that was typed (`edited`). Never for the
+    /// shell's first prompt (`prompted`), which also follows a launcher command.
+    pub fn command_ran(&self) -> bool {
+        self.prompted && if self.start_marks { self.ran } else { self.edited }
+    }
+
+    /// How long the command started at the prompt has been running. Only with a working shell
+    /// integration (`prompted`): without prompt signals `command_started` would never reset.
+    pub fn running_for(&self) -> Option<std::time::Duration> {
+        self.command_started.filter(|_| self.prompted).map(|t| t.elapsed())
     }
 
     pub fn take_notice(&self) -> Option<String> {
@@ -902,7 +1058,7 @@ impl Pane {
         let rows = self.size.0 as usize;
         let top = line.saturating_sub(rows / 2);
         let offset = history.saturating_sub(top);
-        lock(&self.parser).screen_mut().set_scrollback(offset);
+        self.set_offset(&mut lock(&self.parser), offset);
     }
 
     /// The OSC 8 link at on-screen (row, col): address and column span.
@@ -1031,6 +1187,18 @@ mod tests {
         assert_eq!(&with[..3], ["-NoLogo", "-NoExit", "-Command"]);
         assert!(with[3].starts_with(PWSH_CWD_HOOK) && with[3].ends_with("; claude"));
         assert!(!PWSH_CWD_HOOK.contains('"'));
+        // The exit code is read first thing in the prompt and reported before the directory.
+        assert!(PWSH_CWD_HOOK.contains("function global:prompt { $s=$?;"));
+        assert!(PWSH_CWD_HOOK.find("]133;D;").unwrap() < PWSH_CWD_HOOK.find("]9;9;").unwrap());
+        // The wrapped prompt still sees a failure in `$?` (a prompt may report its own status).
+        assert!(PWSH_CWD_HOOK.ends_with("if (-not $s) { Write-Error '' -ErrorAction Ignore }; & $global:__nobleP }"));
+        // PSReadLine's read-line is wrapped to mark a command's start, not for a blank line.
+        assert!(PWSH_CWD_HOOK.contains("function global:PSConsoleHostReadLine {"));
+        assert!(
+            PWSH_CWD_HOOK.contains("if ($l -notmatch '^\\s*(#.*)?$') { [Console]::Write([char]27+']133;C'+[char]7) }")
+        );
+        // Set up front, so `Set-StrictMode` does not trip over it in the prompt.
+        assert!(PWSH_CWD_HOOK.starts_with("$global:__nobleR=$null; "));
         assert_eq!(pwsh.args_with_command(None)[3], PWSH_CWD_HOOK);
         assert!(pwsh.extra_env(Some("claude")).is_empty());
         let cmd = ShellSpec::new("cmd.exe", vec![]);
@@ -1251,6 +1419,87 @@ Claude needs your permission",
         assert_eq!(parser.callbacks().notice.as_deref(), Some("Build · done in 3s"));
         parser.process(b"]133;D;0");
         assert!(parser.callbacks().prompt);
+    }
+
+    /// `133;D;<code>` carries the exit code with the prompt signal; a bare `133;D` or `133;A` is a
+    /// prompt without one and does not wipe a code that came just before it.
+    #[test]
+    fn exit_codes_from_prompt_marks() {
+        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        parser.process(b"\x1b]133;D;2\x07\x1b]7;file://h/tmp\x07");
+        assert!(parser.callbacks().prompt);
+        assert_eq!(parser.callbacks().exit, Some(2));
+        parser.process(b"\x1b]133;D\x07\x1b]133;A\x07");
+        assert_eq!(parser.callbacks().exit, Some(2));
+        let cb = parser.callbacks_mut();
+        cb.exit = None;
+        cb.prompt = false;
+        parser.process(b"\x1b]133;D\x07");
+        assert!(parser.callbacks().prompt);
+        assert_eq!(parser.callbacks().exit, None);
+        // PowerShell's $LASTEXITCODE for a crashed Windows program, as signed or unsigned text.
+        for (text, want) in [("0", 0), ("130", 130), ("-1073741510", -1073741510), ("3221225786", -1073741510)] {
+            parser.callbacks_mut().exit = None;
+            parser.process(format!("\x1b]133;D;{text}\x1b\\").as_bytes());
+            assert_eq!(parser.callbacks().exit, Some(want), "{text}");
+        }
+        // Not a number: the prompt still counts, the code is unknown.
+        parser.callbacks_mut().exit = None;
+        parser.process(b"\x1b]133;D;x\x07");
+        assert_eq!(parser.callbacks().exit, None);
+    }
+
+    /// A user's prompt that sends its own `133;D;<code>` right after NOBLE's hook (the Windows
+    /// Terminal snippet, oh-my-posh) cannot hide the real code: the first one of a prompt wins.
+    #[test]
+    fn first_exit_code_of_a_prompt_wins() {
+        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        parser.process(b"\x1b]133;D;3\x07\x1b]9;9;C:/x\x1b\\\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
+        assert_eq!(parser.callbacks().exit, Some(3));
+        let cb = parser.callbacks_mut();
+        let exit = cb.exit.take();
+        cb.prompt = false;
+        assert_eq!(exit, Some(3));
+        // The next prompt reports its own.
+        parser.process(b"\x1b]133;D;0\x07\x1b]133;D;1\x07");
+        assert_eq!(parser.callbacks().exit, Some(0));
+    }
+
+    /// `133;C` marks a command's start without being a prompt signal.
+    #[test]
+    fn command_start_mark() {
+        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        parser.process(b"ls\r\n\x1b]133;C\x07out\r\n");
+        assert!(parser.callbacks().started.is_some());
+        assert!(!parser.callbacks().prompt);
+        parser.callbacks_mut().started = None;
+        parser.process(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert!(parser.callbacks().started.is_none() && parser.callbacks().prompt);
+    }
+
+    #[test]
+    fn live_timer_text_and_schedule() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(live_timer(ms(1500), false), None);
+        assert_eq!(live_timer(ms(7200), false).as_deref(), Some("◷ 0:07"));
+        assert_eq!(live_timer(ms(7200), true).as_deref(), Some("◷"));
+        assert_eq!(live_timer(ms(185_000), false).as_deref(), Some("◷ 3m"));
+        assert_eq!(live_timer(ms(185_000), true).as_deref(), Some("◷ 3m"));
+        assert_eq!(live_timer(ms(3_720_000), false).as_deref(), Some("◷ 1h02m"));
+        // Redraws: when the timer appears, every second in the first minute, then each minute.
+        assert_eq!(live_timer_next(ms(500), false), ms(1500));
+        assert_eq!(live_timer_next(ms(7250), false), ms(755));
+        assert_eq!(live_timer_next(ms(7250), true), ms(52_755));
+        assert_eq!(live_timer_next(ms(185_000), false), ms(55_005));
+        for t in [2000, 7250, 59_900, 60_000, 185_000, 4_000_000] {
+            for battery in [false, true] {
+                let next = live_timer_next(ms(t), battery);
+                // The text never changes before the next redraw.
+                assert_eq!(live_timer(ms(t), battery), live_timer(ms(t) + next - ms(10), battery), "{t} {battery}");
+                assert!(next <= ms(60_005), "{t}");
+            }
+        }
     }
 
     #[test]

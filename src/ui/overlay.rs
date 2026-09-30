@@ -705,7 +705,9 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
     section(&mut v, "MOUSE");
     for (k, d) in [
         ("click", "everything: tabs, rows, buttons, settings"),
-        ("┃ ━ ⤢ ✕", "pane buttons: split right · split down · zoom · close"),
+        ("◫ ⊟ ⤢ ✕", "pane buttons: split right · split down · zoom · close (focused or hovered pane)"),
+        ("double-click title", "zoom / restore the pane"),
+        ("middle-click tab", "close the tab"),
         ("drag border", "resize panes"),
         ("drag text", "select (copied on release)"),
         ("right-click", "paste into terminal"),

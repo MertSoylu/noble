@@ -23,9 +23,9 @@ use crate::keys::Keymap;
 use crate::projects::{Project, ProjectReq};
 use crate::sensors::{self, SensorMode, SensorRequest, Sensors};
 use crate::store::{Recent, UsageHistory, Workspaces};
-use crate::term::Tab;
 use crate::term::layout::{Divider, PaneId};
-use crate::term::pane::{Pane, ShellSpec, resolve_shell};
+use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
+use crate::term::{Tab, TabAlert};
 use crate::theme::Theme;
 
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
@@ -249,6 +249,13 @@ pub enum Hit {
     },
     PaneZoom(PaneId),
     PaneClose(PaneId),
+    /// "↓ live" chip of a pane scrolled back: back to the newest output.
+    ScrollLive(PaneId),
+    /// Position bar of a pane scrolled back: a click jumps to that part of the scrollback.
+    ScrollTrack {
+        pane: PaneId,
+        track: Rect,
+    },
     PaneSplit {
         pane: PaneId,
         dir: crate::term::layout::Dir,
@@ -394,6 +401,39 @@ impl AgentState {
             AgentState::Running => "running",
         }
     }
+
+    /// How much the state asks for attention: the tab strip's dot shows the most urgent
+    /// state among a tab's panes.
+    pub fn urgency(&self) -> u8 {
+        match self {
+            AgentState::NeedsYou => 3,
+            AgentState::Idle => 2,
+            AgentState::Working => 1,
+            AgentState::Running => 0,
+        }
+    }
+}
+
+/// What a pane's title shows about the agent running in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentBadge {
+    pub kind: &'static str,
+    pub state: AgentState,
+    /// Since when it has been working (Unix seconds); only for a Working hook session.
+    pub working_since: Option<i64>,
+    /// Subagents of the session still running.
+    pub subagents: usize,
+}
+
+/// The pane "jump to waiting agent" goes to: in `order` (every pane, in tab order, with its
+/// agent's state), the first one after `current` (cyclic, `current` itself last) that needs
+/// you, else the first whose agent finished its answer. `None`: no agent is waiting.
+pub fn next_waiting_agent(order: &[(PaneId, Option<AgentState>)], current: Option<PaneId>) -> Option<PaneId> {
+    let n = order.len();
+    let start = current.and_then(|c| order.iter().position(|(p, _)| *p == c)).map_or(0, |i| i + 1);
+    [AgentState::NeedsYou, AgentState::Idle]
+        .into_iter()
+        .find_map(|want| (0..n).map(|k| &order[(start + k) % n]).find(|(_, s)| *s == Some(want)).map(|(p, _)| *p))
 }
 
 /// A Claude session's state from its last hook event. While subagents still run the
@@ -419,16 +459,26 @@ pub struct AgentSession {
     pub state: AgentState,
 }
 
+/// How long after its pane's last output a working agent still counts as live (`App::agent_live`).
+pub const AGENT_LIVE: Duration = Duration::from_secs(3);
+
 /// Signals collected from a pane in a single frame.
 struct PaneSignal {
     id: PaneId,
     visible: bool,
     bell: bool,
     notice: Option<String>,
+    /// The shell marked a command start (`OSC 133;C`) at this moment.
+    started: Option<Instant>,
     /// If the prompt returned and the user started a command, that command's duration.
     finished: Option<Duration>,
     /// The pane's directory when its prompt came back.
     cwd: Option<PathBuf>,
+    /// The exit code reported with the prompt (OSC 133;D).
+    exit: Option<i32>,
+    /// The command typed at the prompt ended with a non-zero exit code (never for a launcher command
+    /// or the shell's first prompt; set by `on_pty_output`).
+    failed: bool,
 }
 
 /// Channels to the background services (absent in headless tests).
@@ -517,6 +567,10 @@ pub struct App {
     /// When each pane's shell prompt last came back (Unix seconds): a hook record written
     /// until then belongs to a program that has exited (`clear_agent`).
     agent_cleared: HashMap<PaneId, i64>,
+    /// When each hook-tracked agent started its current stretch of work (Unix seconds): the
+    /// record's time when it turned Working, kept while it stays Working (a `stop` with
+    /// subagents still running does not restart it). Shown as "working 2m" in the pane title.
+    agent_working_since: HashMap<PaneId, i64>,
     last_hook_scan: Instant,
     /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
     pub hooks_installed: bool,
@@ -732,6 +786,7 @@ impl App {
             ui_state: crate::store::UiState::memory(),
             agent_hooks: HashMap::new(),
             agent_cleared: HashMap::new(),
+            agent_working_since: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_installed: false,
             sensor_mode: None,
@@ -798,7 +853,7 @@ impl App {
     }
 
     /// State shown by every screen: notifications and tab markers.
-    fn ui_fingerprint(&self) -> (u64, usize, Vec<(bool, bool)>) {
+    fn ui_fingerprint(&self) -> (u64, usize, Vec<(bool, Option<TabAlert>)>) {
         (self.toast_serial, self.toasts.len(), self.tabs.iter().map(|t| (t.activity, t.alert)).collect())
     }
 
@@ -918,6 +973,24 @@ impl App {
         if matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
             want(Duration::from_millis(500));
         }
+        // The live timer of a command running in a visible pane (see `pane::live_timer`). A pane
+        // running an agent shows the agent's state instead of the timer.
+        let battery = self.on_battery();
+        for id in self.visible_panes().into_iter().filter(|id| self.agent_state(*id).is_none()) {
+            if let Some(elapsed) = self.panes.get(&id).and_then(|p| p.running_for()) {
+                want(crate::term::pane::live_timer_next(elapsed, battery));
+            }
+        }
+        // A working agent in a visible pane: its spinner (see `agent_spinning`), and the minutes
+        // of its "working 2m", which change once a minute (on battery that is its only redraw).
+        if self.agent_spinning() {
+            want(Duration::from_millis(crate::ui::hud::AGENT_SPIN_MS));
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for since in self.visible_panes().into_iter().filter_map(|p| self.agent_badge(p)?.working_since) {
+            let into_minute = (now_ms - since * 1000).rem_euclid(60_000) as u64;
+            want(Duration::from_millis(60_000 - into_minute + 5));
+        }
         let charging = self.sensors.battery().is_some_and(|(b, _)| b.state == crate::battery::PowerState::Charging);
         if charging && matches!(self.view, View::Bridge | View::System) {
             want(Duration::from_millis(450));
@@ -1011,10 +1084,11 @@ impl App {
         }
     }
 
-    /// The state of every pane with a hook record (in pane order), to see whether it changed.
-    fn hook_states(&self) -> Vec<(PaneId, Option<AgentState>)> {
-        let mut states: Vec<_> = self.agent_hooks.iter().map(|(p, rec)| (*p, hook_state(rec))).collect();
-        states.sort_by_key(|(p, _)| *p);
+    /// The state and running subagents of every pane with a hook record (in pane order), to see
+    /// whether they changed.
+    fn hook_states(&self) -> Vec<(PaneId, Option<AgentState>, usize)> {
+        let mut states: Vec<_> = self.agent_hooks.iter().map(|(p, rec)| (*p, hook_state(rec), rec.subagents)).collect();
+        states.sort_by_key(|(p, ..)| *p);
         states
     }
 
@@ -1048,11 +1122,31 @@ impl App {
             }
             live.insert(pane, rec);
         }
+        // A session that stays Working keeps the time it started working; a new stretch starts
+        // at the record that turned it Working.
+        let since: HashMap<PaneId, i64> = live
+            .iter()
+            .filter(|(_, rec)| hook_state(rec) == Some(AgentState::Working))
+            .map(|(pane, rec)| {
+                let was_working = self.agent_hooks.get(pane).and_then(hook_state) == Some(AgentState::Working);
+                let kept = self.agent_working_since.get(pane).copied().filter(|_| was_working);
+                (*pane, kept.unwrap_or(rec.ts))
+            })
+            .collect();
+        self.agent_working_since = since;
         let before = self.hook_states();
         self.agent_hooks = live;
-        // Only Home shows the agent states, and it redraws by the clock only (once a minute on battery):
-        // a changed state has to ask for its own frame.
-        if self.view == View::Bridge && self.hook_states() != before {
+        // The states show on Home, in the pane titles and as the tab strip's dots (the top bar is on
+        // every screen), and those only redraw by the clock (once a minute on battery): a changed state
+        // asks for its own frame. A changed subagent count ("+2") only shows in a visible pane's title.
+        let after = self.hook_states();
+        let state_of = |v: &[(PaneId, Option<AgentState>, usize)]| -> Vec<(PaneId, Option<AgentState>)> {
+            v.iter().map(|(p, s, _)| (*p, *s)).collect()
+        };
+        let shown = |v: &[(PaneId, Option<AgentState>, usize)]| -> Vec<(PaneId, usize)> {
+            v.iter().filter(|(p, ..)| visible.contains(p)).map(|(p, _, n)| (*p, *n)).collect()
+        };
+        if state_of(&after) != state_of(&before) || shown(&after) != shown(&before) {
             self.dirty = true;
         }
         for (pane, rec) in changed {
@@ -1069,8 +1163,11 @@ impl App {
                 visible: visible.contains(&pane),
                 bell: false,
                 notice: None,
+                started: None,
                 finished: None,
                 cwd: None,
+                exit: None,
+                failed: false,
             };
             if sig.visible {
                 continue;
@@ -1090,6 +1187,7 @@ impl App {
     /// notification and stop) writes a newer record and the state comes back.
     fn clear_agent(&mut self, pane: PaneId) {
         self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
+        self.agent_working_since.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
             crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
         }
@@ -1098,6 +1196,7 @@ impl App {
     /// Forgets a closed pane's agent state and deletes its hook record.
     pub(crate) fn forget_agent(&mut self, pane: PaneId) {
         self.agent_cleared.remove(&pane);
+        self.agent_working_since.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
             crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
         }
@@ -1113,8 +1212,49 @@ impl App {
         // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
         let command = p.command.as_deref().filter(|_| p.launch_running());
         let kind = crate::ai::agent_kind(command, &p.label())?;
-        let alert = self.tabs.iter().any(|t| t.alert && t.root.contains(pane));
+        // Only a notice (bell, notification) means the agent asks for the user; a finished or failed command does not.
+        let alert = self.tabs.iter().any(|t| t.alert == Some(TabAlert::Notice) && t.root.contains(pane));
         Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
+    }
+
+    /// The agent part of a pane's title: its state, how long it has been working and its subagents.
+    pub fn agent_badge(&self, pane: PaneId) -> Option<AgentBadge> {
+        let (kind, state) = self.agent_state(pane)?;
+        let rec = self.agent_hooks.get(&pane);
+        let working_since = (state == AgentState::Working)
+            .then(|| self.agent_working_since.get(&pane).copied().or(rec.map(|r| r.ts)))
+            .flatten();
+        Some(AgentBadge { kind, state, working_since, subagents: rec.map_or(0, |r| r.subagents) })
+    }
+
+    /// The most urgent agent state among a tab's panes (the dot in the tab strip).
+    pub fn tab_agent_state(&self, tab: usize) -> Option<AgentState> {
+        let tab = self.tabs.get(tab)?;
+        tab.panes().into_iter().filter_map(|p| self.agent_state(p).map(|(_, s)| s)).max_by_key(AgentState::urgency)
+    }
+
+    /// Panes drawn in the visible terminal tab (only the focused one while zoomed).
+    pub fn visible_panes(&self) -> Vec<PaneId> {
+        match self.view {
+            View::Term(i) => self.tabs.get(i).map(|t| if t.zoomed { vec![t.focus] } else { t.panes() }),
+            _ => None,
+        }
+        .unwrap_or_default()
+    }
+
+    /// Working agents spin (`hud::agent_spinner`) only while one in a visible pane is live
+    /// (`agent_live`) and not on battery; otherwise they show a static "…" and ask for no extra frames.
+    pub fn agent_spinning(&self) -> bool {
+        !self.on_battery() && self.visible_panes().into_iter().any(|p| self.agent_live(p))
+    }
+
+    /// The pane's agent is working and shows it: its pane printed something within `AGENT_LIVE`
+    /// (an agent's own screen animates while it works). A session stays Working after an interrupt
+    /// (Esc sends no hook event) or with a leftover subagent marker; such a stale state must not
+    /// keep the screen redrawing.
+    pub fn agent_live(&self, pane: PaneId) -> bool {
+        matches!(self.agent_state(pane), Some((_, AgentState::Working)))
+            && self.panes.get(&pane).and_then(|p| p.last_output).is_some_and(|t| t.elapsed() < AGENT_LIVE)
     }
 
     /// AI sessions across all tabs (in tab order).
@@ -1137,12 +1277,7 @@ impl App {
     /// Open AI sessions in the project: (agent, state). If the same agent is in
     /// several panes, the state needing most attention is shown.
     pub fn agent_sessions(&self, project: &std::path::Path) -> Vec<(&'static str, AgentState)> {
-        let rank = |s: AgentState| match s {
-            AgentState::NeedsYou => 3,
-            AgentState::Idle => 2,
-            AgentState::Working => 1,
-            AgentState::Running => 0,
-        };
+        let rank = |s: AgentState| s.urgency();
         let mut out: Vec<(&'static str, AgentState)> = Vec::new();
         for s in self.all_agent_sessions() {
             let Some(p) = self.panes.get(&s.pane) else { continue };
@@ -1229,19 +1364,32 @@ impl App {
                 if let Some(c) = pane.take_clipboard() {
                     clip = Some(c);
                 }
+                let started = pane.take_started();
                 let prompt = pane.take_prompt();
                 signals.push(PaneSignal {
                     id: *id,
                     visible: visible.contains(id),
                     bell: pane.take_bell(),
                     notice: pane.take_notice(),
-                    finished: prompt.then(|| pane.command_started.map(|t| t.elapsed())).flatten(),
-                    cwd: prompt.then(|| pane.cwd()),
+                    started,
+                    finished: prompt.and_then(|_| started.or(pane.command_started).map(|t| t.elapsed())),
+                    cwd: prompt.map(|_| pane.cwd()),
+                    exit: prompt.flatten(),
+                    failed: false,
                 });
             }
         }
         let mut shown = signals.iter().any(|s| s.visible);
-        for sig in signals {
+        for mut sig in signals {
+            if let Some(p) = self.panes.get_mut(&sig.id) {
+                p.last_output = Some(Instant::now());
+                // The shell marks command starts: from now on only that mark starts the clock.
+                if let Some(t) = sig.started {
+                    p.start_marks = true;
+                    p.ran = true;
+                    p.command_started = Some(t);
+                }
+            }
             if let Some(cwd) = &sig.cwd {
                 // Command finished: the repo may have changed.
                 self.refresh_git_at(cwd);
@@ -1249,7 +1397,16 @@ impl App {
                 shown |= self.agent_state(sig.id).is_some();
                 self.clear_agent(sig.id);
                 if let Some(p) = self.panes.get_mut(&sig.id) {
+                    // Only a command typed at a prompt counts (`Pane::command_ran`): the shell's first
+                    // prompt (after it starts, or after a launcher command, whose code the shell does
+                    // not know) and an Enter on an empty line leave the last result in place.
+                    if let Some(took) = sig.finished.filter(|_| p.command_ran()) {
+                        p.last_result = Some(CommandResult { code: sig.exit, took, at: Instant::now() });
+                        sig.failed = sig.exit.is_some_and(|code| code != 0);
+                    }
                     p.command_started = None;
+                    p.edited = false;
+                    p.ran = false;
                     p.prompted = true;
                 }
             }
@@ -1271,15 +1428,29 @@ impl App {
         let long = sig
             .finished
             .filter(|d| self.cfg.terminal.notify_after > 0 && d.as_secs() >= self.cfg.terminal.notify_after);
+        let took = long.map(crate::util::fmt_duration);
         let message = if let Some(n) = &sig.notice {
             Some(format!("{title} · {n}"))
-        } else if let Some(d) = long {
-            Some(format!("{title} · done in {}", crate::util::fmt_duration(d)))
+        } else if let Some(took) = took {
+            Some(match sig.exit.filter(|_| sig.failed) {
+                Some(code) => format!("{title} · failed (exit {code}) after {took}"),
+                None => format!("{title} · done in {took}"),
+            })
         } else if sig.bell {
             Some(format!("{title} · needs attention"))
         } else {
             None
         };
+        // The marker on the tab strip: the most urgent thing that happened. A short command that
+        // fails leaves a marker only (no toast, no bell): failures of quick commands are routine.
+        let kind = [
+            (sig.notice.is_some() || sig.bell, TabAlert::Notice),
+            (sig.failed, TabAlert::Failed),
+            (long.is_some(), TabAlert::Done),
+        ]
+        .into_iter()
+        .filter_map(|(on, kind)| on.then_some(kind))
+        .max();
         let tab = &mut self.tabs[ti];
         if sig.visible {
             // On the visible tab only the app's own notice is shown.
@@ -1289,8 +1460,10 @@ impl App {
             return;
         }
         tab.activity = true;
+        if let Some(kind) = kind {
+            tab.raise(kind);
+        }
         let Some(message) = message else { return };
-        tab.alert = true;
         if self.cfg.terminal.notify {
             self.toast(ToastLevel::Info, message);
             self.outer_bell = true;
@@ -1406,7 +1579,7 @@ impl App {
     /// Pastes text into a pane. Text with a line break would run as commands in an app without bracketed paste
     /// (cmd, older PowerShell, a plain `sh`): that asks first.
     pub fn paste_into(&mut self, pane: PaneId, text: String) {
-        let Some(p) = self.panes.get(&pane) else { return };
+        let Some(p) = self.panes.get_mut(&pane) else { return };
         let bracketed = p.parser().screen().bracketed_paste();
         if !bracketed && text.contains(['\n', '\r']) {
             let lines = text.lines().count().max(1);
@@ -1456,7 +1629,7 @@ impl App {
             && let Some(t) = self.tabs.get_mut(i)
         {
             t.activity = false;
-            t.alert = false;
+            t.alert = None;
         }
         // The search closes when the pane closes or focus moves elsewhere.
         if let Some(s) = &self.search
@@ -1568,5 +1741,39 @@ impl App {
 
     pub fn pane_count(&self) -> usize {
         self.panes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Jump to waiting agent": a pane that needs you wins over one whose agent finished, the
+    /// search starts after the focused pane and wraps around (the focused pane comes last), and
+    /// working or unknown agents are never a target.
+    #[test]
+    fn jump_order_prefers_needs_you_then_idle() {
+        use AgentState::*;
+        let order =
+            [(1, None), (2, Some(Idle)), (3, Some(Working)), (4, Some(NeedsYou)), (5, Some(Running)), (6, Some(Idle))];
+        // From Home (no focused pane) the search starts at the first pane.
+        assert_eq!(next_waiting_agent(&order, None), Some(4));
+        assert_eq!(next_waiting_agent(&order, Some(1)), Some(4));
+        // Already on the only pane that needs you: it stays there.
+        assert_eq!(next_waiting_agent(&order, Some(4)), Some(4));
+        // Two panes need you: they alternate, wrapping past the end.
+        let two = [(1, Some(NeedsYou)), (2, Some(Idle)), (3, Some(NeedsYou))];
+        assert_eq!(next_waiting_agent(&two, Some(1)), Some(3));
+        assert_eq!(next_waiting_agent(&two, Some(3)), Some(1));
+        // Nobody needs you: the next finished one after the focused pane, cyclic.
+        let idle = [(1, Some(Idle)), (2, None), (3, Some(Idle)), (4, Some(Working))];
+        assert_eq!(next_waiting_agent(&idle, Some(1)), Some(3));
+        assert_eq!(next_waiting_agent(&idle, Some(3)), Some(1));
+        assert_eq!(next_waiting_agent(&idle, Some(4)), Some(1));
+        // A focused pane that is gone counts as none.
+        assert_eq!(next_waiting_agent(&idle, Some(99)), Some(1));
+        // Nothing waiting.
+        assert_eq!(next_waiting_agent(&[(1, Some(Working)), (2, Some(Running)), (3, None)], Some(1)), None);
+        assert_eq!(next_waiting_agent(&[], None), None);
     }
 }

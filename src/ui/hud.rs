@@ -395,6 +395,15 @@ pub fn spinner(ms: u128) -> &'static str {
     FRAMES[((ms / 120) % 4) as usize]
 }
 
+/// Frame time of the working-agent spinner (`agent_spinner`).
+pub const AGENT_SPIN_MS: u64 = 130;
+
+/// Braille spinner of a working agent (pane title, tab dot); `ms` is any running clock.
+pub fn agent_spinner(ms: u128) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[((ms / AGENT_SPIN_MS as u128) % FRAMES.len() as u128) as usize]
+}
+
 /// Clickable button: " ⏎ Open " — the key in the accent color, background slightly raised.
 pub fn button(buf: &mut Buffer, x: u16, y: u16, key: &str, label: &str, th: &Theme, enabled: bool) -> u16 {
     let bg = th.sel_bg;
@@ -512,6 +521,19 @@ mod tests {
         assert_eq!(rows, ["────┬────", "    │    ", "    ├────", "    │    ", "────┴────"]);
         assert_eq!(frames[0].inner(), Rect::new(0, 1, 4, 3));
         assert_eq!(frames[1].inner(), Rect::new(5, 1, 4, 1));
+    }
+
+    /// The agent spinner cycles through ten single-width braille frames, one per `AGENT_SPIN_MS`.
+    #[test]
+    fn agent_spinner_frames() {
+        let step = AGENT_SPIN_MS as u128;
+        let frames: Vec<&str> = (0..10).map(|i| agent_spinner(i * step)).collect();
+        assert_eq!(frames.concat(), "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+        assert_eq!(agent_spinner(10 * step), "⠋");
+        assert_eq!(agent_spinner(step - 1), "⠋");
+        for f in frames.iter().chain(["…", "◆", "●", "○"].iter()) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(*f), 1, "{f}");
+        }
     }
 
     #[test]

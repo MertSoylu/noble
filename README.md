@@ -49,7 +49,10 @@ tab costs about 0.05% of one core and the Home screen about 0.4%.
 
 **🖥 Real terminals**<br>
 ConPTY on Windows, a PTY on Linux and macOS. Tabs, splits, zoom, drag to resize, scrollback search, `ctrl+click` on URLs
-and `file:line` paths. vim, htop and Claude Code run full-screen with mouse support.
+and `file:line` paths. vim, htop and Claude Code run full-screen with mouse support. Each pane's title shows
+how the last command ended (`✓ 2.4s`, `✗ 1 · 12s`) and a live timer while one runs. Scrolled back, a pane shows a
+position bar with the search matches on it and a `↓ live · 12` chip counting the new lines below. The focused
+or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
 
 </td>
 <td width="50%" valign="top">
@@ -66,7 +69,8 @@ remove one you do not want (⋯ → Remove from list).
 
 **🤖 AI quota and sessions**<br>
 5-hour and weekly limits for Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code, read
-from the logins the CLIs already keep. See which Claude session is working and which one is waiting for you.
+from the logins the CLIs already keep. See which Claude session is working and which one is waiting for you,
+on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you.
 
 </td>
 <td valign="top">
@@ -227,6 +231,7 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass shortcuts to the app (lock / next key) |
+| | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
 <details>
@@ -245,8 +250,13 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
   `K` or `del` terminate (asks first) · `esc` back.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
-  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename ·
+  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
+  middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
+  pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
+  double-click a pane's title to zoom it (again to restore) ·
   drag dividers · drag to select text (copied on release) · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
+  scrolled back, click the position bar in the pane's last column to jump there, or the `↓ live` chip (any key
+  typed into the pane works too) to return to the newest output; the wheel keeps scrolling over both ·
   `shift+drag` selects even inside apps that capture the mouse.
 
 AltGr symbols (`@ { } [ ] \ | ~ €` on Turkish, German, Polish… layouts) are passed through as characters,
@@ -321,7 +331,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
-remove_project send_prefix passthrough update dismiss_update`.
+remove_project send_prefix passthrough jump_to_agent update dismiss_update`.
 
 </details>
 
@@ -360,6 +370,15 @@ background tab lights up the moment Claude asks for permission. A session stays 
 subagents (background ones too) still run, and Claude's idle reminder does not count as needing you. Hooks
 set by an older NOBLE get the new events on the next start.
 
+The pane title leads with the same state: `⠋ claude · working 2m +2` (a spinner, how long it has been working
+and its running subagents), `◆ claude · needs you`, `● claude · your turn`, or `○ codex` for an agent NOBLE can
+only recognize by name. Narrow panes keep the glyph and name, then the glyph alone. Each tab starts with a dot
+for the most urgent state among its panes (◆ needs you, ● your turn, spinner working, ○ running). The spinner
+only turns while a working agent is visible, its pane is printing (an interrupted session stays "working" until
+its next prompt, but stops spinning) and the laptop is plugged in; otherwise it is a still `…`.
+**Prefix `a`** (Jump to Waiting Agent) goes to the next pane, across tabs, whose agent needs you, else to the
+next one whose agent finished its answer.
+
 </details>
 
 <details>
@@ -367,12 +386,18 @@ set by an older NOBLE get the new events on the next start.
 
 <br>
 
-NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, with no setup:
+NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, the last command's exit code from
+OSC 133;D and when a typed command starts from OSC 133;C, with no setup:
 
-- **PowerShell** (Windows and Linux): your existing prompt (oh-my-posh included) is wrapped to emit OSC 9;9.
-- **cmd.exe**: a `PROMPT` that does the same, unless you already have one.
+- **PowerShell** (Windows, Linux and macOS): your existing prompt (oh-my-posh included) is wrapped to emit
+  OSC 133;D (the exit code: 0, else `$LASTEXITCODE`, else 1) and OSC 9;9; your prompt still sees a failed
+  command's `$?`. With PSReadLine (always there in an interactive session) the read-line call is wrapped to
+  emit OSC 133;C before a line that is not blank runs.
+- **cmd.exe**: a `PROMPT` that reports the directory, unless you already have one. cmd cannot report an exit
+  code, so its panes show only how long a command took.
 - **bash, zsh, fish** (Git Bash too): your own `~/.bashrc`, `.zshrc` or `config.fish` loads first, then a
-  small hook reports OSC 7 on every prompt. Starship, oh-my-zsh and friends keep working, and so does a zsh
+  small hook reports the exit code (OSC 133;D) and the directory (OSC 7) on every prompt, and a typed command's
+  start (OSC 133;C: `PS0` in bash 4.4+, `preexec` in zsh, `fish_preexec` in fish). Starship, oh-my-zsh and friends keep working, and so does a zsh
   `ZDOTDIR` of your own. A bash login shell (`-l` / `--login` in `shell_args`) loads `/etc/profile` and your
   `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`. On macOS bash, zsh and fish
   start as login shells, as in Terminal.app and iTerm2 (`/etc/zprofile`, `~/.zprofile` and Homebrew's PATH
@@ -383,7 +408,22 @@ NOBLE learns each pane's working directory from OSC 7 / OSC 9;9, with no setup:
 
 This is what lets splits open in the current directory and sessions restore where you left off. Each prompt (OSC 7, OSC 9;9 or OSC 133) also tells NOBLE
 that the previous command finished: it refreshes that repository's git status and, for background tabs,
-reports long-running commands. OSC 9 / OSC 777 notifications and the bell mark a background tab with `◆`.
+reports long-running commands. A background tab gets a marker in the top bar, after its title, for the most
+urgent thing that happened there: `◆` for an OSC 9 / OSC 777 notification, the bell or an agent that needs you, `✗`
+for a command that ended with a non-zero exit code, `✓` for a long command that finished, `•` for plain output. It
+clears when you open the tab. A split tab shows its pane count (`⊞2`) when the strip has room (in a narrow window
+only on the active tab), and the active tab is framed by accent bars (`▌work ×▐`). When tabs do not fit, `+N`
+keeps the most urgent marker of the hidden ones (`+3 ✗`).
+
+The pane title shows the result of the last command typed at the prompt: `✓ 2.4s` when it worked,
+`✗ 1 · 12s` with its exit code when it failed, `· 12s` in cmd.exe. It stays until the next command starts. A
+command that runs longer than 2 s shows a live timer there instead (`◷ 0:07`, then `◷ 3m` updated once a
+minute; on battery the first minute shows `◷` alone, so an idle pane still redraws at most once a minute).
+The command start mark (OSC 133;C) tells a command that ran from an Enter on an empty, cleared or
+continuation line, which records nothing; the time counts from when the command started, not from the first
+line typed. cmd.exe and bash 3.2 (macOS `/bin/bash`) send no such mark: there the last Enter starts the
+clock and a typed line counts as a command (a line typed and cleared again may repeat the last result).
+On a narrow pane the title drops its folder first, then the tag, then this badge.
 
 </details>
 

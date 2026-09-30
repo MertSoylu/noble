@@ -149,7 +149,8 @@ fn full_session_lifecycle() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let s = h.screen();
-        if s.matches('⤢').count() >= 2 {
+        // Two panes side by side share a joined line; the focused one shows the zoom button.
+        if s.contains('┬') && s.contains('⤢') {
             save("split", &s);
             break;
         }

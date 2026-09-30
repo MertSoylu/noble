@@ -143,9 +143,16 @@ impl App {
             let parser = p.parser();
             (parser.screen().application_cursor(), parser.screen().alternate_screen())
         };
-        // In a shell Enter starts a command: we time its end (prompt return).
-        if k.code == KeyCode::Enter && !alt {
-            p.command_started = Some(Instant::now());
+        // A shell that marks command starts (OSC 133;C) times them itself. For one that does not
+        // (cmd.exe, bash 3.2) the last Enter starts the clock, so a continuation line of a
+        // multi-line command does not count its typing time. Ctrl+C at the prompt drops the line.
+        if !alt && !p.start_marks {
+            if k.code == KeyCode::Enter {
+                p.command_started = Some(Instant::now());
+            } else {
+                let interrupt = k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL);
+                p.edited = !(interrupt && p.command_started.is_none());
+            }
         }
         p.write(&encode_key(&k, app_cursor));
     }
@@ -635,6 +642,16 @@ impl App {
         self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())
     }
 
+    /// The pane under a scroll helper (the position bar or the "↓ live" chip): everything but a
+    /// left click (the wheel, right and middle click) acts on the pane content below it.
+    fn pane_under(&self, x: u16, y: u16, pane: PaneId) -> Option<Hit> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|(r, h)| r.contains(Position { x, y }) && matches!(h, Hit::Pane { pane: p, .. } if *p == pane))
+            .map(|(_, h)| h.clone())
+    }
+
     pub(super) fn tab_of(&self, pane: PaneId) -> Option<usize> {
         self.tabs.iter().position(|t| t.root.contains(pane))
     }
@@ -715,7 +732,13 @@ impl App {
         self.last_click = Some((Instant::now(), x, y));
         // A click ends the keyboard focus on a project's quick actions.
         self.bridge.proj_act = None;
-        let Some(hit) = self.hit_at(x, y) else { return };
+        let Some(mut hit) = self.hit_at(x, y) else { return };
+        if btn != MouseButton::Left
+            && let Hit::ScrollLive(pane) | Hit::ScrollTrack { pane, .. } = hit
+            && let Some(under) = self.pane_under(x, y, pane)
+        {
+            hit = under;
+        }
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
         // Right click: context menu for a tab, a pane title and a project.
         if btn == MouseButton::Right && self.overlay.is_none() {
@@ -744,6 +767,8 @@ impl App {
             Hit::TabBridge => self.view = View::Bridge,
             Hit::TabSystem => self.view = View::System,
             Hit::TabSettings => self.open_settings(),
+            // Middle click closes a tab, as in a browser (asks first while something runs in it).
+            Hit::Tab(i) if btn == MouseButton::Middle => self.request_close_tab(i),
             Hit::Tab(i) => {
                 if double && self.view == View::Term(i) {
                     self.rename_tab_prompt(i);
@@ -754,6 +779,15 @@ impl App {
             }
             Hit::PaneTitle(p) => {
                 self.focus_pane(p);
+                // A double click on the title zooms the pane, or puts it back.
+                if double
+                    && btn == MouseButton::Left
+                    && let Some(ti) = self.tab_of(p)
+                {
+                    self.toggle_zoom(ti, p);
+                    // A third click starts over rather than undoing the zoom.
+                    self.last_click = None;
+                }
             }
             Hit::MenuItem(i) => {
                 let cmd = match &self.overlay {
@@ -816,6 +850,19 @@ impl App {
                 }
             }
             Hit::PaneClose(id) => self.request_close_pane(id),
+            Hit::ScrollLive(id) => {
+                self.focus_pane(id);
+                if let Some(p) = self.panes.get(&id) {
+                    p.scroll_reset();
+                }
+            }
+            Hit::ScrollTrack { pane, track } => {
+                self.focus_pane(pane);
+                if let Some(p) = self.panes.get(&pane) {
+                    let (history, rows) = (p.history_len(), p.size.0 as usize);
+                    p.scroll_to_line(crate::ui::terminal::track_line(track, y, history + rows), history);
+                }
+            }
             Hit::Divider { tab, div } => self.drag = Some(Drag::Divider { tab, div }),
             Hit::Project(i) => {
                 if self.bridge.proj_sel == i && double {
@@ -1035,7 +1082,11 @@ impl App {
             self.settings_follow = false;
             return;
         }
-        match self.hit_at(m.column, m.row) {
+        let hit = match self.hit_at(m.column, m.row) {
+            Some(Hit::ScrollLive(pane) | Hit::ScrollTrack { pane, .. }) => self.pane_under(m.column, m.row, pane),
+            hit => hit,
+        };
+        match hit {
             Some(Hit::Pane { pane, inner }) => {
                 if self.pane_wants_mouse(pane) {
                     self.forward_mouse(pane, inner, m);

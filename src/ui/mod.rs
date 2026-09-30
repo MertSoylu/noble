@@ -6,18 +6,19 @@ pub mod hud;
 mod overlay;
 mod settings;
 mod system;
-mod terminal;
+pub(crate) mod terminal;
 
 pub use settings::settings_width;
-pub use terminal::pane_outline;
+pub use terminal::{PaneButton, pane_outline};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::app::{App, Hit, ToastLevel, View};
+use crate::app::{AgentState, App, Hit, ToastLevel, View};
 use crate::keys::Action;
+use crate::term::TabAlert;
 use crate::util;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -57,7 +58,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
     let cursor = slide(buf, body, app).then_some(cursor).flatten();
     if area.height >= 2 {
-        status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app);
+        status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &hits);
     }
     update_notice(buf, area, app, &mut hits);
     toasts(buf, area, app);
@@ -148,10 +149,31 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     let Some((rect, hit)) = hits.iter().rev().find(|(r, _)| r.contains(pos)) else { return };
     let th = &app.theme;
     match hit {
-        Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) => {}
+        Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) | Hit::ScrollTrack { .. } => {}
         Hit::Divider { .. } => {
             // Draggable edge: highlight the shared frame line (not the title text on it).
             hud::tint_frame(buf, hud::Outline::closed(*rect), th.accent);
+        }
+        Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_) => {
+            // A pane button (" ◫", " ✕ "): its glyph turns into a small chip, close in the error color.
+            // Inverted, so the glyph stays readable in every theme (the error or accent color as text
+            // on the hover background is too faint in some of them).
+            let style = match hit {
+                Hit::PaneClose(_) => Style::default().fg(th.bg).bg(th.crit),
+                _ => Style::default().fg(th.on_accent).bg(th.accent),
+            };
+            if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
+                c.set_style(style.add_modifier(Modifier::BOLD));
+            }
+        }
+        Hit::ScrollLive(_) => {
+            // The "↓ live" chip keeps its colors (its text is chosen for its own background) and
+            // underlines its label.
+            for xx in rect.left() + 1..rect.right().saturating_sub(1) {
+                if let Some(c) = buf.cell_mut((xx, rect.y)) {
+                    c.modifier.insert(Modifier::UNDERLINED);
+                }
+            }
         }
         Hit::TermScheme(_) | Hit::ThemeOption(_) => {
             // A selector row keeps its own colors; a marker is placed on the left edge.
@@ -264,6 +286,70 @@ fn clock_text(app: &App, seconds: bool) -> String {
     now.format(fmt).to_string()
 }
 
+/// One terminal tab of the top bar, measured before it is drawn.
+struct TabCell {
+    title: String,
+    /// The most urgent agent state among the panes (a dot before the title).
+    dot: Option<(&'static str, Style)>,
+    /// "⊞2": the pane count of a split tab, drawn only when `show_split` (there is room).
+    split: Option<String>,
+    show_split: bool,
+    /// What happened in the background (after the title, in its own cell).
+    mark: Option<(&'static str, Style)>,
+    active: bool,
+}
+
+impl TabCell {
+    /// Cells before the title: the edge bar, plus the agent dot and its space.
+    fn lead(&self) -> u16 {
+        if self.dot.is_some() { 3 } else { 1 }
+    }
+
+    /// Width of the tab including its close button and the cell after it.
+    fn width(&self) -> u16 {
+        let split = self.split.as_ref().filter(|_| self.show_split).map_or(0, |s| 1 + util::width(s) as u16);
+        // Title, a space before the close button, "×" and the closing cell.
+        self.lead() + util::width(&self.title) as u16 + split + if self.mark.is_some() { 2 } else { 0 } + 3
+    }
+}
+
+fn tab_cell(app: &App, i: usize, compact: bool, working: &'static str) -> TabCell {
+    let th = &app.theme;
+    let tab = &app.tabs[i];
+    let active = app.view == View::Term(i);
+    // The most urgent agent state among the tab's panes leads the title as a one-cell dot
+    // (two cells with its space; the title gives them up so the tab keeps its width).
+    let state = app.tab_agent_state(i);
+    let dot = state.map(|s| terminal::agent_glyph(s, working, th));
+    let max = if compact { 12 } else { 24 } - if dot.is_some() { 2 } else { 0 };
+    let panes = tab.panes().len();
+    TabCell {
+        title: util::truncate(&app.tab_title(i), max),
+        dot,
+        split: (panes > 1).then(|| format!("⊞{panes}")),
+        show_split: false,
+        // The tab being viewed has seen everything.
+        // A ◆ notice is not repeated after the title when the dot already says the agent needs you.
+        mark: tab_marker(tab, th)
+            .filter(|_| !active && !(tab.alert == Some(TabAlert::Notice) && state == Some(AgentState::NeedsYou)))
+            .map(|(_, glyph, style)| (glyph, style)),
+        active,
+    }
+}
+
+/// The marker of a tab that had something happen in the background, with its rank: a notice or a
+/// bell (◆), a failed command (✗), a long command that finished (✓), plain output (•).
+fn tab_marker(tab: &crate::term::Tab, th: &crate::theme::Theme) -> Option<(u8, &'static str, Style)> {
+    let bold = |c| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    match tab.alert {
+        Some(TabAlert::Notice) => Some((3, "◆", bold(th.warn))),
+        Some(TabAlert::Failed) => Some((2, "✗", bold(th.crit))),
+        Some(TabAlert::Done) => Some((1, "✓", Style::default().fg(th.ok))),
+        None if tab.activity => Some((0, "•", Style::default().fg(th.accent2))),
+        None => None,
+    }
+}
+
 fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     if area.height == 0 {
         return;
@@ -295,32 +381,97 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     }
     x = hud::put(buf, x, y, " │", th.line().bg(th.raised), limit.saturating_sub(x));
     // Terminal tabs: those that do not fit are summarized as "+N".
-    let mut hidden = 0;
-    for i in 0..app.tabs.len() {
-        let active = app.view == View::Term(i);
-        let title = util::truncate(&app.tab_title(i), if compact { 12 } else { 24 });
-        let text = format!(" {title} ");
-        let tw = util::width(&text) as u16 + 2;
-        if x + tw + 4 > limit {
-            hidden = app.tabs.len() - i;
+    let mut cells: Vec<TabCell> = (0..app.tabs.len())
+        .map(|i| tab_cell(app, i, compact, terminal::working_glyph(app, &app.tabs[i].panes())))
+        .collect();
+    let mut widths: Vec<u16> = Vec::new();
+    let mut used = x;
+    for c in &cells {
+        let w = c.width();
+        if used + w + 4 > limit {
             break;
         }
-        let start = x;
-        x = hud::put(buf, x, y, &text, tab_style(active), tw);
-        if app.tabs[i].alert && !active {
-            // Tab that needs attention: highlighted diamond (finished command, bell, notification).
-            hud::put(buf, x - 1, y, "◆", Style::default().fg(th.warn).bg(th.raised).add_modifier(Modifier::BOLD), 1);
-        } else if app.tabs[i].activity && !active {
-            hud::put(buf, x - 1, y, "•", Style::default().fg(th.accent2).bg(th.raised), 1);
+        used += w;
+        widths.push(w);
+    }
+    let mut shown = widths.len();
+    // The "+N" summary carries the most urgent marker of the tabs it hides; a tab gives way
+    // when that does not fit next to the count.
+    let hidden_mark = |from: usize| {
+        (from..app.tabs.len())
+            .filter(|i| app.view != View::Term(*i))
+            .filter_map(|i| tab_marker(&app.tabs[i], th))
+            .max_by_key(|m| m.0)
+    };
+    while shown > 0 && shown < cells.len() {
+        let count = util::width(&format!(" +{} ", cells.len() - shown)) as u16;
+        let need = count + if hidden_mark(shown).is_some() { 2 } else { 0 };
+        if used + need <= limit {
+            break;
         }
+        shown -= 1;
+        used -= widths[shown];
+    }
+    let hidden = cells.len() - shown;
+    if hidden == 0 {
+        // Split counts are the first thing to go: they only appear in what the tabs leave free,
+        // the active tab's first (and only that one in compact mode).
+        let mut slack = limit.saturating_sub(used + 4);
+        let mut order: Vec<usize> = (0..cells.len()).collect();
+        order.sort_by_key(|i| !cells[*i].active);
+        for i in order {
+            let c = &mut cells[i];
+            let Some(split) = &c.split else { continue };
+            let w = 1 + util::width(split) as u16;
+            if (!compact || c.active) && w <= slack {
+                c.show_split = true;
+                slack -= w;
+            }
+        }
+    }
+    for (i, c) in cells.iter().enumerate().take(shown) {
+        let bg = if c.active { th.bg } else { th.raised };
+        let base = tab_style(c.active);
+        let start = x;
+        x = hud::put(buf, x, y, &" ".repeat(c.lead() as usize), base, c.lead());
+        if c.active {
+            // Edge bars: the active tab is more than a color.
+            hud::put(buf, start, y, "▌", Style::default().fg(th.accent).bg(th.bg), 1);
+        }
+        if let Some((glyph, style)) = c.dot {
+            hud::put(buf, start + 1, y, glyph, style.bg(bg), 1);
+        }
+        x = hud::put(buf, x, y, &c.title, base, limit.saturating_sub(x));
+        if let Some(split) = c.split.as_ref().filter(|_| c.show_split) {
+            x = hud::put(buf, x, y, " ", base, 1);
+            x = hud::put(buf, x, y, split, th.dim().bg(bg), limit.saturating_sub(x));
+        }
+        if let Some((glyph, style)) = c.mark {
+            // The marker has its own cell after the title.
+            x = hud::put(buf, x, y, " ", base, 1);
+            x = hud::put(buf, x, y, glyph, style.bg(bg), 1);
+        }
+        x = hud::put(buf, x, y, " ", base, 1);
         hits.push((Rect::new(start, y, x - start, 1), Hit::Tab(i)));
         let cx = x;
-        let bg = if active { th.bg } else { th.raised };
-        x = hud::put(buf, x, y, "× ", Style::default().fg(th.dim).bg(bg), 2);
+        x = hud::put(buf, x, y, "×", Style::default().fg(th.dim).bg(bg), 1);
         hits.push((Rect::new(cx, y, 1, 1), Hit::TabClose(i)));
+        if c.active {
+            x = hud::put(buf, x, y, "▐", Style::default().fg(th.accent).bg(th.bg), 1);
+        } else {
+            x = hud::put(buf, x, y, " ", Style::default().bg(th.raised), 1);
+        }
     }
     if hidden > 0 {
-        x = hud::put(buf, x, y, &format!(" +{hidden} "), th.dim().bg(th.raised), limit.saturating_sub(x));
+        let mark = hidden_mark(shown);
+        let count = format!(" +{hidden}");
+        let mut spans = vec![(count.as_str(), th.dim().bg(th.raised))];
+        if let Some((_, glyph, style)) = mark {
+            spans.push((" ", th.dim().bg(th.raised)));
+            spans.push((glyph, style.bg(th.raised)));
+        }
+        spans.push((" ", th.dim().bg(th.raised)));
+        x = hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x));
     }
     let start = x;
     x = hud::put(buf, x, y, " + ", Style::default().fg(th.accent).bg(th.raised), limit.saturating_sub(x));
@@ -332,6 +483,22 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     let sx = rx.saturating_sub(util::width(settings_label) as u16 + 1);
     hud::put(buf, sx, y, settings_label, tab_style(app.view == View::Settings), util::width(settings_label) as u16);
     hits.push((Rect::new(sx, y, util::width(settings_label) as u16, 1), Hit::TabSettings));
+}
+
+/// The pane button under the mouse, as a status bar hint: its glyph, what it does and the shortcut
+/// that does the same in a pane ("◫ split right · ctrl+a v").
+fn pane_button_hint(app: &App, hits: &[(Rect, Hit)]) -> Option<(String, String)> {
+    let (x, y) = app.hover.filter(|_| app.overlay.is_none() && app.drag_kind().is_none())?;
+    let pos = ratatui::layout::Position { x, y };
+    let (_, hit) = hits.iter().rev().find(|(r, _)| r.contains(pos))?;
+    let (button, pane) = terminal::PaneButton::of_hit(hit)?;
+    let zoomed = app.tabs.iter().any(|t| t.zoomed && t.root.contains(pane));
+    let what = button.what(zoomed);
+    let text = match app.keymap.term_hint(button.action(), app.focused_locked()) {
+        Some(key) => format!("{what} · {key}"),
+        None => what.to_string(),
+    };
+    Some((button.glyph(zoomed).to_string(), text))
 }
 
 /// A few short hints for the context.
@@ -400,6 +567,17 @@ fn hints(app: &App) -> Vec<(String, String)> {
             let key = app.keymap.hint(Action::Passthrough).unwrap_or_default();
             vec![(key, "unlock keys".into()), (app.keymap.prefix.to_string(), "menu".into())]
         }
+        // Scrolled back: a key typed into the pane returns to the newest output (and goes to the app).
+        View::Term(_)
+            if app.focused_pane().and_then(|id| app.panes.get(&id)).is_some_and(|p| p.scroll_offset() > 0) =>
+        {
+            let mut v = Vec::new();
+            if let Some(key) = app.keymap.term_hint(Action::ScrollDown, app.focused_locked()) {
+                v.push((key, "newer".into()));
+            }
+            v.extend([h("any key", "back to live"), (app.keymap.prefix.to_string(), "menu".into())]);
+            v
+        }
         View::Term(_) => vec![
             (app.keymap.prefix.to_string(), "menu".into()),
             h("alt+0", "home"),
@@ -415,12 +593,12 @@ const TIPS: [&str; 10] = [
     "prefix / searches a terminal's scrollback",
     "drag a tab to reorder it · double-click to rename",
     "right-click a tab, a pane title or a project for more",
-    "a background tab shows ◆ when it needs you",
+    "background tab markers: ◆ needs you · ✗ failed · ✓ done",
     "press a on Home to add a folder with your projects",
     "alt+1…9 or prefix n / p switch tabs",
     "Settings → Terminal colors: pick any Windows Terminal scheme",
     "w on Home saves your open tabs as a workspace",
-    "prefix z zooms the focused pane",
+    "prefix z or a double-click on its title zooms a pane",
 ];
 
 /// The hint to show right now (changes every 20 seconds). Until the prefix key has been
@@ -432,7 +610,7 @@ fn current_tip(app: &App) -> String {
     TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()].to_string()
 }
 
-fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
+fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &[(Rect, Hit)]) {
     let th = &app.theme;
     hud::fill(buf, area, Style::default().bg(th.raised));
     let y = area.y;
@@ -457,7 +635,9 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
         );
         x += 1;
     }
-    for (k, v) in hints(app) {
+    let hover = if app.prefix_armed { None } else { pane_button_hint(app, hits) };
+    let pane_button = hover.is_some();
+    for (k, v) in hover.map_or_else(|| hints(app), |h| vec![h]) {
         let need = (util::width(&k) + util::width(&v) + 3) as u16;
         if x + need > limit {
             break;
@@ -471,7 +651,7 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
     // The hint shows only if it fits in the space left after the shortcut hints.
     let tip = format!("tip: {}", current_tip(app));
     let tip_w = util::width(&tip) as u16;
-    if !app.prefix_armed && x + tip_w + 4 <= limit {
+    if !app.prefix_armed && !pane_button && x + tip_w + 4 <= limit {
         hud::put_right(buf, limit.saturating_sub(2), y, &tip, Style::default().fg(th.accent_dim).bg(th.raised));
     }
 }

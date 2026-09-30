@@ -119,6 +119,7 @@ impl App {
                 _ => self.toast(ToastLevel::Info, "select a project on Home first"),
             },
             Action::Passthrough => self.passthrough(),
+            Action::JumpToAgent => self.jump_to_agent(),
             Action::SendPrefix => {
                 let bytes = crate::term::input::encode_key(
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
@@ -249,6 +250,29 @@ impl App {
             self.view = View::Term(n - 1);
             self.tabs[n - 1].activity = false;
         }
+    }
+
+    /// Goes to the next pane whose agent needs you, else to the next one whose agent finished its
+    /// answer (`next_waiting_agent`, across all tabs), focusing its tab; a zoomed tab showing
+    /// another pane is restored so the pane is visible.
+    pub fn jump_to_agent(&mut self) {
+        let order: Vec<_> =
+            self.tabs.iter().flat_map(|t| t.panes()).map(|p| (p, self.agent_state(p).map(|(_, s)| s))).collect();
+        let current = match self.view {
+            View::Term(i) => self.tabs.get(i).map(|t| t.focus),
+            _ => None,
+        };
+        let Some(pane) = super::next_waiting_agent(&order, current) else {
+            self.toast(ToastLevel::Info, "no agent is waiting");
+            return;
+        };
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.root.contains(pane))
+            && tab.zoomed
+            && tab.focus != pane
+        {
+            tab.zoomed = false;
+        }
+        self.focus_pane(pane);
     }
 
     fn cycle_tab(&mut self, delta: i32) {
@@ -650,7 +674,7 @@ impl App {
                 }
             }
             ConfirmAction::Paste { pane, text } => {
-                if let Some(p) = self.panes.get(&pane) {
+                if let Some(p) = self.panes.get_mut(&pane) {
                     p.scroll_reset();
                     p.paste(&text);
                 }

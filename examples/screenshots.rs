@@ -316,8 +316,8 @@ fn terminals(app: &mut App) {
         let seq = "\x1b]0;node\x07\x1b[2J\x1b[H";
         app.panes[&first].parser().process(seq.as_bytes());
     }
-    // The long command in the background tab finished: the ◆ marker.
-    app.tabs[0].alert = true;
+    // The long command in the background tab finished: the ✓ marker.
+    app.tabs[0].alert = Some(noble::term::TabAlert::Done);
     app.tabs[tab].focus = ids[0];
 }
 

@@ -32,8 +32,20 @@ pub struct Tab {
     pub launched: bool,
     /// Did output arrive in the background (dot on the tab strip).
     pub activity: bool,
-    /// Needs attention: a long command finished, the bell rang or the app sent a notification.
-    pub alert: bool,
+    /// What happened in the background that the user has not seen yet (the marker after the tab title).
+    pub alert: Option<TabAlert>,
+}
+
+/// Kinds of background event a tab marker reports. The order is the priority when several happen
+/// before the tab is visited: a later variant replaces an earlier one, never the other way round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TabAlert {
+    /// A long command finished successfully (✓).
+    Done,
+    /// A background command ended with a non-zero exit code (✗).
+    Failed,
+    /// The app sent a notification, the bell rang or an agent needs attention (◆).
+    Notice,
 }
 
 impl Tab {
@@ -47,12 +59,17 @@ impl Tab {
             origin,
             launched: false,
             activity: false,
-            alert: false,
+            alert: None,
         }
     }
 
     pub fn panes(&self) -> Vec<PaneId> {
         self.root.leaves()
+    }
+
+    /// Records a background event; a more urgent kind that is already there stays.
+    pub fn raise(&mut self, kind: TabAlert) {
+        self.alert = self.alert.max(Some(kind));
     }
 }
 

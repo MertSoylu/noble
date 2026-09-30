@@ -1,15 +1,20 @@
 //! Shell integration for bash, zsh and fish: small startup scripts that load the
-//! user's own configuration first and then report the working directory with
-//! OSC 7 on every prompt (PowerShell and cmd are handled in `pane.rs`).
-//! The OSC 7 report is also the "command finished" signal (`Callbacks::prompt`).
+//! user's own configuration first and then report, on every prompt, the last command's
+//! exit code (OSC 133;D;<code>) and the working directory (OSC 7). PowerShell and cmd are
+//! handled in `pane.rs`. The reports are also the "command finished" signal
+//! (`Callbacks::prompt`). Before a typed command line runs they send OSC 133;C (bash 4.4+
+//! `PS0`, zsh `preexec`, fish `fish_preexec`): only that starts NOBLE's clock and records a
+//! result, never an empty line or a continuation line.
 //!
 //! The scripts are written to `<data>/shell/` before a pane starts; a file is only
 //! rewritten when its content changed.
 
 use std::path::{Path, PathBuf};
 
-/// The bash prompt hook shared by the rc and the login script. It runs last in
-/// `PROMPT_COMMAND` (after the user's own commands) and keeps `$?` for prompts that show it.
+/// The bash prompt hook shared by the rc and the login script. `__noble_status` runs first in
+/// `PROMPT_COMMAND` and saves the command's `$?` before the user's own prompt commands can change
+/// it; `__noble_osc7` runs last and reports it (OSC 133;D) with the directory. Both return the
+/// status they found, so `$?` is kept for prompts that show it.
 /// Git Bash (MSYS) and Cygwin show mount points such as `/tmp` or `/usr`: those are turned
 /// into Windows paths with prefixes looked up once (`/c/...` is converted by NOBLE).
 /// The path is percent-encoded byte by byte (`LC_ALL=C`), so spaces, `%`, `;` and
@@ -36,6 +41,10 @@ __noble_urlenc() {
     (( i++ ))
   done
 }
+__noble_status() {
+  __noble_s=$?
+  return $__noble_s
+}
 __noble_osc7() {
   local s=$? p=$PWD u
   if [[ -n $__noble_root ]]; then
@@ -47,13 +56,18 @@ __noble_osc7() {
     esac
   fi
   if [[ $p == *[!-/:_.~a-zA-Z0-9]* ]]; then u=$(__noble_urlenc "$p"); else u=$p; fi
-  builtin printf '\033]7;file://%s%s\a' "${HOSTNAME}" "$u"
+  builtin printf '\033]133;D;%s\a\033]7;file://%s%s\a' "${__noble_s:-$s}" "${HOSTNAME}" "$u"
   return $s
 }
 if [[ ${PROMPT_COMMAND} != *__noble_osc7* ]]; then
   __noble_nl=$'\n'
-  PROMPT_COMMAND="${PROMPT_COMMAND:+${PROMPT_COMMAND}${__noble_nl}}__noble_osc7"
+  PROMPT_COMMAND="__noble_status${__noble_nl}${PROMPT_COMMAND:+${PROMPT_COMMAND}${__noble_nl}}__noble_osc7"
   unset __noble_nl
+fi
+# bash 4.4+ prints PS0 after reading a command line and before running it (never for an empty
+# line): it marks the command's start (OSC 133;C). bash 3.2 ignores it; NOBLE then times from Enter.
+if [[ ${PS0} != *']133;C'* ]]; then
+  PS0=$'\033]133;C\a'"${PS0}"
 fi
 "#
     };
@@ -106,21 +120,35 @@ ZDOTDIR=$NOBLE_USER_ZDOTDIR
 [[ $HISTFILE == $__noble_zdotdir/.zsh_history ]] && HISTFILE=$ZDOTDIR/.zsh_history
 [[ -f $ZDOTDIR/.zshrc ]] && builtin source $ZDOTDIR/.zshrc
 unset __noble_zdotdir
-# The path is percent-encoded byte by byte (`LC_ALL=C`): spaces, `%`, `;` and non-ASCII
-# names survive the round trip through NOBLE.
+# The last command's exit code goes first (OSC 133;D): `$?` is read before anything resets it
+# (every precmd function starts with the command's own status). The path is percent-encoded
+# byte by byte (`LC_ALL=C`): spaces, `%`, `;` and non-ASCII names survive the round trip.
 __noble_osc7() {
+  local s=$?
   emulate -L zsh -o extendedglob
   local LC_ALL=C
+  builtin printf '\033]133;D;%s\a' "$s"
   builtin printf '\033]7;file://%s%s\a' "${HOST}" "${PWD//(#m)[^-\/:_.~a-zA-Z0-9]/%${(l:2::0:)$(( [##16] #MATCH ))}}"
 }
-autoload -Uz add-zsh-hook && add-zsh-hook precmd __noble_osc7
+# A typed command line is about to run (preexec is not called for an empty line): OSC 133;C.
+__noble_preexec() {
+  builtin printf '\033]133;C\a'
+}
+autoload -Uz add-zsh-hook && add-zsh-hook precmd __noble_osc7 && add-zsh-hook preexec __noble_preexec
 "#;
 
-/// fish: loaded with `--init-command` after the user's `config.fish`.
-/// The path is percent-encoded (`string escape --style=url`, fish 3.0+).
+/// fish: loaded with `--init-command` after the user's `config.fish`. The exit code is read
+/// first (an event handler starts with the command's `$status`) and reported with OSC 133;D;
+/// the path is percent-encoded (`string escape --style=url`, fish 3.0+). `fish_preexec` (not
+/// sent for an empty line) marks a command's start with OSC 133;C.
 pub const FISH: &str = r#"# NOBLE shell integration for fish (generated; changes are overwritten).
 function __noble_osc7 --on-event fish_prompt
+    set -l s $status
+    printf '\e]133;D;%s\a' $s
     printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
+end
+function __noble_preexec --on-event fish_preexec
+    printf '\e]133;C\a'
 end
 "#;
 
@@ -194,5 +222,40 @@ mod tests {
         }
         assert!(ZSHRC.contains("[##16]"));
         assert!(FISH.contains("string escape --style=url"));
+    }
+
+    /// Every script reports the last command's exit code (OSC 133;D;<code>) before the directory,
+    /// reading it before anything else runs. (`tests/render.rs` runs a failing command for real.)
+    #[test]
+    fn scripts_report_the_exit_code_first() {
+        for script in [BASH, BASH_LOGIN, ZSHRC, FISH] {
+            let d = script.find("]133;D;%s").unwrap_or_else(|| panic!("no 133;D in {script}"));
+            assert!(d < script.find("]7;file://").unwrap(), "{script}");
+        }
+        for script in [BASH, BASH_LOGIN] {
+            // `$?` is saved by a hook that runs before the user's own PROMPT_COMMAND, and handed on.
+            assert!(script.contains("__noble_s=$?\n  return $__noble_s"), "{script}");
+            assert!(script.contains(r#"PROMPT_COMMAND="__noble_status${__noble_nl}"#), "{script}");
+            assert!(script.contains(r#""${__noble_s:-$s}""#), "{script}");
+            // bash 3.2: no `printf -v`, no `local -n`, no `${var@…}`.
+            assert!(!script.contains("printf -v") && !script.contains("local -n") && !script.contains("@Q}"));
+        }
+        let zsh = &ZSHRC[ZSHRC.find("__noble_osc7() {").unwrap()..];
+        assert!(zsh.starts_with("__noble_osc7() {\n  local s=$?\n"), "{zsh}");
+        let fish = &FISH[FISH.find("--on-event fish_prompt").unwrap()..];
+        assert!(fish.starts_with("--on-event fish_prompt\n    set -l s $status\n"), "{fish}");
+    }
+
+    /// Every script marks a typed command's start (OSC 133;C) from a hook that only runs for a
+    /// command line that is not empty. (`tests/render.rs` checks it for real where the shell exists.)
+    #[test]
+    fn scripts_mark_command_starts() {
+        for script in [BASH, BASH_LOGIN] {
+            assert!(script.contains(r#"PS0=$'\033]133;C\a'"${PS0}""#), "{script}");
+            // Sourcing the script twice does not add a second mark.
+            assert!(script.contains("if [[ ${PS0} != *']133;C'* ]]; then"), "{script}");
+        }
+        assert!(ZSHRC.contains("add-zsh-hook preexec __noble_preexec") && ZSHRC.contains(r"'\033]133;C\a'"));
+        assert!(FISH.contains("--on-event fish_preexec\n    printf '\\e]133;C\\a'"), "{FISH}");
     }
 }

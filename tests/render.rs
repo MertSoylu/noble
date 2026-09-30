@@ -2,7 +2,7 @@
 //! and text dumps are written under `target/audit/` (for visual review).
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -1145,7 +1145,7 @@ fn background_tab_notification_marks_tab() {
         pane.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
     app.handle(AppEvent::PtyOutput);
-    assert!(app.tabs[0].alert);
+    assert!(app.tabs[0].alert.is_some());
     assert!(app.outer_bell);
     assert!(app.toasts.iter().any(|t| t.text.contains("Build finished")), "toast missing");
     let text = render(&mut app, 110, 30);
@@ -1153,7 +1153,7 @@ fn background_tab_notification_marks_tab() {
     assert!(text.lines().next().unwrap().contains('◆'), "{text}");
     app.run(Action::GoTab(1));
     app.tick();
-    assert!(!app.tabs[0].alert);
+    assert!(app.tabs[0].alert.is_none());
     app.run(Action::CloseTab);
     app.run(Action::CloseTab);
 }
@@ -1659,10 +1659,11 @@ fn passthrough_sends_shortcuts_to_the_app() {
     app.on_key(key('z', KeyModifiers::ALT));
     assert!(app.overlay.is_none() && !app.tabs[0].zoomed);
     assert_eq!(app.view, term);
-    // The lock also shows on a pane too narrow for the corner tag.
+    // The lock also shows on a pane too narrow for the corner tag and all its buttons (only close
+    // comes first).
     let narrow = render(&mut app, 16, 10);
     save("term-keys-locked-16x10", &narrow);
-    assert!(narrow.contains('🔒'), "{narrow}");
+    assert!(narrow.contains('🔒') && narrow.contains('✕') && !narrow.contains("KEYS"), "{narrow}");
     // The prefix still works while locked; prefix i unlocks.
     app.on_key(prefix());
     app.on_key(key('i', KeyModifiers::NONE));
@@ -2092,7 +2093,7 @@ fn claude_hook_states_drive_sessions() {
     assert!(app.toasts.is_empty(), "working is not an alert");
     app.apply_hook_records([(pane, rec("notification", Some("Claude needs your permission to use Bash")))].into());
     assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
-    assert!(app.tabs[0].alert);
+    assert!(app.tabs[0].alert.is_some());
     assert!(app.toasts.iter().any(|t| t.text.contains("needs your permission")), "toast missing");
     let text = render(&mut app, 160, 45);
     save("bridge-sessions-160x45", &text);
@@ -2161,7 +2162,7 @@ fn claude_subagents_keep_the_session_working() {
     let (state, n) = apply("notification", now + 3, 1);
     assert_eq!(state, Some(AgentState::NeedsYou), "a subagent asks for permission");
     assert!(n.iter().any(|t| t.contains("needs your permission")), "{n:?}");
-    assert!(app.tabs[0].alert);
+    assert!(app.tabs[0].alert.is_some());
 }
 
 /// Runs the real `noble hook <event>` the way Claude Code's hooks do: inside the pane's
@@ -3909,8 +3910,9 @@ fn empty_menu_keys_do_not_panic() {
     assert!(matches!(app.overlay, Some(Overlay::Menu(_))));
 }
 
-/// A hook state change that shows on Home asks for a redraw itself (on battery Home only redraws by
-/// the minute); a repeated state, or one on a screen that does not show it, does not.
+/// A hook state change asks for a redraw itself (on battery the screens only redraw by the minute):
+/// it shows on Home, in the pane title and as the tab strip's dot on every screen. A repeated state,
+/// or a subagent count change that only a hidden pane's title would show, does not.
 #[test]
 fn agent_state_change_marks_the_frame_dirty() {
     use noble::hooks::HookRecord;
@@ -3920,10 +3922,15 @@ fn agent_state_change_marks_the_frame_dirty() {
     let rec = |event: &str, ts: i64| HookRecord { event: event.into(), message: None, ts, subagents: 0 };
     let now = chrono::Utc::now().timestamp();
 
-    // In the terminal the state is not on screen.
+    // In the terminal the state shows in the pane title and the tab's dot.
     app.take_dirty();
     app.apply_hook_records([(pane, rec("prompt", now))].into());
-    assert!(!app.take_dirty(), "an invisible state change woke the screen");
+    assert!(app.take_dirty(), "the visible pane's state change did not ask for a frame");
+    // On Home a subagent starting keeps the state (Working) and shows nowhere.
+    app.run(Action::Bridge);
+    app.take_dirty();
+    app.apply_hook_records([(pane, HookRecord { subagents: 1, ..rec("prompt", now) })].into());
+    assert!(!app.take_dirty(), "an invisible subagent count change woke the screen");
 
     app.run(Action::Bridge);
     app.take_dirty();
@@ -4001,4 +4008,1099 @@ fn launcher_suffix_goes_with_its_pane_in_a_split_tab() {
     app.run(Action::SplitRight);
     assert_eq!(app.snapshot("s").tabs[1].origin, "proj · notes");
     assert!(app.tab_title(1).starts_with("proj · notes"), "{:?}", app.tab_title(1));
+}
+
+/// The pane title shows how the last command ended (`✓` / `✗ code` / cmd.exe's time alone) and a
+/// live timer while a command runs; a narrow pane drops it before the title loses its folder.
+#[test]
+fn pane_title_shows_the_last_command_result() {
+    use noble::battery::{Battery, PowerState};
+    use noble::term::pane::CommandResult;
+    let mut app = demo_app(110, 30);
+    // Plugged in: the timer counts seconds in its first minute (on battery it shows the glyph alone).
+    let mut sample = app.sensors.last.clone().unwrap();
+    sample.battery = Some(Battery { percent: 80.0, state: PowerState::Full, secs_left: None, secs_to_full: None });
+    app.handle(AppEvent::Sensors(Box::new(sample.clone())));
+    app.new_tab(std::env::temp_dir(), None, Some("result".into()));
+    let id = app.tabs[0].focus;
+    let ms = Duration::from_millis;
+    let title_row = |app: &mut App, w: u16, h: u16| {
+        let text = render(app, w, h);
+        // The pane's title row is the one with its close button.
+        text.lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string()
+    };
+    let set = |app: &mut App, code: Option<i32>, took: Duration| {
+        let p = app.panes.get_mut(&id).unwrap();
+        p.last_result = Some(CommandResult { code, took, at: std::time::Instant::now() });
+    };
+    assert!(!title_row(&mut app, 110, 30).contains('✓'));
+    set(&mut app, Some(0), ms(2460));
+    let row = title_row(&mut app, 110, 30);
+    save("pane-result-ok-110x30", &render(&mut app, 110, 30));
+    assert!(row.contains(" ✓ 2.4s "), "{row}");
+    set(&mut app, Some(1), ms(12_700));
+    let row = title_row(&mut app, 110, 30);
+    assert!(row.contains(" ✗ 1 · 12s "), "{row}");
+    set(&mut app, None, ms(65_000));
+    let row = title_row(&mut app, 110, 30);
+    assert!(row.contains(" · 1m05s ") && !row.contains('✓') && !row.contains('✗'), "{row}");
+    set(&mut app, Some(0), ms(2460));
+
+    // A narrow pane keeps its buttons; the folder goes before the badge (`fit_title`).
+    for (w, h) in [(60, 20), (40, 12), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("pane-result-{w}x{h}"), &text);
+        let row = text.lines().find(|l| l.contains(" ✕ ├")).unwrap_or_default().to_string();
+        assert!(row.contains('✓') || !row.contains(" · "), "{w}x{h}: the folder outranked the badge: {row}");
+        assert_eq!(unicode_width::UnicodeWidthStr::width(row.as_str()), w as usize, "{row}");
+    }
+
+    // A command running: the old result is hidden, the live timer shows after 2 s.
+    {
+        let p = app.panes.get_mut(&id).unwrap();
+        p.prompted = true;
+        p.command_started = Some(std::time::Instant::now() - ms(500));
+    }
+    let row = title_row(&mut app, 110, 30);
+    assert!(!row.contains('✓') && !row.contains('◷'), "{row}");
+    let next = app.redraw_after().unwrap();
+    assert!(next <= ms(1505), "the timer must appear on time: {next:?}");
+    app.panes.get_mut(&id).unwrap().command_started = Some(std::time::Instant::now() - ms(7_300));
+    let row = title_row(&mut app, 110, 30);
+    save("pane-result-timer-110x30", &render(&mut app, 110, 30));
+    assert!(row.contains(" ◷ 0:0"), "{row}");
+    assert!(app.redraw_after().unwrap() <= ms(1005));
+    // After the first minute it redraws once a minute, and not at all off screen.
+    app.panes.get_mut(&id).unwrap().command_started = Some(std::time::Instant::now() - ms(125_000));
+    assert!(title_row(&mut app, 110, 30).contains(" ◷ 2m "));
+    // On battery the first minute shows the glyph alone and redraws only when the minute is up.
+    sample.battery =
+        Some(Battery { percent: 80.0, state: PowerState::Discharging, secs_left: None, secs_to_full: None });
+    app.handle(AppEvent::Sensors(Box::new(sample)));
+    app.panes.get_mut(&id).unwrap().command_started = Some(std::time::Instant::now() - ms(7_300));
+    let row = title_row(&mut app, 110, 30);
+    assert!(row.contains(" ◷ ") && !row.contains("0:0"), "{row}");
+    assert!(app.redraw_after().unwrap() > ms(1005) || chrono::Local::now().format("%S").to_string() == "59");
+    app.view = View::Bridge;
+    assert!(app.redraw_after().unwrap() <= ms(1005) || !app.live_clock());
+    app.view = View::Term(0);
+    app.run(Action::CloseTab);
+}
+
+/// A real command that fails, in every installed shell: the prompt reports its exit code (OSC
+/// 133;D) and the pane title shows it; cmd.exe cannot report one, so only its time shows there.
+/// A command that works shows `✓`; the first prompt of the shell records nothing.
+#[test]
+fn failing_command_shows_its_exit_code() {
+    check_exit_code("");
+    if cfg!(windows) {
+        check_exit_code("cmd.exe");
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_exit_code(&git_bash.display().to_string());
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_exit_code(&path.display().to_string());
+            }
+        }
+    }
+}
+
+fn check_exit_code(shell: &str) {
+    let mut app = demo_app(110, 30);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let kind = app.shell.label().to_lowercase();
+    app.new_tab(std::env::temp_dir(), None, Some("exit".into()));
+    let id = app.tabs[0].focus;
+    pump_until(&mut app, &format!("{kind}: first prompt"), |a| a.panes[&id].prompted);
+    // pwsh prints its prompt before PSReadLine is ready (slowest on macOS): let it settle.
+    wait_idle(&mut app, id);
+    assert_eq!(app.panes[&id].last_result, None, "{kind}: the first prompt is not a command");
+    // Typed through NOBLE's own key handling, as a user does (that is what starts the clock).
+    let type_line = |app: &mut App, line: &str| {
+        for c in line.chars() {
+            app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ))));
+        }
+        app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))));
+    };
+    let (failing, want) = match kind.as_str() {
+        "cmd" => ("cmd /c exit 3", None),
+        "pwsh" | "powershell" if cfg!(windows) => ("cmd /c exit 3", Some(3)),
+        _ => ("sh -c 'exit 3'", Some(3)),
+    };
+    type_line(&mut app, failing);
+    pump_until(&mut app, &format!("{kind}: result of `{failing}`"), |a| a.panes[&id].last_result.is_some());
+    let result = app.panes[&id].last_result.unwrap();
+    assert_eq!(result.code, want, "{kind}: exit code of `{failing}`");
+    let text = render(&mut app, 110, 30);
+    let tag = kind.replace(' ', "-");
+    save(&format!("pane-exit-code-{tag}"), &text);
+    let row = text.lines().find(|l| l.contains(" ✕ ")).unwrap_or_default();
+    let badge = if want.is_some() { " ✗ 3 · " } else { " · " };
+    assert!(row.contains(badge), "{kind}: {row}");
+    // Shells that mark a command's start (OSC 133;C) are timed by that mark: zsh, fish, bash 4.4+
+    // (`PS0`) and PowerShell with PSReadLine. cmd.exe and bash 3.2 cannot; they fall back to Enter.
+    let marks = app.panes[&id].start_marks;
+    let expect_marks = match kind.as_str() {
+        "zsh" | "fish" => Some(true),
+        "cmd" => Some(false),
+        "bash" => Some(bash_has_ps0(shell)),
+        // PSReadLine is always there in an interactive Windows PowerShell / pwsh on Windows; checked
+        // for real on Windows only.
+        "pwsh" | "powershell" if cfg!(windows) => Some(true),
+        _ => None,
+    };
+    if let Some(expect) = expect_marks {
+        assert_eq!(marks, expect, "{kind}: command start marks");
+    }
+
+    // A command that works; the next prompt replaces the result.
+    wait_idle(&mut app, id);
+    type_line(&mut app, "cd .");
+    pump_until(&mut app, &format!("{kind}: result of `cd .`"), |a| {
+        a.panes[&id].last_result.is_some_and(|r| r.code != want || r.at > result.at)
+    });
+    let ok = app.panes[&id].last_result.unwrap();
+    assert_eq!(ok.code, want.map(|_| 0), "{kind}: exit code of `cd .`");
+    // An Enter on an empty line brings the prompt back but keeps the result.
+    wait_idle(&mut app, id);
+    type_line(&mut app, "");
+    wait_idle(&mut app, id);
+    assert_eq!(app.panes[&id].last_result, Some(ok), "{kind}: an empty line replaced the result");
+    if marks {
+        // A line typed and cleared again runs nothing: with start marks that is known for sure.
+        app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))));
+        app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        ))));
+        wait_idle(&mut app, id);
+        type_line(&mut app, "");
+        wait_idle(&mut app, id);
+        assert_eq!(app.panes[&id].last_result, Some(ok), "{kind}: a cleared line replaced the result");
+        assert!(app.panes[&id].command_started.is_none(), "{kind}: the clock runs after a cleared line");
+    }
+    app.run(Action::CloseTab);
+}
+
+/// Without start marks every Enter restarts the command clock (so a continuation line's typing time
+/// is not counted) and a typed line counts as a command. Once the shell marks command starts
+/// (OSC 133;C) only the mark starts the clock and records a result: an Enter on an empty, cleared or
+/// continuation line runs nothing and shows no timer. The marks are fed by hand into a pane whose
+/// command sleeps, so the shell itself adds none.
+#[test]
+fn command_start_marks_decide_what_ran() {
+    let mut app = demo_app(110, 30);
+    let wait = match app.shell.label().to_lowercase().as_str() {
+        "cmd" => "ping -n 60 127.0.0.1 >nul",
+        "pwsh" | "powershell" => "Start-Sleep 60",
+        _ => "sleep 60",
+    };
+    app.new_tab(std::env::temp_dir(), Some(wait), None);
+    let id = app.tabs[0].focus;
+    std::thread::sleep(Duration::from_millis(800));
+    app.pump();
+    app.panes.get_mut(&id).unwrap().prompted = true;
+    let key = |app: &mut App, code: KeyCode| {
+        app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(code, KeyModifiers::NONE))));
+    };
+    let feed = |app: &mut App, bytes: &[u8]| {
+        let pane = &app.panes[&id];
+        pane.parser().process(bytes);
+        pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        app.handle(AppEvent::PtyOutput);
+    };
+    // No marks: the last Enter starts the clock, a typed line is a command.
+    key(&mut app, KeyCode::Char('x'));
+    key(&mut app, KeyCode::Enter);
+    let first = app.panes[&id].command_started.expect("Enter starts the clock");
+    std::thread::sleep(Duration::from_millis(30));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.panes[&id].command_started.unwrap() > first, "a later Enter restarts the clock");
+    feed(&mut app, b"\x1b]133;D;1\x07");
+    let guessed = app.panes[&id].last_result.expect("a typed line counts");
+    assert_eq!(guessed.code, Some(1));
+    assert!(guessed.took < Duration::from_millis(30), "{:?}", guessed.took);
+
+    // The shell marks a start: the mark starts the clock, later Enters (input for the command) do not.
+    key(&mut app, KeyCode::Char('x'));
+    key(&mut app, KeyCode::Enter);
+    feed(&mut app, b"\x1b]133;C\x07");
+    let (marks, ran, started) = {
+        let p = &app.panes[&id];
+        (p.start_marks, p.ran, p.command_started)
+    };
+    assert!(marks && ran);
+    let started = started.expect("the mark starts the clock");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.panes[&id].command_started, Some(started));
+    feed(&mut app, b"\x1b]133;D;4\x07");
+    let result = app.panes[&id].last_result.unwrap();
+    assert_eq!(result.code, Some(4));
+    assert!(!app.panes[&id].ran && app.panes[&id].command_started.is_none());
+
+    // No mark before the prompt: a cleared line (or a continuation line) ran nothing.
+    key(&mut app, KeyCode::Char('x'));
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.panes[&id].command_started.is_none() && app.panes[&id].running_for().is_none());
+    feed(&mut app, b"\x1b]133;D;4\x07");
+    assert_eq!(app.panes[&id].last_result, Some(result), "a line that ran nothing replaced the result");
+    let row = render(&mut app, 110, 30).lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string();
+    assert!(row.contains(" ✗ 4 · ") && !row.contains('◷'), "{row}");
+    app.run(Action::CloseTab);
+}
+
+/// Whether this bash has `PS0` (4.4+; macOS `/bin/bash` is 3.2).
+fn bash_has_ps0(shell: &str) -> bool {
+    let program = if shell.is_empty() { "bash" } else { shell };
+    let out = std::process::Command::new(program).arg("--version").output().expect("bash --version");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = text.split("version ").nth(1).unwrap_or_default();
+    let mut parts = version.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse::<u32>().ok());
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (4, 4)
+}
+
+/// A hook record as `noble hook` writes it.
+fn hook_rec(event: &str, ts: i64, subagents: usize) -> noble::hooks::HookRecord {
+    noble::hooks::HookRecord {
+        event: event.into(),
+        message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
+        ts,
+        subagents,
+    }
+}
+
+/// Renders and returns the buffer too (to check colors).
+fn render_buf(app: &mut App, w: u16, h: u16) -> (String, ratatui::buffer::Buffer) {
+    let text = render(app, w, h);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| noble::ui::draw(f, app)).unwrap();
+    (text, term.backend().buffer().clone())
+}
+
+/// Plugs the laptop in (`plugged`) or runs it on battery.
+fn set_power(app: &mut App, plugged: bool) {
+    use noble::battery::{Battery, PowerState};
+    let mut sample = app.sensors.last.clone().unwrap();
+    let state = if plugged { PowerState::Full } else { PowerState::Discharging };
+    sample.battery = Some(Battery { percent: 80.0, state, secs_left: None, secs_to_full: None });
+    app.handle(AppEvent::Sensors(Box::new(sample)));
+}
+
+/// Nothing asks for fast frames: only the top bar's clock (once a minute) and the like.
+fn idle_redraw(app: &App) -> bool {
+    use chrono::Timelike;
+    app.redraw_after().is_none_or(|d| d > Duration::from_millis(150)) || chrono::Local::now().second() == 59
+}
+
+const SPIN: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/// The pane title leads with the agent's state: a spinner (a static "…" on battery) with
+/// "claude · working 2m +2", "◆ … needs you" in the warning color, "● … your turn"; narrow panes
+/// keep the glyph and kind, then the glyph alone. Only a visible working agent asks for fast frames.
+#[test]
+fn pane_title_shows_the_agent_state() {
+    use noble::app::AgentState;
+    let mut app = demo_app(110, 30);
+    set_power(&mut app, true);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    app.toasts.clear();
+    let title_row = |text: &str| text.lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string();
+    // No agent: no extra frames (the idle cost stays one frame a minute).
+    render(&mut app, 110, 30);
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+
+    let now = chrono::Utc::now().timestamp();
+    app.take_dirty();
+    app.apply_hook_records([(pane, hook_rec("prompt", now - 125, 2))].into());
+    assert!(app.take_dirty(), "a changed state in the visible tab asks for a frame");
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+    // Working but its pane is silent (an interrupt sends no hook event): a static glyph and no
+    // fast frames, however long the record stays.
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.contains(" … claude · working 2m +2 · "), "{row}");
+    assert!(idle_redraw(&app), "a stale working state costs nothing: {:?}", app.redraw_after());
+    app.panes.get_mut(&pane).unwrap().last_output = Some(Instant::now() - noble::app::AGENT_LIVE);
+    render(&mut app, 110, 30);
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    // Its pane shows output: the spinner turns.
+    app.panes.get_mut(&pane).unwrap().last_output = Some(Instant::now());
+    let text = render(&mut app, 110, 30);
+    save("pane-agent-working-110x30", &text);
+    let row = title_row(&text);
+    assert!(row.contains(" claude · working 2m +2 · "), "{row}");
+    let at = row.find(" claude · working").unwrap();
+    let glyph = row[..at].chars().last().unwrap();
+    assert!(SPIN.contains(glyph), "spinner frame expected: {row}");
+    assert!(app.redraw_after().unwrap() <= Duration::from_millis(150), "the spinner turns");
+    // The main answer ends while a subagent still runs: still working, still since the prompt.
+    app.apply_hook_records([(pane, hook_rec("stop", now - 5, 1))].into());
+    assert!(app.take_dirty(), "the subagent count shows in the visible title");
+    assert!(title_row(&render(&mut app, 110, 30)).contains(" claude · working 2m +1 · "));
+
+    // On battery the glyph is static and nothing spins; the minute count still moves on.
+    set_power(&mut app, false);
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.contains(" … claude · working 2m +1 "), "{row}");
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    assert!(app.redraw_after().unwrap() <= Duration::from_millis(60_005));
+    // On another screen a working agent costs nothing.
+    set_power(&mut app, true);
+    app.view = View::System;
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    app.view = View::Term(0);
+
+    // Narrow panes: the folder goes first, then the state, and the glyph and kind stay; the
+    // buttons stay too (`fit_title`).
+    app.panes.get_mut(&pane).unwrap().last_output = Some(Instant::now());
+    for (w, h, want, gone) in [(60, 20, "working 2m", ""), (40, 12, "working 2m", ""), (30, 8, " claude", "working")] {
+        let text = render(&mut app, w, h);
+        save(&format!("pane-agent-working-{w}x{h}"), &text);
+        let row = text.lines().find(|l| l.contains('✕')).unwrap_or_default().to_string();
+        assert!(row.chars().any(|c| SPIN.contains(c)), "{w}x{h}: {row}");
+        assert!(row.contains(want), "{w}x{h}: {row}");
+        assert!(gone.is_empty() || !row.contains(gone), "{w}x{h}: {row}");
+    }
+
+    // Needs you: the whole part in the warning color, bold.
+    app.apply_hook_records([(pane, hook_rec("notification", now, 0))].into());
+    assert!(app.take_dirty());
+    let (text, buf) = render_buf(&mut app, 110, 30);
+    save("pane-agent-needs-you-110x30", &text);
+    let row = title_row(&text);
+    assert!(row.contains("◆ claude · needs you · "), "{row}");
+    let y = text.lines().position(|l| l.contains(" ✕ ")).unwrap() as u16;
+    let x = (0..110).find(|x| buf[(*x, y)].symbol() == "◆").unwrap();
+    assert_eq!(buf[(x, y)].fg, app.theme.warn);
+    assert!(buf[(x + 2, y)].modifier.contains(ratatui::style::Modifier::BOLD));
+    assert!(idle_redraw(&app), "nothing spins while it waits: {:?}", app.redraw_after());
+
+    // Your turn.
+    app.apply_hook_records([(pane, hook_rec("stop", now + 1, 0))].into());
+    let (text, buf) = render_buf(&mut app, 110, 30);
+    save("pane-agent-your-turn-110x30", &text);
+    let row = title_row(&text);
+    assert!(row.contains("● claude · your turn · "), "{row}");
+    let y = text.lines().position(|l| l.contains(" ✕ ")).unwrap() as u16;
+    let x = (0..110).find(|x| buf[(*x, y)].symbol() == "●").unwrap();
+    assert_eq!(buf[(x, y)].fg, app.theme.ok);
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    app.run(Action::CloseTab);
+}
+
+/// The tab strip leads each tab's title with the most urgent agent state among its panes:
+/// ◆ needs you, ● your turn, a spinner (or "…") while working, ○ unknown.
+#[test]
+fn tab_strip_shows_agent_dots() {
+    let mut app = demo_app(120, 30);
+    set_power(&mut app, true);
+    app.new_tab(std::env::temp_dir(), None, None);
+    app.run(Action::SplitRight);
+    let (a, b) = (app.tabs[0].panes()[0], app.tabs[0].panes()[1]);
+    app.new_tab(std::env::temp_dir(), None, None);
+    let c = app.tabs[1].focus;
+    app.new_tab(std::env::temp_dir(), None, None);
+    for (tab, name) in app.tabs.iter_mut().zip(["first", "second", "third"]) {
+        tab.name = Some(name.into());
+    }
+    let now = chrono::Utc::now().timestamp();
+    // Tab 1: one pane finished and one needs you, so ◆. Tab 2: working.
+    app.view = View::Term(2);
+    app.take_dirty();
+    app.apply_hook_records(
+        [(a, hook_rec("stop", now, 0)), (b, hook_rec("notification", now, 0)), (c, hook_rec("prompt", now, 0))].into(),
+    );
+    assert!(app.take_dirty(), "the dots of other tabs changed");
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-agent-dots-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    assert!(top.contains(" ◆ first"), "{top}");
+    // No working pane is visible (tab 3 is shown): the working dot is static.
+    assert!(top.contains(" … second"), "{top}");
+    assert!(top.contains("▌third ×▐") && !top.contains('○'), "{top}");
+    // The agent dot already says "needs you": the notice does not repeat as a marker.
+    assert_eq!(top.matches('◆').count(), 1, "{top}");
+    assert!(idle_redraw(&app), "a working agent in a hidden tab costs nothing: {:?}", app.redraw_after());
+    let x = (0..120).find(|x| buf[(*x, 0)].symbol() == "◆").unwrap();
+    assert_eq!(buf[(x, 0)].fg, app.theme.warn);
+    // Showing the working tab: its dot spins with the pane title while the pane shows output.
+    app.view = View::Term(1);
+    let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(top.contains("▌… second"), "a silent working pane does not spin: {top}");
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    app.panes.get_mut(&c).unwrap().last_output = Some(Instant::now());
+    let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(top.chars().any(|ch| SPIN.contains(ch)), "{top}");
+    assert!(app.redraw_after().unwrap() <= Duration::from_millis(150));
+    // The finished pane alone: ●.
+    app.apply_hook_records([(a, hook_rec("stop", now, 0)), (c, hook_rec("prompt", now, 0))].into());
+    let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(top.contains(" ● first"), "{top}");
+    // Small sizes keep the strip within bounds.
+    for (w, h) in [(80, 24), (60, 20), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("tabs-agent-dots-{w}x{h}"), &text);
+        assert!(text.lines().next().unwrap().chars().count() <= w as usize);
+    }
+    for _ in 0..3 {
+        app.view = View::Term(0);
+        app.run(Action::CloseTab);
+    }
+}
+
+/// Opens a tab with a fixed name (the automatic name is the folder).
+fn named_tab(app: &mut App, name: &str) {
+    app.new_tab(std::env::temp_dir(), None, None);
+    app.tabs.last_mut().unwrap().name = Some(name.into());
+}
+
+/// The top bar's tab markers say what happened in a background tab: ◆ notice, ✗ failed command,
+/// ✓ long command done, • output. The marker has its own cell after the title.
+#[test]
+fn tab_markers_are_typed() {
+    use noble::term::TabAlert;
+    let mut app = demo_app(120, 30);
+    for name in ["notice", "failed", "done", "quiet", "active"] {
+        named_tab(&mut app, name);
+    }
+    app.tabs[0].raise(TabAlert::Notice);
+    app.tabs[1].raise(TabAlert::Failed);
+    app.tabs[2].raise(TabAlert::Done);
+    app.tabs[3].activity = true;
+    assert_eq!(app.view, View::Term(4));
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-markers-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    for row in ["notice ◆ ×", "failed ✗ ×", "done ✓ ×", "quiet • ×"] {
+        assert!(top.contains(row), "{row}: {top}");
+    }
+    let th = &app.theme;
+    let color = |glyph: &str| {
+        let x = (0..120u16).find(|x| buf[(*x, 0)].symbol() == glyph).unwrap();
+        buf[(x, 0)].fg
+    };
+    assert_eq!(color("◆"), th.warn);
+    assert_eq!(color("✗"), th.crit);
+    assert_eq!(color("✓"), th.ok);
+    assert_eq!(color("•"), th.accent2);
+    // Nothing overwrites the title's last letter, and the active tab has no marker.
+    assert!(top.contains("notice") && top.contains("▌active ×▐"), "{top}");
+    // Priority: a notice or failure beats a finished command, which beats plain output; less urgent
+    // events never replace a more urgent one.
+    let t = &mut app.tabs[3];
+    t.raise(TabAlert::Done);
+    t.raise(TabAlert::Failed);
+    t.raise(TabAlert::Done);
+    assert_eq!(t.alert, Some(TabAlert::Failed));
+    t.raise(TabAlert::Notice);
+    t.raise(TabAlert::Failed);
+    assert_eq!(t.alert, Some(TabAlert::Notice));
+    app.tabs[3].alert = Some(TabAlert::Done);
+    let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(top.contains("quiet ✓ ×") && !top.contains("quiet • ×"), "{top}");
+    // The whole row stays inside the screen at small sizes.
+    for (w, h) in [(80, 24), (60, 20), (40, 12), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("tabs-markers-{w}x{h}"), &text);
+        assert!(text.lines().next().unwrap().chars().count() <= w as usize);
+        for (r, _) in app.hits.iter().filter(|(r, h)| r.y == 0 && matches!(h, noble::app::Hit::Tab(_))) {
+            assert!(r.right() <= w, "{w}x{h}: {r:?}");
+        }
+    }
+    // Visiting a tab clears its marker.
+    app.run(Action::GoTab(1));
+    app.tick();
+    assert!(app.tabs[0].alert.is_none() && !app.tabs[0].activity);
+    let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(!top.contains("notice ◆"), "{top}");
+    for _ in 0..5 {
+        app.run(Action::CloseTab);
+    }
+}
+
+/// A command that ends in a background tab leaves ✗ (non-zero exit code) or ✓ (a long one that worked);
+/// a quick success leaves no marker, and only a failure that took a while raises a toast.
+#[test]
+fn background_command_result_marks_tab() {
+    use noble::term::TabAlert;
+    let mut app = demo_app(110, 30);
+    named_tab(&mut app, "worker");
+    named_tab(&mut app, "front");
+    std::thread::sleep(Duration::from_millis(800));
+    app.pump();
+    let worker = app.tabs[0].focus;
+    let ms = Duration::from_millis;
+    // Finishes a command typed at the prompt `ago` ago with the exit code `code`.
+    let finish = |app: &mut App, ago: Duration, code: i32, typed: bool| {
+        {
+            let pane = app.panes.get_mut(&worker).unwrap();
+            pane.prompted = true;
+            pane.edited = typed;
+            pane.command_started = Some(std::time::Instant::now() - ago);
+            pane.parser().process(format!("\x1b]133;D;{code}\x07").as_bytes());
+            pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        }
+        app.toasts.clear();
+        app.handle(AppEvent::PtyOutput);
+    };
+    let reset = |app: &mut App| {
+        app.tabs[0].alert = None;
+        app.tabs[0].activity = false;
+    };
+    // A quick success: output only.
+    finish(&mut app, ms(200), 0, true);
+    assert_eq!(app.tabs[0].alert, None);
+    assert!(app.tabs[0].activity && app.toasts.is_empty());
+    // A quick failure: the marker, but no toast.
+    reset(&mut app);
+    finish(&mut app, ms(200), 1, true);
+    assert_eq!(app.tabs[0].alert, Some(TabAlert::Failed));
+    assert!(app.toasts.is_empty(), "{:?}", app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    let top = render(&mut app, 110, 30).lines().next().unwrap().to_string();
+    assert!(top.contains("worker ✗ ×"), "{top}");
+    // A long success: ✓ and a toast.
+    reset(&mut app);
+    finish(&mut app, Duration::from_secs(3600), 0, true);
+    assert_eq!(app.tabs[0].alert, Some(TabAlert::Done));
+    assert!(app.toasts.iter().any(|t| t.text.contains("done in")), "toast missing");
+    let top = render(&mut app, 110, 30).lines().next().unwrap().to_string();
+    assert!(top.contains("worker ✓ ×"), "{top}");
+    // A long failure: ✗ with its code in the toast.
+    reset(&mut app);
+    finish(&mut app, Duration::from_secs(3600), 2, true);
+    assert_eq!(app.tabs[0].alert, Some(TabAlert::Failed));
+    assert!(app.toasts.iter().any(|t| t.text.contains("failed (exit 2)")), "toast missing");
+    // A command that was not typed (a launcher command, the first prompt) never counts as failed.
+    reset(&mut app);
+    finish(&mut app, ms(200), 1, false);
+    assert_eq!(app.tabs[0].alert, None);
+    // A notice beats a failure on the same tab.
+    finish(&mut app, ms(200), 1, true);
+    app.tabs[0].raise(TabAlert::Notice);
+    assert_eq!(app.tabs[0].alert, Some(TabAlert::Notice));
+    app.run(Action::CloseTab);
+    app.run(Action::CloseTab);
+}
+
+/// A split tab shows its pane count ("⊞2") when the strip has room; compact mode keeps it for the
+/// active tab only. The active tab has edge bars and hovering a tab still highlights it.
+#[test]
+fn tab_strip_split_count_and_active_edges() {
+    use noble::app::Hit;
+    assert_eq!(unicode_width::UnicodeWidthStr::width("⊞"), 1);
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "one");
+    app.run(Action::SplitRight);
+    app.run(Action::SplitDown);
+    named_tab(&mut app, "two");
+    app.run(Action::SplitRight);
+    named_tab(&mut app, "solo");
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-split-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    assert!(top.contains("one ⊞3 ×") && top.contains("two ⊞2 ×"), "{top}");
+    assert!(top.contains("▌solo ×▐") && !top.contains("solo ⊞"), "{top}");
+    // The active tab is drawn with accent edges on the base background.
+    let bar = (0..120u16).find(|x| buf[(*x, 0)].symbol() == "▌").unwrap();
+    assert_eq!((buf[(bar, 0)].fg, buf[(bar, 0)].bg), (app.theme.accent, app.theme.bg));
+    let end = (0..120u16).find(|x| buf[(*x, 0)].symbol() == "▐").unwrap();
+    assert_eq!(buf[(end, 0)].fg, app.theme.accent);
+    assert!(end > bar);
+    // Hover still highlights a tab, and clicks land on the right tab.
+    let r = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
+    app.hover = Some((r.x + 1, 0));
+    let (_, buf) = render_buf(&mut app, 120, 30);
+    assert_eq!(buf[(r.x + 1, 0)].bg, app.theme.hover());
+    click(&mut app, r.x + 1, 0);
+    assert_eq!(app.view, View::Term(0));
+    // Compact mode: only the active tab shows its count.
+    let top = render(&mut app, 70, 20).lines().next().unwrap().to_string();
+    assert!(top.contains("▌one ⊞3 ×▐") && !top.contains("two ⊞"), "{top}");
+    app.view = View::Term(2);
+    let top = render(&mut app, 70, 20).lines().next().unwrap().to_string();
+    assert!(!top.contains('⊞'), "{top}");
+    // Small sizes keep the strip within bounds.
+    app.view = View::Term(0);
+    for (w, h) in [(160, 45), (80, 24), (60, 20), (44, 12), (40, 12), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("tabs-split-{w}x{h}"), &text);
+        assert!(text.lines().next().unwrap().chars().count() <= w as usize);
+    }
+    for _ in 0..3 {
+        app.run(Action::CloseTab);
+    }
+}
+
+/// Tabs that do not fit collapse into "+N"; the most urgent marker among them stays visible.
+#[test]
+fn hidden_tabs_summary_keeps_the_marker() {
+    use noble::term::TabAlert;
+    let mut app = demo_app(80, 24);
+    for i in 0..12 {
+        named_tab(&mut app, &format!("tab{i}"));
+    }
+    app.view = View::Term(0);
+    app.tabs[11].raise(TabAlert::Failed);
+    app.tabs[10].raise(TabAlert::Done);
+    let (text, buf) = render_buf(&mut app, 80, 24);
+    save("tabs-hidden-80x24", &text);
+    let top = text.lines().next().unwrap().to_string();
+    let plus = top.find('+').unwrap_or_else(|| panic!("no +N: {top}"));
+    let tail = &top[plus..];
+    assert!(tail.contains('✗') && !tail.contains('✓'), "{top}");
+    let x = (0..80u16).find(|x| buf[(*x, 0)].symbol() == "✗").unwrap();
+    assert_eq!(buf[(x, 0)].fg, app.theme.crit);
+    // The count matches the tabs that were left out.
+    let shown = app.hits.iter().filter(|(r, h)| r.y == 0 && matches!(h, noble::app::Hit::Tab(_))).count();
+    assert!(top.contains(&format!("+{}", 12 - shown)), "{top}");
+    for _ in 0..12 {
+        app.run(Action::CloseTab);
+    }
+}
+
+/// "Jump to waiting agent" (prefix a): the next pane that needs you, across tabs, restoring a
+/// zoomed tab that shows another pane; else the next finished one; else a toast.
+#[test]
+fn jump_to_waiting_agent() {
+    use noble::keys::Chord;
+    let mut app = demo_app(120, 30);
+    let a_key = Chord::parse("a").unwrap();
+    assert_eq!(app.keymap.prefix_map.get(&a_key), Some(&Action::JumpToAgent));
+    assert!(app.palette_items().iter().any(|i| i.title == "Jump to Waiting Agent"), "on every screen");
+    app.new_tab(std::env::temp_dir(), None, Some("first".into()));
+    let a = app.tabs[0].focus;
+    app.new_tab(std::env::temp_dir(), None, Some("second".into()));
+    let b = app.tabs[1].focus;
+    app.run(Action::SplitRight);
+    let other = app.tabs[1].focus;
+    assert_ne!(other, b);
+    app.run(Action::Zoom);
+    assert!(app.tabs[1].zoomed);
+    let now = chrono::Utc::now().timestamp();
+    let recs = |x: &str, y: &str| -> std::collections::HashMap<_, _> {
+        [(a, hook_rec(x, now, 0)), (b, hook_rec(y, now, 0))].into()
+    };
+    // Nothing waiting.
+    app.apply_hook_records(recs("prompt", "prompt"));
+    app.toasts.clear();
+    app.view = View::Bridge;
+    app.run(Action::JumpToAgent);
+    assert_eq!(app.view, View::Bridge);
+    assert!(app.toasts.iter().any(|t| t.text == "no agent is waiting"), "toast missing");
+    // Tab 1 finished, tab 2's hidden pane needs you: that one wins, and its tab is unzoomed.
+    app.apply_hook_records(recs("stop", "notification"));
+    app.run(Action::JumpToAgent);
+    assert_eq!(app.view, View::Term(1));
+    assert_eq!(app.tabs[1].focus, b);
+    assert!(!app.tabs[1].zoomed, "the pane must be visible");
+    // It is the only one needing you, so it stays. Through the prefix key as well.
+    let prefix = app.keymap.prefix;
+    app.on_key(KeyEvent::new(prefix.code, prefix.mods));
+    app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert_eq!((app.view, app.tabs[1].focus), (View::Term(1), b));
+    // Once answered, the finished agent in tab 1 is next.
+    app.apply_hook_records(recs("stop", "prompt"));
+    app.run(Action::JumpToAgent);
+    assert_eq!((app.view, app.tabs[0].focus), (View::Term(0), a));
+    for _ in 0..2 {
+        app.view = View::Term(0);
+        app.run(Action::CloseTab);
+    }
+}
+
+/// While a pane is scrolled back it shows a position bar in its last column (with the search matches
+/// on it) and a "↓ live" chip counting the lines that arrived meanwhile; a click on the bar jumps,
+/// a click on the chip returns to the newest output. Nothing of it shows while live.
+#[test]
+fn scrollback_helpers_while_scrolled_back() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("scroll".into()));
+    std::thread::sleep(Duration::from_millis(1500));
+    app.pump();
+    let id = app.tabs[0].focus;
+    let feed = |app: &mut App, from: usize, to: usize| {
+        let pane = &app.panes[&id];
+        let text: String = (from..to).map(|i| format!("line {i}\r\n")).collect();
+        pane.parser().process(text.as_bytes());
+        pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        app.handle(AppEvent::PtyOutput);
+    };
+    feed(&mut app, 0, 200);
+    let live = render(&mut app, 110, 30);
+    assert!(!live.contains("↓ live"), "{live}");
+    assert!(find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. } | Hit::ScrollLive(_))).is_none());
+
+    app.run(Action::ScrollUp);
+    let offset = app.panes[&id].scroll_offset();
+    assert!(offset > 0);
+    assert_eq!(app.panes[&id].new_lines(), 0);
+    let text = render(&mut app, 110, 30);
+    save("pane-scrolled-back-110x30", &text);
+    let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. })).expect("position bar");
+    let chip = find_hit(&app, |h| matches!(h, Hit::ScrollLive(_))).expect("live chip");
+    assert!(text.contains(" ↓ live "), "{text}");
+    assert!(!text.contains("↓ live ·"), "{text}");
+    // The bar runs down the content's last column, the chip sits below it on the bottom row.
+    assert_eq!(track.x, chip.right() - 1);
+    assert_eq!(track.bottom(), chip.y);
+    let column: String = (track.y..track.bottom())
+        .map(|y| text.lines().nth(y as usize).unwrap().chars().nth(track.x as usize).unwrap())
+        .collect();
+    assert!(column.contains('┃') && column.contains('│'), "{column}");
+    assert!(!column.ends_with('┃'), "scrolled back, the thumb is not at the bottom: {column}");
+    // The title's "↑N" tag and the status bar hint agree with the offset.
+    assert!(text.contains(&format!("↑{offset}")), "{text}");
+    assert!(text.lines().last().unwrap().contains("back to live"), "{text}");
+
+    // New output keeps the view in place and is counted on the chip.
+    feed(&mut app, 200, 207);
+    assert!(app.panes[&id].scroll_offset() >= offset + 7);
+    let new = app.panes[&id].new_lines();
+    assert!(new >= 7, "{new}");
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains(&format!("↓ live · {new}")), "{text}");
+    let buf_chip = find_hit(&app, |h| matches!(h, Hit::ScrollLive(_))).unwrap();
+    assert!(buf_chip.width > chip.width);
+    // The mouse on the chip underlines its label and keeps its colors, so it stays readable.
+    app.hover = Some((buf_chip.x + 2, buf_chip.y));
+    let (_, buf) = render_buf(&mut app, 110, 30);
+    let label = &buf[(buf_chip.x + 1, buf_chip.y)];
+    assert_eq!((label.fg, label.bg), (app.theme.on_accent, app.theme.accent2));
+    assert!(label.modifier.contains(ratatui::style::Modifier::UNDERLINED));
+    app.hover = None;
+
+    // The wheel over the bar and over the chip scrolls the pane as over its content.
+    use crossterm::event::MouseEventKind;
+    let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. })).unwrap();
+    let before = app.panes[&id].scroll_offset();
+    mouse(&mut app, MouseEventKind::ScrollUp, track.x, track.y + 2);
+    assert_eq!(app.panes[&id].scroll_offset(), before + 3);
+    render(&mut app, 110, 30);
+    for _ in 0..2 {
+        mouse(&mut app, MouseEventKind::ScrollUp, track.x, track.y + 2);
+    }
+    assert_eq!(app.panes[&id].scroll_offset(), before + 9, "every wheel step over the bar counts");
+    mouse(&mut app, MouseEventKind::ScrollDown, track.x, track.y + 2);
+    assert_eq!(app.panes[&id].scroll_offset(), before + 6);
+    let chip = find_hit(&app, |h| matches!(h, Hit::ScrollLive(_))).unwrap();
+    mouse(&mut app, MouseEventKind::ScrollDown, chip.x + 1, chip.y);
+    assert_eq!(app.panes[&id].scroll_offset(), before + 3);
+    assert_eq!(app.panes[&id].new_lines(), new);
+
+    // Scrolling further keeps the count; a click at the top of the bar goes to the oldest lines.
+    app.run(Action::ScrollUp);
+    assert_eq!(app.panes[&id].new_lines(), new);
+    let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. })).unwrap();
+    click(&mut app, track.x, track.y);
+    let history = app.panes[&id].history_len();
+    assert!(app.panes[&id].scroll_offset() + 20 >= history, "{} of {history}", app.panes[&id].scroll_offset());
+    assert_eq!(app.panes[&id].new_lines(), new);
+
+    // Search matches are marked on the bar, the selected one in the accent color.
+    app.run(Action::Search);
+    for c in "line 12".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(app.panes[&id].scroll_offset() > 0);
+    let text = render(&mut app, 110, 30);
+    save("pane-scrolled-search-110x30", &text);
+    let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. })).unwrap();
+    let chip = find_hit(&app, |h| matches!(h, Hit::ScrollLive(_))).unwrap();
+    // The chip moves up above the search bar.
+    assert_eq!(track.bottom(), chip.y);
+    assert!(text.lines().nth(chip.y as usize + 1).unwrap().contains("find line 12"), "{text}");
+    let column: String = (track.y..track.bottom())
+        .map(|y| text.lines().nth(y as usize).unwrap().chars().nth(track.x as usize).unwrap())
+        .collect();
+    assert!(column.contains('●') && column.contains('•'), "{column}");
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| noble::ui::draw(f, &mut app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let current = (track.y..track.bottom()).find(|&y| buf[(track.x, y)].symbol() == "●").unwrap();
+    assert_eq!(buf[(track.x, current)].fg, app.theme.accent);
+    // The other matches in a color that shows as a mark (the match background tint does not).
+    let other = (track.y..track.bottom()).find(|&y| buf[(track.x, y)].symbol() == "•").unwrap();
+    assert_eq!(buf[(track.x, other)].fg, app.theme.accent2);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.panes[&id].scroll_offset(), 0);
+
+    // Small panes: only the chip, or nothing when even that does not fit.
+    for (w, h) in [(40, 12), (30, 8)] {
+        app.run(Action::ScrollUp);
+        assert!(app.panes[&id].scroll_offset() > 0);
+        let text = render(&mut app, w, h);
+        save(&format!("pane-scrolled-back-{w}x{h}"), &text);
+        assert!(text.lines().all(|l| l.chars().count() == w as usize), "{text}");
+        let chip = find_hit(&app, |h| matches!(h, Hit::ScrollLive(_)));
+        let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. }));
+        if let Some(Hit::Pane { inner, .. }) =
+            app.hits.iter().find(|(_, h)| matches!(h, Hit::Pane { .. })).map(|(_, h)| h.clone())
+        {
+            assert_eq!(track.is_some(), inner.width >= 20 && inner.height >= 4, "{w}x{h}: {inner:?}");
+            if let Some(c) = chip {
+                assert!(c.right() <= inner.right() && c.y < inner.bottom());
+            }
+        }
+        // A click on the chip returns to live, and the helpers are gone.
+        if let Some(c) = chip {
+            click(&mut app, c.x, c.y);
+        } else {
+            app.panes[&id].scroll_reset();
+        }
+        assert_eq!(app.panes[&id].scroll_offset(), 0);
+        assert_eq!(app.panes[&id].new_lines(), 0);
+        render(&mut app, w, h);
+        assert!(find_hit(&app, |h| matches!(h, Hit::ScrollLive(_) | Hit::ScrollTrack { .. })).is_none());
+    }
+    app.run(Action::CloseTab);
+}
+
+/// A wide character (CJK) in the last two content columns is blanked where the position bar covers
+/// its second cell; otherwise the terminal would never be sent the bar's cell on that row.
+#[test]
+fn scroll_bar_clears_wide_characters_under_it() {
+    use noble::app::Hit;
+    let mut app = demo_app(80, 24);
+    app.new_tab(std::env::temp_dir(), None, Some("wide".into()));
+    std::thread::sleep(Duration::from_millis(1500));
+    app.pump();
+    let id = app.tabs[0].focus;
+    render(&mut app, 80, 24);
+    let cols = app.panes[&id].size.1 as usize;
+    {
+        let pane = &app.panes[&id];
+        let text: String = (0..80).map(|i| format!("{i:<w$}中\r\n", w = cols - 2)).collect();
+        pane.parser().process(text.as_bytes());
+        pane.scroll(2);
+    }
+    let (text, buf) = render_buf(&mut app, 80, 24);
+    save("pane-scrolled-wide-80x24", &text);
+    let track = find_hit(&app, |h| matches!(h, Hit::ScrollTrack { .. })).expect("position bar");
+    for y in track.y..track.bottom() {
+        assert_eq!(buf[(track.x - 1, y)].symbol(), " ", "row {y}");
+        assert!(matches!(buf[(track.x, y)].symbol(), "│" | "┃"), "row {y}");
+    }
+    app.run(Action::CloseTab);
+}
+
+/// Panes share their border lines: with the mouse on the line between two panes (the lower one's
+/// title row), only the lower pane shows its buttons.
+#[test]
+fn pane_buttons_hover_one_pane_on_a_shared_line() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("shared".into()));
+    app.run(Action::SplitDown);
+    let (top, bottom) = (app.tabs[0].panes()[0], app.tabs[0].panes()[1]);
+    app.tabs[0].focus = top;
+    app.hover = None;
+    render(&mut app, 110, 30);
+    let title = app.hits.iter().find(|(_, h)| *h == noble::app::Hit::PaneTitle(bottom)).map(|(r, _)| *r).unwrap();
+    app.hover = Some((title.x + 20, title.y));
+    let text = render(&mut app, 110, 30);
+    save("pane-buttons-shared-line-110x30", &text);
+    assert_eq!(pane_buttons(&app, bottom).len(), 4, "{text}");
+    assert_eq!(text.matches('✕').count(), 2, "the focused pane and the one under the mouse: {text}");
+    // One row higher the mouse is inside the top pane: the bottom one hides its buttons again.
+    app.hover = Some((title.x + 20, title.y - 1));
+    let text = render(&mut app, 110, 30);
+    assert!(pane_buttons(&app, bottom).is_empty(), "{text}");
+    app.run(Action::CloseTab);
+}
+
+/// The buttons of the pane under `pane` as drawn: (button, click target).
+fn pane_buttons(app: &App, pane: u64) -> Vec<(noble::ui::PaneButton, ratatui::layout::Rect)> {
+    app.hits
+        .iter()
+        .filter_map(|(r, h)| noble::ui::PaneButton::of_hit(h).filter(|(_, p)| *p == pane).map(|(b, _)| (b, *r)))
+        .collect()
+}
+
+/// The title row's buttons form one bracketed cluster (`┤ ◫ ⊟ ⤢ ✕ ├`) on the focused pane and on
+/// the pane under the mouse; other panes show a plain line there and have no click targets. A
+/// hovered button lights up (close in the error color) and the status bar says what it does with
+/// the shortcut for it.
+#[test]
+fn pane_buttons_show_on_focus_and_hover() {
+    use noble::ui::PaneButton;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("buttons".into()));
+    app.run(Action::SplitRight);
+    let (left, right) = (app.tabs[0].panes()[0], app.tabs[0].panes()[1]);
+    assert_eq!(app.tabs[0].focus, right);
+    app.hover = None;
+    let (text, buf) = render_buf(&mut app, 110, 30);
+    save("pane-buttons-110x30", &text);
+    let th = app.theme.clone();
+    let shown = pane_buttons(&app, right);
+    let kinds: Vec<PaneButton> = shown.iter().map(|(b, _)| *b).collect();
+    assert_eq!(kinds, [PaneButton::SplitRight, PaneButton::SplitDown, PaneButton::Zoom, PaneButton::Close]);
+    assert!(pane_buttons(&app, left).is_empty(), "click targets on a pane that shows no buttons");
+    let y = shown[0].1.y;
+    let row: String = text.lines().nth(y as usize).unwrap().to_string();
+    assert!(row.contains("─┤ ◫ ⊟ ⤢ ✕ ├─"), "{row}");
+    assert_eq!(row.matches('✕').count(), 1, "the unfocused pane shows buttons: {row}");
+    // Each target is " glyph" (close " ✕ "), drawn right where it is clicked, next to each other.
+    for (i, (b, r)) in shown.iter().enumerate() {
+        assert_eq!(buf[(r.x + 1, r.y)].symbol(), b.glyph(false));
+        assert_eq!(buf[(r.x + 1, r.y)].fg, th.accent);
+        assert_eq!(r.width, if *b == PaneButton::Close { 3 } else { 2 });
+        if i > 0 {
+            assert_eq!(shown[i - 1].1.right(), r.x);
+        }
+    }
+    assert_eq!(buf[(shown[0].1.x - 1, y)].symbol(), "┤");
+    assert_eq!(buf[(shown[3].1.right(), y)].symbol(), "├");
+
+    // The mouse over the other pane shows its buttons, dim.
+    app.hover = Some((5, 10));
+    let (text, buf) = render_buf(&mut app, 110, 30);
+    save("pane-buttons-hover-110x30", &text);
+    let other = pane_buttons(&app, left);
+    assert_eq!(other.len(), 4, "{text}");
+    assert!(other.iter().all(|(_, r)| buf[(r.x + 1, r.y)].fg == th.dim));
+    assert_eq!(text.lines().nth(y as usize).unwrap().matches('✕').count(), 2);
+
+    // On a button: it lights up and the status bar says what it does and how to do it by key.
+    let status = |text: &str| text.lines().last().unwrap().to_string();
+    // It turns into a small inverted chip, readable in every theme (`theme_contrast_meets_wcag`
+    // checks crit against bg).
+    for (b, colors) in [(PaneButton::Close, (th.bg, th.crit)), (PaneButton::SplitRight, (th.on_accent, th.accent))] {
+        let r = other.iter().find(|(k, _)| *k == b).unwrap().1;
+        app.hover = Some((r.x, r.y));
+        let (text, buf) = render_buf(&mut app, 110, 30);
+        let cell = &buf[(r.x + 1, r.y)];
+        assert_eq!((cell.fg, cell.bg), colors, "{b:?}");
+        let key = app.keymap.term_hint(b.action(), false).unwrap();
+        let want = format!("{} {} · {key}", b.glyph(false), b.what(false));
+        assert!(status(&text).contains(&want), "{want:?} not in {:?}", status(&text));
+        assert!(!status(&text).contains("tip:"));
+    }
+    save("pane-buttons-hover-close-110x30", &render(&mut app, 110, 30));
+    // Not over a button: the usual hints.
+    app.hover = Some((5, 10));
+    assert!(!status(&render(&mut app, 110, 30)).contains("split right"));
+
+    // A revealed button works: close the other pane.
+    let close = pane_buttons(&app, left).into_iter().find(|(b, _)| *b == PaneButton::Close).unwrap().1;
+    click(&mut app, close.x + 1, close.y);
+    assert_eq!(app.tabs[0].panes(), vec![right]);
+    // A single pane has no zoom button.
+    app.hover = None;
+    render(&mut app, 110, 30);
+    assert!(pane_buttons(&app, right).iter().all(|(b, _)| *b != PaneButton::Zoom));
+    app.run(Action::CloseTab);
+}
+
+/// A double click on a pane's title zooms it, another one puts it back; a single click only
+/// focuses. A middle click on a tab closes it.
+#[test]
+fn double_click_title_zooms_and_middle_click_closes_tab() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.cfg.terminal.tab_follows_cwd = false;
+    app.new_tab(std::env::temp_dir(), None, Some("zoom".into()));
+    app.run(Action::SplitRight);
+    let left = app.tabs[0].panes()[0];
+    render(&mut app, 110, 30);
+    // The title text of the left pane (the narrow target on top of the row).
+    let title = |app: &App| find_hit(app, |h| *h == Hit::PaneTitle(left)).unwrap();
+    let t = title(&app);
+    click(&mut app, t.x + 3, t.y);
+    assert_eq!(app.tabs[0].focus, left);
+    assert!(!app.tabs[0].zoomed, "a single click zoomed");
+    click(&mut app, t.x + 3, t.y);
+    assert!(app.tabs[0].zoomed, "a double click did not zoom");
+    let text = render(&mut app, 110, 30);
+    save("pane-title-double-click-zoom-110x30", &text);
+    assert!(text.contains("ZOOM") && text.contains('◱'), "{text}");
+    // A third click right after starts over; a new double click restores.
+    click(&mut app, t.x + 3, t.y);
+    assert!(app.tabs[0].zoomed, "a triple click undid the zoom");
+    std::thread::sleep(Duration::from_millis(500));
+    let t = title(&app);
+    click(&mut app, t.x + 3, t.y);
+    click(&mut app, t.x + 3, t.y);
+    assert!(!app.tabs[0].zoomed, "a double click did not restore");
+
+    // Middle click on a tab closes that tab (and does not start a drag).
+    app.new_tab(std::env::temp_dir(), None, Some("second".into()));
+    render(&mut app, 110, 30);
+    assert_eq!(app.tabs.len(), 2);
+    let tab = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Middle), tab.x + 2, tab.y);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Middle), tab.x + 2, tab.y);
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.tab_title(0).starts_with("second"), "{}", app.tab_title(0));
+    assert_eq!(app.view, View::Term(0));
+    app.run(Action::CloseTab);
+}
+
+/// Title rows in split and grid layouts at every size: rows keep their width, the buttons stay
+/// together inside their pane with a line cell before the cluster, the focused pane keeps close.
+#[test]
+fn pane_title_rows_fit_every_layout() {
+    use noble::ui::PaneButton;
+    for (layout, actions) in [
+        ("split", vec![Action::SplitRight]),
+        ("grid", vec![Action::SplitRight, Action::SplitDown, Action::FocusLeft, Action::SplitDown]),
+    ] {
+        let mut app = demo_app(160, 45);
+        app.new_tab(std::env::temp_dir(), None, Some(layout.into()));
+        for a in actions {
+            app.run(a);
+        }
+        let focus = app.tabs[0].focus;
+        app.panes.get_mut(&focus).unwrap().last_result = Some(noble::term::pane::CommandResult {
+            code: Some(1),
+            took: Duration::from_millis(12_300),
+            at: std::time::Instant::now(),
+        });
+        app.hover = None;
+        for (w, h) in [(160, 45), (110, 30), (60, 20), (30, 8)] {
+            let (text, buf) = render_buf(&mut app, w, h);
+            save(&format!("pane-title-{layout}-{w}x{h}"), &text);
+            for line in text.lines() {
+                assert_eq!(unicode_width::UnicodeWidthStr::width(line), w as usize, "{w}x{h}:\n{text}");
+            }
+            let body = app.body();
+            for (id, tile) in app.tabs[0].root.layout(body).0 {
+                let frame = noble::ui::pane_outline(tile, body).rect;
+                let buttons = pane_buttons(&app, id);
+                if id != focus {
+                    assert!(buttons.is_empty(), "{layout} {w}x{h}: buttons on an unfocused pane");
+                    continue;
+                }
+                if frame.width >= 11 {
+                    let close = buttons.iter().any(|(b, _)| *b == PaneButton::Close);
+                    assert!(close, "{layout} {w}x{h}: no close\n{text}");
+                }
+                for (i, (_, r)) in buttons.iter().enumerate() {
+                    assert!(r.x > frame.x && r.right() < frame.right() && r.y == frame.y, "{layout} {w}x{h}");
+                    assert!(i == 0 || buttons[i - 1].1.right() == r.x, "{layout} {w}x{h}: gap");
+                }
+                if let Some((_, first)) = buttons.first() {
+                    let before = buf[(first.x - 2, first.y)].symbol().to_string();
+                    assert!("─┬┴┼".contains(before.as_str()), "{layout} {w}x{h}: {before:?} at the cluster\n{text}");
+                }
+            }
+        }
+        app.run(Action::CloseTab);
+    }
 }

@@ -188,10 +188,11 @@ pub enum Action {
     Update,
     DismissUpdate,
     Passthrough,
+    JumpToAgent,
 }
 
 impl Action {
-    pub const ALL: [Action; 52] = [
+    pub const ALL: [Action; 53] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -244,6 +245,7 @@ impl Action {
         Action::Update,
         Action::DismissUpdate,
         Action::Passthrough,
+        Action::JumpToAgent,
     ];
 
     pub fn id(&self) -> String {
@@ -294,6 +296,7 @@ impl Action {
                     Action::Update => "update",
                     Action::DismissUpdate => "dismiss_update",
                     Action::Passthrough => "passthrough",
+                    Action::JumpToAgent => "jump_to_agent",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -353,13 +356,20 @@ impl Action {
             Action::Update => "Update NOBLE".into(),
             Action::DismissUpdate => "Dismiss Update Notice".into(),
             Action::Passthrough => "Pass Keys to the App".into(),
+            Action::JumpToAgent => "Jump to Waiting Agent".into(),
         }
     }
 
     /// Palette'teki grup etiketi.
     pub fn group(&self) -> &'static str {
         match self {
-            Action::Bridge | Action::System | Action::Settings | Action::Palette | Action::Help | Action::Quit => "NAV",
+            Action::Bridge
+            | Action::System
+            | Action::Settings
+            | Action::Palette
+            | Action::Help
+            | Action::Quit
+            | Action::JumpToAgent => "NAV",
             Action::NewTab
             | Action::CloseTab
             | Action::NextTab
@@ -458,6 +468,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("/"), Action::Search),
         (c("f"), Action::Search),
         (c("i"), Action::Passthrough),
+        (c("a"), Action::JumpToAgent),
     ];
     for n in 1..=9u8 {
         v.push((Chord::new(KeyCode::Char((b'0' + n) as char), KeyModifiers::NONE), Action::GoTab(n)));
