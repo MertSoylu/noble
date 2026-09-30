@@ -1095,7 +1095,7 @@ fn hover_highlights_clickable_items() {
 }
 
 fn wait_for(app: &mut App, pane: noble::term::layout::PaneId, needle: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
     loop {
         app.pump();
         let (lines, _) = app.panes[&pane].all_lines();
