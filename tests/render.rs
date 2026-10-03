@@ -967,12 +967,13 @@ fn split_panes_share_joined_borders() {
         assert!(text.contains(junction), "no {junction}:\n{text}");
     }
     assert!(!text.contains("││") && !text.contains("╮╭"), "double border:\n{text}");
-    // The window's outer left and right sides have no line: lines only run between panes.
+    // The window's outer left and right sides have no line: lines only run between panes. (The panes'
+    // own text may reach the edge: a shell prompt starts in column 0.)
     let body = app.body();
     for y in body.top()..body.bottom() {
         let row = &rows[y as usize];
         for edge in [row[0], row[row.len() - 1]] {
-            assert!(edge == ' ' || edge == '─', "outer side line at row {y}:\n{text}");
+            assert!(!"│┃├┤┌┐└┘╭╮╰╯┬┴┼".contains(edge), "outer side line at row {y}:\n{text}");
         }
     }
     let top = |x: u16, y: u16| {
@@ -1124,10 +1125,10 @@ fn terminal_search_finds_scrollback() {
     } else {
         "for i in $(seq 1 60); do echo row $i; done; echo NEEDLE_DONE"
     };
+    // The script is cmd.exe syntax on Windows and POSIX sh elsewhere: the shell is chosen to match, not
+    // left to the machine's default (fish would not run it).
     let mut cfg = app.cfg.clone();
-    if cfg!(windows) {
-        cfg.terminal.shell = "cmd.exe".into();
-    }
+    cfg.terminal.shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into();
     app.apply_config(cfg);
     app.new_tab(std::env::temp_dir(), Some(script), Some("search".into()));
     let id = app.tabs[0].focus;
@@ -5504,6 +5505,9 @@ fn double_and_triple_click_select_word_and_line() {
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("one".into()));
     let id = app.focused_pane().unwrap();
+    // The shell's first prompt must be out before the line is written over the screen: a fast shell
+    // (zsh without a config) would otherwise print it after, onto the same line.
+    wait_idle(&mut app, id);
     app.panes[&id].parser().process(b"\x1b[2J\x1b[Hfoo ~/code/app bar");
     render(&mut app, 110, 30);
     let inner = find_hit_inner(&app).expect("pane");
