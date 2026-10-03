@@ -323,6 +323,19 @@ impl App {
         };
         let pane = Pane::spawn(id, spec, self.tx.clone()).map_err(|e| format!("{e:#}"))?;
         self.panes.insert(id, pane);
+        if !self.zsh_warned
+            && let Some(file) = self.shell.zsh_integration_blocked()
+        {
+            self.zsh_warned = true;
+            self.toast(
+                ToastLevel::Warn,
+                format!(
+                    "{} sets ZDOTDIR: zsh starts without NOBLE's integration (no directory tracking or exit codes); \
+                     write it as ZDOTDIR=${{ZDOTDIR:-…}} to keep both",
+                    file.display()
+                ),
+            );
+        }
         Ok(id)
     }
 
@@ -600,7 +613,8 @@ impl App {
         } else {
             "xdg-open"
         };
-        match crate::util::spawn_detached(std::process::Command::new(program).arg(path)) {
+        let report = Some((self.tx.clone(), format!("could not open {}", crate::util::tilde(path))));
+        match crate::util::spawn_reporting(std::process::Command::new(program).arg(path), report) {
             Ok(_) => self.toast(ToastLevel::Info, format!("opened {}", crate::util::tilde(path))),
             Err(_) => self.toast(ToastLevel::Error, "could not open file manager"),
         }
@@ -648,12 +662,13 @@ impl App {
         if (from_env || !crate::util::has_desktop()) && self.edit_in_tab(&path, None, "config") {
             return;
         }
+        let report = Some((self.tx.clone(), format!("could not open an editor for {}", crate::util::tilde(&path))));
         let result = if cfg!(windows) {
-            crate::util::spawn_detached(std::process::Command::new("notepad").arg(&path))
+            crate::util::spawn_reporting(std::process::Command::new("notepad").arg(&path), report)
         } else if cfg!(target_os = "macos") {
-            crate::util::spawn_detached(std::process::Command::new("open").arg("-t").arg(&path))
+            crate::util::spawn_reporting(std::process::Command::new("open").arg("-t").arg(&path), report)
         } else {
-            crate::util::spawn_detached(std::process::Command::new("xdg-open").arg(&path))
+            crate::util::spawn_reporting(std::process::Command::new("xdg-open").arg(&path), report)
         };
         match result {
             Ok(_) => self

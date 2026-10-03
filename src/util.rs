@@ -280,19 +280,51 @@ pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool
     usable
 }
 
-/// Is there a graphical session to open files, folders and URLs in? Always on
-/// Windows; on macOS unless NOBLE runs over SSH (`open` would show things on the
-/// Mac's own screen); elsewhere an X11/Wayland display and `xdg-open` are needed
-/// (not the case over plain SSH or on a text console).
+/// Is there a graphical session to open files, folders and URLs in? Not over SSH (the user sits at
+/// another machine: `open`, `explorer` or `xdg-open` would show things on this machine's screen), except
+/// for a forwarded X11 display (`ssh -X`, `DISPLAY=localhost:10.0`), which is the user's own screen.
+/// Windows: otherwise always; macOS: otherwise always; Linux and the BSDs: an X11/Wayland display and
+/// `xdg-open` are needed (not on a text console).
 pub fn has_desktop() -> bool {
-    if cfg!(windows) {
-        return true;
+    let ssh = over_ssh();
+    if cfg!(windows) || cfg!(target_os = "macos") {
+        return !ssh;
     }
-    if cfg!(target_os = "macos") {
-        return !over_ssh();
-    }
-    let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|d| !d.is_empty()));
+    let var = |v: &str| std::env::var(v).ok().filter(|d| !d.is_empty());
+    let display = if ssh {
+        // A local display name (`:0`, `unix:0`) seen from SSH is the remote machine's own screen (tmux
+        // started on the desktop, attached later over SSH); a forwarded one names a host.
+        var("DISPLAY").is_some_and(|d| forwarded_display(&d))
+    } else {
+        var("DISPLAY").is_some() || var("WAYLAND_DISPLAY").is_some()
+    };
     display && which("xdg-open").is_some()
+}
+
+/// An X11 `DISPLAY` that goes over the network (`localhost:10.0`, `host:0`), not this machine's screen.
+fn forwarded_display(display: &str) -> bool {
+    match display.split_once(':') {
+        Some((host, _)) => !host.is_empty() && host != "unix" && !host.starts_with('/'),
+        None => false,
+    }
+}
+
+/// Does the outer terminal lack 24-bit color? Terminal.app before macOS 26 reads a truecolor sequence
+/// as other attributes, which garbles the whole HUD; every other terminal NOBLE supports has truecolor
+/// (Windows Terminal, the Linux terminals, iTerm2). `COLORTERM=truecolor` (or `24bit`) set by the user
+/// is trusted. Over SSH `TERM_PROGRAM` is not forwarded, so this only applies on the Mac itself.
+pub fn lacks_truecolor() -> bool {
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default().to_ascii_lowercase();
+    if matches!(colorterm.as_str(), "truecolor" | "24bit") {
+        return false;
+    }
+    if std::env::var("TERM_PROGRAM").ok().as_deref() != Some("Apple_Terminal") {
+        return false;
+    }
+    let major = sysinfo::System::os_version()
+        .and_then(|v| v.split('.').next().and_then(|m| m.parse::<u32>().ok()))
+        .unwrap_or(0);
+    major < 26
 }
 
 /// Running in an SSH session (the user sits at another machine).
@@ -353,17 +385,38 @@ pub fn command_for(program: &Path) -> std::process::Command {
 /// three standard streams go to null. The child is reaped on a small background thread so it never
 /// stays a zombie process.
 pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    spawn_reporting(cmd, None)
+}
+
+/// `spawn_detached`, and on Unix a failed exit (an `xdg-open` with no handler, `open` on a missing app)
+/// is sent back as `AppEvent::LaunchFailed(failed)` so the "opened" toast is corrected. Windows: the
+/// launchers' exit codes say nothing (explorer.exe exits with 1 after opening a folder), so none is sent.
+pub fn spawn_reporting(
+    cmd: &mut std::process::Command,
+    report: Option<(crate::event::Tx, String)>,
+) -> std::io::Result<()> {
     use std::process::Stdio;
+    // Unix: a process group of its own, so the SIGHUP that closing NOBLE's terminal window sends to
+    // NOBLE's group does not take the browser or editor down with it. Windows: CREATE_NO_WINDOW already
+    // detaches it from the console (`command_for`).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
     if cfg!(unix) {
         // Unix (Linux/macOS): an unwaited child stays a zombie until NOBLE exits, so wait for it on a thread.
         // If the thread cannot be started the child is left as it is (no worse than before).
         let _ = std::thread::Builder::new().name("reap".into()).spawn(move || {
-            let _ = child.wait();
+            let failed = child.wait().is_ok_and(|s| !s.success());
+            if failed && let Some((tx, text)) = report {
+                let _ = tx.send(crate::event::AppEvent::LaunchFailed(text));
+            }
         });
     } else {
         // Windows: dropping the handle is enough, the process table entry goes away with it.
-        drop(child);
+        drop((child, report));
     }
     Ok(())
 }
@@ -419,6 +472,16 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarded_x11_display_is_told_from_a_local_one() {
+        assert!(forwarded_display("localhost:10.0"));
+        assert!(forwarded_display("host.lan:0"));
+        assert!(!forwarded_display(":0"));
+        assert!(!forwarded_display(":1.0"));
+        assert!(!forwarded_display("unix:0"));
+        assert!(!forwarded_display("/tmp/launch-x/org.xquartz:0"));
+    }
 
     #[test]
     fn start_dir_argument_resolves_relative_and_tilde() {

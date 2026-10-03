@@ -99,6 +99,14 @@ impl Chord {
                 KeyCode::Char(c)
             }
         };
+        // ctrl+alt with a non-letter is how Windows reports AltGr, so such a chord is matched as the plain
+        // character (`normalized`): `ctrl+alt+1` would quietly become `1` and take that key from every
+        // shell. It is refused instead, on every platform alike (configs are shared).
+        if let KeyCode::Char(c) = code
+            && crate::term::input::is_altgr_char(mods, c)
+        {
+            return None;
+        }
         Some(Chord::new(code, mods))
     }
 }
@@ -496,6 +504,14 @@ pub fn default_direct_bindings() -> Vec<(Chord, Action)> {
     v
 }
 
+/// A key spelled with both ctrl and alt (see `Chord::parse`, which refuses those on a non-letter).
+fn is_altgr_spelling(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    let mods: Vec<&str> = lower.rsplit_once('+').map(|(m, _)| m.split('+').collect()).unwrap_or_default();
+    let has = |names: &[&str]| mods.iter().any(|m| names.contains(m));
+    has(&["ctrl", "control", "c"]) && has(&["alt", "meta", "m", "opt"])
+}
+
 impl Keymap {
     pub fn from_config(cfg: &KeysCfg) -> Keymap {
         let mut warnings = Vec::new();
@@ -519,6 +535,9 @@ impl Keymap {
                         }
                         None => warnings.push(format!("{label} binding '{key}': unknown action '{id}'")),
                     },
+                    (None, _) if is_altgr_spelling(key) => warnings.push(format!(
+                        "{label} binding '{key}': ctrl+alt with a non-letter is AltGr on Windows; use another key"
+                    )),
                     (None, _) => warnings.push(format!("{label} binding: cannot parse key '{key}'")),
                 }
             }
@@ -589,6 +608,11 @@ mod tests {
         assert_eq!(Chord::parse("shift+up"), Some(Chord::new(KeyCode::Up, KeyModifiers::SHIFT)));
         assert_eq!(Chord::parse("|"), Some(Chord::new(KeyCode::Char('|'), KeyModifiers::NONE)));
         assert_eq!(Chord::parse("+"), Some(Chord::new(KeyCode::Char('+'), KeyModifiers::NONE)));
+        // ctrl+alt+<non-letter> is AltGr on Windows: refused rather than turned into the bare key.
+        assert_eq!(Chord::parse("ctrl+alt+1"), None);
+        assert_eq!(Chord::parse("ctrl+alt+-"), None);
+        assert!(Chord::parse("ctrl+alt+k").is_some());
+        assert!(is_altgr_spelling("ctrl+alt+1") && !is_altgr_spelling("alt+1"));
         assert_eq!(Chord::parse("ctrl++"), Some(Chord::new(KeyCode::Char('+'), KeyModifiers::CONTROL)));
         assert_eq!(Chord::parse("f5"), Some(Chord::new(KeyCode::F(5), KeyModifiers::NONE)));
         assert_eq!(Chord::parse("hyper+x"), None);

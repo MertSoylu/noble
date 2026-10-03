@@ -42,6 +42,8 @@ pub struct Callbacks {
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
     open_link: Option<(usize, u16, String)>,
+    /// The host named by the pane's first OSC 7 report (its own shell, before any `ssh`).
+    local_host: Option<String>,
 }
 
 impl Callbacks {
@@ -123,8 +125,23 @@ impl vt100::Callbacks for Callbacks {
         match params {
             // OSC 7: file://host/path
             [b"7", rest @ ..] if !rest.is_empty() => {
-                let path = parse_cwd_url(&join(rest));
-                self.cwd = Some(if cfg!(windows) { msys_to_windows(&path) } else { path });
+                let url = join(rest);
+                // A remote shell (`ssh` from the pane) reports its own host's path: still a prompt, but
+                // not a directory here (a split would open a missing or unrelated local folder).
+                let host = cwd_url_host(&url);
+                let local = host.as_deref().is_none_or(|h| {
+                    is_local_host(h) || self.local_host.as_deref().is_none_or(|first| same_host(first, h))
+                });
+                if let Some(h) = &host
+                    && self.local_host.is_none()
+                    && local
+                {
+                    self.local_host = Some(h.clone());
+                }
+                if local {
+                    let path = parse_cwd_url(&url);
+                    self.cwd = Some(if cfg!(windows) { windows_cwd(&path) } else { path });
+                }
                 self.shell_prompt();
             }
             // OSC 9;9: Windows Terminal's cwd report.
@@ -258,6 +275,40 @@ pub fn parse_cwd_url(raw: &str) -> String {
     p
 }
 
+/// The host of an OSC 7 `file://host/path` URL; `None` when there is none (`file:///x`, a bare path).
+pub fn cwd_url_host(raw: &str) -> Option<String> {
+    let after = raw.trim().strip_prefix("file://")?;
+    let host = &after[..after.find('/').unwrap_or(after.len())];
+    (!host.is_empty()).then(|| percent_decode(host))
+}
+
+/// Host names compare without case and by their first label (`box` and `box.lan` are one machine).
+fn same_host(a: &str, b: &str) -> bool {
+    let short = |h: &str| h.split('.').next().unwrap_or(h).to_ascii_lowercase();
+    short(a) == short(b)
+}
+
+/// Is `host` this machine? `localhost` always is; otherwise it is compared with the system host name.
+fn is_local_host(host: &str) -> bool {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    NAME.get_or_init(sysinfo::System::host_name).as_deref().is_some_and(|name| same_host(name, host))
+}
+
+/// An OSC 7 path as a Windows directory: Git Bash's `/c/x` → `C:\x`, its `//server/share` → `\\server\share`,
+/// with backslashes throughout (explorer.exe and "copy path" want them).
+pub fn windows_cwd(path: &str) -> String {
+    let p = msys_to_windows(path);
+    let unc = p.starts_with("//") && !p.starts_with("///");
+    if !unc && !(p.len() >= 2 && p.as_bytes()[1] == b':') {
+        // Not a Windows path (a remote or unconverted MSYS path): left as reported.
+        return p;
+    }
+    p.replace('/', "\\")
+}
+
 /// Git Bash / MSYS2 report Windows directories as `/c/Users/me`; turns that into `C:/Users/me`.
 pub fn msys_to_windows(path: &str) -> String {
     let b = path.as_bytes();
@@ -337,11 +388,40 @@ impl ShellSpec {
         match self.label().to_lowercase().as_str() {
             "pwsh" | "powershell" => ShellKind::PowerShell,
             "cmd" => ShellKind::Cmd,
+            "wsl" if cfg!(windows) => ShellKind::Wsl,
+            // `bash` on a Windows PATH is often `System32\bash.exe`, WSL's launcher: a Linux bash that
+            // cannot read a Windows `--rcfile` (it would skip `~/.bashrc` too). Git Bash's is not there.
+            "bash" if cfg!(windows) && is_windows_system_program(&self.program) => ShellKind::Wsl,
             "bash" => ShellKind::Bash,
             "zsh" => ShellKind::Zsh,
             "fish" => ShellKind::Fish,
             _ => ShellKind::Posix,
         }
+    }
+
+    /// The system `zshenv` that keeps NOBLE's zsh integration from loading, when this is a zsh pane
+    /// that should have it (see `integration::system_zshenv_forcing_zdotdir`).
+    pub fn zsh_integration_blocked(&self) -> Option<PathBuf> {
+        (matches!(self.kind(), ShellKind::Zsh) && self.integration_dir().is_some())
+            .then(integration::system_zshenv_forcing_zdotdir)
+            .flatten()
+    }
+
+    /// cmd.exe (it cannot start in a UNC directory, see `Pane::spawn`).
+    pub fn is_cmd(&self) -> bool {
+        matches!(self.kind(), ShellKind::Cmd)
+    }
+
+    /// Do the user's PowerShell arguments already run something (`-Command`, `-File`, `-EncodedCommand`,
+    /// any abbreviation PowerShell accepts)? Then NOBLE adds no `-Command` of its own: PowerShell would
+    /// take everything after the first one as a single command and the user's would break.
+    fn pwsh_runs_own_command(&self) -> bool {
+        self.args.iter().any(|a| {
+            let Some(name) = a.strip_prefix('-').or_else(|| a.strip_prefix('/')) else { return false };
+            let name = name.split(':').next().unwrap_or(name).to_ascii_lowercase();
+            matches!(name.as_str(), "c" | "f" | "e" | "ec")
+                || (name.len() >= 3 && ["command", "file", "encodedcommand"].iter().any(|full| full.starts_with(&name)))
+        })
     }
 
     /// The integration directory, unless this shell has none or the user's
@@ -423,7 +503,9 @@ impl ShellSpec {
                 let trailing = word.len() - word.trim_end_matches('\\').len();
                 Some(format!("\"{word}{}\"", "\\".repeat(trailing)))
             }
-            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => Some(self.quote(word)),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix | ShellKind::Wsl => {
+                Some(self.quote(word))
+            }
         }
     }
 
@@ -440,6 +522,7 @@ impl ShellSpec {
         let mut args = self.args.clone();
         let cmd = command.filter(|c| !c.trim().is_empty());
         match self.kind() {
+            ShellKind::PowerShell if self.pwsh_runs_own_command() => {}
             ShellKind::PowerShell => {
                 let script = match cmd {
                     Some(c) => format!("{PWSH_CWD_HOOK}; {c}"),
@@ -452,6 +535,22 @@ impl ShellSpec {
                 // cmd.exe does not recognize the `\"` escape, so quoted paths would break.
                 if cmd.is_some() {
                     args.extend(["/K".into(), "%NOBLE_LAUNCH%".into()]);
+                }
+            }
+            // WSL: the command runs in Linux, then the user's login shell there takes over. `bash.exe`
+            // takes `-c` like bash; `wsl.exe` runs a program with `-e`.
+            ShellKind::Wsl => {
+                if let Some(c) = cmd {
+                    if self.label().eq_ignore_ascii_case("bash") {
+                        args.extend(["-c".into(), format!("{c}; exec bash")]);
+                    } else {
+                        args.extend([
+                            "-e".into(),
+                            "sh".into(),
+                            "-c".into(),
+                            format!("{c}; exec \"${{SHELL:-/bin/sh}}\""),
+                        ]);
+                    }
                 }
             }
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => match cmd {
@@ -490,7 +589,9 @@ impl ShellSpec {
         match self.kind() {
             ShellKind::PowerShell => format!("& {}{tail}", pwsh_quote(&path.display().to_string())),
             ShellKind::Cmd => format!("\"{}\"{tail}", path.display()),
-            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => command.to_string(),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix | ShellKind::Wsl => {
+                command.to_string()
+            }
         }
     }
 
@@ -504,6 +605,8 @@ impl ShellSpec {
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => {
                 format!("{} {args}", self.quote(&path))
             }
+            // A Windows program from inside WSL: through its `/mnt/c/...` path (WSL interop runs it).
+            ShellKind::Wsl => format!("\"$(wslpath {})\" {args}", self.quote(&path)),
         }
     }
 
@@ -596,6 +699,27 @@ enum ShellKind {
     Fish,
     /// Another Unix shell (sh, dash, nu …): started as configured, without integration.
     Posix,
+    /// Windows: `wsl.exe` or WSL's `System32\bash.exe`. A Linux shell behind a Windows launcher: no
+    /// integration (its scripts would be Windows paths), and launcher commands go through `-c` / `-e`.
+    Wsl,
+}
+
+/// Windows: is `program` (a name looked up on PATH, or a path) in the Windows system folder? That is
+/// where WSL's `bash.exe` lives; Git Bash, MSYS2 and Cygwin install elsewhere.
+fn is_windows_system_program(program: &str) -> bool {
+    let path = if Path::new(program).components().count() > 1 {
+        PathBuf::from(program)
+    } else {
+        match util::which(program) {
+            Some(p) => p,
+            None => return false,
+        }
+    };
+    let Some(root) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir")) else { return false };
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase().replace('/', "\\");
+    let root = lower(Path::new(&root));
+    let path = lower(&path);
+    ["system32", "sysnative"].iter().any(|d| path.starts_with(&format!("{root}\\{d}\\")))
 }
 
 /// Decides which shell to use; bash/zsh/fish get the integration scripts from `<data>/shell`.
@@ -614,6 +738,11 @@ pub fn resolve_shell(cfg: &TerminalCfg, data: &Path) -> ShellSpec {
     let mut spec = ShellSpec::new(program, cfg.shell_args.clone());
     spec.integration = Some(data.join("shell"));
     if spec.args.is_empty() && matches!(spec.kind(), ShellKind::PowerShell) {
+        // macOS: a login PowerShell, like the other shells below (`-Login` must come first).
+        // Windows and Linux start it as it is.
+        if cfg!(target_os = "macos") {
+            spec.args.push("-Login".into());
+        }
         spec.args.push("-NoLogo".into());
     }
     // macOS terminals start login shells: `/etc/zprofile` (path_helper), `~/.zprofile`
@@ -781,13 +910,27 @@ impl Pane {
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .context("could not open a pseudo terminal")?;
         let shell = spec.shell.prepared();
-        let mut cmd = CommandBuilder::new(&shell.program);
-        cmd.args(shell.args_with_command(spec.command));
-        let cwd = if spec.cwd.is_dir() {
+        let mut cwd = if spec.cwd.is_dir() {
             spec.cwd.to_path_buf()
         } else {
             dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
         };
+        // cmd.exe cannot start in a UNC directory (`\\server\share`, `\\wsl$\…`): it falls back to
+        // C:\Windows. It starts in the home folder and `pushd` maps the share to a drive letter instead.
+        // PowerShell and the Unix shells start there directly.
+        let unc_launch;
+        let mut command = spec.command;
+        if shell.is_cmd() && cwd.to_string_lossy().starts_with(r"\\") {
+            let pushd = format!("pushd \"{}\"", cwd.display());
+            unc_launch = match command.filter(|c| !c.trim().is_empty()) {
+                Some(c) => format!("{pushd} && {c}"),
+                None => pushd,
+            };
+            command = Some(&unc_launch);
+            cwd = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        }
+        let mut cmd = CommandBuilder::new(&shell.program);
+        cmd.args(shell.args_with_command(command));
         cmd.cwd(&cwd);
         // bash and zsh take `PWD` as the logical directory when it matches the real one, so a
         // folder reached through a symlink keeps its name (macOS `/var` is `/private/var`).
@@ -799,13 +942,22 @@ impl Pane {
         cmd.env("TERM_PROGRAM", "NOBLE");
         // The outer terminal's identity (kitty/Ghostty terminfo, iTerm2) does not describe the
         // pane: apps would look up the wrong terminfo or send that terminal's own sequences.
-        for var in ["TERMINFO", "TERM_PROGRAM_VERSION", "LC_TERMINAL", "LC_TERMINAL_VERSION", "ITERM_SESSION_ID"] {
+        // Windows Terminal's `WT_SESSION` / `WT_PROFILE_ID` would make apps think they draw in it directly.
+        for var in [
+            "TERMINFO",
+            "TERM_PROGRAM_VERSION",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "ITERM_SESSION_ID",
+            "WT_SESSION",
+            "WT_PROFILE_ID",
+        ] {
             cmd.env_remove(var);
         }
         cmd.env("NOBLE_PANE", id.to_string());
         // So the Claude Code hooks write the state to the right NOBLE instance.
         cmd.env("NOBLE_INSTANCE", std::process::id().to_string());
-        for (k, v) in shell.extra_env(spec.command) {
+        for (k, v) in shell.extra_env(command) {
             cmd.env(k, v);
         }
         let mut child =
@@ -1256,6 +1408,13 @@ mod tests {
         assert_eq!(msys_to_windows("/d"), "D:/");
         assert_eq!(msys_to_windows("/home/me"), "/home/me");
         assert_eq!(msys_to_windows("/tmp"), "/tmp");
+        assert_eq!(windows_cwd("/c/Users/me"), r"C:\Users\me");
+        assert_eq!(windows_cwd("C:/Program Files/Git/usr"), r"C:\Program Files\Git\usr");
+        assert_eq!(windows_cwd("//server/share/x"), r"\\server\share\x");
+        assert_eq!(windows_cwd("/home/me"), "/home/me");
+        assert_eq!(cwd_url_host("file://box/home"), Some("box".into()));
+        assert_eq!(cwd_url_host("file:///home"), None);
+        assert!(same_host("Box", "box.lan") && !same_host("box", "other"));
     }
 
     #[test]
@@ -1279,6 +1438,14 @@ mod tests {
         assert!(PWSH_CWD_HOOK.starts_with("$global:__nobleR=$null; "));
         assert_eq!(pwsh.args_with_command(None)[3], PWSH_CWD_HOOK);
         assert!(pwsh.extra_env(Some("claude")).is_empty());
+        // The user's own `-Command` / `-File` (or an abbreviation) is left alone: no second `-Command`.
+        for own in [["-Command", "Import-Module x"], ["-c", "x"], ["-File", "a.ps1"], ["-EncodedCommand", "AA"]] {
+            let user: Vec<String> = own.iter().map(|a| a.to_string()).collect();
+            let spec = ShellSpec::new("pwsh", user.clone());
+            assert_eq!(spec.args_with_command(None), user, "{own:?}");
+        }
+        assert!(!ShellSpec::new("pwsh", vec!["-NoProfile".into()]).pwsh_runs_own_command());
+        assert!(!ShellSpec::new("pwsh", vec!["-ConfigurationName".into(), "x".into()]).pwsh_runs_own_command());
         let cmd = ShellSpec::new("cmd.exe", vec![]);
         assert_eq!(cmd.args_with_command(Some("codex")), vec!["/K", "%NOBLE_LAUNCH%"]);
         let quoted = r#""C:\Program Files\x\claude.exe" --resume"#;

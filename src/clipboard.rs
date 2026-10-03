@@ -31,10 +31,10 @@ impl Clipboard {
 
     /// The system clipboard, opened on first use (and again after a failure).
     fn system(&mut self) -> Option<&mut arboard::Clipboard> {
-        // Over SSH the Mac's pasteboard is the remote one, not the user's: OSC 52 instead.
-        // (Linux has no display there, so arboard fails and OSC 52 is used the same way;
-        // Windows has no such case.)
-        if cfg!(target_os = "macos") && crate::util::over_ssh() {
+        // Over SSH this machine's clipboard is not the user's (on every OS: a Mac's pasteboard, a
+        // Windows OpenSSH session, a Linux tmux started on the desktop): OSC 52 instead. A forwarded
+        // X11 display (`ssh -X`) is the user's own, so its clipboard is used (`util::has_desktop`).
+        if crate::util::over_ssh() && !crate::util::has_desktop() {
             return None;
         }
         if self.inner.is_none() {

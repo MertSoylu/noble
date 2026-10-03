@@ -21,6 +21,20 @@ use crate::keys::Action;
 use crate::term::TabAlert;
 use crate::util;
 
+/// Replaces every 24-bit color in the frame with the nearest of the 256-color palette, for a terminal
+/// without truecolor (`util::lacks_truecolor`). Runs after `draw`, so themes and pane colors stay RGB.
+pub fn to_256_colors(buf: &mut Buffer) {
+    use ratatui::style::Color;
+    let map = |c: Color| match c {
+        Color::Rgb(r, g, b) => Color::Indexed(crate::theme::rgb_to_256(r, g, b)),
+        other => other,
+    };
+    for cell in buf.content.iter_mut() {
+        let (fg, bg) = (map(cell.fg), map(cell.bg));
+        cell.set_fg(fg).set_bg(bg);
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.size = (area.width, area.height);

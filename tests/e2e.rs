@@ -295,3 +295,33 @@ fn folder_argument_is_validated() {
     let help = String::from_utf8_lossy(&run(&["--help"]).stdout).into_owned();
     assert!(help.contains("<dir>"), "{help}");
 }
+
+/// `kill` (SIGTERM) and a closing terminal window (SIGHUP) run the normal shutdown path, which saves the
+/// open tabs (`termination.rs`). Unix only: Windows' console close event cannot be sent to another
+/// process from a test (`GenerateConsoleCtrlEvent` only sends Ctrl+C / Ctrl+Break); there the same
+/// shutdown path runs from the console handler and the session-end window.
+#[test]
+fn termination_signals_save_the_session() {
+    if cfg!(windows) {
+        return;
+    }
+    for signal in ["TERM", "HUP"] {
+        let home = std::env::temp_dir().join(format!("noble-e2e-sig{signal}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut h = Harness::start(&home, 34, 120);
+        h.wait_for("WELCOME TO NOBLE", 20);
+        h.send(b"\x1b");
+        h.wait_for("Projects", 20);
+        h.send(b"t");
+        h.wait_for("drag border", 10);
+        let pid = h.child.process_id().expect("pid");
+        let ok = std::process::Command::new("kill").arg(format!("-{signal}")).arg(pid.to_string()).status().unwrap();
+        assert!(ok.success(), "kill -{signal}");
+        assert!(h.wait_exit(15), "SIG{signal}: noble did not exit");
+        let session = std::fs::read_to_string(home.join("session.json")).unwrap_or_default();
+        assert!(session.contains("\"tabs\""), "SIG{signal}: session not saved: {session}");
+        drop(h);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

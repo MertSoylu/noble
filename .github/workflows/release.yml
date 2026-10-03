@@ -1,6 +1,7 @@
 # On a `v*` tag, builds ready-to-run Windows, Linux and macOS binaries and uploads them
 # to the GitHub release (so users don't need a Rust toolchain).
-# The Linux binaries are static (musl): they run on any distribution, old glibc included.
+# The Linux binaries are static (musl): they run on any distribution, old glibc included. The Windows
+# binaries link the C runtime statically (`.cargo/config.toml`): no VC++ redistributable is needed.
 # The macOS binaries are ad-hoc signed by the linker (not notarized): a download from the
 # browser needs `xattr -d com.apple.quarantine noble` once; curl and `noble update` do not.
 # Archive names are what `noble update` looks for (`update::asset_name`); keep them stable. Each archive
@@ -27,6 +28,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: noble-windows-x86_64.zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: noble-windows-aarch64.zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive: noble-linux-x86_64.tar.gz

@@ -277,10 +277,10 @@ mod tests {
         HookRecord { event: event.into(), message: None, ts, subagents }
     }
 
-    /// A headless app with one shell pane and its own data folder (the records are deleted from there).
-    fn app_with_pane(tag: &str) -> (App, PaneId) {
+    /// A headless app with one shell pane and its own data folder (the records are deleted from there;
+    /// the folder goes when the app is dropped).
+    fn app_with_pane() -> (App, PaneId) {
         let mut app = App::headless(Config::default(), (100, 30));
-        app.paths.data = std::env::temp_dir().join(format!("noble-agents-unit-{}-{tag}", std::process::id()));
         let _ = std::fs::create_dir_all(&app.paths.data);
         app.open_project_shell(std::env::temp_dir());
         let pane = app.tabs.last().expect("tab").focus;
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn records_drive_working_needs_you_and_your_turn() {
-        let (mut app, pane) = app_with_pane("flow");
+        let (mut app, pane) = app_with_pane();
         apply(&mut app, pane, rec("prompt", 100, 0));
         assert_eq!(state(&app, pane), Some(AgentState::Working));
         assert_eq!(app.agent_working_since.get(&pane), Some(&100));
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn running_subagents_keep_the_session_working_after_stop() {
-        let (mut app, pane) = app_with_pane("sub");
+        let (mut app, pane) = app_with_pane();
         apply(&mut app, pane, rec("prompt", 100, 0));
         apply(&mut app, pane, rec("stop", 110, 2));
         assert_eq!(state(&app, pane), Some(AgentState::Working));
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn older_orphan_and_ended_records_are_ignored() {
-        let (mut app, pane) = app_with_pane("stale");
+        let (mut app, pane) = app_with_pane();
         apply(&mut app, pane, rec("prompt", 100, 0));
         assert!(app.agent_hooks.contains_key(&pane));
         // The prompt came back: the agent is gone and records written before that are ignored.
