@@ -718,6 +718,24 @@ impl TermPalette {
     }
 }
 
+/// The xterm 256-color index nearest to an RGB color: the 6×6×6 cube (16–231) or the gray ramp (232–255),
+/// whichever is closer. Used where the terminal has no truecolor (`ui::to_256_colors`).
+pub fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let nearest =
+        |v: u8| LEVELS.iter().enumerate().min_by_key(|(_, l)| (**l as i32 - v as i32).abs()).map_or(0, |(i, _)| i);
+    let (ri, gi, bi) = (nearest(r), nearest(g), nearest(b));
+    let cube = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
+    let avg = (r as u32 + g as u32 + b as u32) / 3;
+    let gray_i = ((avg.saturating_sub(8) + 5) / 10).min(23) as u8;
+    let gray = 8 + 10 * gray_i;
+    let dist = |(cr, cg, cb): (u8, u8, u8)| {
+        let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+        d(cr, r) + d(cg, g) + d(cb, b)
+    };
+    if dist((gray, gray, gray)) < dist(cube) { 232 + gray_i } else { 16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8 }
+}
+
 #[cfg(test)]
 mod term_tests {
     use super::*;

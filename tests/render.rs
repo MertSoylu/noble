@@ -425,6 +425,13 @@ fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
     if cfg!(windows) {
         check_cwd_tracking("cmd.exe");
+        // Windows PowerShell 5.1 is the default shell where pwsh is not installed; when pwsh took the
+        // default above, 5.1 is checked on its own.
+        if noble::util::which("pwsh").is_some()
+            && let Some(ps) = noble::util::which("powershell")
+        {
+            check_cwd_tracking(&ps.display().to_string());
+        }
         let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
         if git_bash.is_file() {
             check_cwd_tracking(&git_bash.display().to_string());
@@ -2250,6 +2257,16 @@ fn agent_state_follows_the_program_in_the_pane() {
     check_agent_lifecycle("");
     if cfg!(windows) {
         check_agent_lifecycle("cmd.exe");
+        // Windows PowerShell 5.1 when pwsh took the default above, and Git Bash.
+        if noble::util::which("pwsh").is_some()
+            && let Some(ps) = noble::util::which("powershell")
+        {
+            check_agent_lifecycle(&ps.display().to_string());
+        }
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_agent_lifecycle(&git_bash.display().to_string());
+        }
     } else {
         for shell in ["bash", "zsh", "fish", "pwsh"] {
             if let Some(path) = noble::util::which(shell) {

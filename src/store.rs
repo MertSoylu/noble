@@ -19,7 +19,21 @@ fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
 }
 
 /// Atomic text write: temp file first, then rename. A failed write or rename leaves no temp file behind.
+/// A symlinked file (a dotfiles manager's `config.toml`) is written through, so the link stays a link,
+/// and the new file keeps the old one's permissions (a private 0600 file stays private).
 pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
+    let target;
+    let file = match std::fs::symlink_metadata(file) {
+        // A dangling link has no target to write to: it is replaced like a missing file.
+        Ok(m) if m.file_type().is_symlink() => match std::fs::canonicalize(file) {
+            Ok(t) => {
+                target = t;
+                target.as_path()
+            }
+            Err(_) => file,
+        },
+        _ => file,
+    };
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -29,11 +43,26 @@ pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
     let tmp = file.with_extension(format!("{ext}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     // A failed write (disk full) or rename (target locked on Windows, a directory in its
     // place) must not leave the temp file behind.
-    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file));
+    let result = std::fs::write(&tmp, text)
+        .and_then(|()| keep_permissions(file, &tmp))
+        .and_then(|()| std::fs::rename(&tmp, file));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// Gives `tmp` the mode bits of the file it is about to replace. Unix: a new file gets the umask's mode,
+/// so without this a 0600 file would become 0644. Windows: the file's ACL comes from its folder and the
+/// read-only attribute must not be copied (it would block the next save), so nothing is done.
+fn keep_permissions(file: &Path, tmp: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(file) {
+        std::fs::set_permissions(tmp, meta.permissions())?;
+    }
+    #[cfg(not(unix))]
+    let _ = (file, tmp);
+    Ok(())
 }
 
 /// Atomic JSON write (see [`write_text`]); errors are ignored.
@@ -650,6 +679,28 @@ impl UsageHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A symlinked file (dotfiles managers) stays a link and its target gets the text; a private file
+    /// stays private. Unix only: creating symlinks on Windows needs developer mode or admin rights, and
+    /// Windows has no mode bits to keep.
+    #[cfg(unix)]
+    #[test]
+    fn write_text_keeps_symlinks_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("noble-write-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_text(&link, "new").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is kept");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Removed and manually added projects survive a restart; removing unpins, adding a
     /// removed project brings it back, and paths compare like the file system does.

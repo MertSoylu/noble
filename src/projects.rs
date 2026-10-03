@@ -69,31 +69,54 @@ const SKIP_DIRS: &[&str] = &[
 /// Default root folders: the ones that exist.
 pub fn default_roots() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
-    let mut roots: Vec<PathBuf> = [
-        "Desktop",
-        "Documents",
-        "Documents/GitHub",
-        "source/repos",
-        "projects",
-        "Projects",
-        "code",
-        "Code",
-        "dev",
-        "src",
-        "repos",
-        "git",
-        "work",
-    ]
-    .iter()
-    .map(|p| home.join(p))
-    .filter(|p| p.is_dir())
-    .collect();
-    // On Windows and macOS `projects` and `Projects` are the same folder: it must not be
-    // added twice. On Linux they are two folders.
-    if cfg!(any(windows, target_os = "macos")) {
-        roots.dedup_by(|a, b| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
+    // The desktop and documents folders by their real (possibly localized) names: `~/Schreibtisch`,
+    // `~/Dokumente` on a German Linux (XDG user dirs); Windows and macOS keep the English names on disk.
+    let desktop = dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop"));
+    let documents = dirs::document_dir().unwrap_or_else(|| home.join("Documents"));
+    let mut roots: Vec<PathBuf> = vec![desktop, documents.clone(), documents.join("GitHub")];
+    roots.extend(
+        [
+            "source/repos",
+            "projects",
+            "Projects",
+            // macOS: the folder Apple suggests for code (Finder gives it its own icon, Xcode proposes it).
+            "Developer",
+            "code",
+            "Code",
+            "dev",
+            "src",
+            "repos",
+            "git",
+            "work",
+        ]
+        .iter()
+        .map(|p| home.join(p)),
+    );
+    let mut out: Vec<PathBuf> = Vec::new();
+    // Windows and macOS: `projects` exists for `Projects` too (case-insensitive file system); the
+    // spelling on disk is kept, so paths show and are saved the way the folder is really named, and the
+    // folder is added once (`same_path`). On Linux they are two folders.
+    for p in roots.into_iter().filter(|p| p.is_dir()) {
+        let p = if cfg!(any(windows, target_os = "macos")) { on_disk_case(&p) } else { p };
+        if !out.iter().any(|o| crate::util::same_path(o, &p)) {
+            out.push(p);
+        }
     }
-    roots
+    out
+}
+
+/// `path` with its last component spelled as it is on disk (`~/projects` → `~/Projects` on a
+/// case-insensitive file system). Unchanged when the parent cannot be read.
+fn on_disk_case(path: &Path) -> PathBuf {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return path.to_path_buf() };
+    let want = name.to_string_lossy().to_lowercase();
+    std::fs::read_dir(parent)
+        .ok()
+        .and_then(|entries| {
+            entries.flatten().map(|e| e.file_name()).find(|n| n == name || n.to_string_lossy().to_lowercase() == want)
+        })
+        .map(|real| parent.join(real))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 pub fn roots_from(cfg: &ProjectsCfg) -> Vec<PathBuf> {
@@ -323,6 +346,19 @@ fn git_run(path: &Path, git: &Path, args: &[&str]) -> Option<String> {
     crate::ai::run_command(cmd, GIT_TIMEOUT).ok()
 }
 
+/// Is `git` a working git? macOS: `/usr/bin/git` always exists, but without the Command Line Tools it is
+/// a stub that pops up the "install developer tools" dialog every time it runs; `xcode-select -p` tells
+/// (without the dialog). Without them no git status is shown, as on a machine with no git at all.
+/// Windows and Linux: a `git` on PATH is the real one.
+fn git_is_real(git: &Path) -> bool {
+    if !cfg!(target_os = "macos") || git != Path::new("/usr/bin/git") {
+        return true;
+    }
+    let mut cmd = util::command_for(Path::new("/usr/bin/xcode-select"));
+    cmd.arg("-p");
+    crate::ai::run_command(cmd, Duration::from_secs(5)).is_ok_and(|out| !out.trim().is_empty())
+}
+
 fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
     // A non-zero exit (not a repo) prints nothing useful; `git status` on a repo always prints the branch line.
     let status = git_run(path, git, &["status", "--porcelain=v1", "-b", "--untracked-files=normal"])?;
@@ -399,7 +435,7 @@ pub fn spawn(
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     let _ = std::thread::Builder::new().name("projects".into()).spawn(move || {
-        let git = util::which("git");
+        let git = util::which("git").filter(|g| git_is_real(g));
         // Last activity times from the previous scan: no git run for unchanged repos.
         let mut seen: std::collections::HashMap<PathBuf, Option<SystemTime>> = Default::default();
         loop {

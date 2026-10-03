@@ -559,6 +559,8 @@ pub struct App {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<PaneId, Pane>,
     next_id: PaneId,
+    /// The "zsh integration is blocked by the system zshenv" warning was shown (once per run).
+    zsh_warned: bool,
     pub prefix_armed: bool,
     /// The next key goes straight to this pane while it is focused (`passthrough = "once"`, prefix i).
     pub pass_next: Option<PaneId>,
@@ -820,6 +822,7 @@ impl App {
             tabs: Vec::new(),
             panes: HashMap::new(),
             next_id: 1,
+            zsh_warned: false,
             prefix_armed: false,
             pass_next: None,
             sensors: Sensors::default(),
@@ -925,6 +928,7 @@ impl App {
             AppEvent::Input(_)
             | AppEvent::PtyExit(_)
             | AppEvent::KillResult { .. }
+            | AppEvent::LaunchFailed(_)
             | AppEvent::Update(_)
             | AppEvent::Quit => true,
             AppEvent::PtyOutput => false,
@@ -976,6 +980,7 @@ impl App {
                     self.toast(ToastLevel::Error, format!("could not terminate {name} ({pid})"));
                 }
             }
+            AppEvent::LaunchFailed(text) => self.toast(ToastLevel::Error, text),
             AppEvent::Projects(list) => self.set_projects(list),
             AppEvent::Git(path, info) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {

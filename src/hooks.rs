@@ -119,13 +119,8 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
         std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.noble-tmp");
-    // A failed write or rename must not leave the temporary file next to the user's settings.
-    let result = std::fs::write(&tmp, text + "\n").and_then(|()| std::fs::rename(&tmp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result.map_err(|e| e.to_string())
+    // Atomic, through a symlinked file, keeping its permissions; no temp file is left on failure.
+    crate::store::write_text(path, &(text + "\n")).map_err(|e| e.to_string())
 }
 
 /// Are the hooks installed for every event?
@@ -389,7 +384,8 @@ mod tests {
         std::fs::create_dir_all(blocked.join("inside")).unwrap();
         assert!(write_settings(&blocked, &serde_json::json!({})).is_err());
         assert!(blocked.is_dir(), "the directory in the way is untouched");
-        assert!(!dir.join("settings.json.noble-tmp").exists(), "temp file left behind");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("settings.json")], "temp file left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

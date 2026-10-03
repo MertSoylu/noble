@@ -10,9 +10,13 @@ if ! cargo build --release --quiet --manifest-path "$dir/Cargo.toml"; then
   echo "NOBLE build failed." >&2
   exit 1
 fi
+# Where cargo put it: `CARGO_TARGET_DIR` or `build.target-dir` may move it away from `target/`.
+target=$(cargo metadata --format-version 1 --no-deps --manifest-path "$dir/Cargo.toml" |
+  sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+target=${target:-$dir/target}
 mkdir -p "$bin"
 tmp="$bin/.noble-dev.new"
-if ! install -m 755 "$dir/target/release/noble" "$tmp" || ! mv -f "$tmp" "$bin/noble-dev"; then
+if ! install -m 755 "$target/release/noble" "$tmp" || ! mv -f "$tmp" "$bin/noble-dev"; then
   rm -f "$tmp"
   echo "NOBLE install failed." >&2
   exit 1

@@ -171,12 +171,103 @@ pub fn is_openable_url(url: &str) -> bool {
     ["http", "https", "mailto"].iter().any(|s| scheme.eq_ignore_ascii_case(s))
 }
 
+/// Would handing `path` to the system opener run it as a program? A link's visible text may differ
+/// from its target (OSC 8), so a click must never run code: such a path is copied instead.
+/// Windows (`FileProtocolHandler`): `.exe`, scripts, installers, shortcuts. macOS (`open`): app bundles,
+/// `.command`/`.tool`/`.terminal` scripts, installer packages, and any file with an execute bit (opened in
+/// Terminal and run). Linux (`xdg-open`): `.desktop` launchers, AppImages, and files with an execute bit.
+pub fn is_launchable(path: &Path) -> bool {
+    const PROGRAM_EXTS: &[&str] = &[
+        // Windows
+        "exe",
+        "com",
+        "bat",
+        "cmd",
+        "ps1",
+        "psm1",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "msi",
+        "msp",
+        "msix",
+        "appx",
+        "scr",
+        "pif",
+        "lnk",
+        "url",
+        "hta",
+        "cpl",
+        "reg",
+        "application",
+        "appref-ms",
+        "inf",
+        "sct",
+        // macOS
+        "app",
+        "command",
+        "tool",
+        "terminal",
+        "pkg",
+        "mpkg",
+        "workflow",
+        "scpt",
+        "applescript",
+        "prefpane",
+        "action",
+        "dylib",
+        "kext",
+        // Linux (and anywhere)
+        "desktop",
+        "appimage",
+        "run",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "csh",
+        "ksh",
+        "jar",
+        "bin",
+        "deb",
+        "rpm",
+    ];
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if PROGRAM_EXTS.contains(&ext.as_str()) {
+        return true;
+    }
+    // Unix: an executable file (a directory's execute bit only means it can be entered). Windows has no
+    // execute bit; the extension list above is what decides there.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.is_file()
+            && meta.permissions().mode() & 0o111 != 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Why a link was not opened.
+#[derive(Debug, PartialEq)]
+pub enum OpenError {
+    /// The target is a program (`is_launchable`): not run from a click.
+    Program,
+    Failed(String),
+}
+
 /// Opens a link in an external app: URLs in the browser, `file:line` in the first editor
 /// found that can jump to a line (VS Code, Cursor, Windsurf, Zed), other files with the
-/// system's default application.
-pub fn open(link: &Link) -> Result<(), String> {
+/// system's default application — unless that would run them (`is_launchable`).
+pub fn open(link: &Link) -> Result<(), OpenError> {
     use std::process::Command;
-    let spawn = |mut c: Command| crate::util::spawn_detached(&mut c).map_err(|e| e.to_string());
+    let spawn = |mut c: Command| crate::util::spawn_detached(&mut c).map_err(|e| OpenError::Failed(e.to_string()));
     let system = |target: &std::ffi::OsStr| {
         let mut c = if cfg!(windows) {
             // `start` interprets '&' inside a URL; rundll32 takes the text as it is.
@@ -192,7 +283,7 @@ pub fn open(link: &Link) -> Result<(), String> {
         c
     };
     match link {
-        Link::Url(url) if !is_openable_url(url) => Err("this kind of link is not opened".to_string()),
+        Link::Url(url) if !is_openable_url(url) => Err(OpenError::Failed("this kind of link is not opened".into())),
         Link::Url(url) => spawn(system(std::ffi::OsStr::new(url))),
         Link::File { path, line, col } => {
             if path.is_file()
@@ -207,6 +298,9 @@ pub fn open(link: &Link) -> Result<(), String> {
                     return spawn(c);
                 }
             }
+            if is_launchable(path) {
+                return Err(OpenError::Program);
+            }
             spawn(system(path.as_os_str()))
         }
     }
@@ -215,6 +309,28 @@ pub fn open(link: &Link) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_are_never_opened_from_a_link() {
+        for p in ["setup.command", "x.EXE", "run.bat", "Evil.app", "a.desktop", "tool.AppImage", "i.pkg", "s.ps1"] {
+            assert!(is_launchable(Path::new(p)), "{p}");
+        }
+        for p in ["README.md", "photo.png", "notes.txt", "src/main.rs"] {
+            assert!(!is_launchable(Path::new(p)), "{p}");
+        }
+        // Unix: an executable file without an extension (`open` would run it in Terminal on macOS).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = std::env::temp_dir().join(format!("noble-link-exec-{}", std::process::id()));
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(is_launchable(&f));
+            let link = Link::File { path: f.clone(), line: None, col: None };
+            assert_eq!(open(&link), Err(OpenError::Program));
+            let _ = std::fs::remove_file(&f);
+        }
+    }
 
     #[test]
     fn only_web_and_mail_urls_are_openable() {
