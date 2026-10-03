@@ -38,6 +38,7 @@ All notable changes to NOBLE are documented here. The format is based on
 - A remote shell's OSC 7 (after `ssh` from a pane) no longer changes the pane's local directory.
 - macOS: background git no longer pops up the Command Line Tools installer; PowerShell starts as a login
   shell like the other shells; zsh launcher commands read `~/.zlogin`; `~/Projects` keeps its on-disk case.
+- Tests and the screenshot example no longer leave a `noble-headless` folder in the temp dir.
 - bash login shells read `~/.bash_logout` on exit; `install.sh`/`install.cmd` respect `CARGO_TARGET_DIR`.
 
 ## [1.8.0] - 2026-09-30

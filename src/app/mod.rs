@@ -561,6 +561,8 @@ pub struct App {
     next_id: PaneId,
     /// The "zsh integration is blocked by the system zshenv" warning was shown (once per run).
     zsh_warned: bool,
+    /// A headless app's own data folder under the temp dir, deleted when the app is dropped.
+    owned_data: Option<PathBuf>,
     pub prefix_armed: bool,
     /// The next key goes straight to this pane while it is focused (`passthrough = "once"`, prefix i).
     pub pass_next: Option<PaneId>,
@@ -686,6 +688,19 @@ fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
         .collect()
 }
 
+impl Drop for App {
+    /// A headless app removes its temp data folder (and the shared `noble-headless` parent once it is
+    /// empty). The panes go first: their shells may still hold the integration scripts open (Windows).
+    fn drop(&mut self) {
+        let Some(dir) = self.owned_data.take() else { return };
+        self.panes.clear();
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
 impl App {
     /// Launchers to show on Home: the ones found on PATH and not hidden
     /// (in their `launchers` order).
@@ -696,10 +711,16 @@ impl App {
     /// Without background services (for tests and screenshots).
     pub fn headless(cfg: Config, size: (u16, u16)) -> App {
         let (tx, rx) = std::sync::mpsc::channel();
-        let paths = Paths { config: PathBuf::from("config.toml"), data: std::env::temp_dir().join("noble-headless") };
+        // A folder of its own per app (tests run in parallel), removed again on drop: tests and the
+        // screenshot example would otherwise leave shell scripts and records in the temp dir on every run.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let data = std::env::temp_dir().join("noble-headless").join(format!("{}-{seq}", std::process::id()));
+        let paths = Paths { config: PathBuf::from("config.toml"), data: data.clone() };
         let mut app = App::build(cfg, paths, None, tx, size, Recent::memory(), Workspaces::memory());
         app.boot = None;
         app.rx = Some(rx);
+        app.owned_data = Some(data);
         app
     }
 
@@ -823,6 +844,7 @@ impl App {
             panes: HashMap::new(),
             next_id: 1,
             zsh_warned: false,
+            owned_data: None,
             prefix_armed: false,
             pass_next: None,
             sensors: Sensors::default(),
