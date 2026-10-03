@@ -36,10 +36,10 @@ pub type Tx = std::sync::mpsc::Sender<AppEvent>;
 
 /// Windows: crossterm's console input has no bracketed paste, so the terminal's own paste (Ctrl+V in
 /// Windows Terminal) arrives as a burst of key presses, each line break as an Enter. Key events that
-/// were all waiting at once (`batch`: one read plus everything already queued) and hold text with a line
-/// break cannot be typing, so they become one `Event::Paste`: it then gets the multi-line confirmation
-/// and the bracketed-paste wrapping a Unix paste gets. A burst without a line break stays as keys (it
-/// runs nothing on its own, and IMEs commit several characters at once). Unix terminals send bracketed
+/// were all waiting at once (`batch`: one read plus everything already queued) and hold more than one
+/// line cannot be typing, so they become one `Event::Paste`: it then gets the multi-line confirmation
+/// and the bracketed-paste wrapping a Unix paste gets. A burst of one line (with or without its Enter)
+/// stays as keys: IMEs commit several characters at once, and a single command runs alike either way. Unix terminals send bracketed
 /// paste and never need this.
 pub fn coalesce_paste(batch: Vec<crossterm::event::Event>) -> Vec<crossterm::event::Event> {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -62,7 +62,9 @@ pub fn coalesce_paste(batch: Vec<crossterm::event::Event>) -> Vec<crossterm::eve
     let mut run: Vec<Event> = Vec::new();
     let flush = |run: &mut Vec<Event>, out: &mut Vec<Event>| {
         let text: String = run.iter().filter_map(|e| text_key(e).flatten()).collect();
-        if text.chars().count() >= 2 && text.contains('\n') && text.contains(|c: char| c != '\n') {
+        // Two lines or more: one line with its Enter is what a fast typist, an automation tool or a
+        // terminal's "send text" action produces too, and it runs the same way as a typed command.
+        if text.trim_end_matches('\n').contains('\n') {
             out.push(Event::Paste(text));
         } else {
             out.append(run);
@@ -106,6 +108,9 @@ mod tests {
         assert_eq!(coalesce_paste(burst), vec![Event::Paste("ls\nx".into())]);
         // Typing: one key at a time, or a burst without a line break (an IME commit).
         assert_eq!(coalesce_paste(vec![press(KeyCode::Enter)]), vec![press(KeyCode::Enter)]);
+        // One line with its Enter (automation, "send text") stays keys.
+        let line = vec![press(KeyCode::Char('l')), press(KeyCode::Char('s')), press(KeyCode::Enter)];
+        assert_eq!(coalesce_paste(line.clone()), line);
         let ime = vec![press(KeyCode::Char('日')), press(KeyCode::Char('本'))];
         assert_eq!(coalesce_paste(ime.clone()), ime);
         // A shortcut in between ends the run.
