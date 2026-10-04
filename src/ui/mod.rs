@@ -851,6 +851,17 @@ fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, 
     hits.push((Rect::new(cx, y, x - cx, 1), if plan.hooks { Hit::HooksOfferDismiss } else { Hit::UpdateDismiss }));
 }
 
+/// A notification's text as drawn on a screen `screen_w` wide (cut to fit, padded).
+fn toast_text(text: &str, screen_w: u16) -> String {
+    let max = screen_w.saturating_sub(4).min(70) as usize;
+    format!(" {} ", util::truncate(text, max.saturating_sub(3)))
+}
+
+/// Cells of a notification's countdown (its text, which darkens as its time runs out).
+pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
+    util::width(&toast_text(text, screen_w)) as u16
+}
+
 fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
     let th = &app.theme;
     let mut y = area.bottom().saturating_sub(3);
@@ -864,8 +875,7 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
             ToastLevel::Warn => th.warn,
             ToastLevel::Error => th.crit,
         };
-        let max = area.width.saturating_sub(4).min(70) as usize;
-        let text = format!(" {} ", util::truncate(&t.text, max.saturating_sub(3)));
+        let text = toast_text(&t.text, area.width);
         let w = util::width(&text) as u16 + 1;
         // Slides in from the right edge, and out the same way once its time is up.
         let shift = if app.fx.enabled() {

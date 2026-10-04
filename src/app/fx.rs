@@ -102,7 +102,27 @@ impl Tween {
     fn value(&self) -> f64 {
         self.from + (self.to - self.from) * ease_out(linear(self.started, TWEEN))
     }
+
+    /// How long until the shown value crosses the next half percent (what a bar or a rounded number
+    /// can show), or the tween ends; `None` once it has ended.
+    fn next_change(&self) -> Option<Duration> {
+        let elapsed = self.started.elapsed();
+        if elapsed >= TWEEN {
+            return None;
+        }
+        let (span, now) = (self.to - self.from, self.value());
+        let next = if span > 0.0 { (now / STEP).floor() * STEP + STEP } else { (now / STEP).ceil() * STEP - STEP };
+        // Inverse of `ease_out`: when the eased progress reaches that value.
+        let e = (next - self.from) / span;
+        let at = if (0.0..1.0).contains(&e) { TWEEN.mul_f64(1.0 - (1.0 - e).cbrt()) } else { TWEEN };
+        Some(at.saturating_sub(elapsed).max(Duration::from_millis(4)))
+    }
 }
+
+/// The finest change a tweened value shows (half a percent: a half-cell bar step, a rounded number).
+const STEP: f64 = 0.5;
+/// Frame interval while something fades or moves.
+const FRAME: Duration = Duration::from_millis(16);
 
 /// A list selection moving from one row to another.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -202,6 +222,21 @@ impl Effects {
             || self.tweens.borrow().values().any(|t| t.started.elapsed() < TWEEN + GRACE)
             || self.glides.borrow().values().any(|g| g.2.elapsed() < GLIDE + GRACE)
             || seen.closing.is_some()
+    }
+
+    /// When the running effects need the next frame: every frame while something fades or moves,
+    /// only when a tweened value shows a new step otherwise. `None`: nothing runs.
+    pub fn next_frame(&self) -> Option<Duration> {
+        if !self.busy() {
+            return None;
+        }
+        let smooth = !self.started.borrow().is_empty()
+            || self.glides.borrow().values().any(|g| g.2.elapsed() < GLIDE + GRACE)
+            || self.seen.borrow().closing.is_some();
+        if smooth {
+            return Some(FRAME);
+        }
+        self.tweens.borrow().values().filter_map(Tween::next_change).min()
     }
 
     /// The value to show for a number that moves to `target`: it slides there from what was shown.
@@ -426,6 +461,26 @@ mod tests {
         let fx = on();
         fx.tween("ram", 40.0, 1.0);
         assert_eq!(fx.tween("ram", 40.4, 1.0), 40.4);
+    }
+
+    /// A sliding number wakes the screen only when its shown value moves on, and at its end.
+    #[test]
+    fn tween_paces_its_frames() {
+        let fx = on();
+        fx.tween("cpu", 10.0, 1.0);
+        assert_eq!(fx.next_frame(), None);
+        fx.tween("cpu", 11.0, 1.0);
+        // 10 → 11 has two half-percent steps over 320 ms: the first comes well after one frame.
+        let first = fx.next_frame().unwrap();
+        assert!(first > FRAME && first < TWEEN, "{first:?}");
+        // A big jump has many steps close together.
+        fx.tween("ram", 0.0, 1.0);
+        fx.tween("ram", 100.0, 1.0);
+        assert!(fx.next_frame().unwrap() <= FRAME);
+        // A fade draws every frame.
+        let fx = on();
+        fx.start(Fx::Hover);
+        assert_eq!(fx.next_frame(), Some(FRAME));
     }
 
     #[test]
