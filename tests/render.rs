@@ -1126,7 +1126,8 @@ fn effects_play_and_settle() {
         }
     }
     assert!(app.fx.raw(Fx::HomeIn).is_some());
-    app.run(Action::NextTab);
+    // The settled comparison below runs over Settings: a live shell may redraw its prompt between two frames.
+    app.run(Action::Settings);
     settle(&mut app);
     // An overlay fades its backdrop in; its selection glides.
     app.run(Action::Palette);
@@ -1138,11 +1139,13 @@ fn effects_play_and_settle() {
     }
     settle(&mut app);
     // Settled: the same picture as without animations.
-    let animated = render(&mut app, 110, 30);
+    // The "Animations" row itself shows the setting and is left out.
+    let without_setting = |s: String| s.lines().filter(|l| !l.contains("Animati")).collect::<Vec<_>>().join("\n");
+    let animated = without_setting(render(&mut app, 110, 30));
     let mut cfg = app.cfg.clone();
     cfg.general.animations = false;
     app.apply_config(cfg);
-    assert_eq!(animated, render(&mut app, 110, 30));
+    assert_eq!(animated, without_setting(render(&mut app, 110, 30)));
     // A laptop (the demo runs on battery) gets "Animations on battery"; off, it stops them on battery.
     let item = SettingItem::Setting(SettingKey::AnimBattery);
     assert!(app.settings_items().contains(&item));
