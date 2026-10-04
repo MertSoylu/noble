@@ -6,6 +6,41 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Windows ARM64 release archive (`noble-windows-aarch64.zip`); `noble update` picks it up.
+- Terminal.app before macOS 26 (no truecolor) gets the nearest 256-palette colors instead of garbled ones.
+- `~/Developer` and the localized XDG desktop/documents folders are default project roots.
+- A warning when the system `zshenv` sets `ZDOTDIR` and so keeps NOBLE's zsh integration from loading.
+
+### Changed
+- Ctrl+click never runs a program: a link to an executable, script, app bundle or installer copies its path.
+- `ctrl+alt+<non-letter>` key bindings are refused with a warning (they are AltGr on Windows) instead of
+  silently binding the bare key.
+- Network rates leave out loopback and virtual links (VPN tunnels, container bridges); disk rows leave out
+  container, snap and simulator mounts and list a device once.
+- Opening a folder, file or link over SSH no longer starts it on the remote screen on Windows and Linux;
+  the clipboard falls back to OSC 52 there (a forwarded X11 display still counts as the user's).
+
+### Fixed
+- `noble update` works in a fresh private temp directory (shared `/tmp` on Linux could be abused by
+  another local user).
+- Windows: a multi-line paste with the terminal's shortcut (Ctrl+V) asks first and uses bracketed paste.
+- Windows: the session is saved on logoff and shutdown; the release binary no longer needs the VC++ runtime.
+- Windows: Git Bash directories use backslashes ("Open folder" opened Documents), network shares work in Git
+  Bash and cmd.exe, and MSYS2/Cygwin zsh and fish report Windows paths.
+- Windows: `bash` that is WSL's launcher is started without NOBLE's bash script (it hid `~/.bashrc`);
+  PowerShell arguments with their own `-Command`/`-File` are kept; `WT_SESSION` no longer leaks into panes;
+  `install.cmd` works with several noble-dev windows open.
+- Linux: a battery reporting `Unknown` on AC no longer turns on battery mode; a hung network mount no longer
+  freezes CPU and memory readings; programs NOBLE opens survive closing its terminal window and a failed
+  `xdg-open` is reported.
+- Saving `config.toml` or Claude's `settings.json` keeps a symlinked file a symlink and keeps its permissions.
+- A remote shell's OSC 7 (after `ssh` from a pane) no longer changes the pane's local directory.
+- macOS: background git no longer pops up the Command Line Tools installer; PowerShell starts as a login
+  shell like the other shells; zsh launcher commands read `~/.zlogin`; `~/Projects` keeps its on-disk case.
+- Tests and the screenshot example no longer leave a `noble-headless` folder in the temp dir.
+- bash login shells read `~/.bash_logout` on exit; `install.sh`/`install.cmd` respect `CARGO_TARGET_DIR`.
+
 ## [1.8.0] - 2026-09-30
 
 ### Added

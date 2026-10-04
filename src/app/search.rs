@@ -225,7 +225,18 @@ impl App {
         }
         match link::open(&target) {
             Ok(()) => self.toast(ToastLevel::Info, format!("opening {}", crate::util::truncate(&label, 60))),
-            Err(e) => self.toast(ToastLevel::Error, format!("could not open link: {e}")),
+            // A program behind a link (its text may say something else) is never run: the path is copied.
+            Err(link::OpenError::Program) => {
+                if let link::Link::File { path, .. } = &target {
+                    let text = path.display().to_string();
+                    self.set_clipboard(&text, false);
+                }
+                self.toast(
+                    ToastLevel::Warn,
+                    format!("a program — copied, not run: {}", crate::util::truncate(&label, 50)),
+                );
+            }
+            Err(link::OpenError::Failed(e)) => self.toast(ToastLevel::Error, format!("could not open link: {e}")),
         }
         true
     }

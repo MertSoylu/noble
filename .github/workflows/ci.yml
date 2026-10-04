@@ -61,7 +61,7 @@ jobs:
       - run: cargo test
 
   linux-musl:
-    # The release builds static musl binaries (`release.yml`); make sure they still build.
+    # The release builds static musl binaries (`release.yml`); make sure they still build and work.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -72,6 +72,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --target x86_64-unknown-linux-musl
       - run: target/x86_64-unknown-linux-musl/debug/noble --version
+      # The release ships the musl build: its unit tests and the end-to-end run (the real binary in a
+      # pseudo-terminal) run against musl too, not only glibc.
+      - run: cargo test --locked --target x86_64-unknown-linux-musl --lib --test e2e
 
   msrv:
     # The oldest Rust that `rust-version` in Cargo.toml promises (read from there, so it is kept in one

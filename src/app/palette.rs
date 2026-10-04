@@ -174,7 +174,7 @@ impl App {
         }
         for e in self.recent.top(12) {
             let path = PathBuf::from(&e.path);
-            if self.projects.iter().any(|p| p.path == path) {
+            if self.projects.iter().any(|p| util::same_path(&p.path, &path)) {
                 continue;
             }
             items.push(PaletteItem {

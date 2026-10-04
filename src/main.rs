@@ -123,7 +123,8 @@ fn main() -> anyhow::Result<()> {
         crossterm::terminal::SetTitle(if noble::util::is_dev_build() { "NOBLE dev" } else { "NOBLE" })
     )?;
     // Unix: pastes arrive as one `Event::Paste`. crossterm's Windows console input has no
-    // bracketed paste; there a paste arrives as ordinary key events and reaches the shell as typed text.
+    // bracketed paste; there a paste arrives as a burst of key events, which the input thread turns back
+    // into a paste (`event::coalesce_paste`).
     #[cfg(not(windows))]
     execute!(out, crossterm::event::EnableBracketedPaste)?;
     // Restore the terminal if the main thread panics; background panics are
@@ -156,7 +157,22 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
         let tx = tx.clone();
         std::thread::Builder::new().name("input".into()).spawn(move || {
             while let Ok(ev) = event::read() {
-                if tx.send(AppEvent::Input(ev)).is_err() {
+                // Windows: a paste arrives as a burst of key presses (no bracketed paste in the console
+                // API); everything already queued is read with it and turned back into a paste
+                // (`event::coalesce_paste`). Unix terminals send `Event::Paste` themselves.
+                let batch = if cfg!(windows) {
+                    let mut batch = vec![ev];
+                    while batch.len() < 100_000 && event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                        match event::read() {
+                            Ok(ev) => batch.push(ev),
+                            Err(_) => break,
+                        }
+                    }
+                    noble::event::coalesce_paste(batch)
+                } else {
+                    vec![ev]
+                };
+                if batch.into_iter().any(|ev| tx.send(AppEvent::Input(ev)).is_err()) {
                     break;
                 }
             }
@@ -164,6 +180,8 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
     }
     // SIGHUP/SIGTERM (Unix) and console close/logoff/shutdown (Windows) end the loop like a quit.
     noble::termination::install(tx.clone());
+    // Terminal.app before macOS 26 has no truecolor: every color is sent from the 256-color palette there.
+    let colors_256 = noble::util::lacks_truecolor();
     let size = terminal.size()?;
     let mut app = App::start(paths, tx, (size.width, size.height));
     if no_boot {
@@ -211,7 +229,12 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
             pending = true;
         } else if due {
             // A failed draw (the terminal is gone) still ends through `shutdown`, which saves the session.
-            if let Err(e) = terminal.draw(|f| noble::ui::draw(f, &mut app)) {
+            if let Err(e) = terminal.draw(|f| {
+                noble::ui::draw(f, &mut app);
+                if colors_256 {
+                    noble::ui::to_256_colors(f.buffer_mut());
+                }
+            }) {
                 draw_error = Some(e);
                 break;
             }

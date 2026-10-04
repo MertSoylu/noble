@@ -257,7 +257,7 @@ shell_first = true
 # "alt+enter" = "zoom"
 
 [projects]
-roots = []               # empty = Desktop, Documents, source/repos, projects, code, dev ...
+roots = []               # empty = Desktop, Documents, source/repos, projects, Developer, code, dev ...
 max_depth = 4
 exclude = []
 

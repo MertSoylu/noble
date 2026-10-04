@@ -139,9 +139,10 @@ them from the palette. `noble .` (or `noble <folder>`) opens a shell tab in that
 
 ## 📦 Install
 
-**Prebuilt binaries:** download the archive for Windows (x86_64), Linux (x86_64, ARM64) or macOS (Apple
+**Prebuilt binaries:** download the archive for Windows (x86_64, ARM64), Linux (x86_64, ARM64) or macOS (Apple
 Silicon, Intel) from the [latest release](https://github.com/MertSoylu/noble/releases/latest), unpack it and put
-`noble` on your PATH. The Linux binaries are static, so they run on any distribution. The macOS binaries are
+`noble` on your PATH. The Linux binaries are static, so they run on any distribution; the Windows ones need no
+VC++ redistributable. The macOS binaries are
 not notarized: a file downloaded with a browser needs `xattr -d com.apple.quarantine noble` once (not needed
 with `curl` or `noble update`). Each archive has a `.sha256` file next to it: check it with
 `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, `shasum -a 256 -c noble-macos-aarch64.tar.gz.sha256`
@@ -178,8 +179,8 @@ stops the update and leaves the installed binary alone) and replaces the install
 <br>
 
 Any truecolor terminal with a regular monospace font works, no Nerd Font needed: Windows Terminal, WezTerm,
-Kitty, Alacritty, GNOME Terminal, Konsole, iTerm2, Ghostty (and Terminal.app on macOS 26+; older versions
-have no truecolor). Cascadia Code / Cascadia Mono render every glyph NOBLE uses
+Kitty, Alacritty, GNOME Terminal, Konsole, iTerm2, Ghostty and Terminal.app. Terminal.app before macOS 26
+has no truecolor: NOBLE then draws with the nearest colors of the 256-color palette. Cascadia Code / Cascadia Mono render every glyph NOBLE uses
 (box drawing, block elements, braille).
 
 Copy and paste use the system clipboard (Windows, macOS, X11 and Wayland). Without one, e.g. over SSH, copied text is
@@ -314,7 +315,7 @@ shell_first = true       # alt+. alt+, alt+t alt+s alt+p go to the shell in a te
 "alt+v" = "split_right"
 
 [projects]
-roots = []               # empty = Desktop, Documents, source/repos, projects, code, dev, src, repos …
+roots = []               # empty = Desktop, Documents, source/repos, projects, Developer, code, dev, src, repos …
 max_depth = 4
 exclude = []             # folder names the scan skips
 # Projects added with A and removed with ⋯ → Remove from list are kept in state.json, not here.
@@ -406,9 +407,10 @@ OSC 133;D and when a typed command starts from OSC 133;C, with no setup:
   small hook reports the exit code (OSC 133;D) and the directory (OSC 7) on every prompt, and a typed command's
   start (OSC 133;C: `PS0` in bash 4.4+, `preexec` in zsh, `fish_preexec` in fish). Starship, oh-my-zsh and friends keep working, and so does a zsh
   `ZDOTDIR` of your own. A bash login shell (`-l` / `--login` in `shell_args`) loads `/etc/profile` and your
-  `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`. On macOS bash, zsh and fish
-  start as login shells, as in Terminal.app and iTerm2 (`/etc/zprofile`, `~/.zprofile` and Homebrew's PATH
-  load); any `shell_args` of your own replace that. The hook scripts live
+  `~/.bash_profile` (or `~/.bash_login` / `~/.profile`) instead of `~/.bashrc`, and `~/.bash_logout` on exit.
+  On macOS bash, zsh, fish and PowerShell start as login shells, as in Terminal.app and iTerm2 (`/etc/zprofile`,
+  `~/.zprofile` and Homebrew's PATH load); any `shell_args` of your own replace that. If a system `zshenv` sets
+  `ZDOTDIR` outright, zsh cannot load NOBLE's hook and NOBLE says so; write it as `ZDOTDIR=${ZDOTDIR:-…}`. The hook scripts live
   in the data folder under `shell/`; pass `--norc` (bash), `-f` (zsh) or `--no-config` (fish) in `shell_args`
   to start the shell untouched.
 - Any other shell whose prompt emits OSC 7 works too.

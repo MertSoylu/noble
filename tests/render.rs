@@ -425,6 +425,13 @@ fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
     if cfg!(windows) {
         check_cwd_tracking("cmd.exe");
+        // Windows PowerShell 5.1 is the default shell where pwsh is not installed; when pwsh took the
+        // default above, 5.1 is checked on its own.
+        if noble::util::which("pwsh").is_some()
+            && let Some(ps) = noble::util::which("powershell")
+        {
+            check_cwd_tracking(&ps.display().to_string());
+        }
         let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
         if git_bash.is_file() {
             check_cwd_tracking(&git_bash.display().to_string());
@@ -960,12 +967,13 @@ fn split_panes_share_joined_borders() {
         assert!(text.contains(junction), "no {junction}:\n{text}");
     }
     assert!(!text.contains("││") && !text.contains("╮╭"), "double border:\n{text}");
-    // The window's outer left and right sides have no line: lines only run between panes.
+    // The window's outer left and right sides have no line: lines only run between panes. (The panes'
+    // own text may reach the edge: a shell prompt starts in column 0.)
     let body = app.body();
     for y in body.top()..body.bottom() {
         let row = &rows[y as usize];
         for edge in [row[0], row[row.len() - 1]] {
-            assert!(edge == ' ' || edge == '─', "outer side line at row {y}:\n{text}");
+            assert!(!"│┃├┤┌┐└┘╭╮╰╯┬┴┼".contains(edge), "outer side line at row {y}:\n{text}");
         }
     }
     let top = |x: u16, y: u16| {
@@ -1117,10 +1125,10 @@ fn terminal_search_finds_scrollback() {
     } else {
         "for i in $(seq 1 60); do echo row $i; done; echo NEEDLE_DONE"
     };
+    // The script is cmd.exe syntax on Windows and POSIX sh elsewhere: the shell is chosen to match, not
+    // left to the machine's default (fish would not run it).
     let mut cfg = app.cfg.clone();
-    if cfg!(windows) {
-        cfg.terminal.shell = "cmd.exe".into();
-    }
+    cfg.terminal.shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into();
     app.apply_config(cfg);
     app.new_tab(std::env::temp_dir(), Some(script), Some("search".into()));
     let id = app.tabs[0].focus;
@@ -2250,6 +2258,16 @@ fn agent_state_follows_the_program_in_the_pane() {
     check_agent_lifecycle("");
     if cfg!(windows) {
         check_agent_lifecycle("cmd.exe");
+        // Windows PowerShell 5.1 when pwsh took the default above, and Git Bash.
+        if noble::util::which("pwsh").is_some()
+            && let Some(ps) = noble::util::which("powershell")
+        {
+            check_agent_lifecycle(&ps.display().to_string());
+        }
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_agent_lifecycle(&git_bash.display().to_string());
+        }
     } else {
         for shell in ["bash", "zsh", "fish", "pwsh"] {
             if let Some(path) = noble::util::which(shell) {
@@ -5487,6 +5505,9 @@ fn double_and_triple_click_select_word_and_line() {
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("one".into()));
     let id = app.focused_pane().unwrap();
+    // The shell's first prompt must be out before the line is written over the screen: a fast shell
+    // (zsh without a config) would otherwise print it after, onto the same line.
+    wait_idle(&mut app, id);
     app.panes[&id].parser().process(b"\x1b[2J\x1b[Hfoo ~/code/app bar");
     render(&mut app, 110, 30);
     let inner = find_hit_inner(&app).expect("pane");

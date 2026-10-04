@@ -2,7 +2,9 @@
 //! separate thread; the main loop only receives the snapshots.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
@@ -201,7 +203,11 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
     }
 
     let mut networks = Networks::new_with_refreshed_list();
-    let mut disks = Disks::new_with_refreshed_list();
+    // Disks are read on a thread of their own: a dead network mount (sshfs, smb) can block `statvfs`
+    // for minutes, and that must not freeze CPU, memory and network. While a read hangs no new one starts.
+    let disks: Arc<Mutex<Option<Disks>>> = Arc::new(Mutex::new(None));
+    let disks_busy = Arc::new(AtomicBool::new(false));
+    let disk_shared: Arc<Mutex<Vec<DiskInfo>>> = Arc::new(Mutex::new(Vec::new()));
     let proc_kind = ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::Never);
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, proc_kind);
 
@@ -214,7 +220,6 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
     let mut last_battery: Option<Instant> = None;
     let mut procs: Vec<ProcInfo> = Vec::new();
     let mut proc_count = 0;
-    let mut disk_list: Vec<DiskInfo> = Vec::new();
     let mut battery = None;
 
     loop {
@@ -248,8 +253,11 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
         sys.refresh_cpu_usage();
         sys.refresh_memory();
         networks.refresh(true);
-        let (rx, txb) =
-            networks.list().values().fold((0u64, 0u64), |(r, t), n| (r + n.received(), t + n.transmitted()));
+        let (rx, txb) = networks
+            .list()
+            .iter()
+            .filter(|(name, _)| counts_traffic(name))
+            .fold((0u64, 0u64), |(r, t), (_, n)| (r + n.received(), t + n.transmitted()));
 
         let due = |last: Option<Instant>, every: Duration| last.is_none_or(|t| t.elapsed() >= every);
         // The process list is the most expensive read: only while the System screen is open.
@@ -276,25 +284,26 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             last_battery = Some(Instant::now());
             battery = crate::battery::read();
         }
-        if due(last_disks, Duration::from_secs(if slow { 60 } else { 10 })) {
+        if due(last_disks, Duration::from_secs(if slow { 60 } else { 10 })) && !disks_busy.swap(true, Ordering::AcqRel)
+        {
             last_disks = Some(Instant::now());
-            disks.refresh(true);
-            disk_list = disks
-                .list()
-                .iter()
-                .filter(|d| d.total_space() > 0)
-                // macOS lists the APFS system volumes (`/System/Volumes/Data`, `VM`, `Preboot`)
-                // next to `/`: they share its container and would show the same disk again.
-                // Windows and Linux have no such mounts.
-                .filter(|d| !(cfg!(target_os = "macos") && d.mount_point().starts_with("/System/Volumes")))
-                .map(|d| DiskInfo {
-                    mount: d.mount_point().display().to_string(),
-                    total: d.total_space(),
-                    used: d.total_space().saturating_sub(d.available_space()),
-                })
-                .collect();
-            disk_list.dedup_by(|a, b| a.mount == b.mount);
+            let (disks, busy, shared) = (disks.clone(), disks_busy.clone(), disk_shared.clone());
+            let spawned = std::thread::Builder::new().name("disks".into()).spawn(move || {
+                if let Ok(mut d) = disks.lock() {
+                    let d = d.get_or_insert_with(Disks::new);
+                    d.refresh(true);
+                    let list = disk_rows(d.list());
+                    if let Ok(mut s) = shared.lock() {
+                        *s = list;
+                    }
+                }
+                busy.store(false, Ordering::Release);
+            });
+            if spawned.is_err() {
+                disks_busy.store(false, Ordering::Release);
+            }
         }
+        let disk_list = disk_shared.lock().map(|d| d.clone()).unwrap_or_default();
 
         let sample = SensorSample {
             cpu: sys.global_cpu_usage().clamp(0.0, 100.0),
@@ -306,7 +315,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             swap_total: sys.total_swap(),
             rx_rate: rx as f64 / elapsed,
             tx_rate: txb as f64 / elapsed,
-            disks: disk_list.clone(),
+            disks: disk_list,
             // The process list is only shown on the System screen; in other modes
             // it is not copied and sent every second.
             procs: if mode == SensorMode::Detail { procs.clone() } else { Vec::new() },
@@ -318,6 +327,97 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             return;
         }
     }
+}
+
+/// Does this network interface's traffic count toward the rates? Loopback (local dev servers) is not
+/// network traffic, and virtual links (VPN tunnels, container bridges, Apple Wireless Direct) carry
+/// bytes that also cross the physical link, which would count them twice.
+/// Linux: `lo`, `docker0`, `veth*`, `br-*`, `virbr*`, `tun*`/`tap*`, `wg*`; macOS: `lo0`, `utun*`, `awdl*`,
+/// `llw*`, `bridge*`, `gif*`, `stf*`, `anpi*`, `ap*`; Windows: the loopback pseudo-interface (VPN adapters
+/// have free-form names there and stay counted).
+fn counts_traffic(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    const VIRTUAL: &[&str] = &[
+        "lo",
+        "docker",
+        "veth",
+        "br-",
+        "virbr",
+        "vmnet",
+        "vboxnet",
+        "tun",
+        "tap",
+        "wg",
+        "utun",
+        "awdl",
+        "llw",
+        "bridge",
+        "gif",
+        "stf",
+        "anpi",
+        "ap",
+        "zt",
+        "tailscale",
+        "cni",
+        "flannel",
+        "kube",
+    ];
+    if n.contains("loopback") {
+        return false;
+    }
+    !VIRTUAL.iter().any(|p| {
+        n.strip_prefix(p).is_some_and(|rest| {
+            // `ap1` is a macOS access-point link, but `apple`/`apfs` style names are not; the same for `lo`
+            // (`lo`, `lo0`) against e.g. `local`. Longer prefixes are specific enough on their own.
+            p.len() > 2 || rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit())
+        })
+    })
+}
+
+/// The disk rows to show, from sysinfo's mount list. Skipped: empty and pseudo file systems, container and
+/// snap images, and the second mount of one device (btrfs subvolumes `/` and `/home`, bind mounts).
+/// macOS also lists the APFS system volumes (`/System/Volumes/Data`, `VM`, `Preboot`, which share `/`'s
+/// container) and Xcode's simulator runtimes; Windows lists drive letters only, none of this applies.
+fn disk_rows(list: &[sysinfo::Disk]) -> Vec<DiskInfo> {
+    let mut rows: Vec<(String, DiskInfo)> = Vec::new();
+    for d in list {
+        if d.total_space() == 0 {
+            continue;
+        }
+        let fs = d.file_system().to_string_lossy().to_ascii_lowercase();
+        let mount = d.mount_point().display().to_string();
+        if skip_mount(&mount, &fs) {
+            continue;
+        }
+        let device = d.name().to_string_lossy().into_owned();
+        let info =
+            DiskInfo { mount, total: d.total_space(), used: d.total_space().saturating_sub(d.available_space()) };
+        // One row per device (the first mount, usually `/`); a nameless device is compared by mount.
+        let key = if device.is_empty() { info.mount.clone() } else { device };
+        if rows.iter().any(|(k, r)| *k == key && r.total == info.total) {
+            continue;
+        }
+        rows.push((key, info));
+    }
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Mounts that are not a disk the user thinks of (see `disk_rows`).
+fn skip_mount(mount: &str, fs: &str) -> bool {
+    const PSEUDO_FS: &[&str] = &["overlay", "squashfs", "tmpfs", "devtmpfs", "ramfs", "nsfs", "fuse.snapfuse"];
+    if PSEUDO_FS.contains(&fs) {
+        return true;
+    }
+    const SKIP_UNDER: &[&str] = &[
+        "/var/lib/docker/",
+        "/var/lib/containers/",
+        "/snap/",
+        "/var/snap/",
+        "/System/Volumes",
+        "/Library/Developer/CoreSimulator/",
+        "/private/var/vm",
+    ];
+    SKIP_UNDER.iter().any(|p| mount.starts_with(p))
 }
 
 #[cfg(test)]
@@ -344,5 +444,28 @@ mod tests {
             s.ingest(SensorSample { cpu: 95.0, mem_used: 4, mem_total: 16, ..Default::default() });
         }
         assert_eq!(s.status(), SysStatus::Critical);
+    }
+
+    #[test]
+    fn traffic_skips_loopback_and_virtual_links() {
+        for name in ["lo", "lo0", "utun3", "awdl0", "docker0", "veth12ab", "br-1a2b", "wg0", "tun0", "bridge100"] {
+            assert!(!counts_traffic(name), "{name}");
+        }
+        assert!(!counts_traffic("Loopback Pseudo-Interface 1"));
+        for name in ["eth0", "en0", "wlan0", "wlp3s0", "enp0s31f6", "Ethernet", "Wi-Fi", "local0", "apple0"] {
+            assert!(counts_traffic(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn container_and_system_mounts_are_skipped() {
+        assert!(skip_mount("/var/lib/docker/overlay2/x/merged", "ext4"));
+        assert!(skip_mount("/", "overlay"));
+        assert!(skip_mount("/snap/core/1", "squashfs"));
+        assert!(skip_mount("/System/Volumes/Data", "apfs"));
+        assert!(skip_mount("/Library/Developer/CoreSimulator/Volumes/iOS_22", "apfs"));
+        assert!(!skip_mount("/", "ext4"));
+        assert!(!skip_mount("/home", "btrfs"));
+        assert!(!skip_mount("C:\\", "ntfs"));
     }
 }

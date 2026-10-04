@@ -1,0 +1,4 @@
+# Windows (MSVC): link the C runtime statically, so `noble.exe` starts on a machine without the VC++
+# redistributable (VCRUNTIME140.dll). Linux release builds are static through musl; macOS always has its libc.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

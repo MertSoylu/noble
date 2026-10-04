@@ -51,6 +51,8 @@ __noble_osc7() {
     case $p in
       /[a-zA-Z] | /[a-zA-Z]/*) ;;
       /cygdrive/*) p=${p#/cygdrive} ;;
+      # A network share (`//server/share`): NOBLE turns it into a UNC path.
+      //*) ;;
       /tmp | /tmp/*) p=/$__noble_tmp${p#/tmp} ;;
       /*) p=/${__noble_root%/}$p ;;
     esac
@@ -83,7 +85,8 @@ pub const BASH: &str = concat!(
 /// bash login shell (`-l`/`--login` among the user's arguments): a login shell never reads
 /// the rc file, so NOBLE starts it without the option and this script loads the login files
 /// the way bash does: `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`
-/// and `~/.profile`.
+/// and `~/.profile`, and `~/.bash_logout` on exit. (`shopt login_shell` stays off: bash only sets it
+/// for a real login shell.)
 pub const BASH_LOGIN: &str = concat!(
     "# NOBLE shell integration for bash login shells (generated; changes are overwritten).\n",
     "if [[ -r /etc/profile ]]; then builtin source /etc/profile; fi\n",
@@ -91,6 +94,8 @@ pub const BASH_LOGIN: &str = concat!(
     "  if [[ -r $__noble_f ]]; then builtin source \"$__noble_f\"; break; fi\n",
     "done\n",
     "unset __noble_f\n",
+    // A login shell reads `~/.bash_logout` when it exits; this one is started without `-l` (see above).
+    "trap 'if [[ -r ~/.bash_logout ]]; then builtin source ~/.bash_logout; fi' EXIT\n",
     bash_hook!()
 );
 
@@ -111,6 +116,15 @@ ZDOTDIR=$NOBLE_USER_ZDOTDIR
 ZDOTDIR=$__noble_zdotdir
 "#;
 
+/// zsh `.zlogin`: only read from here when `.zshrc` did not run first (a login shell started with `-c`,
+/// as a launcher command does); an interactive shell has the user's `ZDOTDIR` back by then and reads
+/// the user's own `.zlogin` directly.
+pub const ZLOGIN: &str = r#"# NOBLE shell integration for zsh (generated; changes are overwritten).
+ZDOTDIR=$NOBLE_USER_ZDOTDIR
+[[ -f $ZDOTDIR/.zlogin ]] && builtin source $ZDOTDIR/.zlogin
+ZDOTDIR=$__noble_zdotdir
+"#;
+
 /// zsh `.zshrc`: after it `ZDOTDIR` stays the user's, so `.zlogin`, completion
 /// dumps and nested shells behave as without NOBLE.
 pub const ZSHRC: &str = r#"# NOBLE shell integration for zsh (generated; changes are overwritten).
@@ -120,15 +134,29 @@ ZDOTDIR=$NOBLE_USER_ZDOTDIR
 [[ $HISTFILE == $__noble_zdotdir/.zsh_history ]] && HISTFILE=$ZDOTDIR/.zsh_history
 [[ -f $ZDOTDIR/.zshrc ]] && builtin source $ZDOTDIR/.zshrc
 unset __noble_zdotdir
+# Git Bash (MSYS) and Cygwin: mount points such as `/tmp` or `/usr` are turned into Windows
+# paths (the same rules as the bash hook; `/c/...` is converted by NOBLE).
+if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]] && (( $+commands[cygpath] )); then
+  __noble_root=$(cygpath -m /) __noble_tmp=$(cygpath -m /tmp)
+fi
 # The last command's exit code goes first (OSC 133;D): `$?` is read before anything resets it
 # (every precmd function starts with the command's own status). The path is percent-encoded
 # byte by byte (`LC_ALL=C`): spaces, `%`, `;` and non-ASCII names survive the round trip.
 __noble_osc7() {
   local s=$?
   emulate -L zsh -o extendedglob
-  local LC_ALL=C
+  local LC_ALL=C p=$PWD
+  if [[ -n $__noble_root ]]; then
+    case $p in
+      /[a-zA-Z] | /[a-zA-Z]/*) ;;
+      /cygdrive/*) p=${p#/cygdrive} ;;
+      //*) ;;
+      /tmp | /tmp/*) p=/$__noble_tmp${p#/tmp} ;;
+      /*) p=/${__noble_root%/}$p ;;
+    esac
+  fi
   builtin printf '\033]133;D;%s\a' "$s"
-  builtin printf '\033]7;file://%s%s\a' "${HOST}" "${PWD//(#m)[^-\/:_.~a-zA-Z0-9]/%${(l:2::0:)$(( [##16] #MATCH ))}}"
+  builtin printf '\033]7;file://%s%s\a' "${HOST}" "${p//(#m)[^-\/:_.~a-zA-Z0-9]/%${(l:2::0:)$(( [##16] #MATCH ))}}"
 }
 # A typed command line is about to run (preexec is not called for an empty line): OSC 133;C.
 __noble_preexec() {
@@ -142,15 +170,64 @@ autoload -Uz add-zsh-hook && add-zsh-hook precmd __noble_osc7 && add-zsh-hook pr
 /// the path is percent-encoded (`string escape --style=url`, fish 3.0+). `fish_preexec` (not
 /// sent for an empty line) marks a command's start with OSC 133;C.
 pub const FISH: &str = r#"# NOBLE shell integration for fish (generated; changes are overwritten).
+# Git Bash (MSYS) and Cygwin: mount points become Windows paths (the same rules as the bash hook).
+if command -sq cygpath; and contains -- (uname -o 2>/dev/null) Msys Cygwin
+    set -g __noble_root (cygpath -m /)
+    set -g __noble_tmp (cygpath -m /tmp)
+end
 function __noble_osc7 --on-event fish_prompt
     set -l s $status
+    set -l p $PWD
+    if set -q __noble_root
+        switch $p
+            case '/?' '/?/*' '//*'
+            case '/cygdrive/*'
+                set p (string replace -r '^/cygdrive' '' -- $p)
+            case '/tmp' '/tmp/*'
+                set p /$__noble_tmp(string replace -r '^/tmp' '' -- $p)
+            case '/*'
+                set p /(string trim -r -c / -- $__noble_root)$p
+        end
+    end
     printf '\e]133;D;%s\a' $s
-    printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
+    printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $p)
 end
 function __noble_preexec --on-event fish_preexec
     printf '\e]133;C\a'
 end
 "#;
+
+/// The system `zshenv` that sets `ZDOTDIR` outright, if any. zsh reads it before `$ZDOTDIR/.zshenv`, so
+/// NOBLE's `ZDOTDIR` is replaced and none of its zsh scripts load (the user is told, see `App`).
+/// `ZDOTDIR=${ZDOTDIR:-…}` and `[[ -z $ZDOTDIR ]] && …` keep NOBLE's and are fine.
+/// Linux: `/etc/zsh/zshenv` (Debian, Arch) or `/etc/zshenv`; macOS: `/etc/zshenv`. Windows: MSYS2's
+/// `/etc` lives under its install folder and is not checked.
+pub fn system_zshenv_forcing_zdotdir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    ["/etc/zshenv", "/etc/zsh/zshenv"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|f| std::fs::read_to_string(f).is_ok_and(|text| forces_zdotdir(&text)))
+}
+
+/// Does this zsh script set `ZDOTDIR` without keeping a value that is already there?
+pub fn forces_zdotdir(text: &str) -> bool {
+    text.lines().map(str::trim).filter(|l| !l.starts_with('#')).any(|line| {
+        let Some(i) = line.find("ZDOTDIR=") else { return false };
+        let before = &line[..i];
+        // `export ZDOTDIR=`, `ZDOTDIR=` at the start; `FOO_ZDOTDIR=` is another variable.
+        if !(before.is_empty() || before.ends_with(' ') || before.ends_with(';') || before.ends_with('\t')) {
+            return false;
+        }
+        let value = line[i + "ZDOTDIR=".len()..].trim_start_matches(['"', '\'']);
+        let keeps =
+            value.starts_with("${ZDOTDIR:-") || value.starts_with("${ZDOTDIR-") || value.starts_with("$ZDOTDIR");
+        let guarded = before.contains("-z") && before.contains("ZDOTDIR");
+        !keeps && !guarded
+    })
+}
 
 pub fn bash_rc(dir: &Path) -> PathBuf {
     dir.join("bashrc")
@@ -177,6 +254,7 @@ pub fn install(dir: &Path) -> std::io::Result<()> {
         (bash_login_rc(dir), BASH_LOGIN),
         (zsh.join(".zshenv"), ZSHENV),
         (zsh.join(".zprofile"), ZPROFILE),
+        (zsh.join(".zlogin"), ZLOGIN),
         (zsh.join(".zshrc"), ZSHRC),
         (fish_script(dir), FISH),
     ];
@@ -192,6 +270,17 @@ pub fn install(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_zdotdir_that_replaces_noble_is_detected() {
+        assert!(forces_zdotdir("export ZDOTDIR=\"$HOME\"/.config/zsh\n"));
+        assert!(forces_zdotdir("ZDOTDIR=$HOME/.config/zsh"));
+        assert!(!forces_zdotdir("export ZDOTDIR=${ZDOTDIR:-$HOME/.config/zsh}"));
+        assert!(!forces_zdotdir(": ${ZDOTDIR:=$HOME/.config/zsh}"));
+        assert!(!forces_zdotdir("[[ -z $ZDOTDIR ]] && export ZDOTDIR=$HOME/.config/zsh"));
+        assert!(!forces_zdotdir("# export ZDOTDIR=$HOME/.config/zsh"));
+        assert!(!forces_zdotdir("export MY_ZDOTDIR=x"));
+    }
 
     #[test]
     fn install_writes_once() {

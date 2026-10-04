@@ -121,6 +121,7 @@ pub fn asset_name() -> Option<&'static str> {
 fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("windows", "x86_64") => Some("noble-windows-x86_64.zip"),
+        ("windows", "aarch64") => Some("noble-windows-aarch64.zip"),
         ("linux", "x86_64") => Some("noble-linux-x86_64.tar.gz"),
         ("linux", "aarch64") => Some("noble-linux-aarch64.tar.gz"),
         ("macos", "aarch64") => Some("noble-macos-aarch64.tar.gz"),
@@ -309,6 +310,42 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A new, empty directory under the temp dir that only this call uses. The temp dir is shared with other
+/// users on Linux, so a name that already exists is never reused (someone else may own it and have planted
+/// symlinks in it): the directory is created fresh, with a hard-to-guess name, and on Unix readable by
+/// the owner only. Windows: the per-user `%TEMP%` is not shared, the ACL comes from it.
+fn private_work_dir() -> Result<PathBuf, String> {
+    // Unique per call, not only per process (parallel tests install at the same time).
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let mut last = String::new();
+    for _ in 0..16 {
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let salt = {
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(nanos);
+            h.write_u32(seq);
+            h.finish()
+        };
+        let work = std::env::temp_dir().join(format!("noble-update-{}-{seq}-{salt:016x}", std::process::id()));
+        #[allow(unused_mut)]
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&work) {
+            Ok(()) => return Ok(work),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e.to_string(),
+            Err(e) => return Err(format!("could not create a work directory in {}: {e}", work.display())),
+        }
+    }
+    Err(format!("could not create a work directory: {last}"))
+}
+
 /// Downloads the release's archive for this platform and puts it in place of `exe`.
 pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
     install_with(release, exe, &download, &tar_program())
@@ -333,12 +370,7 @@ fn install_with(
     let sum_url = release.assets.iter().find(|(n, _)| *n == sum_name).map(|(_, u)| u.clone()).ok_or_else(|| {
         format!("release {} publishes no checksum ({sum_name}), so the download cannot be verified", release.version)
     })?;
-    // Unique per call, not only per process (parallel tests install at the same time).
-    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let work = std::env::temp_dir().join(format!("noble-update-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let work = private_work_dir()?;
     let result = (|| {
         // The checksum first: small, and a release without a usable one is refused before the big download.
         let sums_path = work.join(&sum_name);
@@ -742,7 +774,7 @@ mod tests {
         let targets: Vec<String> =
             yml.lines().filter_map(|l| field(l, "target:")).filter(|t| !t.contains('$')).collect();
         let archives: Vec<String> = yml.lines().filter_map(|l| field(l, "archive:")).collect();
-        assert_eq!(targets.len(), 5, "{targets:?}");
+        assert_eq!(targets.len(), 6, "{targets:?}");
         assert_eq!(targets.len(), archives.len());
         for (target, archive) in targets.iter().zip(&archives) {
             let arch = target.split('-').next().unwrap();
@@ -764,5 +796,21 @@ mod tests {
     fn old_binary_sits_next_to_the_exe() {
         let p = old_path(Path::new("/usr/bin/noble"));
         assert_eq!(p, Path::new("/usr/bin/noble.old"));
+    }
+
+    #[test]
+    fn work_dir_is_fresh_and_private() {
+        let a = private_work_dir().unwrap();
+        let b = private_work_dir().unwrap();
+        assert_ne!(a, b);
+        assert!(std::fs::read_dir(&a).unwrap().next().is_none(), "a new directory is empty");
+        // Unix: the shared temp dir must not let other users look in or plant files. Windows: %TEMP% is per user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir(&a);
+        let _ = std::fs::remove_dir(&b);
     }
 }

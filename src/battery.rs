@@ -95,11 +95,21 @@ pub fn read_linux(root: &std::path::Path) -> Option<Battery> {
         let name = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         (!name.starts_with("BAT"), name)
     });
-    dirs.iter().find_map(|dir| read_supply(dir))
+    dirs.iter().find_map(|dir| read_supply(dir, &|| ac_online(&dirs)))
+}
+
+/// Is a mains adapter (`type` Mains, or a USB-C/USB charger) plugged in? Read only when the battery's own
+/// status does not say: many laptops report `Unknown` on AC (charge thresholds, some firmware).
+fn ac_online(dirs: &[std::path::PathBuf]) -> bool {
+    dirs.iter().any(|dir| {
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
+        let mains = matches!(read("type").as_deref(), Some("Mains" | "USB" | "USB_C" | "USB_PD"));
+        mains && read("scope").as_deref() != Some("Device") && read("online").as_deref() == Some("1")
+    })
 }
 
 /// One `power_supply` directory as a battery; `None` for other types, device batteries or unreadable ones.
-fn read_supply(dir: &std::path::Path) -> Option<Battery> {
+fn read_supply(dir: &std::path::Path, ac_online: &dyn Fn() -> bool) -> Option<Battery> {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
     let num = |name: &str| read(name).and_then(|s| s.parse::<f64>().ok());
     if read("type").as_deref() != Some("Battery") || read("scope").as_deref() == Some("Device") {
@@ -111,6 +121,9 @@ fn read_supply(dir: &std::path::Path) -> Option<Battery> {
         "Charging" => PowerState::Charging,
         "Full" => PowerState::Full,
         "Not charging" => PowerState::PluggedIn,
+        "Discharging" => PowerState::Discharging,
+        // `Unknown` (or no status): the adapter decides.
+        _ if ac_online() => PowerState::PluggedIn,
         _ => PowerState::Discharging,
     };
     // Time from energy (µWh/µW) or charge (µAh/µA).
@@ -279,6 +292,12 @@ mod tests {
         }
         let b = read_linux(&root).unwrap();
         assert_eq!((b.percent, b.state, b.secs_left), (50.0, PowerState::Discharging, Some(9_000)));
+        // `Unknown` (charge thresholds, some firmware): the adapter decides between plugged in and battery.
+        std::fs::write(bat.join("status"), "Unknown\n").unwrap();
+        std::fs::write(root.join("AC/online"), "1\n").unwrap();
+        assert_eq!(read_linux(&root).unwrap().state, PowerState::PluggedIn);
+        std::fs::write(root.join("AC/online"), "0\n").unwrap();
+        assert_eq!(read_linux(&root).unwrap().state, PowerState::Discharging);
         let _ = std::fs::remove_dir_all(&root);
     }
 
