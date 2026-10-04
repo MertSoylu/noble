@@ -15,7 +15,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let th = &app.theme;
     // The right-click menu does not dim the screen; clicking outside still closes it.
     if !matches!(ov, Overlay::Menu(_)) {
-        dim_backdrop(buf, area, th);
+        // The backdrop darkens in when the overlay opens.
+        let fade = app.fx.progress(crate::app::fx::Fx::Backdrop).unwrap_or(1.0);
+        dim_backdrop(buf, area, th, fade);
     }
     hits.push((area, Hit::Backdrop));
     match ov {
@@ -159,14 +161,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     }
 }
 
-fn dim_backdrop(buf: &mut Buffer, area: Rect, th: &Theme) {
+/// Dims everything under an overlay; `fade` (0..1) is how far the dimming has come.
+fn dim_backdrop(buf: &mut Buffer, area: Rect, th: &Theme, fade: f64) {
     let area = area.intersection(buf.area);
+    let mix = crate::theme::Theme::mix;
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_fg(th.line);
+                let (fg, bg) = (c.fg, c.bg);
+                c.set_fg(if fade < 1.0 { mix(fg, th.line, fade) } else { th.line });
                 if th.bg != ratatui::style::Color::Reset {
-                    c.set_bg(th.bg);
+                    c.set_bg(if fade < 1.0 { mix(bg, th.bg, fade) } else { th.bg });
                 }
             }
         }
@@ -187,11 +192,12 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
     let rect = Rect::new(x, y, w, h);
     hits.push((rect, Hit::Inert));
     let inner = boxed(buf, rect, &util::truncate(&m.title, (w as usize).saturating_sub(6)), th, th.accent_dim);
+    let glide = app.fx.glide("menu", m.selected);
     for (i, it) in m.items.iter().enumerate().take(inner.height as usize) {
         let ry = inner.y + i as u16;
         let row = Rect::new(inner.x, ry, inner.width, 1);
         let selected = i == m.selected;
-        let bg = if selected { th.sel_bg } else { th.raised };
+        let bg = glide.bg(i, th.raised, th.sel_bg);
         hud::fill(buf, row, Style::default().bg(bg));
         let marker = if selected { "▌" } else { " " };
         hud::put(buf, row.x, ry, marker, Style::default().fg(th.accent).bg(bg), 1);
@@ -531,12 +537,13 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
     let list_h = inner.height.saturating_sub(2) as usize;
     let selected = selected.min(list.len().saturating_sub(1));
     let offset = (selected + 1).saturating_sub(list_h);
+    let glide = app.fx.glide("launchers", selected);
     for (row, (n, &i)) in list.iter().enumerate().skip(offset).take(list_h).enumerate() {
         let Some((l, _)) = app.launchers.get(i) else { continue };
         let y = inner.y + row as u16;
         let line = Rect::new(inner.x, y, inner.width, 1);
         let is_sel = n == selected;
-        let bg = if is_sel { th.sel_bg } else { th.raised };
+        let bg = glide.bg(n, th.raised, th.sel_bg);
         hud::fill(buf, line, Style::default().bg(bg));
         if is_sel {
             hud::put(buf, inner.x, y, "▌", Style::default().fg(th.accent).bg(bg), 1);
@@ -639,11 +646,12 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     let footer_rule = inner.height >= 8;
     let rows = inner.bottom().saturating_sub(list_y + 1 + u16::from(footer_rule)) as usize;
     let offset = if st.selected >= rows { st.selected + 1 - rows } else { 0 };
+    let glide = app.fx.glide("palette", st.selected);
     for (row, idx) in st.matches.iter().enumerate().skip(offset).take(rows) {
         let item = &st.all[*idx];
         let y = list_y + (row - offset) as u16;
         let selected = row == st.selected;
-        let bgc = if selected { th.sel_bg } else { th.raised };
+        let bgc = glide.bg(row, th.raised, th.sel_bg);
         hud::set_bg_row(buf, inner.x, y, inner.width, bgc);
         // Same selection marker as every other list.
         if selected {

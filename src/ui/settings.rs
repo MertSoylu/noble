@@ -95,6 +95,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let lines = build_lines(app);
     let offset = app.settings_scroll.min(lines.len().saturating_sub(rows));
     let visible = &lines[offset..(offset + rows).min(lines.len())];
+    let glide = app.fx.glide("settings", sel);
 
     for (n, (y, line)) in (inner.y + 1..).zip(visible).enumerate() {
         match line {
@@ -111,7 +112,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             }
             Line::Item(i) => {
                 let SettingItem::Setting(key) = items[*i] else { continue };
-                setting_row(buf, Rect::new(inner.x, y, inner.width, 1), app, key, *i == sel);
+                let bg = glide.bg(*i, th.bg, th.sel_bg);
+                setting_row(buf, Rect::new(inner.x, y, inner.width, 1), app, key, *i == sel, bg);
                 hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::Setting(*i)));
             }
             Line::Buttons(list) => {
@@ -151,14 +153,16 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
 }
 
 /// A setting's row: its label and value (on/off, a choice, or what a popup sets). A setting
-/// that only matters under another one is indented, and dimmed while that one is off.
-fn setting_row(buf: &mut Buffer, row: Rect, app: &App, key: SettingKey, selected: bool) {
+/// that only matters under another one is indented, and dimmed while that one is off. `bg` is the
+/// row's background (the selection's, or on its way to or from it).
+fn setting_row(buf: &mut Buffer, row: Rect, app: &App, key: SettingKey, selected: bool, bg: ratatui::style::Color) {
     let th = &app.theme;
     let (x, y, iw) = (row.x + 2, row.y, row.width.saturating_sub(4));
-    let bg = if selected { th.sel_bg } else { th.bg };
+    if bg != th.bg {
+        hud::set_bg_row(buf, row.x, y, row.width, bg);
+    }
     if selected {
-        hud::set_bg_row(buf, row.x, y, row.width, th.sel_bg);
-        hud::put(buf, row.x, y, "▌", Style::default().fg(th.accent).bg(th.sel_bg), 1);
+        hud::put(buf, row.x, y, "▌", Style::default().fg(th.accent).bg(bg), 1);
     }
     let parent = key.parent();
     let active = parent.is_none_or(|p| app.setting_on(p));

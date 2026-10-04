@@ -39,6 +39,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.size = (area.width, area.height);
     app.sync_layout();
+    app.fx.set_enabled(app.anim_on());
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
     let buf = f.buffer_mut();
     hud::clear(buf, area, &app.theme);
@@ -52,6 +53,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    app.fx.observe_home(app.view == View::Bridge);
     top_bar(buf, Rect::new(0, 0, area.width, 1.min(area.height)), app, &mut hits);
     let body = app.body();
     let cursor = match app.view {
@@ -76,6 +78,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     update_notice(buf, area, app, &mut hits);
     toasts(buf, area, app);
+    app.fx.observe_overlay(app.overlay.is_some());
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
     // The boot's closing iris opens over the finished frame.
@@ -107,7 +110,7 @@ fn slide(buf: &mut Buffer, body: Rect, app: &mut App) -> bool {
     let current = buf_region(buf, body);
     if let (Some(prev), Some(from)) = (app.drawn_view, app.last_body.take())
         && prev != app.view
-        && app.cfg.general.animations
+        && app.anim_on()
         && from.area == body
     {
         let dir = if view_order(app.view) > view_order(prev) { 1 } else { -1 };
@@ -160,8 +163,12 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
         return;
     }
     let pos = ratatui::layout::Position { x, y };
-    let Some((rect, hit)) = hits.iter().rev().find(|(r, _)| r.contains(pos)) else { return };
+    let found = hits.iter().rev().find(|(r, _)| r.contains(pos));
+    // A new item under the mouse fades its highlight in.
+    let fade = app.fx.observe_hover(found.map(|(r, _)| *r));
+    let Some((rect, hit)) = found else { return };
     let th = &app.theme;
+    let mix = crate::theme::Theme::mix;
     match hit {
         Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) | Hit::ScrollTrack { .. } => {}
         Hit::Divider { .. } => {
@@ -204,9 +211,9 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
             }
         }
         _ if rect.height == 1 => {
-            let bg = th.hover();
             for xx in rect.left()..rect.right() {
                 if let Some(c) = buf.cell_mut((xx, rect.y)) {
+                    let bg = if fade < 1.0 { mix(c.bg, th.hover(), fade) } else { th.hover() };
                     c.set_bg(bg);
                 }
             }
@@ -222,7 +229,7 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
                         && let Some(c) = buf.cell_mut((xx, yy))
                         && c.fg == th.line
                     {
-                        c.set_fg(th.accent);
+                        c.set_fg(mix(th.line, th.accent, fade));
                     }
                 }
             }
@@ -450,38 +457,69 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             }
         }
     }
+    app.fx.observe_tabs(
+        &cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (app.tabs[i].id, app.tabs[i].alert, c.width(), c.active))
+            .collect::<Vec<_>>(),
+    );
+    // A closed tab's place closes up: a shrinking gap where it was.
+    let gap = app.fx.tab_gap();
+    let put_gap = |buf: &mut Buffer, x: u16, at: usize| match gap {
+        Some((i, w)) if i == at => {
+            hud::put(buf, x, y, &" ".repeat(w as usize), Style::default().bg(th.raised), limit.saturating_sub(x))
+        }
+        _ => x,
+    };
     for (i, c) in cells.iter().enumerate().take(shown) {
-        let bg = if c.active { th.bg } else { th.raised };
-        let base = tab_style(c.active);
+        x = put_gap(buf, x, i);
+        let id = app.tabs[i].id;
+        // A new tab grows open: everything past its current width is cut off.
+        let end = (x + app.fx.tab_width(id, c.width())).min(limit);
+        let room = |x: u16| end.saturating_sub(x);
+        // A background tab that just got a marker flashes in the marker's color.
+        let flash = app
+            .fx
+            .raw(crate::app::fx::Fx::TabFlash(id))
+            .map_or(0.0, |t| (1.0 - t) * (0.5 + 0.5 * (std::f64::consts::TAU * 2.0 * t).cos()));
+        let mark_color = c.mark.and_then(|(_, s)| s.fg).unwrap_or(th.accent2);
+        let bg = if c.active { th.bg } else { crate::theme::Theme::mix(th.raised, mark_color, 0.4 * flash) };
+        let base = tab_style(c.active).bg(bg);
         let start = x;
-        x = hud::put(buf, x, y, &" ".repeat(c.lead() as usize), base, c.lead());
+        x = hud::put(buf, x, y, &" ".repeat(c.lead() as usize), base, c.lead().min(room(x)));
         if c.active {
             // Edge bars: the active tab is more than a color.
-            hud::put(buf, start, y, "▌", Style::default().fg(th.accent).bg(th.bg), 1);
+            hud::put(buf, start, y, "▌", Style::default().fg(th.accent).bg(th.bg), room(start).min(1));
         }
         if let Some((glyph, style)) = c.dot {
-            hud::put(buf, start + 1, y, glyph, style.bg(bg), 1);
+            hud::put(buf, start + 1, y, glyph, style.bg(bg), room(start + 1).min(1));
         }
-        x = hud::put(buf, x, y, &c.title, base, limit.saturating_sub(x));
+        x = hud::put(buf, x, y, &c.title, base, room(x));
         if let Some(split) = c.split.as_ref().filter(|_| c.show_split) {
-            x = hud::put(buf, x, y, " ", base, 1);
-            x = hud::put(buf, x, y, split, th.dim().bg(bg), limit.saturating_sub(x));
+            x = hud::put(buf, x, y, " ", base, room(x).min(1));
+            x = hud::put(buf, x, y, split, th.dim().bg(bg), room(x));
         }
         if let Some((glyph, style)) = c.mark {
             // The marker has its own cell after the title.
-            x = hud::put(buf, x, y, " ", base, 1);
-            x = hud::put(buf, x, y, glyph, style.bg(bg), 1);
+            x = hud::put(buf, x, y, " ", base, room(x).min(1));
+            x = hud::put(buf, x, y, glyph, style.bg(bg), room(x).min(1));
         }
-        x = hud::put(buf, x, y, " ", base, 1);
+        x = hud::put(buf, x, y, " ", base, room(x).min(1));
         hits.push((Rect::new(start, y, x - start, 1), Hit::Tab(i)));
         let cx = x;
-        x = hud::put(buf, x, y, "×", Style::default().fg(th.dim).bg(bg), 1);
-        hits.push((Rect::new(cx, y, 1, 1), Hit::TabClose(i)));
-        if c.active {
-            x = hud::put(buf, x, y, "▐", Style::default().fg(th.accent).bg(th.bg), 1);
-        } else {
-            x = hud::put(buf, x, y, " ", Style::default().bg(th.raised), 1);
+        x = hud::put(buf, x, y, "×", Style::default().fg(th.dim).bg(bg), room(x).min(1));
+        if x > cx {
+            hits.push((Rect::new(cx, y, 1, 1), Hit::TabClose(i)));
         }
+        if c.active {
+            x = hud::put(buf, x, y, "▐", Style::default().fg(th.accent).bg(th.bg), room(x).min(1));
+        } else {
+            x = hud::put(buf, x, y, " ", Style::default().bg(th.raised), room(x).min(1));
+        }
+    }
+    if gap.is_some_and(|(i, _)| i >= shown) {
+        x = put_gap(buf, x, gap.map_or(0, |g| g.0));
     }
     if hidden > 0 {
         let mark = hidden_mark(shown);
@@ -787,8 +825,12 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
 /// New version notice: bottom right, just above the status bar. On terminal tabs
 /// it drops to the right of the status bar (which leaves room for it).
 fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
-    let Some(plan) = notice_plan(app, area) else { return };
+    let plan = notice_plan(app, area);
+    app.fx.observe_notice(plan.is_some());
+    let Some(plan) = plan else { return };
     let th = &app.theme;
+    // When it appears the button pulses a few times to catch the eye.
+    let button_bg = crate::theme::Theme::mix(th.accent2, th.fg, 0.45 * app.fx.notice_pulse());
     let (y, w) = (plan.y, plan.width);
     let x0 = area.right().saturating_sub(w);
     let bg = Style::default().bg(th.raised);
@@ -799,7 +841,7 @@ fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, 
         x,
         y,
         plan.button,
-        Style::default().fg(th.on_accent).bg(th.accent2).add_modifier(Modifier::BOLD),
+        Style::default().fg(th.on_accent).bg(button_bg).add_modifier(Modifier::BOLD),
         w,
     );
     hits.push((Rect::new(x0, y, x - x0, 1), if plan.hooks { Hit::HooksOffer } else { Hit::Update }));
@@ -825,9 +867,36 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
         let max = area.width.saturating_sub(4).min(70) as usize;
         let text = format!(" {} ", util::truncate(&t.text, max.saturating_sub(3)));
         let w = util::width(&text) as u16 + 1;
-        let x = area.right().saturating_sub(w + 1);
-        hud::put(buf, x, y, "▌", Style::default().fg(color).bg(th.raised), 1);
-        hud::put(buf, x + 1, y, &text, Style::default().fg(th.fg).bg(th.raised), w);
+        // Slides in from the right edge, and out the same way once its time is up.
+        let shift = if app.fx.enabled() {
+            let now = std::time::Instant::now();
+            let away = if now >= t.until {
+                crate::app::fx::linear(t.until, crate::app::fx::TOAST_OUT).powi(2)
+            } else {
+                1.0 - crate::app::fx::ease_out(crate::app::fx::linear(t.born, crate::app::fx::TOAST_IN))
+            };
+            ((w + 1) as f64 * away).round() as u16
+        } else {
+            0
+        };
+        let x = area.right().saturating_sub(w + 1) + shift;
+        let room = area.right().saturating_sub(x);
+        hud::put(buf, x, y, "▌", Style::default().fg(color).bg(th.raised), room.min(1));
+        hud::put(buf, x + 1, y, &text, Style::default().fg(th.fg).bg(th.raised), w.min(room.saturating_sub(1)));
+        // Countdown: the time already spent darkens the toast from its right end.
+        if app.fx.enabled() {
+            let life = t.until.saturating_duration_since(t.born).as_secs_f64().max(0.001);
+            let spent = (t.born.elapsed().as_secs_f64() / life).clamp(0.0, 1.0);
+            let cells = ((w - 1) as f64 * spent).round() as u16;
+            let dark = crate::theme::Theme::mix(th.raised, th.bg, 0.65);
+            for cx in (x + w).saturating_sub(cells)..x + w {
+                if let Some(c) = buf.cell_mut((cx, y))
+                    && cx < area.right()
+                {
+                    c.set_bg(dark);
+                }
+            }
+        }
         y -= 1;
     }
 }

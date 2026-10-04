@@ -287,6 +287,8 @@ Errors show up as a toast and never crash the app. Most options can also be chan
 theme = "amber"          # any of the 22 themes in Settings
 transparent = false      # let the terminal's own background (blur/opacity) show
 boot_animation = true
+animations = true        # page transitions, zoom, fades, tab and toast animations
+animations_on_battery = true  # false: no animations while a laptop runs on battery
 clock_24h = true
 show_seconds = true
 operator = ""            # name in the greeting; empty = your user name

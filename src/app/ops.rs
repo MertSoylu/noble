@@ -513,7 +513,7 @@ impl App {
         tab.zoomed = !tab.zoomed;
         let zoomed = tab.zoomed;
         if let Some(tile) = tile
-            && self.cfg.general.animations
+            && self.anim_on()
         {
             let (from, to) = if zoomed { (tile, body) } else { (body, tile) };
             self.zoom_anim = Some(super::ZoomAnim { pane, from, to, started: std::time::Instant::now() });

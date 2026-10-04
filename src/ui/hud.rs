@@ -220,6 +220,25 @@ pub fn tint_frame(buf: &mut Buffer, o: Outline, color: Color) {
 }
 
 /// Fill bar on a thin track: the filled part is a colored `━`, the rest of the track is dim.
+/// Fades an area toward `toward` (usually the background): `amount` 0 leaves it, 1 covers it.
+pub fn fade_rect(buf: &mut Buffer, area: Rect, toward: Color, amount: f64) {
+    if amount <= 0.0 {
+        return;
+    }
+    let area = area.intersection(buf.area);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                let (fg, bg) = (c.fg, c.bg);
+                c.set_fg(Theme::mix(fg, toward, amount));
+                if bg != Color::Reset {
+                    c.set_bg(Theme::mix(bg, toward, amount));
+                }
+            }
+        }
+    }
+}
+
 pub fn bar(buf: &mut Buffer, x: u16, y: u16, w: u16, pct: f64, color: Color, th: &Theme) {
     if w == 0 {
         return;
