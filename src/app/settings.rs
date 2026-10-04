@@ -11,6 +11,7 @@ pub enum SettingKey {
     Transparent,
     Boot,
     Animations,
+    AnimBattery,
     Clock24,
     Seconds,
     Shell,
@@ -66,6 +67,7 @@ impl SettingKey {
             SettingKey::Transparent => "Transparent background",
             SettingKey::Boot => "Boot animation",
             SettingKey::Animations => "Animations",
+            SettingKey::AnimBattery => "Animations on battery",
             SettingKey::Clock24 => "24-hour clock",
             SettingKey::Seconds => "Show seconds",
             SettingKey::Shell => "Shell",
@@ -98,7 +100,8 @@ impl SettingKey {
             SettingKey::Theme => "Color theme of the whole interface",
             SettingKey::Transparent => "Let the terminal's own background show through",
             SettingKey::Boot => "Play the startup animation on launch",
-            SettingKey::Animations => "Slide, zoom and pulse effects",
+            SettingKey::Animations => "Slide, zoom, fade and pulse effects",
+            SettingKey::AnimBattery => "Keep animations while running on battery",
             SettingKey::Clock24 => "24-hour instead of AM/PM clock on Home",
             SettingKey::Seconds => "Show seconds on the Home clock (off on battery)",
             SettingKey::Shell => "Program that new terminal panes start",
@@ -137,6 +140,9 @@ impl SettingKey {
     /// The on/off setting this one only matters under: drawn indented, and dimmed while it is off.
     pub fn parent(&self) -> Option<SettingKey> {
         let under_ai = PROVIDER_KEYS.contains(self) || matches!(self, SettingKey::AiRefresh | SettingKey::AiWarn);
+        if *self == SettingKey::AnimBattery {
+            return Some(SettingKey::Animations);
+        }
         under_ai.then_some(SettingKey::AiEnabled)
     }
 
@@ -199,8 +205,14 @@ impl App {
         ai.extend(rows(&[AiRefresh, AiWarn]));
         let mut general = rows(&[Updates]);
         general.extend([SettingItem::OpenConfig, SettingItem::ReloadConfig]);
+        let mut display = rows(&[Theme, Transparent, Boot, Animations]);
+        // Only a laptop runs on battery.
+        if self.sensors.battery().is_some() {
+            display.push(SettingItem::Setting(AnimBattery));
+        }
+        display.extend(rows(&[Clock24, Seconds]));
         vec![
-            ("Display", rows(&[Theme, Transparent, Boot, Animations, Clock24, Seconds])),
+            ("Display", display),
             ("Terminal", terminal),
             ("Keys", rows(&[Prefix, Passthrough, ShellFirst])),
             ("AI usage", ai),
@@ -243,6 +255,7 @@ impl App {
             SettingKey::Transparent => c.general.transparent,
             SettingKey::Boot => c.general.boot_animation,
             SettingKey::Animations => c.general.animations,
+            SettingKey::AnimBattery => c.general.animations_on_battery,
             SettingKey::Clock24 => c.general.clock_24h,
             SettingKey::Seconds => c.general.show_seconds,
             SettingKey::Updates => c.general.check_updates,
@@ -388,6 +401,10 @@ impl App {
                     SettingKey::Animations => {
                         c.general.animations ^= true;
                         ("general", "animations", c.general.animations.to_string())
+                    }
+                    SettingKey::AnimBattery => {
+                        c.general.animations_on_battery ^= true;
+                        ("general", "animations_on_battery", c.general.animations_on_battery.to_string())
                     }
                     SettingKey::Clock24 => {
                         c.general.clock_24h ^= true;

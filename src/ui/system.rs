@@ -65,7 +65,7 @@ fn cpu(buf: &mut Buffer, area: Rect, app: &App) {
             let (row, col) = ((i / cols) as u16, (i % cols) as u16);
             let cx = x + col * cell_w;
             let y = y0 + row;
-            let pct = *v as f64;
+            let pct = app.fx.tween(&format!("sys:core:{i}"), *v as f64, 1.0);
             hud::put(buf, cx, y, &format!("{:>2}", i + 1), th.dim(), 2);
             let bar_w = cell_w.saturating_sub(2 + 1 + 5 + 1);
             hud::bar(buf, cx + 3, y, bar_w, pct, th.level(pct), th);
@@ -94,6 +94,7 @@ fn memory(buf: &mut Buffer, area: Rect, app: &App) {
     let mut y = inner.y;
     let gauge = |buf: &mut Buffer, y: u16, label: &str, used: u64, total: u64| {
         let pct = if total > 0 { used as f64 / total as f64 * 100.0 } else { 0.0 };
+        let pct = app.fx.tween(&format!("sys:{label}"), pct, 1.0);
         hud::put(buf, x, y, label, th.dim(), 5);
         let right = format!("{} / {}", util::fmt_bytes(used), util::fmt_bytes(total));
         let bar_w = w.saturating_sub(5 + util::width(&right) as u16 + 1);
@@ -142,6 +143,7 @@ fn memory(buf: &mut Buffer, area: Rect, app: &App) {
         }
         let label = util::truncate(&d.mount, 4);
         let pct = if d.total > 0 { d.used as f64 / d.total as f64 * 100.0 } else { 0.0 };
+        let pct = app.fx.tween(&format!("sys:disk:{}", d.mount), pct, 1.0);
         hud::put(buf, x, y, &label, th.dim(), 5);
         let right = format!("{} free", util::fmt_bytes(d.total.saturating_sub(d.used)));
         let bar_w = w.saturating_sub(5 + util::width(&right) as u16 + 1);

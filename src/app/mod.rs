@@ -2,6 +2,7 @@
 //! everything here mutates state and nothing writes to the screen directly.
 
 mod agents;
+pub mod fx;
 mod input;
 mod menu;
 mod ops;
@@ -287,6 +288,7 @@ pub enum ToastLevel {
 pub struct Toast {
     pub text: String,
     pub level: ToastLevel,
+    pub born: Instant,
     pub until: Instant,
 }
 
@@ -588,6 +590,8 @@ pub struct App {
     pub hover: Option<(u16, u16)>,
     pub slide: Option<Slide>,
     pub zoom_anim: Option<ZoomAnim>,
+    /// Short UI effects (fades, flashes, glides, tweens); see `fx`.
+    pub fx: fx::Effects,
     /// Last drawn page and body image (to start a transition).
     pub drawn_view: Option<View>,
     pub last_body: Option<ratatui::buffer::Buffer>,
@@ -866,6 +870,7 @@ impl App {
             hover: None,
             slide: None,
             zoom_anim: None,
+            fx: fx::Effects::default(),
             drawn_view: None,
             last_body: None,
             drag: None,
@@ -926,7 +931,8 @@ impl App {
             _ => 3,
         };
         self.toasts.retain(|t| t.text != text);
-        self.toasts.push(Toast { text, level, until: Instant::now() + Duration::from_secs(secs) });
+        let born = Instant::now();
+        self.toasts.push(Toast { text, level, born, until: born + Duration::from_secs(secs) });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
         }
@@ -939,7 +945,29 @@ impl App {
 
     /// Does an animation need frequent redraws?
     pub fn animating(&self) -> bool {
-        self.boot.is_some() || self.slide.is_some() || self.zoom_anim.is_some()
+        self.moving() || self.fx.busy()
+    }
+
+    /// The animations drawn on every frame (the effects in `fx` pace themselves: `Effects::next_frame`).
+    fn moving(&self) -> bool {
+        self.boot.is_some() || self.slide.is_some() || self.zoom_anim.is_some() || self.toast_moving()
+    }
+
+    /// Whether animations play now: the setting, and on battery the "animations on battery" one.
+    pub fn anim_on(&self) -> bool {
+        let g = &self.cfg.general;
+        g.animations && (g.animations_on_battery || !self.on_battery())
+    }
+
+    /// A notification sliding in or out.
+    fn toast_moving(&self) -> bool {
+        self.anim_on()
+            && self.toasts.iter().any(|t| t.born.elapsed() < fx::TOAST_IN + fx::GRACE || Instant::now() >= t.until)
+    }
+
+    /// How long notifications stay on screen after their time is up (they slide out meanwhile).
+    pub fn toast_linger(&self) -> Duration {
+        if self.anim_on() { fx::TOAST_OUT } else { Duration::ZERO }
     }
 
     /// Handles the event; `true` when something visible changed (redraw).
@@ -1056,11 +1084,15 @@ impl App {
     /// The main loop draws only when that moment arrives (or an event fires).
     pub fn redraw_after(&self) -> Option<Duration> {
         use chrono::Timelike;
-        if self.animating() {
+        if self.moving() {
             return Some(Duration::from_millis(16));
         }
         let mut best: Option<Duration> = None;
         let mut want = |d: Duration| best = Some(best.map_or(d, |b| b.min(d)));
+        // Effects: every frame while something fades, only at visible steps for sliding numbers.
+        if let Some(d) = self.fx.next_frame() {
+            want(d);
+        }
         let now = chrono::Local::now();
         let into_sec = now.timestamp_subsec_millis().min(999) as u64;
         let to_second = Duration::from_millis(1000 - into_sec + 5);
@@ -1088,6 +1120,20 @@ impl App {
         }
         if let Some(t) = self.toasts.iter().map(|t| t.until).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
+        }
+        // A notification's countdown darkens one cell at a time: wake for the next cell only.
+        if self.anim_on() {
+            for t in &self.toasts {
+                let cells = crate::ui::toast_cells(&t.text, self.size.0).max(1) as f64;
+                let life = t.until.saturating_duration_since(t.born).as_secs_f64();
+                let step = life / cells;
+                if step > 0.0 {
+                    // The drawing rounds: the next cell turns half a step past a whole one.
+                    let k = (t.born.elapsed().as_secs_f64() / step + 0.5).floor() + 0.5;
+                    let at = Duration::from_secs_f64(k * step);
+                    want(at.saturating_sub(t.born.elapsed()).max(Duration::from_millis(16)));
+                }
+            }
         }
         if matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
             want(Duration::from_millis(500));
@@ -1506,10 +1552,11 @@ impl App {
 
     /// Periodic work: boot animation, notifications, config watching.
     pub fn tick(&mut self) {
-        let before = (self.ui_fingerprint(), self.animating());
+        // `fx` effects are left out: their pacing already draws their final frame.
+        let before = (self.ui_fingerprint(), self.moving());
         self.tick_inner();
         // When the animation ends, the final (static) frame must draw too.
-        if (self.ui_fingerprint(), self.animating()) != before {
+        if (self.ui_fingerprint(), self.moving()) != before {
             self.dirty = true;
         }
     }
@@ -1525,7 +1572,8 @@ impl App {
             self.zoom_anim = None;
         }
         let now = Instant::now();
-        self.toasts.retain(|t| t.until > now);
+        let linger = self.toast_linger();
+        self.toasts.retain(|t| t.until + linger > now);
         self.request_visible_git();
         self.sync_power_state();
         let hooks_live = self.hooks_installed || !self.agent_hooks.is_empty();

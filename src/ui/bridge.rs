@@ -20,10 +20,32 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         return;
     }
     let area = if area.width >= 60 { Rect::new(area.x + 1, area.y, area.width - 2, area.height) } else { area };
-    let two_col = area.width >= 92 && area.height >= 16;
     // Collected once per frame: the project rows, the AI panel and the quota strip all read it.
     let sessions = app.all_agent_sessions();
     let agents = app.agent_sessions_by_project(&sessions);
+    app.fx.observe_agents(sessions.iter().map(|s| (s.pane, s.state)));
+    draw_columns(buf, area, app, &sessions, &agents, hits);
+    // Coming back to Home: the rows fade in from the top, one after another.
+    if app.fx.raw(crate::app::fx::Fx::HomeIn).is_some() {
+        let steps = 10u64;
+        for (n, y) in (area.top()..area.bottom()).enumerate() {
+            let step = n as u64 * steps / area.height.max(1) as u64;
+            let shown = app.fx.home_step(step);
+            hud::fade_rect(buf, Rect::new(area.x, y, area.width, 1), th.bg, 1.0 - shown);
+        }
+    }
+}
+
+/// Home's panels: one column (clock, quota strip, projects) or two (projects | AI and system).
+fn draw_columns(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    sessions: &[crate::app::AgentSession],
+    agents: &AgentsByProject,
+    hits: &mut Vec<(Rect, Hit)>,
+) {
+    let two_col = area.width >= 92 && area.height >= 16;
     if !two_col {
         let hero_h = if area.height >= 14 { 3 } else { 0 };
         if hero_h > 0 {
@@ -31,10 +53,10 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         }
         // One column has no AI panel: a one-line strip keeps quota and "needs you" in sight.
         let strip_h = u16::from(
-            hero_h > 0 && area.height >= 16 && quota_strip(buf, area.x, area.y + hero_h, area.width, app, &sessions),
+            hero_h > 0 && area.height >= 16 && quota_strip(buf, area.x, area.y + hero_h, area.width, app, sessions),
         );
         let top = hero_h + strip_h;
-        projects(buf, Rect::new(area.x, area.y + top, area.width, area.height - top), app, &agents, hits);
+        projects(buf, Rect::new(area.x, area.y + top, area.width, area.height - top), app, agents, hits);
         return;
     }
     let right_w = ((area.width as f32 * 0.34) as u16).clamp(34, 46);
@@ -47,7 +69,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     } else {
         hero_compact(buf, Rect::new(left.x, left.y, left.width, hero_h), app);
     }
-    projects(buf, Rect::new(left.x, left.y + hero_h, left.width, left.height - hero_h), app, &agents, hits);
+    projects(buf, Rect::new(left.x, left.y + hero_h, left.width, left.height - hero_h), app, agents, hits);
 
     let signed_in = signed_in(app);
     let room = right.height.saturating_sub(hero_h + 10);
@@ -57,7 +79,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     let top = right.y + hero_h;
     let avail = right.height.saturating_sub(hero_h);
     if ai_h >= 5 {
-        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, &sessions, hits);
+        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, sessions, hits);
         system_panel(buf, Rect::new(right.x, top + ai_h, right.width, avail - ai_h), app, hits);
     } else {
         system_panel(buf, Rect::new(right.x, top, right.width, avail), app, hits);
@@ -323,13 +345,16 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
         }
         let sel = app.bridge.proj_sel.min(vis.len() - 1);
         let offset = if sel >= list_h as usize { sel + 1 - list_h as usize } else { 0 };
+        let glide = app.fx.glide("projects", sel);
         for (row, idx) in vis.iter().enumerate().skip(offset).take(list_h as usize) {
             let p = &app.projects[*idx];
             let ry = y + (row - offset) as u16;
             let selected = row == sel;
-            let bgc = if selected { th.sel_strong() } else { th.bg };
-            if selected {
+            let bgc = glide.bg(row, th.bg, th.sel_strong());
+            if bgc != th.bg {
                 hud::set_bg_row(buf, inner.x, ry, inner.width, bgc);
+            }
+            if selected {
                 hud::put(buf, inner.x, ry, "▌", Style::default().fg(th.accent).bg(bgc), 1);
             }
             let st = |s: Style| s.bg(bgc);
@@ -749,6 +774,11 @@ fn ai_panel(
             }
             let (glyph, color) = state_glyph(sess.state, th);
             let label = sess.state.label();
+            // A session that just changed state lights its row up in its color, fading back.
+            if let Some(t) = app.fx.raw(crate::app::fx::Fx::Agent(sess.pane)) {
+                let glow = crate::theme::Theme::mix(th.bg, color, 0.35 * (1.0 - t));
+                hud::set_bg_row(buf, inner.x, y, inner.width, glow);
+            }
             let cx = hud::put(buf, x, y, glyph, Style::default().fg(color), 1);
             let cx = hud::put(buf, cx + 1, y, sess.kind, th.text().add_modifier(Modifier::BOLD), w);
             let room = (x + w).saturating_sub(cx + util::width(label) as u16 + 4);
@@ -794,13 +824,14 @@ fn ai_panel(
                     if y >= bottom {
                         break;
                     }
-                    let pct = win.used as f64;
+                    // The bar and the number slide to a new value.
+                    let pct = app.fx.tween(&format!("ai:{}:{}", p.id, win.label), win.used as f64, 1.0);
                     let color = if ok { th.level(pct) } else { th.dim };
                     hud::put(buf, x, y, &crate::ai::window_name(&win.label), th.dim().add_modifier(Modifier::BOLD), 5);
                     let reset = win.resets_at.map(reset_in).unwrap_or_default();
                     let bar_w = w.saturating_sub(5 + 5 + 7);
                     hud::bar(buf, x + 5, y, bar_w, pct, color, th);
-                    let pct_s = format!("{}{}%", if ok { "" } else { "~" }, win.used);
+                    let pct_s = format!("{}{}%", if ok { "" } else { "~" }, pct.round() as u64);
                     hud::put(buf, x + 5 + bar_w, y, &util::pad_left(&pct_s, 5), Style::default().fg(color), 5);
                     hud::put(buf, x + 10 + bar_w, y, &util::pad_left(&reset, 7), th.dim(), 7);
                     y += 1;
@@ -869,6 +900,8 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
         return;
     };
     let metric = |buf: &mut Buffer, y: u16, label: &str, pct: f64| {
+        // The bar and the number slide to a new value.
+        let pct = app.fx.tween(&format!("home:{label}"), pct, 1.0);
         hud::put(buf, x, y, label, th.dim().add_modifier(Modifier::BOLD), 5);
         let bar_w = w.saturating_sub(5 + 5);
         hud::bar(buf, x + 5, y, bar_w, pct, th.level(pct), th);

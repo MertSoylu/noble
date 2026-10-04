@@ -25,8 +25,14 @@ pub fn draw(
     let th = &app.theme;
     // During the fullscreen animation the normal layout stays visible behind it.
     let anim = app.zoom_anim.as_ref().filter(|z| tab.root.contains(z.pane));
-    let (rects, dividers) =
-        if tab.zoomed && anim.is_none() { (vec![(tab.focus, area)], Vec::new()) } else { tab.root.layout(area) };
+    app.fx.observe_focus(tab.id, tab.focus, &tab.panes());
+    // A pane just split off unfolds from the divider.
+    let split = app.fx.progress(crate::app::fx::Fx::Split(tab.focus)).map(|t| tab.root.growing(tab.focus, t as f32));
+    let (rects, dividers) = if tab.zoomed && anim.is_none() {
+        (vec![(tab.focus, area)], Vec::new())
+    } else {
+        split.as_ref().unwrap_or(&tab.root).layout(area)
+    };
     let multi = tab.panes().len() > 1;
     let hover = app.hover.filter(|_| app.overlay.is_none());
     let ctx = FrameCtx { multi, zoomed: tab.zoomed, on_battery: app.on_battery(), hover: None };
@@ -65,7 +71,12 @@ pub fn draw(
         hud::join_frames(buf, &all);
         // The focused frame is drawn in its color all around, also where it shares a line.
         if let Some((_, r)) = frames.iter().find(|(id, _)| *id == tab.focus) {
-            hud::tint_frame(buf, *r, th.accent_dim);
+            // A pane that just took the focus lights its frame up, fading back to the usual tint.
+            let color = app
+                .fx
+                .progress(crate::app::fx::Fx::Focus(tab.focus))
+                .map_or(th.accent_dim, |t| crate::theme::Theme::mix(th.accent, th.accent_dim, t));
+            hud::tint_frame(buf, *r, color);
         }
     }
     cluster_brackets(buf, &on_top);

@@ -99,6 +99,27 @@ impl Node {
         }
     }
 
+    /// A copy in which pane `id` gets only `share` (0..1) of its size within its split: a new pane
+    /// unfolding from the divider. Unchanged when `id` is not directly in a split.
+    pub fn growing(&self, id: PaneId, share: f32) -> Node {
+        let mut node = self.clone();
+        node.grow_into(id, share.clamp(0.0, 1.0));
+        node
+    }
+
+    fn grow_into(&mut self, id: PaneId, share: f32) -> bool {
+        let Node::Split { ratio, a, b, .. } = self else { return false };
+        if matches!(**b, Node::Leaf(x) if x == id) {
+            *ratio = 1.0 - (1.0 - *ratio) * share;
+            return true;
+        }
+        if matches!(**a, Node::Leaf(x) if x == id) {
+            *ratio *= share;
+            return true;
+        }
+        a.grow_into(id, share) || b.grow_into(id, share)
+    }
+
     /// Computes every pane's rectangle and the dividers.
     pub fn layout(&self, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
         let mut panes = Vec::new();
@@ -278,6 +299,19 @@ mod tests {
 
     fn area() -> Rect {
         Rect::new(0, 0, 100, 40)
+    }
+
+    #[test]
+    fn growing_pane_unfolds() {
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, Dir::Row);
+        let area = Rect::new(0, 0, 100, 10);
+        let width = |n: &Node, id| n.layout(area).0.into_iter().find(|(p, _)| *p == id).map(|(_, r)| r.width);
+        assert_eq!(width(&root.growing(2, 1.0), 2), width(&root, 2));
+        assert!(width(&root.growing(2, 0.2), 2) < Some(15));
+        assert!(width(&root.growing(1, 0.2), 1) < Some(15));
+        // Not a pane of the tree: unchanged.
+        assert_eq!(root.growing(9, 0.0), root);
     }
 
     #[test]

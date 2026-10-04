@@ -11,6 +11,12 @@ All notable changes to NOBLE are documented here. The format is based on
 - Terminal.app before macOS 26 (no truecolor) gets the nearest 256-palette colors instead of garbled ones.
 - `~/Developer` and the localized XDG desktop/documents folders are default project roots.
 - A warning when the system `zshenv` sets `ZDOTDIR` and so keeps NOBLE's zsh integration from loading.
+- More animations: overlay backdrops fade in and list selections glide; notifications slide in and out
+  with a countdown line; tabs grow open and close up, a background tab flashes when it gets a marker;
+  a new split unfolds and the focused pane's frame lights up; Home fades in row by row, its bars and
+  percentages slide to new values, an agent that changes state lights up its row and hover highlights
+  fade in. On laptops, "Animations on battery" in Settings (`animations_on_battery`) turns them off on
+  battery.
 
 ### Changed
 - Ctrl+click never runs a program: a link to an executable, script, app bundle or installer copies its path.

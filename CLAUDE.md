@@ -88,6 +88,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   seconds and does not blink.
   When adding periodic work, run it only while the relevant screen is open; measure with
   `cargo test --release --test e2e idle -- --ignored --nocapture` (CPU ms per minute).
+- **Effects:** `app/fx.rs` (`App::fx`) holds the short UI effects (fades, flashes, list glides, value tweens).
+  Drawing code reports what it sees (`observe_*`) and a change from the previous frame starts an effect;
+  `fx.busy()` keeps `App::animating` true until the final frame is drawn. They play only while
+  `App::anim_on` (the `animations` setting, and `animations_on_battery` on battery); off, every query
+  returns the final state, so render tests turn animations off.
 - **Mouse/hit-test:** `ui/*` drawing functions fill `hits: Vec<(Rect, Hit)>` while drawing; `app/input.rs`
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.

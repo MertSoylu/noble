@@ -23,8 +23,10 @@ pub struct General {
     pub theme: String,
     pub transparent: bool,
     pub boot_animation: bool,
-    /// Page transition and pane zoom animations.
+    /// Page transitions, pane zoom, fades and other small animations.
     pub animations: bool,
+    /// Keep the animations while running on battery (laptops).
+    pub animations_on_battery: bool,
     pub clock_24h: bool,
     pub show_seconds: bool,
     /// Name in the greeting text; the user name is used when empty.
@@ -111,6 +113,7 @@ impl Default for General {
             transparent: false,
             boot_animation: true,
             animations: true,
+            animations_on_battery: true,
             clock_24h: true,
             show_seconds: true,
             operator: String::new(),
@@ -221,7 +224,8 @@ pub const DEFAULT_CONFIG: &str = r#"# NOBLE configuration — the app reloads it
 theme = "amber"          # pickable from the Settings tab (22 themes)
 transparent = false      # true: the terminal's own background (transparency) shows
 boot_animation = true
-animations = true        # page transition and fullscreen animations
+animations = true        # page transitions, zoom, fades and other small animations
+animations_on_battery = true  # keep them while a laptop runs on battery (false: off on battery)
 clock_24h = true
 show_seconds = true
 operator = ""            # greeting name; empty = user name

@@ -1077,6 +1077,88 @@ fn zoom_animation_grows_from_tile() {
     app.run(Action::CloseTab);
 }
 
+/// The small effects: each starts on the frame that sees the change and shows an in-between state,
+/// nothing breaks mid-way at small sizes, and once they settle the screen is the one drawn without them.
+#[test]
+fn effects_play_and_settle() {
+    use noble::app::fx::Fx;
+    use noble::app::{Hit, SettingItem, SettingKey, ToastLevel};
+    let sizes = [(160, 45), (80, 20), (30, 8)];
+    let settle = |app: &mut App| {
+        std::thread::sleep(Duration::from_millis(400));
+        app.tick();
+    };
+    let mut app = animated_app();
+    render(&mut app, 110, 30);
+    // A new tab grows open in the strip.
+    app.new_tab(std::env::temp_dir(), None, Some("grow".into()));
+    let title = app.tab_title(0);
+    let first = render(&mut app, 110, 30);
+    assert!(!first.lines().next().unwrap().contains(&title), "{first}");
+    for (w, h) in sizes {
+        render(&mut app, w, h);
+    }
+    settle(&mut app);
+    assert!(render(&mut app, 110, 30).lines().next().unwrap().contains(&title));
+    // A split unfolds from the divider and the new pane's frame lights up.
+    app.run(Action::SplitRight);
+    render(&mut app, 110, 30);
+    let new = app.tabs[0].focus;
+    assert!(app.fx.raw(Fx::Split(new)).is_some() && app.fx.raw(Fx::Focus(new)).is_some());
+    let width = |app: &App| find_hit(app, |h| matches!(h, Hit::Pane { pane, .. } if *pane == new)).map(|r| r.width);
+    let early = width(&app);
+    for (w, h) in sizes {
+        render(&mut app, w, h);
+    }
+    settle(&mut app);
+    render(&mut app, 110, 30);
+    assert!(early < width(&app), "{early:?} {:?}", width(&app));
+    // A notification slides in from the right edge.
+    app.toast(ToastLevel::Info, "effects toast");
+    assert!(!render(&mut app, 110, 30).contains("effects toast"));
+    settle(&mut app);
+    assert!(render(&mut app, 110, 30).contains("effects toast"));
+    // Home fades in row by row; Home and System mid-way at every size.
+    for action in [Action::Bridge, Action::System, Action::Bridge] {
+        app.run(action);
+        for (w, h) in sizes {
+            render(&mut app, w, h);
+        }
+    }
+    assert!(app.fx.raw(Fx::HomeIn).is_some());
+    // The settled comparison below runs over Settings: a live shell may redraw its prompt between two frames.
+    app.run(Action::Settings);
+    settle(&mut app);
+    // An overlay fades its backdrop in; its selection glides.
+    app.run(Action::Palette);
+    render(&mut app, 110, 30);
+    assert!(app.fx.raw(Fx::Backdrop).is_some());
+    app.handle(AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))));
+    for (w, h) in sizes {
+        render(&mut app, w, h);
+    }
+    settle(&mut app);
+    // Settled: the same picture as without animations.
+    // The "Animations" row itself shows the setting and is left out.
+    let without_setting = |s: String| s.lines().filter(|l| !l.contains("Animati")).collect::<Vec<_>>().join("\n");
+    let animated = without_setting(render(&mut app, 110, 30));
+    let mut cfg = app.cfg.clone();
+    cfg.general.animations = false;
+    app.apply_config(cfg);
+    assert_eq!(animated, without_setting(render(&mut app, 110, 30)));
+    // A laptop (the demo runs on battery) gets "Animations on battery"; off, it stops them on battery.
+    let item = SettingItem::Setting(SettingKey::AnimBattery);
+    assert!(app.settings_items().contains(&item));
+    let mut cfg = app.cfg.clone();
+    cfg.general.animations = true;
+    app.apply_config(cfg);
+    assert!(app.on_battery() && app.anim_on());
+    app.activate_setting(item, 1);
+    assert!(!app.anim_on());
+    app.overlay = None;
+    app.run(Action::CloseTab);
+}
+
 #[test]
 fn hover_highlights_clickable_items() {
     use crossterm::event::{Event, MouseEvent, MouseEventKind};
