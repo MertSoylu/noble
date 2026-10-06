@@ -988,8 +988,10 @@ impl App {
             }
         };
         let before = self.ui_fingerprint();
+        // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
+        let power = self.on_battery();
         let pty_shown = self.apply(ev);
-        shown || pty_shown || self.ui_fingerprint() != before
+        shown || pty_shown || self.ui_fingerprint() != before || self.on_battery() != power
     }
 
     /// Whether a non-event change happened since the last draw (read once).
@@ -1135,7 +1137,8 @@ impl App {
                 }
             }
         }
-        if matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
+        // The blinking cursor of the palette and of prompts (steady on battery, see `cursor_lit`).
+        if self.live_clock() && matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
             want(Duration::from_millis(500));
         }
         // The live timer of a command running in a visible pane (see `pane::live_timer`). A pane
@@ -1434,6 +1437,12 @@ impl App {
     /// (so the screen draws only once a minute).
     pub fn live_clock(&self) -> bool {
         !self.on_battery()
+    }
+
+    /// Whether a text field's cursor is drawn now: it blinks every 500 ms, and like the
+    /// Home clock it stays lit on battery so an open palette does not redraw twice a second.
+    pub fn cursor_lit(&self) -> bool {
+        !self.live_clock() || (self.started.elapsed().as_millis() / 500).is_multiple_of(2)
     }
 
     /// Tunes background work to the visible screen: sensor rate and refreshing

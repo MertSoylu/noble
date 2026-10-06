@@ -472,7 +472,8 @@ under heavy output. Everything else runs only while it is on screen:
 - System sensors: every second on the System screen and on Home (every 2 s on battery), every 5 s elsewhere.
 - Git status: when a command finishes, when Home opens, or when a repository changes.
 - AI quota: only while Home is open.
-- On battery the Home clock drops its seconds and the blinking colon.
+- On battery the Home clock drops its seconds and the blinking colon, and the cursor of the command palette
+  and prompts stops blinking.
 
 ## 🤝 Contributing
 

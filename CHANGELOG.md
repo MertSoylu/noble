@@ -19,6 +19,8 @@ All notable changes to NOBLE are documented here. The format is based on
   battery.
 
 ### Changed
+- On battery the cursor of the command palette and prompts stays lit instead of blinking, so an open
+  palette no longer redraws the screen twice a second.
 - Ctrl+click never runs a program: a link to an executable, script, app bundle or installer copies its path.
 - `ctrl+alt+<non-letter>` key bindings are refused with a warning (they are AltGr on Windows) instead of
   silently binding the bare key.
