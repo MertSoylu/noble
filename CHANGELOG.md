@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-06
+
 ### Added
 - Windows ARM64 release archive (`noble-windows-aarch64.zip`); `noble update` picks it up.
 - Terminal.app before macOS 26 (no truecolor) gets the nearest 256-palette colors instead of garbled ones.
@@ -401,7 +403,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/MertSoylu/noble/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/MertSoylu/noble/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/MertSoylu/noble/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/MertSoylu/noble/compare/v1.5.0...v1.6.0
