@@ -2308,8 +2308,9 @@ fn scan_hooks(app: &mut App) {
     app.apply_hook_records(records);
 }
 
+/// Slow Windows CI shells (cmd.exe) can take well over 30 s to come back to the prompt.
 fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         app.pump();
         if done(app) {
