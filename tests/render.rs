@@ -1139,8 +1139,13 @@ fn effects_play_and_settle() {
     }
     settle(&mut app);
     // Settled: the same picture as without animations.
-    // The "Animations" row itself shows the setting and is left out.
-    let without_setting = |s: String| s.lines().filter(|l| !l.contains("Animati")).collect::<Vec<_>>().join("\n");
+    // The "Animations" row itself shows the setting and is left out, and the clock's digits are masked:
+    // a minute may turn between the two frames. (The palette cursor stays lit: the demo runs on battery.)
+    let without_setting = |s: String| {
+        let mut lines = s.lines().filter(|l| !l.contains("Animati")).map(str::to_string).collect::<Vec<_>>();
+        lines[0] = lines[0].replace(|c: char| c.is_ascii_digit(), "#");
+        lines.join("\n")
+    };
     let animated = without_setting(render(&mut app, 110, 30));
     let mut cfg = app.cfg.clone();
     cfg.general.animations = false;
@@ -2303,8 +2308,9 @@ fn scan_hooks(app: &mut App) {
     app.apply_hook_records(records);
 }
 
+/// Slow Windows CI shells (cmd.exe) can take well over 30 s to come back to the prompt.
 fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         app.pump();
         if done(app) {
@@ -2745,15 +2751,25 @@ fn redraw_only_when_something_visible_changes() {
     // Terminal: sensor/project events do not wake the screen, the clock draws once a minute.
     app.new_tab(std::env::temp_dir(), None, Some("quiet".into()));
     app.toasts.clear();
-    assert!(!app.handle(AppEvent::Sensors(Box::new(sample))));
+    assert!(!app.handle(AppEvent::Sensors(Box::new(sample.clone()))));
     assert!(!app.handle(AppEvent::Projects(app.projects.clone())));
     let term = app.redraw_after().unwrap();
     assert!(term <= Duration::from_secs(61), "{term:?}");
-    // A key always redraws; the palette cursor blinks twice a second (alt+p is the shell's in a terminal).
+    // A key always redraws (alt+p is the shell's in a terminal); on battery the palette cursor stays lit.
     let key = |c, m| AppEvent::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char(c), m)));
     assert!(app.handle(key('a', KeyModifiers::CONTROL)));
     assert!(app.handle(key(':', KeyModifiers::NONE)));
+    assert!(app.cursor_lit());
+    let palette = app.redraw_after().unwrap();
+    assert!(palette > Duration::from_millis(500), "{palette:?}");
+    // Plugged in, it blinks twice a second. Plugging in or unplugging redraws at once, even over a terminal.
+    sample.battery = Some(Battery { percent: 80.0, state: PowerState::Full, secs_left: None, secs_to_full: None });
+    assert!(app.handle(AppEvent::Sensors(Box::new(sample.clone()))));
     assert!(app.redraw_after().unwrap() <= Duration::from_millis(500));
+    sample.battery =
+        Some(Battery { percent: 80.0, state: PowerState::Discharging, secs_left: None, secs_to_full: None });
+    assert!(app.handle(AppEvent::Sensors(Box::new(sample))));
+    assert!(app.cursor_lit());
     app.overlay = None;
     // We wake at the moment a notification must expire and disappear.
     app.toast(noble::app::ToastLevel::Info, "hello");

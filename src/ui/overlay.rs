@@ -75,8 +75,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             let inner = boxed(buf, rect, &p.title, th, th.accent);
             let x = inner.x + 1;
             let y = inner.y + 1;
-            let ms = app.started.elapsed().as_millis();
-            let cursor = if (ms / 500).is_multiple_of(2) { "▏" } else { " " };
+            let cursor = if app.cursor_lit() { "▏" } else { " " };
             let split = p.value.char_indices().nth(p.cursor).map_or(p.value.len(), |(i, _)| i);
             let (before, after) = p.value.split_at(split);
             let field_w = inner.width.saturating_sub(2);
@@ -624,8 +623,7 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     let inner = boxed(buf, rect, "COMMAND", th, th.accent);
     let x = inner.x + 1;
     let iw = inner.width.saturating_sub(2);
-    let ms = app.started.elapsed().as_millis();
-    let cursor = if (ms / 500).is_multiple_of(2) { "▏" } else { " " };
+    let cursor = if app.cursor_lit() { "▏" } else { " " };
     let placeholder = st.query.is_empty();
     hud::put_spans(
         buf,

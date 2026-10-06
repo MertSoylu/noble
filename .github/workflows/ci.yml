@@ -26,7 +26,7 @@ jobs:
   linux:
     # Linux is a first-class platform: the same full suite. zsh and fish are installed
     # so the shell integration of every supported shell is exercised in a real PTY.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install zsh and fish
@@ -62,7 +62,7 @@ jobs:
 
   linux-musl:
     # The release builds static musl binaries (`release.yml`); make sure they still build and work.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -99,7 +99,7 @@ jobs:
   deny:
     # Dependencies: RustSec advisories, licenses (`deny.toml` allow-list), banned crates and sources.
     # `audit.yml` runs the advisory check weekly as well, so a new advisory shows up without a push.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
