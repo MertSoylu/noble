@@ -2761,7 +2761,11 @@ fn redraw_only_when_something_visible_changes() {
     assert!(app.handle(key(':', KeyModifiers::NONE)));
     assert!(app.cursor_lit());
     let palette = app.redraw_after().unwrap();
-    assert!(palette > Duration::from_millis(500), "{palette:?}");
+    // At second 59 the top strip's HH:MM is due within a second (as for Home above).
+    assert!(
+        palette > Duration::from_millis(500) || chrono::Local::now().format("%S").to_string() == "59",
+        "{palette:?}"
+    );
     // Plugged in, it blinks twice a second. Plugging in or unplugging redraws at once, even over a terminal.
     sample.battery = Some(Battery { percent: 80.0, state: PowerState::Full, secs_left: None, secs_to_full: None });
     assert!(app.handle(AppEvent::Sensors(Box::new(sample.clone()))));
