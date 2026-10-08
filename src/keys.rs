@@ -197,10 +197,11 @@ pub enum Action {
     DismissUpdate,
     Passthrough,
     JumpToAgent,
+    OpenLink,
 }
 
 impl Action {
-    pub const ALL: [Action; 53] = [
+    pub const ALL: [Action; 54] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -254,6 +255,7 @@ impl Action {
         Action::DismissUpdate,
         Action::Passthrough,
         Action::JumpToAgent,
+        Action::OpenLink,
     ];
 
     pub fn id(&self) -> String {
@@ -305,6 +307,7 @@ impl Action {
                     Action::DismissUpdate => "dismiss_update",
                     Action::Passthrough => "passthrough",
                     Action::JumpToAgent => "jump_to_agent",
+                    Action::OpenLink => "open_link",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -365,6 +368,7 @@ impl Action {
             Action::DismissUpdate => "Dismiss Update Notice".into(),
             Action::Passthrough => "Pass Keys to the App".into(),
             Action::JumpToAgent => "Jump to Waiting Agent".into(),
+            Action::OpenLink => "Open Link on Screen".into(),
         }
     }
 
@@ -404,7 +408,8 @@ impl Action {
             | Action::Search
             | Action::SendPrefix
             | Action::PaneMenu
-            | Action::Passthrough => "PANE",
+            | Action::Passthrough
+            | Action::OpenLink => "PANE",
             _ => "SYS",
         }
     }
@@ -477,6 +482,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("f"), Action::Search),
         (c("i"), Action::Passthrough),
         (c("a"), Action::JumpToAgent),
+        (c("u"), Action::OpenLink),
     ];
     for n in 1..=9u8 {
         v.push((Chord::new(KeyCode::Char((b'0' + n) as char), KeyModifiers::NONE), Action::GoTab(n)));
@@ -575,6 +581,31 @@ impl Keymap {
             .map(|(k, _)| (k.to_string(), order.iter().position(|d| d == k).unwrap_or(usize::MAX)))
             .min_by_key(|(s, pos)| (s.chars().count(), *pos, s.clone()))
             .map(|(s, _)| s)
+    }
+
+    /// The keys bound to `GoTab(1..=9)` in the prefix or the direct map (the shortest per tab), in tab order.
+    pub fn tab_keys(&self, prefix: bool) -> Vec<(u8, String)> {
+        let map = if prefix { &self.prefix_map } else { &self.direct_map };
+        (1..=9)
+            .filter_map(|n| {
+                map.iter()
+                    .filter(|(_, a)| **a == Action::GoTab(n))
+                    .map(|(k, _)| k.to_string())
+                    .min_by_key(|s| (s.len(), s.clone()))
+                    .map(|k| (n, k))
+            })
+            .collect()
+    }
+
+    /// "alt+1 … 9" when the nine tab keys share one stem (`<stem>1` … `<stem>9`), as the defaults do;
+    /// `None` for rebound, partial or extra tab keys, which are then listed one by one.
+    pub fn tab_range(&self, prefix: bool) -> Option<String> {
+        let map = if prefix { &self.prefix_map } else { &self.direct_map };
+        let bound = map.values().filter(|a| matches!(a, Action::GoTab(_))).count();
+        let keys = self.tab_keys(prefix);
+        let stem = keys.first()?.1.strip_suffix('1')?.to_string();
+        let uniform = bound == 9 && keys.len() == 9 && keys.iter().all(|(n, k)| *k == format!("{stem}{n}"));
+        uniform.then(|| format!("{stem}1 … 9"))
     }
 
     fn hint_where(&self, action: Action, direct_ok: impl Fn(&Chord) -> bool) -> Option<String> {
@@ -727,5 +758,32 @@ mod tests {
         assert_eq!(km.hint(Action::Palette).as_deref(), Some("alt+p"));
         assert_eq!(km.direct_map.get(&c("alt+.")), Some(&Action::NextTab));
         assert_eq!(km.direct_map.get(&c("alt+,")), Some(&Action::PrevTab));
+    }
+
+    /// The help and the tips show the tab keys as one range only while they follow one pattern.
+    #[test]
+    fn tab_range_follows_the_bindings() {
+        let km = Keymap::from_config(&KeysCfg::default());
+        assert_eq!(km.tab_range(false).as_deref(), Some("alt+1 … 9"));
+        assert_eq!(km.tab_range(true).as_deref(), Some("1 … 9"));
+
+        let mut cfg = KeysCfg::default();
+        cfg.direct_bindings.insert("alt+3".into(), "none".into());
+        cfg.direct_bindings.insert("f3".into(), "tab_3".into());
+        let km = Keymap::from_config(&cfg);
+        assert_eq!(km.tab_range(false), None);
+        assert!(km.tab_keys(false).contains(&(3, "f3".into())));
+
+        // An extra key next to the defaults is listed too instead of hiding behind the range.
+        let mut cfg = KeysCfg::default();
+        cfg.direct_bindings.insert("ctrl+shift+3".into(), "tab_3".into());
+        assert_eq!(Keymap::from_config(&cfg).tab_range(false), None);
+
+        let mut cfg = KeysCfg::default();
+        for n in 1..=9 {
+            cfg.direct_bindings.insert(format!("alt+{n}"), "none".into());
+            cfg.direct_bindings.insert(format!("ctrl+{n}"), format!("tab_{n}"));
+        }
+        assert_eq!(Keymap::from_config(&cfg).tab_range(false).as_deref(), Some("ctrl+1 … 9"));
     }
 }

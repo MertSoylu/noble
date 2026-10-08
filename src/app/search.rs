@@ -185,13 +185,101 @@ impl App {
     /// ctrl+click: opens the link. `false` if there is none.
     pub(super) fn open_link_at(&mut self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
         let Some((target, ..)) = self.link_under(pane, inner, m.column, m.row) else { return false };
-        let label = match &target {
-            link::Link::Url(u) => u.clone(),
-            link::Link::File { path, line, .. } => {
-                let base = crate::util::tilde(path);
-                line.map(|l| format!("{base}:{l}")).unwrap_or(base)
+        self.open_link(target);
+        true
+    }
+
+    /// Every link on the pane's screen, the bottom row (the newest output) first, each once. A bare name
+    /// (`src`, `README.md`) is left out: in a list it is noise, while ctrl+click still opens it.
+    fn visible_links(&self, pane: PaneId) -> Vec<link::Link> {
+        let Some(p) = self.panes.get(&pane) else { return Vec::new() };
+        let cwd = p.cwd();
+        let mut rows = Vec::new();
+        for row in 0u16.. {
+            let Some(text) = p.visible_row(row) else { break };
+            let mut found = Vec::new();
+            let width = crate::util::width(&text) as u16;
+            let mut col = 0;
+            while col < width {
+                if let Some((url, _, to)) = p.hyperlink_at(row, col) {
+                    let target = if url.to_ascii_lowercase().starts_with("file://") {
+                        link::classify(&url, &cwd)
+                    } else {
+                        Some(link::Link::Url(url))
+                    };
+                    found.extend(target);
+                    col = to.max(col + 1);
+                } else if let Some((token, _, to)) = link::token_at(&text, col) {
+                    // Only what looks like a link is checked on disk (a URL, a path with a separator or a
+                    // `:line`), not every word: on a slow or network drive each check is a stat call.
+                    let lower = token.to_ascii_lowercase();
+                    let is_url = ["http://", "https://", "file://"].iter().any(|s| lower.starts_with(s));
+                    let has_line =
+                        token.split(':').skip(1).any(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                    if is_url || has_line || token.contains(['/', '\\']) {
+                        found.extend(link::classify(&token, &cwd));
+                    }
+                    col = to.max(col + 1);
+                } else {
+                    col += 1;
+                }
             }
+            rows.push(found);
+        }
+        let mut links: Vec<link::Link> = Vec::new();
+        for target in rows.into_iter().rev().flat_map(|r| r.into_iter()) {
+            if !links.contains(&target) {
+                links.push(target);
+            }
+        }
+        links
+    }
+
+    /// The keyboard way to ctrl+click (macOS terminals such as iTerm2 and Terminal.app keep ctrl+click for
+    /// their own menu): a menu of the links on the focused pane's screen, opened with ⏎ or the item's digit.
+    pub(super) fn open_link_menu(&mut self) {
+        let Some(pane) = self.focused_pane() else {
+            self.toast(ToastLevel::Info, "open a terminal tab first");
+            return;
         };
+        let links = self.visible_links(pane);
+        if links.is_empty() {
+            self.toast(ToastLevel::Info, "no links on screen");
+            return;
+        }
+        // Digits 1…9 pick an item, so the menu holds the nine newest, fewer when the window is too short to
+        // show them all (a digit must not run a hidden item); the title says when some were left out.
+        let max = (self.size.1 as usize).saturating_sub(2).clamp(1, 9);
+        let title = if links.len() > max { format!("LINKS · {max} of {}", links.len()) } else { "LINKS".to_string() };
+        let items = links
+            .into_iter()
+            .take(max)
+            .enumerate()
+            .map(|(i, target)| super::menu::MenuItem {
+                // A path keeps its end (file name and line), an address its start (host); 36 columns fit the
+                // widest menu with its number.
+                label: format!(
+                    "{} {}",
+                    i + 1,
+                    match &target {
+                        link::Link::Url(_) => crate::util::truncate(&link_label(&target), 36),
+                        link::Link::File { .. } => crate::util::truncate_left(&link_label(&target), 36),
+                    }
+                ),
+                hint: String::new(),
+                cmd: super::menu::MenuCmd::OpenLink(target),
+                enabled: true,
+            })
+            .collect();
+        // Below the pane title, like the pane menu.
+        let at = self.hits.iter().find(|(_, h)| *h == super::Hit::PaneTitle(pane)).map(|(r, _)| (r.x + 1, r.y + 1));
+        let (x, y) = at.unwrap_or((0, 1));
+        self.open_menu(title, x, y, items);
+    }
+
+    /// Opens a link from terminal output: a URL in the browser, a file in an editor (see `link::open`).
+    pub(super) fn open_link(&mut self, target: link::Link) {
+        let label = link_label(&target);
         // A scheme the OS could hand to any registered app (`ms-msdt:`, `vscode:`, custom handlers) is never
         // opened from terminal output: the address is copied instead.
         if let link::Link::Url(url) = &target
@@ -200,7 +288,7 @@ impl App {
             let url = url.clone();
             self.set_clipboard(&url, false);
             self.toast(ToastLevel::Info, format!("copied, not opened — {}", crate::util::truncate(&url, 50)));
-            return true;
+            return;
         }
         // Without a graphical session: URLs go to the clipboard, files to a terminal editor.
         if !crate::util::has_desktop() {
@@ -212,13 +300,13 @@ impl App {
                         ToastLevel::Info,
                         format!("no browser here — copied {}", crate::util::truncate(&url, 50)),
                     );
-                    return true;
+                    return;
                 }
                 link::Link::File { path, line, .. } => {
                     let (path, line) = (path.clone(), *line);
                     let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     if path.is_file() && self.edit_in_tab(&path, line, &title) {
-                        return true;
+                        return;
                     }
                 }
             }
@@ -238,7 +326,6 @@ impl App {
             }
             Err(link::OpenError::Failed(e)) => self.toast(ToastLevel::Error, format!("could not open link: {e}")),
         }
-        true
     }
 
     /// Highlights the link under the pointer while ctrl is held during mouse movement.
@@ -249,6 +336,17 @@ impl App {
                 .map(|(_, row, from, to)| LinkHover { pane, row, from, to }),
             _ => None,
         };
+    }
+}
+
+/// How a link reads in a toast or menu: the address, or the path (with `~`) and its line.
+fn link_label(target: &link::Link) -> String {
+    match target {
+        link::Link::Url(u) => u.clone(),
+        link::Link::File { path, line, .. } => {
+            let base = crate::util::tilde(path);
+            line.map(|l| format!("{base}:{l}")).unwrap_or(base)
+        }
     }
 }
 

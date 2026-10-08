@@ -235,6 +235,7 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass shortcuts to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
+| | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
 | | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
 
 <details>
@@ -258,7 +259,9 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 - **Notifications:** background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
   while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
-  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app) · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
+  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
+  Settings → Pointer reports ctrl-click to apps) and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
+  there · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
   middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
@@ -341,7 +344,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
-remove_project send_prefix passthrough jump_to_agent update dismiss_update`.
+remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update`.
 
 </details>
 

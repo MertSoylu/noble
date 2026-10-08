@@ -5708,3 +5708,36 @@ fn hooks_offer_notice() {
     click(&mut app, close.x, close.y);
     assert!(!app.hooks_offer);
 }
+
+/// The keyboard way to ctrl+click (macOS terminals keep ctrl+click for their own menu): the links on the pane's
+/// screen in a menu, the newest first, a file only when it exists and a bare folder name left out.
+#[test]
+fn open_link_lists_the_links_on_screen() {
+    let dir = std::env::temp_dir().join(format!("noble-links-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("notes.txt"), "x\n").unwrap();
+    let mut app = demo_app(110, 30);
+    app.run(Action::OpenLink);
+    assert!(app.overlay.is_none(), "no terminal, no menu");
+    app.new_tab(dir.clone(), None, Some("links".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let feed = |app: &mut App, bytes: &[u8]| app.panes[&id].parser().process(bytes);
+    feed(&mut app, b"\x1b[2J\x1b[H");
+    feed(&mut app, b"old https://example.com/a and missing.txt:4\r\n");
+    feed(&mut app, b"see \x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ in sub\r\n");
+    feed(&mut app, b"error at notes.txt:3 (again https://example.com/a)\r\n");
+    render(&mut app, 110, 30);
+    app.run(Action::OpenLink);
+    let Some(noble::app::Overlay::Menu(m)) = &app.overlay else { panic!("links menu expected") };
+    let labels: Vec<&str> = m.items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels.len(), 3, "{labels:?}");
+    assert!(labels[0].starts_with("1 ") && labels[0].ends_with("notes.txt:3"), "{labels:?}");
+    assert_eq!(labels[1], "2 https://example.com/a");
+    assert_eq!(labels[2], "3 https://example.com/docs");
+    save("open-link-menu-110x30", &render(&mut app, 110, 30));
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    app.run(Action::CloseTab);
+    let _ = std::fs::remove_dir_all(&dir);
+}

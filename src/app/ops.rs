@@ -116,6 +116,7 @@ impl App {
             },
             Action::Passthrough => self.passthrough(),
             Action::JumpToAgent => self.jump_to_agent(),
+            Action::OpenLink => self.open_link_menu(),
             Action::SendPrefix => {
                 let bytes = crate::term::input::encode_key(
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
@@ -600,7 +601,7 @@ impl App {
         self.new_tab(path, None, Some(name));
     }
 
-    pub fn open_in_explorer(&mut self, path: &Path) {
+    pub fn open_in_file_manager(&mut self, path: &Path) {
         // No file manager without a graphical session (SSH, console): a shell tab there instead.
         if !crate::util::has_desktop() {
             self.open_project_shell(path.to_path_buf());

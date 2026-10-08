@@ -6,6 +6,17 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Prefix `u` (Open Link on Screen, `open_link`) lists the URLs and `file:line` links on the focused pane's
+  screen, newest first, and opens the chosen one: the keyboard way to ctrl+click, which iTerm2 and Terminal.app
+  on macOS keep for their own menu.
+
+### Fixed
+- Key hints follow the keymap: the help's tab rows, the welcome screen's palette key, the terminal status bar's
+  home key and the status-bar tips show rebound keys and leave out unbound ones instead of the defaults.
+- Platform text: the terminal scheme preview shows a Unix prompt on Linux/macOS instead of `PS C:\>`, and the
+  color-scheme tip mentions Windows Terminal only on Windows.
+
 ## [1.9.0] - 2026-10-06
 
 ### Added

@@ -657,28 +657,57 @@ fn hints(app: &App) -> Vec<(String, String)> {
             v.extend([h("any key", "back to live"), (app.keymap.prefix.to_string(), "menu".into())]);
             v
         }
-        View::Term(_) => vec![
-            (app.keymap.prefix.to_string(), "menu".into()),
-            h("alt+0", "home"),
-            h("drag border", "resize"),
-            h("right-click", "paste"),
-        ],
+        View::Term(_) => {
+            let mut v = vec![(app.keymap.prefix.to_string(), "menu".into())];
+            if let Some(key) = app.keymap.term_hint(Action::Bridge, app.focused_locked()) {
+                v.push((key, "home".into()));
+            }
+            v.extend([h("drag border", "resize"), h("right-click", "paste")]);
+            v
+        }
     }
 }
 
-/// Hints shown in turn on the status bar (lesser-known features).
-const TIPS: [&str; 10] = [
-    "ctrl+click a URL or file:line in a terminal to open it",
-    "prefix / searches a terminal's scrollback",
-    "drag a tab to reorder it · double-click to rename",
-    "right-click a tab, a pane title or a project for more",
-    "background tab markers: ◆ needs you · ✗ failed · ✓ done",
-    "press a on Home to add a folder with your projects",
-    "alt+1…9 or prefix n / p switch tabs",
-    "Settings → Terminal colors: pick any Windows Terminal scheme",
-    "w on Home saves your open tabs as a workspace",
-    "prefix z or a double-click on its title zooms a pane",
-];
+/// Hints shown in turn on the status bar (lesser-known features). Shortcuts come from the keymap, so a
+/// rebound key shows as bound and a tip whose action has no key is left out.
+fn tips(app: &App) -> Vec<String> {
+    let km = &app.keymap;
+    let mut v = vec![match km.term_hint(Action::OpenLink, false) {
+        Some(k) => format!("ctrl+click a URL or file:line to open it · {k} lists them"),
+        None => "ctrl+click a URL or file:line in a terminal to open it".to_string(),
+    }];
+    if let Some(k) = km.term_hint(Action::Search, false) {
+        v.push(format!("{k} searches a terminal's scrollback"));
+    }
+    v.extend([
+        "drag a tab to reorder it · double-click to rename".to_string(),
+        "right-click a tab, a pane title or a project for more".to_string(),
+        "background tab markers: ◆ needs you · ✗ failed · ✓ done".to_string(),
+        "press a on Home to add a folder with your projects".to_string(),
+    ]);
+    let mut switch = Vec::new();
+    if let Some(range) = km.tab_range(false) {
+        switch.push(range);
+    }
+    if let (Some(n), Some(p)) = (km.prefix_key(Action::NextTab), km.prefix_key(Action::PrevTab)) {
+        switch.push(format!("{} {n} / {p}", km.prefix));
+    }
+    if !switch.is_empty() {
+        v.push(format!("{} switch tabs", switch.join(" or ")));
+    }
+    // Windows also offers the schemes from Windows Terminal's settings; Linux/macOS the built-in ones.
+    v.push(if cfg!(windows) {
+        "Settings → Terminal colors: pick any Windows Terminal scheme".to_string()
+    } else {
+        "Settings → Terminal colors: pick a color scheme for the panes".to_string()
+    });
+    v.push("w on Home saves your open tabs as a workspace".to_string());
+    match km.term_hint(Action::Zoom, false) {
+        Some(k) => v.push(format!("{k} or a double-click on its title zooms a pane")),
+        None => v.push("a double-click on its title zooms a pane".to_string()),
+    }
+    v
+}
 
 /// The hint to show right now (changes every 20 seconds). Until the prefix key has been
 /// used once, the tip is how to reach it, with the configured key.
@@ -686,7 +715,8 @@ fn current_tip(app: &App) -> String {
     if !app.ui_state.data.prefix_used {
         return format!("press {}, then ? for all keys", app.keymap.prefix);
     }
-    TIPS[(app.started.elapsed().as_secs() / 20) as usize % TIPS.len()].to_string()
+    let tips = tips(app);
+    tips[(app.started.elapsed().as_secs() / 20) as usize % tips.len()].clone()
 }
 
 /// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's

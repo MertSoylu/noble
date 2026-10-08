@@ -582,7 +582,7 @@ impl App {
             KeyCode::Char('A') => self.run(Action::AddProject),
             KeyCode::Char('o') => {
                 if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_explorer(&p);
+                    self.open_in_file_manager(&p);
                 }
             }
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
@@ -990,7 +990,7 @@ impl App {
             }
             Hit::OpenFiles => {
                 if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_explorer(&p);
+                    self.open_in_file_manager(&p);
                 }
             }
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),

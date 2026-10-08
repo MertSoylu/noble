@@ -361,10 +361,14 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
         let names = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect::<Vec<_>>().join(" / ");
         keys.push((keys_text, format!("start {names} right there")));
     }
-    keys.push(("alt+p".into(), "command palette — everything is in there".into()));
+    if let Some(k) = app.keymap.hint(Action::Palette) {
+        keys.push((k, "command palette — everything is in there".into()));
+    }
     keys.push(("?".into(), "every shortcut · ctrl+click opens links".into()));
+    // The key column fits the longest key (a rebound palette key can be "ctrl+space :").
+    let key_w = keys.iter().map(|(k, _)| util::width(k) + 2).max().unwrap_or(8).clamp(8, 16);
     for (key, what) in &keys {
-        line(buf, y, &[(&util::pad_right(key, 8), th.accent_bold()), (what, th.text())]);
+        line(buf, y, &[(&util::pad_right(key, key_w), th.accent_bold()), (what, th.text())]);
         y += 1;
     }
     // Always drawn (the rows above stop short of it): the way out must stay visible.
@@ -486,7 +490,9 @@ fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker
                 cx = hud::put(buf, cx, y, "█", Style::default().fg(*c).bg(bg), 1);
             }
             if cx + 10 <= line.right() {
-                hud::put(buf, cx + 2, y, "PS C:\\>", Style::default().fg(fg).bg(bg), 8);
+                // A prompt sample that looks like this OS: PowerShell on Windows, a Unix shell on Linux/macOS.
+                let sample = if cfg!(windows) { "PS C:\\>" } else { "~ $" };
+                hud::put(buf, cx + 2, y, sample, Style::default().fg(fg).bg(bg), 8);
             }
         } else if colors.len() != 16 {
             hud::put(
@@ -706,12 +712,15 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
         keys.sort_by_key(|k| (k.len(), k.clone()));
         by_action.push((a, keys));
     }
-    // Collect the tab numbers on a single line.
+    // Collect the tab numbers on a single line (rebound ones keep their own rows).
+    let tab_range = app.keymap.tab_range(true);
     let mut tabs_done = false;
     for (a, keys) in &by_action {
-        if matches!(a, Action::GoTab(_)) {
+        if matches!(a, Action::GoTab(_))
+            && let Some(range) = &tab_range
+        {
             if !tabs_done {
-                v.push(("1 … 9".into(), "go to tab".into(), false));
+                v.push((range.clone(), "go to tab".into(), false));
                 tabs_done = true;
             }
             continue;
@@ -723,11 +732,14 @@ fn help_lines(app: &App) -> Vec<(String, String, bool)> {
     section(&mut v, "GLOBAL");
     let mut direct: Vec<(String, Action)> = app.keymap.direct_map.iter().map(|(k, a)| (k.to_string(), *a)).collect();
     direct.sort_by_key(|(k, _)| k.clone());
+    let tab_range = app.keymap.tab_range(false);
     let mut tabs_done = false;
     for (k, a) in direct {
-        if matches!(a, Action::GoTab(_)) {
+        if matches!(a, Action::GoTab(_))
+            && let Some(range) = &tab_range
+        {
             if !tabs_done {
-                v.push(("alt+1 … 9".into(), "go to tab".into(), false));
+                v.push((range.clone(), "go to tab".into(), false));
                 tabs_done = true;
             }
             continue;

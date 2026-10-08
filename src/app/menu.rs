@@ -32,6 +32,7 @@ pub enum MenuCmd {
     GitPull(PathBuf),
     TogglePin(PathBuf),
     RemoveProject(PathBuf),
+    OpenLink(crate::term::link::Link),
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +64,7 @@ fn item(label: &str, hint: &str, cmd: MenuCmd) -> MenuItem {
 }
 
 impl App {
-    fn open_menu(&mut self, title: String, x: u16, y: u16, items: Vec<MenuItem>) {
+    pub(super) fn open_menu(&mut self, title: String, x: u16, y: u16, items: Vec<MenuItem>) {
         self.overlay = Some(Overlay::Menu(Menu { title, x, y, items, selected: 0 }));
     }
 
@@ -176,7 +177,7 @@ impl App {
             }
             MenuCmd::ClosePane(pane) => self.request_close_pane(pane),
             MenuCmd::CopyText(text) => self.set_clipboard(&text, true),
-            MenuCmd::OpenFolder(path) => self.open_in_explorer(&path),
+            MenuCmd::OpenFolder(path) => self.open_in_file_manager(&path),
             MenuCmd::OpenCode(path) => self.open_in_code(&path),
             // The tab may be gone by now (its shell exited while the menu was open): nothing to do then.
             MenuCmd::RenameTab(tab) => {
@@ -200,6 +201,7 @@ impl App {
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
             MenuCmd::RemoveProject(path) => self.remove_project(&path),
+            MenuCmd::OpenLink(target) => self.open_link(target),
         }
     }
 
@@ -212,6 +214,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => m.selected = (m.selected + 1) % n.max(1),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(it) = m.items.get(m.selected).filter(|it| it.enabled).cloned() {
+                    self.run_menu(it.cmd);
+                }
+            }
+            // An item numbered in its label (the links menu) runs by its digit.
+            KeyCode::Char(c @ '1'..='9') => {
+                let prefix = format!("{c} ");
+                if let Some(it) = m.items.iter().find(|it| it.enabled && it.label.starts_with(&prefix)).cloned() {
                     self.run_menu(it.cmd);
                 }
             }

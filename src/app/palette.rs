@@ -92,7 +92,8 @@ impl App {
                 | Action::SendPrefix
                 | Action::MoveTabLeft
                 | Action::MoveTabRight
-                | Action::PaneMenu => in_term,
+                | Action::PaneMenu
+                | Action::OpenLink => in_term,
                 Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
                 Action::Palette => false,
                 _ => true,
