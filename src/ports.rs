@@ -459,7 +459,7 @@ mod tests {
         drop(listener);
     }
 
-    /// Home scans the ports every 5 s, so a scan must stay cheap on every platform. Two cases: no process
+    /// Home scans the ports every 10 s, so a scan must stay cheap on every platform. Two cases: no process
     /// inside a project folder (the usual one; macOS runs no `lsof` then) and a listener inside one (macOS
     /// runs `lsof` for it). Wall time is measured because it also covers the `lsof` child's work, so it is an
     /// upper bound of the CPU cost; a busy CI runner only makes it larger. The result line is written past
@@ -488,7 +488,7 @@ mod tests {
         let mut with_listener = elsewhere.clone();
         with_listener.push(std::env::current_dir().unwrap());
         let busy = per_scan(&with_listener);
-        // At one scan per 5 s, a minute holds 12 scans.
+        // At one scan per 10 s (`app::live::PORTS_EVERY`), a minute holds 6 scans.
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let line = format!(
             "ports::scan on {} ({} folders): no project process {:.2} ms/scan (≤ {:.0} ms CPU/min on Home), \
@@ -496,9 +496,9 @@ mod tests {
             std::env::consts::OS,
             with_listener.len(),
             ms(idle),
-            ms(idle) * 12.0,
+            ms(idle) * 6.0,
             ms(busy),
-            ms(busy) * 12.0,
+            ms(busy) * 6.0,
         );
         let _ = std::io::stdout().write_all(line.as_bytes());
         for dir in &elsewhere {

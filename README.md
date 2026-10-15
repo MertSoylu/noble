@@ -481,7 +481,7 @@ under heavy output. Everything else runs only while it is on screen:
 - System sensors: every second on the System screen and on Home (every 2 s on battery), every 5 s elsewhere.
 - Git status: when a command finishes, when Home opens, or when a repository changes.
 - Listening ports and the pull request / CI state of the selected project: only while Home is open. Ports are
-  scanned every 5 s (15 s on battery); the PR is asked for only when the selected project's branch changed or
+  scanned every 10 s (30 s on battery); the PR is asked for only when the selected project's branch changed or
   its answer is older than 60 s (180 s on battery).
 - AI quota: only while Home is open.
 - On battery the Home clock drops its seconds and the blinking colon, and the cursor of the command palette
