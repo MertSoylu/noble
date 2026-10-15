@@ -84,7 +84,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   list, Home: 1 s — 2 s on battery, otherwise 5 s), git status when a command finishes / Home opens / for a
   changed repo, AI quota only while Home is open (`AiReq::Visible`; entering Home fetches at once only if the
   last fetch is older than 30 s, `AiReq::Refresh` — config change, R key — fetches even while Home is hidden).
-  Listening ports (every 5 s, 15 s on battery) and the selected project's PR/CI state (60 s, 180 s on battery,
+  Listening ports (every 10 s, 30 s on battery) and the selected project's PR/CI state (60 s, 180 s on battery,
   or at once when its branch changed) are requested only while Home is open (`app/live.rs`).
   The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`) the Home clock has no
   seconds and does not blink.

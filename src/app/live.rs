@@ -11,8 +11,8 @@ use crate::pr::PrInfo;
 use crate::projects::Project;
 
 /// How often the listening ports are scanned while Home is open (battery: less often).
-const PORTS_EVERY: Duration = Duration::from_secs(5);
-const PORTS_EVERY_ON_BATTERY: Duration = Duration::from_secs(15);
+const PORTS_EVERY: Duration = Duration::from_secs(10);
+const PORTS_EVERY_ON_BATTERY: Duration = Duration::from_secs(30);
 /// How old a pull request answer may get before the selected project is asked again.
 const PR_MAX_AGE: Duration = Duration::from_secs(60);
 const PR_MAX_AGE_ON_BATTERY: Duration = Duration::from_secs(180);

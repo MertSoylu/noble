@@ -458,4 +458,55 @@ mod tests {
         assert!(found.iter().any(|(p, v)| *p == here && v.contains(&port)), "{found:?}");
         drop(listener);
     }
+
+    /// Home scans the ports every 10 s, so a scan must stay cheap on every platform. Two cases: no process
+    /// inside a project folder (the usual one; macOS runs no `lsof` then) and a listener inside one (macOS
+    /// runs `lsof` for it). Wall time is measured because it also covers the `lsof` child's work, so it is an
+    /// upper bound of the CPU cost; a busy CI runner only makes it larger. The result line is written past
+    /// the test harness's output capture on purpose, so every CI log shows the numbers.
+    #[test]
+    fn a_scan_stays_cheap() {
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+        const RUNS: u32 = 20;
+        let tag = std::process::id();
+        let elsewhere: Vec<PathBuf> =
+            (0..60).map(|i| std::env::temp_dir().join(format!("noble-ports-cost-{tag}-{i}"))).collect();
+        for dir in &elsewhere {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let per_scan = |roots: &[PathBuf]| {
+            let _ = scan(roots, None);
+            let start = Instant::now();
+            for _ in 0..RUNS {
+                let _ = scan(roots, None);
+            }
+            start.elapsed() / RUNS
+        };
+        let idle = per_scan(&elsewhere);
+        let mut with_listener = elsewhere.clone();
+        with_listener.push(std::env::current_dir().unwrap());
+        let busy = per_scan(&with_listener);
+        // At one scan per 10 s (`app::live::PORTS_EVERY`), a minute holds 6 scans.
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let line = format!(
+            "ports::scan on {} ({} folders): no project process {:.2} ms/scan (≤ {:.0} ms CPU/min on Home), \
+             a listener in a project {:.2} ms/scan (≤ {:.0} ms CPU/min on Home)\n",
+            std::env::consts::OS,
+            with_listener.len(),
+            ms(idle),
+            ms(idle) * 6.0,
+            ms(busy),
+            ms(busy) * 6.0,
+        );
+        let _ = std::io::stdout().write_all(line.as_bytes());
+        for dir in &elsewhere {
+            let _ = std::fs::remove_dir(dir);
+        }
+        drop(listener);
+        // Generous limits: they catch a scan that turned expensive, not the noise of a shared runner.
+        assert!(idle < Duration::from_millis(50), "{line}");
+        assert!(busy < Duration::from_millis(250), "{line}");
+    }
 }
