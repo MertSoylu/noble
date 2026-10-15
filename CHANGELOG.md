@@ -43,6 +43,9 @@ All notable changes to NOBLE are documented here. The format is based on
 - Help says "enlarge window" when the terminal is too small to show it.
 - Confirmation dialogs wrap long text instead of cutting it off.
 - Dialogs next to a panel frame no longer show doubled corners at small sizes.
+- A pane opened while another pane or window was writing NOBLE's shell scripts (the first start, or the
+  first start after an update) could start without the shell integration: no directory tracking, no exit
+  codes. The scripts are now replaced atomically.
 
 ## [1.9.0] - 2026-10-06
 
