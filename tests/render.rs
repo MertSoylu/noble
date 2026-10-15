@@ -606,6 +606,7 @@ fn project_card_shows_pull_request_and_ports() {
         title: "Show pull requests and ports on the project card".into(),
         state: PrState::Open,
         url: "https://github.com/MertSoylu/noble/pull/42".into(),
+        branch: project.branch.clone().unwrap_or_default(),
         checks,
     };
     let answer = |app: &mut App, info: Option<PrInfo>| {
@@ -644,6 +645,43 @@ fn project_card_shows_pull_request_and_ports() {
     assert!(text.contains("PR #42") && text.contains(":3000"), "{text}");
     assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some());
     assert!(find_hit(&app, |h| *h == Hit::Port(3000)).is_some());
+}
+
+/// Without the card (a narrow window) the Home footer carries the pull request and the ports: each is
+/// drawn whole or left out, never cut to a clickable stub such as `PR #4…`, at any width.
+#[test]
+fn footer_pull_request_is_drawn_whole_or_not_at_all() {
+    use noble::app::{Hit, PrEntry};
+    let mut app = demo_app(110, 30);
+    let project = app.selected_project().expect("a selected project").clone();
+    let info = PrInfo {
+        number: 42,
+        title: "Show pull requests and ports on the project card".into(),
+        state: PrState::Open,
+        url: "https://github.com/MertSoylu/noble/pull/42".into(),
+        branch: project.branch.clone().unwrap_or_default(),
+        checks: Checks { passed: 12, failed: 0, pending: 0 },
+    };
+    app.prs.insert(
+        project.path.clone(),
+        PrEntry { branch: project.branch.clone(), info: Some(info), fetched: Instant::now() },
+    );
+    app.ports.insert(project.path.clone(), vec![3000, 5173]);
+    let mut footer_pr = false;
+    for w in 24..=110u16 {
+        let text = render(&mut app, w, 24);
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "overflow at {w}:\n{text}");
+        for (at, _) in text.match_indices("PR #") {
+            // The card's row says `PR #42 open`; the footer `PR #42 ✓`. Anything else is a cut part.
+            let whole = text[at..].starts_with("PR #42 open") || text[at..].starts_with("PR #42 ✓");
+            assert!(whole, "a cut pull request at {w} columns:\n{text}");
+        }
+        footer_pr |= text.contains("PR #42 ✓");
+        if text.contains("PR #42 ✓") {
+            assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some(), "footer PR is clickable at {w}");
+        }
+    }
+    assert!(footer_pr, "the footer never showed the pull request");
 }
 
 fn find_hit(app: &App, pred: impl Fn(&noble::app::Hit) -> bool) -> Option<ratatui::layout::Rect> {
@@ -5585,6 +5623,33 @@ fn home_filter_keeps_esc_clear_when_nothing_matches() {
     assert!(!text.lines().last().unwrap().contains("esc clear"), "{text}");
 }
 
+/// System with a kept filter: Esc clears the filter, so the hint bar says "esc clear" until it is empty.
+#[test]
+fn system_filter_hint_says_esc_clears() {
+    let mut app = demo_app(120, 34);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    app.run(Action::System);
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Char('/'));
+    for c in "zzqx".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.system.filtering);
+    assert_eq!(app.system.filter, "zzqx");
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc clear"), "{text}");
+    assert!(!text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.system.filter.is_empty());
+    assert_eq!(app.view, View::System, "the first Esc only clears the filter");
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, View::Bridge);
+}
+
 /// Home's "/ search" label is a button: a click starts the project filter, as "/" does.
 #[test]
 fn home_search_label_starts_the_filter() {
@@ -6159,6 +6224,60 @@ fn confirm_wraps_a_long_question() {
     for (w, h) in [(1, 1), (3, 2), (10, 4)] {
         render(&mut app, w, h);
     }
+}
+
+/// A narrow confirmation: the chips stay inside the frame (the n/esc chip is left out when it does not
+/// fit) and a question that does not fit ends with "…" on its last visible line.
+#[test]
+fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
+    use noble::app::{Confirm, ConfirmAction, Overlay};
+    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let mut app = demo_app(110, 30);
+    for (w, h) in [(16u16, 8u16), (30, 8)] {
+        app.overlay = None;
+        let (_, plain) = render_buf(&mut app, w, h);
+        app.overlay = Some(Overlay::Confirm(Confirm {
+            title: "CLOSE PANE".into(),
+            body: body.into(),
+            action: ConfirmAction::Quit,
+        }));
+        let (text, buf) = render_buf(&mut app, w, h);
+        save(&format!("confirm-narrow-{w}x{h}"), &text);
+        // The box: centered, as wide as the window allows (at most 52), the frame's right column last.
+        let box_w = (w - 2).min(52);
+        let left = (w - box_w) / 2;
+        let right = left + box_w - 1;
+        // Nothing is drawn right of the frame: the cells past its ring match the screen without the box.
+        for y in 0..h {
+            for x in right + 2..w {
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    plain[(x, y)].symbol(),
+                    "drawn past the frame at ({x},{y}) {w}x{h}:\n{text}"
+                );
+            }
+        }
+        let top = (0..h).find(|&y| buf[(left, y)].symbol() == "╭").expect("box top");
+        let bottom = (top..h).find(|&y| buf[(left, y)].symbol() == "╰").expect("box bottom");
+        let row = |y: u16| -> String { (left + 1..right).map(|x| buf[(x, y)].symbol()).collect() };
+        let buttons = row(bottom - 1);
+        assert!(buttons.contains(" y "), "yes chip at {w}x{h}: {text}");
+        // The question is cut: its last visible line ends with "…", and what is shown is the start of it.
+        let shown: Vec<String> = (top + 1..bottom - 1).map(row).filter(|l| !l.trim().is_empty()).collect();
+        let shown = shown.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        assert!(shown.ends_with('…'), "the cut question has no ellipsis at {w}x{h}: {shown:?}\n{text}");
+        let words: String = shown.trim_end_matches('…').chars().filter(|c| *c != ' ').collect();
+        assert!(body.replace(' ', "").starts_with(&words), "{shown:?}");
+        assert!(words.len() > 10, "too little of the question is shown at {w}x{h}: {shown:?}");
+    }
+    // At 16 columns the n/esc chip does not fit inside the frame: it is left out, and so is its click target.
+    app.overlay =
+        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    let text = render(&mut app, 16, 8);
+    assert!(!text.contains("n/esc"), "{text}");
+    assert!(find_hit(&app, |h| *h == noble::app::Hit::ConfirmNo).is_none(), "no cancel target when it is not drawn");
+    let text = render(&mut app, 30, 8);
+    assert!(text.contains("n/esc"), "{text}");
 }
 
 /// The wrapping keeps words whole and cuts a word that is wider than the box.

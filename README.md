@@ -61,8 +61,9 @@ or hovered pane shows its buttons on the title line: `◫` split right, `⊟` sp
 Finds your git repositories and shows branch, changes, commits to push or pull, recent commits and changed
 files. The status refreshes as soon as a command finishes in that repository. Add any folder by hand (`A`) or
 remove one you do not want (⋯ → Remove from list). The selected project's card also shows its branch's pull
-request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) `gh`) and the
-ports its running processes listen on (`⇄ :3000 :5173`); click either one to open it.
+request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) signed in via
+`gh auth login`) and the ports that processes running inside the project listen on (`⇄ :3000 :5173`), on
+Windows, Linux and macOS; click either one to open it.
 
 </td>
 </tr>
@@ -236,7 +237,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
 | | | `pgup` `pgdn` `[` `]` | scroll up / down (page) |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
-| | | `i` | pass shortcuts to the app (lock / next key) |
+| | | `i` | pass keys to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
 | | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
@@ -255,7 +256,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
   click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
-  "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` back.
+  "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs

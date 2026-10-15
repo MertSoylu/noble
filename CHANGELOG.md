@@ -42,8 +42,7 @@ All notable changes to NOBLE are documented here. The format is based on
   nothing.
 - Help says "enlarge window" when the terminal is too small to show it.
 - Confirmation dialogs wrap long text instead of cutting it off.
-- Dialogs and overlays clear a one-cell ring around their box, so at small sizes they no longer show doubled
-  frame corners next to the panel underneath.
+- Dialogs next to a panel frame no longer show doubled corners at small sizes.
 
 ## [1.9.0] - 2026-10-06
 

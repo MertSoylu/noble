@@ -273,6 +273,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
                 title: "Show pull requests and ports on the project card".into(),
                 state: PrState::Open,
                 url: "https://github.com/MertSoylu/noble/pull/42".into(),
+                branch: "main".into(),
                 checks: Checks { passed: 12, failed: 0, pending: 0 },
             }),
             fetched: Instant::now(),

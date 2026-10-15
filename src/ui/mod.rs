@@ -643,8 +643,10 @@ fn hints(app: &App) -> Vec<(String, String)> {
             if app.system.filtering {
                 return vec![h("type", "filter"), h("⏎", "done"), h("esc", "clear")];
             }
-            // "/ Filter" and "K Terminate" are buttons on the Processes panel.
-            vec![h("↑↓", "select"), h("c m p n", "sort"), h("esc", "home")]
+            // "/ Filter" and "K Terminate" are buttons on the Processes panel. Esc clears a kept filter
+            // first (see `system_key`), then goes home.
+            let back = if app.system.filter.is_empty() { "home" } else { "clear" };
+            vec![h("↑↓", "select"), h("c m p n", "sort"), h("esc", back)]
         }
         View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
         View::Term(_) if app.search.is_some() => {

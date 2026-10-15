@@ -18,6 +18,8 @@ pub struct PrInfo {
     pub title: String,
     pub state: PrState,
     pub url: String,
+    /// The branch the pull request was opened from, as `gh` reports it (empty when it did not say).
+    pub branch: String,
     pub checks: Checks,
 }
 
@@ -39,7 +41,7 @@ pub struct Checks {
 
 /// Longest `gh` may take (a slow network, a login prompt that never comes).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-const FIELDS: &str = "number,title,state,isDraft,url,statusCheckRollup";
+const FIELDS: &str = "number,title,state,isDraft,url,headRefName,statusCheckRollup";
 
 /// The pull request of the branch checked out in `dir`. `gh` exits with an error (and prints nothing on
 /// stdout) when there is none, so an unparsable answer is `None` as well.
@@ -74,6 +76,7 @@ pub fn parse(json: &str) -> Option<PrInfo> {
     let number = u32::try_from(v.get("number")?.as_u64()?).ok()?;
     let title = v.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
     let url = v.get("url")?.as_str()?.to_string();
+    let branch = v.get("headRefName").and_then(Value::as_str).unwrap_or_default().to_string();
     let draft = v.get("isDraft").and_then(Value::as_bool).unwrap_or(false);
     let state = match v.get("state")?.as_str()? {
         "MERGED" => PrState::Merged,
@@ -84,7 +87,7 @@ pub fn parse(json: &str) -> Option<PrInfo> {
     };
     let checks =
         v.get("statusCheckRollup").and_then(Value::as_array).map(|items| count_checks(items)).unwrap_or_default();
-    Some(PrInfo { number, title, state, url, checks })
+    Some(PrInfo { number, title, state, url, branch, checks })
 }
 
 /// The outcome of one entry of `statusCheckRollup`.
@@ -140,6 +143,7 @@ mod tests {
   "state": "OPEN",
   "isDraft": false,
   "url": "https://github.com/MertSoylu/noble/pull/42",
+  "headRefName": "pr-card",
   "statusCheckRollup": [
     {"__typename": "CheckRun", "completedAt": "2026-10-14T10:02:11Z", "conclusion": "SUCCESS",
      "detailsUrl": "https://github.com/MertSoylu/noble/actions/runs/1/job/2", "name": "test (ubuntu-latest)",
@@ -164,6 +168,7 @@ mod tests {
         assert_eq!(pr.title, "Show pull requests and ports on the project card");
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.url, "https://github.com/MertSoylu/noble/pull/42");
+        assert_eq!(pr.branch, "pr-card");
         assert_eq!(pr.checks, Checks { passed: 2, failed: 1, pending: 2 });
     }
 
@@ -181,10 +186,21 @@ mod tests {
         assert_eq!(parse(&closed).unwrap().state, PrState::Closed);
         // Merged pull requests keep their check results too.
         let merged_all_green = r#"{"number": 7, "title": "x", "state": "MERGED", "isDraft": false,
-            "url": "https://github.com/a/b/pull/7", "statusCheckRollup": [
+            "url": "https://github.com/a/b/pull/7", "headRefName": "done", "statusCheckRollup": [
             {"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED"}]}"#;
         let pr = parse(merged_all_green).unwrap();
         assert_eq!(pr.checks, Checks { passed: 1, failed: 0, pending: 0 });
+    }
+
+    #[test]
+    fn the_branch_is_the_head_ref_and_may_be_missing() {
+        let pr = parse(&OPEN.replace(r#""headRefName": "pr-card""#, r#""headRefName": "feature/x""#)).unwrap();
+        assert_eq!(pr.branch, "feature/x");
+        // Still a pull request (the answer is not thrown away); the branch is just unknown.
+        let missing = r#"{"number": 3, "title": "t", "state": "OPEN", "isDraft": false, "url": "u"}"#;
+        let pr = parse(missing).expect("a pull request without headRefName");
+        assert_eq!(pr.number, 3);
+        assert_eq!(pr.branch, "");
     }
 
     #[test]
@@ -201,8 +217,9 @@ mod tests {
     #[test]
     fn every_check_outcome() {
         let one = |item: &str| {
-            let json =
-                format!(r#"{{"number": 1, "title": "t", "state": "OPEN", "url": "u", "statusCheckRollup": [{item}]}}"#);
+            let json = format!(
+                r#"{{"number": 1, "title": "t", "state": "OPEN", "url": "u", "headRefName": "b", "statusCheckRollup": [{item}]}}"#
+            );
             let c = parse(&json).unwrap().checks;
             (c.passed, c.failed, c.pending)
         };

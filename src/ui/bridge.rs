@@ -481,13 +481,21 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
             }
             parts.push((detail, th.dim(), None));
             let mut cx = x + 1;
-            for (i, (text, style, hit)) in parts.iter().enumerate() {
+            let mut drawn = false;
+            for (text, style, hit) in &parts {
+                let sep = if drawn { 3 } else { 0 };
+                let room = (x + w).saturating_sub(cx);
                 // A separator only goes before a part that still gets a few readable cells.
-                if i > 0 {
-                    if (x + w).saturating_sub(cx) < 3 + 4 {
-                        break;
-                    }
-                    cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
+                if drawn && room < 3 + 4 {
+                    break;
+                }
+                // A part with a hit (the pull request, a port) is drawn whole or skipped: a cut one
+                // would be a clickable stub. Plain text parts are cut to fit.
+                if hit.is_some() && util::width(text) as u16 + sep > room {
+                    continue;
+                }
+                if drawn {
+                    cx = hud::put(buf, cx, by - 2, " · ", th.dim(), room);
                 }
                 let room = (x + w).saturating_sub(cx);
                 let start = cx;
@@ -497,6 +505,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
                 {
                     hits.push((Rect::new(start, by - 2, cx - start, 1), hit.clone()));
                 }
+                drawn = true;
             }
         }
     }

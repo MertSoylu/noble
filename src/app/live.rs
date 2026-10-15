@@ -86,13 +86,82 @@ impl App {
 
     /// Stores a pull request answer for the folder the request was made for. `true` when Home shows
     /// something different.
+    ///
+    /// `gh` answers for the branch checked out when it ran, which may not be the branch the request was
+    /// made for (a checkout during the fetch). The answer is stored under the branch it reports; without
+    /// an answer, or without a branch name in it, under the requested one.
     pub(super) fn set_pr(&mut self, path: PathBuf, info: Option<PrInfo>) -> bool {
-        let Some((_, branch)) = self.pr_in_flight.take_if(|(p, _)| *p == path) else { return false };
+        let Some((_, asked)) = self.pr_in_flight.take_if(|(p, _)| *p == path) else { return false };
+        let branch = match &info {
+            Some(pr) if !pr.branch.is_empty() => pr.branch.clone(),
+            _ => asked,
+        };
         let changed = match self.prs.get(&path) {
             None => true,
             Some(old) => old.branch.as_deref() != Some(branch.as_str()) || old.info != info,
         };
         self.prs.insert(path, PrEntry { branch: Some(branch), info, fetched: Instant::now() });
         changed && (self.view == View::Bridge || self.overlay.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::pr::{Checks, PrState};
+
+    fn pr(branch: &str) -> PrInfo {
+        PrInfo {
+            number: 42,
+            title: "t".into(),
+            state: PrState::Open,
+            url: "https://example.com/pull/42".into(),
+            branch: branch.into(),
+            checks: Checks::default(),
+        }
+    }
+
+    fn project(branch: &str) -> Project {
+        Project {
+            name: "app".into(),
+            path: PathBuf::from("/work/app"),
+            branch: Some(branch.into()),
+            last_active: None,
+            git: None,
+            repo: true,
+        }
+    }
+
+    /// The request was made for feature-a, but gh ran after the checkout had moved on to feature-b.
+    #[test]
+    fn an_answer_is_shown_only_on_the_branch_gh_reports() {
+        let mut app = App::headless(Config::default(), (110, 30));
+        let path = PathBuf::from("/work/app");
+        app.pr_in_flight = Some((path.clone(), "feature-a".into()));
+        app.set_pr(path.clone(), Some(pr("feature-b")));
+        assert!(app.project_pr(&project("feature-a")).is_none(), "feature-b's pull request on feature-a");
+        assert!(app.project_pr(&project("feature-b")).is_some(), "shown once the project is on feature-b");
+        assert_eq!(app.prs[&path].branch.as_deref(), Some("feature-b"));
+    }
+
+    #[test]
+    fn a_missing_answer_is_stored_for_the_requested_branch() {
+        let mut app = App::headless(Config::default(), (110, 30));
+        let path = PathBuf::from("/work/app");
+        app.pr_in_flight = Some((path.clone(), "feature-a".into()));
+        app.set_pr(path.clone(), None);
+        assert_eq!(app.prs[&path].branch.as_deref(), Some("feature-a"));
+        assert!(app.project_pr(&project("feature-a")).is_none());
+    }
+
+    /// An answer without a branch name is taken for the requested branch (never for an empty one).
+    #[test]
+    fn an_answer_without_a_branch_name_keeps_the_requested_branch() {
+        let mut app = App::headless(Config::default(), (110, 30));
+        let path = PathBuf::from("/work/app");
+        app.pr_in_flight = Some((path.clone(), "feature-a".into()));
+        app.set_pr(path.clone(), Some(pr("")));
+        assert!(app.project_pr(&project("feature-a")).is_some());
     }
 }
