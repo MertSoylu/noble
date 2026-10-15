@@ -632,6 +632,9 @@ pub struct App {
     #[doc(hidden)]
     pub dir_probe: fn(&Path) -> bool,
     pub operator: String,
+    /// The time the clocks show instead of now (the README screenshots); `None` in the app.
+    #[doc(hidden)]
+    pub clock: Option<chrono::DateTime<chrono::Local>>,
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
     pub search: Option<SearchState>,
@@ -901,6 +904,7 @@ impl App {
             instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
             operator,
+            clock: None,
             git_requested: HashMap::new(),
             search: None,
             link_hover: None,
@@ -1449,6 +1453,11 @@ impl App {
     /// (so the screen draws only once a minute).
     pub fn live_clock(&self) -> bool {
         !self.on_battery()
+    }
+
+    /// The time the clocks show: now, or the fixed `clock` of the screenshots.
+    pub fn now(&self) -> chrono::DateTime<chrono::Local> {
+        self.clock.unwrap_or_else(chrono::Local::now)
     }
 
     /// Whether a text field's cursor is drawn now: it blinks every 500 ms, and like the

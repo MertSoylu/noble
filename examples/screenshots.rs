@@ -15,6 +15,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
+use chrono::TimeZone;
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
 use noble::app::{App, View};
 use noble::config::Config;
@@ -123,7 +124,7 @@ fn snapshot(app: &mut App, w: u16, h: u16) -> Buffer {
     term.backend().buffer().clone()
 }
 
-// ─── Sahte veri ──────────────────────────────────────────────────────────────
+// ─── Fake data ───────────────────────────────────────────────────────────────
 
 fn demo(theme: &str, w: u16, h: u16) -> App {
     let mut cfg = Config::default();
@@ -131,6 +132,8 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     cfg.general.theme = theme.into();
     let mut app = App::headless(cfg, (w, h));
     app.operator = "ada".into();
+    // A fixed time, so the images change only when the screens do.
+    app.clock = chrono::Local.with_ymd_and_hms(2026, 9, 30, 18, 20, 0).single();
     // Show the rotating tips, not the first-run prefix hint.
     app.ui_state.data.prefix_used = true;
     // The image must not depend on which CLIs are installed on this machine.

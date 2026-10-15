@@ -122,7 +122,7 @@ fn version_label() -> String {
 fn hero(buf: &mut Buffer, area: Rect, app: &App) {
     use chrono::Timelike;
     let th = &app.theme;
-    let now = chrono::Local::now();
+    let now = app.now();
     let time = now.format(if app.cfg.general.clock_24h { "%H:%M" } else { "%I:%M" }).to_string();
     let x = area.x + 1;
     let y = area.y + 1;
@@ -160,7 +160,7 @@ fn hero(buf: &mut Buffer, area: Rect, app: &App) {
 fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     use chrono::Timelike;
     let th = &app.theme;
-    let now = chrono::Local::now();
+    let now = app.now();
     let fmt = match (app.cfg.general.clock_24h, app.cfg.general.show_seconds && app.live_clock()) {
         (true, true) => "%H:%M:%S",
         (true, false) => "%H:%M",

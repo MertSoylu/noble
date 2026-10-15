@@ -304,7 +304,7 @@ pub(crate) fn battery_color(b: &crate::battery::Battery, th: &crate::theme::Them
 }
 
 fn clock_text(app: &App, seconds: bool) -> String {
-    let now = chrono::Local::now();
+    let now = app.now();
     let fmt = match (app.cfg.general.clock_24h, seconds) {
         (true, true) => "%H:%M:%S",
         (true, false) => "%H:%M",
