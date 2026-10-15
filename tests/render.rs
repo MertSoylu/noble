@@ -2550,7 +2550,9 @@ fn check_agent_lifecycle(shell: &str) {
     wait_idle(&mut app, pane);
     let codex = fake_agent(&app.shell, "codex");
     app.panes[&pane].write(format!("{codex}\r").as_bytes());
-    pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some());
+    // Wait for this agent: cmd.exe's console title can lag behind for a moment (ConPTY reports it on its own
+    // schedule), so the first state seen may still come from the previous program.
+    pump_until(&mut app, &format!("{shell}: second agent"), |a| a.agent_state(pane).is_some_and(|(k, _)| k == "codex"));
     assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)), "{shell}");
     // An elevated cmd.exe prefixes its title with "Administrator: ", which the tab's 16-character
     // label cuts before the program name; the pane label still carries it. Other shells show it.
@@ -2561,6 +2563,9 @@ fn check_agent_lifecycle(shell: &str) {
     app.panes[&pane].write(b"\r");
     pump_until(&mut app, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
     assert!(!app.panes[&pane].label().contains("codex"), "{shell}");
+    // The title can reset before the shell's next prompt mark arrives; until then the pane still counts as
+    // running a command, and closing its tab below would ask first instead of closing.
+    pump_until(&mut app, &format!("{shell}: prompt after the second agent"), |a| a.panes[&pane].busy().is_none());
 
     // Claude again, typed at the prompt this time; closing the pane clears its record.
     // Records written in the same second as the last prompt count as leftovers of the
@@ -2570,7 +2575,8 @@ fn check_agent_lifecycle(shell: &str) {
     scan_hooks(&mut app);
     assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)), "{shell}");
     app.run(Action::CloseTab);
-    assert!(app.agent_hooks.is_empty());
+    assert!(app.overlay.is_none(), "{shell}: an idle pane's tab closes without asking");
+    assert!(app.agent_hooks.is_empty(), "{shell}: closing the tab left its agent");
     assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after close");
     let _ = std::fs::remove_dir_all(&app.paths.data);
 }

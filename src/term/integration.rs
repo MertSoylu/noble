@@ -258,11 +258,20 @@ pub fn install(dir: &Path) -> std::io::Result<()> {
         (zsh.join(".zshrc"), ZSHRC),
         (fish_script(dir), FISH),
     ];
+    let current = |path: &Path, text: &str| std::fs::read_to_string(path).is_ok_and(|now| now == text);
     for (path, text) in files {
-        if std::fs::read_to_string(&path).is_ok_and(|current| current == text) {
+        if current(&path, text) {
             continue;
         }
-        std::fs::write(&path, text)?;
+        // Atomic (temp file, then rename): a shell starting in another pane or window while this one
+        // writes the script reads the old text or the new one, never an empty or half-written file.
+        if let Err(e) = crate::store::write_text(&path, text) {
+            // Another window put the same text there meanwhile (Windows refuses to replace a file that
+            // is open); only a script that is still not current is an error.
+            if !current(&path, text) {
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -293,6 +302,39 @@ mod tests {
         let before = std::fs::metadata(fish_script(&dir)).unwrap().modified().unwrap();
         install(&dir).unwrap();
         assert_eq!(std::fs::metadata(fish_script(&dir)).unwrap().modified().unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Panes and windows starting at the same moment all write the scripts: a reader must never see a
+    /// truncated script (a shell sourcing it would start without the integration, so no OSC 7 / prompt).
+    #[test]
+    fn concurrent_installs_never_expose_a_partial_script() {
+        let dir = std::env::temp_dir().join(format!("noble-integration-race-{}", std::process::id()));
+        let zshrc = zsh_dir(&dir).join(".zshrc");
+        for _ in 0..40 {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::thread::scope(|s| {
+                for _ in 0..4 {
+                    s.spawn(|| install(&dir).unwrap());
+                }
+                s.spawn(|| {
+                    for _ in 0..200 {
+                        match std::fs::read_to_string(&zshrc) {
+                            Ok(text) => assert_eq!(text, ZSHRC, "a partial .zshrc was visible"),
+                            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}"),
+                        }
+                    }
+                });
+            });
+            assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), ZSHRC);
+        }
+        // No temp file is left next to the scripts.
+        let leftovers: Vec<_> = std::fs::read_dir(zsh_dir(&dir))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
