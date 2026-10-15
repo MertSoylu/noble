@@ -111,7 +111,7 @@ impl App {
             Action::AddProjectFolder => self.open_add_prompt(false),
             Action::AddProject => self.open_add_prompt(true),
             Action::RemoveProject => match self.selected_project().map(|p| p.path.clone()) {
-                Some(path) if self.view == View::Bridge => self.remove_project(&path),
+                Some(path) if self.view == View::Bridge => self.request_remove_project(path),
                 _ => self.toast(ToastLevel::Info, "select a project on Home first"),
             },
             Action::Passthrough => self.passthrough(),
@@ -466,18 +466,25 @@ impl App {
         }
     }
 
-    /// Closes a tab the user asked to close; asks first while something still runs in one of its panes.
+    /// Closes a tab the user asked to close. Asks first while something still runs in one of its
+    /// panes, and also when the tab has several panes (closing it takes them all); a single idle
+    /// pane closes at once.
     pub fn request_close_tab(&mut self, i: usize) {
         let Some(tab) = self.tabs.get(i) else { return };
         let ids = tab.panes();
         let busy: Vec<String> = ids.iter().filter_map(|id| self.panes.get(id).and_then(Pane::busy)).collect();
-        if busy.is_empty() {
+        if busy.is_empty() && ids.len() <= 1 {
             return self.remove_tab(i);
         }
-        let what = if busy.len() == 1 { busy[0].clone() } else { format!("{} programs", busy.len()) };
+        let body = if busy.is_empty() {
+            format!("close the tab and its {} panes?", ids.len())
+        } else {
+            let what = if busy.len() == 1 { busy[0].clone() } else { format!("{} programs", busy.len()) };
+            format!("{what} still running — close the tab?")
+        };
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "CLOSE TAB".into(),
-            body: format!("{what} still running — close the tab?"),
+            body,
             action: ConfirmAction::CloseTab(tab.id),
         }));
     }
@@ -720,6 +727,16 @@ impl App {
         }));
     }
 
+    /// Removes a project from the list after a confirmation (A on Home adds it back).
+    pub fn request_remove_project(&mut self, path: std::path::PathBuf) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "REMOVE PROJECT".into(),
+            body: format!("“{name}” leaves the list. A on Home adds it back."),
+            action: ConfirmAction::RemoveProject(path),
+        }));
+    }
+
     pub fn request_delete_workspace(&mut self, name: String) {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "DELETE WORKSPACE".into(),
@@ -743,6 +760,8 @@ impl App {
                     p.paste(&text);
                 }
             }
+            ConfirmAction::ReplaceWorkspace(name) => self.save_workspace(&name),
+            ConfirmAction::RemoveProject(path) => self.remove_project(&path),
             ConfirmAction::DeleteWorkspace(name) => {
                 if self.workspaces.remove(&name) {
                     self.toast(ToastLevel::Ok, format!("workspace '{name}' deleted"));
@@ -774,6 +793,7 @@ impl App {
             PromptPurpose::AddProject => Self::resolve_folder(&value).and_then(|p| {
                 crate::projects::project_at(&p).map(|_| ()).ok_or_else(|| format!("not a folder: {}", p.display()))
             }),
+            PromptPurpose::SaveWorkspace if value.is_empty() => Err("type a name first".to_string()),
             _ => Ok(()),
         };
         if let Err(e) = check {
@@ -792,20 +812,31 @@ impl App {
             PromptPurpose::AddRoot => self.add_project_root(&value),
             PromptPurpose::AddProject => self.add_project(&value),
             PromptPurpose::SaveWorkspace => {
-                if value.is_empty() {
-                    return;
+                // A name that is already taken is replaced only after a confirmation.
+                if self.workspaces.list.iter().any(|w| w.name.eq_ignore_ascii_case(&value)) {
+                    self.overlay = Some(Overlay::Confirm(Confirm {
+                        title: "REPLACE WORKSPACE".into(),
+                        body: format!("“{value}” exists — replace it?"),
+                        action: ConfirmAction::ReplaceWorkspace(value),
+                    }));
+                } else {
+                    self.save_workspace(&value);
                 }
-                let ws = self.snapshot(&value);
-                let panes = ws.pane_count();
-                let out = self.workspaces.upsert(ws);
-                let verb = if out.replaced { "replaced" } else { "saved" };
-                let mut msg = format!("workspace '{value}' {verb} · {panes} panes");
-                if let Some(old) = out.dropped {
-                    msg.push_str(&format!(" · limit of {} reached, dropped '{old}'", crate::store::MAX_WORKSPACES));
-                }
-                self.toast(ToastLevel::Ok, msg);
             }
         }
+    }
+
+    /// Saves the open tabs as the workspace `name` (an existing one with that name is replaced).
+    fn save_workspace(&mut self, name: &str) {
+        let ws = self.snapshot(name);
+        let panes = ws.pane_count();
+        let out = self.workspaces.upsert(ws);
+        let verb = if out.replaced { "replaced" } else { "saved" };
+        let mut msg = format!("workspace '{name}' {verb} · {panes} panes");
+        if let Some(old) = out.dropped {
+            msg.push_str(&format!(" · limit of {} reached, dropped '{old}'", crate::store::MAX_WORKSPACES));
+        }
+        self.toast(ToastLevel::Ok, msg);
     }
 
     // ─── Session / workspace ─────────────────────────────────────────────

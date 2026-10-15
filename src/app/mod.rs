@@ -88,6 +88,10 @@ pub enum ConfirmAction {
     },
     /// The saved workspace by name (another window may have changed the list meanwhile).
     DeleteWorkspace(String),
+    /// Save the open tabs under this name over the workspace that has it.
+    ReplaceWorkspace(String),
+    /// Remove the project at this path from the list.
+    RemoveProject(std::path::PathBuf),
 }
 
 pub struct Confirm {

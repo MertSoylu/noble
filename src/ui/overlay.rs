@@ -30,19 +30,23 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Help { scroll } => help(buf, area, app, *scroll, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
-            let rect = centered(area, w, 7);
+            // The question wraps over as many rows as it needs: the box grows with it (within the
+            // area) and the Yes/No row stays at the bottom.
+            let lines = wrap_text(&c.body, (w as usize).saturating_sub(4));
+            let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+            let rect = centered(area, w, rows.saturating_add(6).min(area.height));
             hits.push((rect, Hit::Inert));
             let inner = boxed(buf, rect, &c.title, th, th.crit);
             let x = inner.x + 1;
-            hud::put(
-                buf,
-                x,
-                inner.y + 1,
-                &util::truncate(&c.body, (inner.width as usize).saturating_sub(2)),
-                th.text(),
-                inner.width.saturating_sub(2),
-            );
+            // Rows: a blank, the text, two blanks, then the buttons.
+            let text_rows = inner.bottom().saturating_sub(inner.y + 3) as usize;
+            for (i, line) in lines.iter().take(text_rows).enumerate() {
+                hud::put(buf, x, inner.y + 1 + i as u16, line, th.text(), inner.width.saturating_sub(2));
+            }
             let y = inner.bottom().saturating_sub(1);
+            // The button words drop out when the box is too narrow for them (the keys stay).
+            let (yes_word, no_word) =
+                if inner.width.saturating_sub(2) >= 28 { (" confirm", " cancel") } else { ("", "") };
             let yes_x = x;
             let end = hud::put_spans(
                 buf,
@@ -50,7 +54,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 y,
                 &[
                     (" y ", Style::default().fg(th.on_accent).bg(th.crit).add_modifier(Modifier::BOLD)),
-                    (" confirm", th.text()),
+                    (yes_word, th.text()),
                 ],
                 20,
             );
@@ -62,7 +66,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 y,
                 &[
                     (" n/esc ", Style::default().fg(th.fg).bg(th.line).add_modifier(Modifier::BOLD)),
-                    (" cancel", th.dim()),
+                    (no_word, th.dim()),
                 ],
                 24,
             );
@@ -585,14 +589,78 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
     }
 }
 
+/// Word-wraps `text` to lines of at most `width` columns (by display width); a word wider than
+/// a line is cut into pieces. Newlines count as spaces.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if width == 0 {
+        return lines;
+    }
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if line.is_empty() && util::width(word) <= width {
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() && util::width(&line) + 1 + util::width(word) <= width {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        for c in word.chars() {
+            if !line.is_empty() && util::width(&line) + util::width(c.encode_utf8(&mut [0; 4])) > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(c);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 3, w, h)
 }
 
+/// Clears the one-cell ring around an overlay box. Without it a box placed next to the frame of
+/// the panel underneath (the Home panel fills the screen) shares its border column or row, and
+/// the two frames read as doubled corners and edges.
+fn halo(buf: &mut Buffer, rect: Rect, th: &Theme) {
+    let outer = Rect::new(
+        rect.x.saturating_sub(1),
+        rect.y.saturating_sub(1),
+        rect.width.saturating_add(2),
+        rect.height.saturating_add(2),
+    )
+    .intersection(buf.area);
+    for y in outer.top()..outer.bottom() {
+        for x in outer.left()..outer.right() {
+            let inside = x >= rect.left() && x < rect.right() && y >= rect.top() && y < rect.bottom();
+            if inside {
+                continue;
+            }
+            if let Some(c) = buf.cell_mut((x, y)) {
+                // Blank in the dimmed backdrop's colors.
+                c.reset();
+                c.set_fg(th.line);
+                if th.bg != ratatui::style::Color::Reset {
+                    c.set_bg(th.bg);
+                }
+            }
+        }
+    }
+}
+
 /// A filled box with an accent-colored frame.
 fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui::style::Color) -> Rect {
+    halo(buf, rect, th);
     hud::fill(buf, rect, Style::default().bg(th.raised).fg(th.fg));
     let inner = hud::frame(buf, rect, title, "", true, th);
     // Paint the frame with the box accent.
@@ -811,6 +879,8 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, scroll: u16, hits: &mut Vec<(Re
     let w = 78.min(area.width.saturating_sub(2));
     let h = area.height.saturating_sub(2).min(40);
     if w < 30 || h < 6 {
+        // Too small for the key list: a note instead of nothing (as the Settings screen does).
+        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
         return;
     }
     let rect = centered(area, w, h);
@@ -847,4 +917,26 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, scroll: u16, hits: &mut Vec<(Re
         "esc close".to_string()
     };
     hud::put_right(buf, inner.right() - 1, inner.bottom() - 1, &footer, th.dim().bg(th.raised));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+    use crate::util;
+
+    #[test]
+    fn wrap_text_breaks_at_spaces_and_cuts_long_words() {
+        assert_eq!(wrap_text("close the tab", 20), ["close the tab"]);
+        assert_eq!(wrap_text("close the tab", 9), ["close the", "tab"]);
+        assert_eq!(wrap_text("a  b\nc", 80), ["a b c"]);
+        // A word wider than the line is cut, every piece fits, and no letter is lost.
+        let cut = wrap_text(&"ab".repeat(10), 7);
+        assert_eq!(cut.concat(), "ab".repeat(10));
+        assert!(cut.iter().all(|l| util::width(l) <= 7), "{cut:?}");
+        // Wide characters count two columns.
+        let wide = wrap_text("日本語 日本語", 5);
+        assert!(wide.iter().all(|l| util::width(l) <= 5), "{wide:?}");
+        assert!(wrap_text("", 10).is_empty());
+        assert!(wrap_text("abc", 0).is_empty());
+    }
 }

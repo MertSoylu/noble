@@ -413,6 +413,8 @@ fn real_terminal_session() {
     let snapshot = app.snapshot("t");
     assert_eq!(snapshot.pane_count(), 2);
     app.run(Action::CloseTab);
+    // Two panes are left: closing the tab asks first.
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
     assert_eq!(app.view, View::Bridge);
     assert_eq!(app.pane_count(), 0);
@@ -1141,8 +1143,10 @@ fn effects_play_and_settle() {
     // Settled: the same picture as without animations.
     // The "Animations" row itself shows the setting and is left out, and the clock's digits are masked:
     // a minute may turn between the two frames. (The palette cursor stays lit: the demo runs on battery.)
+    // The palette's one-cell gap cuts the row's label behind it short, so the row is matched by the prefix
+    // that survives the cut.
     let without_setting = |s: String| {
-        let mut lines = s.lines().filter(|l| !l.contains("Animati")).map(str::to_string).collect::<Vec<_>>();
+        let mut lines = s.lines().filter(|l| !l.contains("Animat")).map(str::to_string).collect::<Vec<_>>();
         lines[0] = lines[0].replace(|c: char| c.is_ascii_digit(), "#");
         lines.join("\n")
     };
@@ -1515,6 +1519,7 @@ fn welcome_card_picks_prefix() {
     for (w, h) in SIZES {
         save(&format!("welcome-{w}x{h}"), &render(&mut app, w, h));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     render(&mut app, 110, 30);
     // Clicking the background does not close the card; clicking the ctrl+g chip picks it.
     click(&mut app, 1, 29);
@@ -1916,6 +1921,9 @@ fn context_menus_on_tabs_and_panes() {
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // The tab has two panes: the menu's close asks first.
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
     // The menu does not overflow even on a small screen.
     app.new_tab(std::env::temp_dir(), None, Some("tiny".into()));
@@ -2133,6 +2141,11 @@ fn remove_and_add_projects() {
     assert!(text.contains("Remove from list"), "{text}");
     let row = find_hit(&app, |h| *h == Hit::MenuItem(remove)).unwrap();
     click(&mut app, row.x + 1, row.y);
+    // Removing asks first and names the project; nothing changes until Yes.
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("REMOVE PROJECT") && text.contains("“demo”") && text.contains("A on Home adds it back"));
+    assert!(app.projects.iter().any(|p| p.path == demo), "still listed before the confirm");
+    key(&mut app, KeyCode::Char('y'));
     assert!(app.overlay.is_none());
     assert!(!app.projects.iter().any(|p| p.path == demo), "gone from the list");
     assert!(!app.ui_state.is_pinned(&demo), "removing unpins");
@@ -2155,6 +2168,7 @@ fn remove_and_add_projects() {
     for size in [(60, 12), (30, 8)] {
         save(&format!("add-project-{}x{}", size.0, size.1), &render(&mut app, size.0, size.1));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     // A plain folder (no git) is added and selected; a missing one is refused.
     for c in plain.display().to_string().chars() {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -2186,6 +2200,8 @@ fn remove_and_add_projects() {
     // The palette's remove acts on the selected project.
     let sel = app.selected_project().unwrap().path.clone();
     app.run(Action::RemoveProject);
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))), "the palette's remove asks first");
+    key(&mut app, KeyCode::Char('y'));
     assert!(!app.projects.iter().any(|p| p.path == sel));
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -5195,6 +5211,9 @@ fn double_click_title_zooms_and_middle_click_closes_tab() {
     let tab = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
     mouse(&mut app, MouseEventKind::Down(MouseButton::Middle), tab.x + 2, tab.y);
     mouse(&mut app, MouseEventKind::Up(MouseButton::Middle), tab.x + 2, tab.y);
+    // The tab has split panes: the middle click asks first.
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 1);
     assert!(app.tab_title(0).starts_with("second"), "{}", app.tab_title(0));
     assert_eq!(app.view, View::Term(0));
@@ -5614,6 +5633,10 @@ fn workspaces_delete_replace_and_limit_are_announced() {
     let save_as = |app: &mut App, name: &str| {
         let p = noble::app::Prompt::new(String::new(), name.into(), PromptPurpose::SaveWorkspace);
         app.submit_prompt(p);
+        // A name that is taken asks first: say yes.
+        if matches!(app.overlay, Some(Overlay::Confirm(_))) {
+            app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        }
         toast_texts(app).last().cloned().unwrap_or_default()
     };
     assert!(save_as(&mut app, "alpha").contains("saved"));
@@ -5842,6 +5865,7 @@ fn hooks_offer_notice() {
     for (w, h) in [(80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     render(&mut app, 120, 32);
     let enable = find_hit(&app, |h| *h == Hit::HooksOffer).expect("enable hit");
     click(&mut app, enable.x + 1, enable.y);
@@ -5939,4 +5963,159 @@ fn open_link_lists_the_links_on_screen() {
     assert!(app.overlay.is_none());
     app.run(Action::CloseTab);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two frame glyphs side by side (an overlay box right against the panel under it) read as a doubled border.
+fn assert_no_doubled_frame(text: &str) {
+    for pair in ["╭╭", "╮╮", "╰╰", "╯╯", "││"] {
+        assert!(!text.contains(pair), "doubled border {pair}:\n{text}");
+    }
+}
+
+/// The text inside the box whose title row holds `title`: its rows (up to the "confirm" button row)
+/// joined with single spaces.
+fn box_text(text: &str, title: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().position(|l| l.contains(&format!("╭ {title} "))).expect("box title row");
+    let start = lines[top].find(&format!("╭ {title} ")).unwrap();
+    let left = lines[top][..start].chars().count();
+    let right = left + lines[top][start..].chars().position(|c| c == '╮').expect("box corner");
+    let mut parts = Vec::new();
+    for line in &lines[top + 1..] {
+        if line.contains(" confirm") {
+            break;
+        }
+        let inner: String = line.chars().skip(left + 1).take(right - left - 1).collect();
+        if !inner.trim().is_empty() {
+            parts.push(inner.trim().to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+/// Closing a tab with several panes asks first, idle or not; a single idle pane still closes at once.
+#[test]
+fn closing_a_tab_with_several_panes_asks_first() {
+    use noble::app::Overlay;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("three".into()));
+    app.run(Action::SplitRight);
+    app.run(Action::SplitDown);
+    assert_eq!(app.tabs[0].panes().len(), 3);
+    app.run(Action::CloseTab);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("CLOSE TAB") && text.contains("close the tab and its 3 panes?"), "{text}");
+    // No keeps the tab and all its panes.
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].panes().len(), 3);
+    // Yes closes the tab.
+    app.run(Action::CloseTab);
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.tabs.is_empty());
+    // A single idle pane closes at once.
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    app.run(Action::CloseTab);
+    assert!(app.overlay.is_none());
+    assert!(app.tabs.is_empty());
+}
+
+/// Saving a workspace: a blank name keeps the prompt open and says why; a taken name asks before it is
+/// replaced, and No leaves the saved workspace as it was.
+#[test]
+fn workspace_names_are_checked_before_saving() {
+    use noble::app::{Overlay, PromptPurpose};
+    let mut app = demo_app(110, 30);
+    app.workspaces.list.clear();
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    let prompt = |name: &str| noble::app::Prompt::new("SAVE WORKSPACE AS", name.into(), PromptPurpose::SaveWorkspace);
+    app.submit_prompt(prompt("   "));
+    let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("the prompt closed on a blank name") };
+    assert!(p.error.is_some());
+    assert!(app.workspaces.list.is_empty());
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("type a name first"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    app.submit_prompt(prompt("alpha"));
+    assert_eq!(app.workspaces.list.len(), 1);
+    app.submit_prompt(prompt("ALPHA"));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("REPLACE WORKSPACE") && text.contains("“ALPHA” exists — replace it?"), "{text}");
+    assert_eq!(app.workspaces.list[0].name, "alpha", "nothing is replaced before the confirm");
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.workspaces.list[0].name, "alpha", "No keeps the old workspace");
+    app.submit_prompt(prompt("ALPHA"));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.workspaces.list.len(), 1);
+    assert!(toast_texts(&app).last().is_some_and(|t| t.contains("replaced")), "{:?}", toast_texts(&app));
+}
+
+/// `o` and the "Folder" button with no project selected say why, instead of doing nothing.
+#[test]
+fn open_folder_without_a_project_says_so() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.handle(AppEvent::Projects(Vec::new()));
+    assert!(app.selected_project().is_none());
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+    let text = render(&mut app, 110, 30);
+    let folder = find_hit(&app, |h| *h == Hit::OpenFiles).expect("folder button");
+    assert!(text.contains("Folder"), "{text}");
+    click(&mut app, folder.x + 1, folder.y);
+    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+}
+
+/// Help at a size too small for the key list says so; nothing panics down to a 1×1 terminal.
+#[test]
+fn help_at_a_tiny_size_says_so() {
+    let mut app = demo_app(110, 30);
+    app.run(Action::Help);
+    let text = render(&mut app, 30, 8);
+    assert!(text.contains("enlarge window"), "{text}");
+    for (w, h) in [(1, 1), (2, 3), (12, 5), (29, 40), (40, 5)] {
+        render(&mut app, w, h);
+    }
+    // Big enough again: the key list is back.
+    assert!(render(&mut app, 110, 30).contains("KEYBOARD REFERENCE"));
+}
+
+/// A long question wraps over several rows: the whole text and the buttons stay visible, also at 30x8.
+#[test]
+fn confirm_wraps_a_long_question() {
+    use noble::app::{Confirm, ConfirmAction, Overlay};
+    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let mut app = demo_app(110, 30);
+    app.overlay =
+        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    let text = render(&mut app, 110, 30);
+    save("confirm-wrap-110x30", &text);
+    assert_eq!(box_text(&text, "CLOSE PANE"), body, "{text}");
+    assert!(text.contains("confirm") && text.contains("cancel"), "{text}");
+    let small = render(&mut app, 30, 8);
+    save("confirm-wrap-30x8", &small);
+    // Too narrow for the button words: the keys and their buttons stay.
+    assert!(small.contains(" y ") && small.contains("n/esc"), "{small}");
+    assert_no_doubled_frame(&small);
+    for (w, h) in [(1, 1), (3, 2), (10, 4)] {
+        render(&mut app, w, h);
+    }
+}
+
+/// The wrapping keeps words whole and cuts a word that is wider than the box.
+#[test]
+fn wrapped_confirm_text_keeps_whole_words() {
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(noble::app::Overlay::Confirm(noble::app::Confirm {
+        title: "WIDE".into(),
+        body: "x".repeat(120),
+        action: noble::app::ConfirmAction::Quit,
+    }));
+    let text = render(&mut app, 110, 30);
+    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there.
+    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
 }

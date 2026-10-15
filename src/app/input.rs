@@ -472,6 +472,15 @@ impl App {
         self.selected_project().map(|p| p.path.clone())
     }
 
+    /// `o` and the "Folder" button: the selected project's folder in the file manager. With no
+    /// project selected (empty list, a filter without matches) it says so instead of doing nothing.
+    fn open_selected_folder(&mut self) {
+        match self.bridge_target_dir() {
+            Some(p) => self.open_in_file_manager(&p),
+            None => self.toast(ToastLevel::Info, "select a project first"),
+        }
+    }
+
     fn open_selected(&mut self) {
         match self.selected_project().map(|p| p.path.clone()) {
             Some(p) => self.open_project_shell(p),
@@ -576,11 +585,7 @@ impl App {
             KeyCode::Char('R') => self.refresh_ai(),
             KeyCode::Char('a') => self.run(Action::AddProjectFolder),
             KeyCode::Char('A') => self.run(Action::AddProject),
-            KeyCode::Char('o') => {
-                if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_file_manager(&p);
-                }
-            }
+            KeyCode::Char('o') => self.open_selected_folder(),
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
             _ => {}
         }
@@ -998,11 +1003,7 @@ impl App {
                 let dir = self.bridge_target_dir();
                 self.launch(i, dir);
             }
-            Hit::OpenFiles => {
-                if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_file_manager(&p);
-                }
-            }
+            Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),
             Hit::SystemFilter => self.start_system_filter(),

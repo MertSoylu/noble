@@ -200,7 +200,7 @@ impl App {
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
-            MenuCmd::RemoveProject(path) => self.remove_project(&path),
+            MenuCmd::RemoveProject(path) => self.request_remove_project(path),
             MenuCmd::OpenLink(target) => self.open_link(target),
         }
     }
