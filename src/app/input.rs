@@ -865,6 +865,13 @@ impl App {
             Hit::UpdateDismiss => self.dismiss_update(),
             Hit::HooksOffer => self.accept_hooks_offer(),
             Hit::HooksOfferDismiss => self.dismiss_hooks_offer(),
+            Hit::ProjectPr => {
+                let url = self.selected_project().and_then(|p| self.project_pr(p)).map(|pr| pr.url.clone());
+                if let Some(url) = url {
+                    self.open_link(crate::term::link::Link::Url(url));
+                }
+            }
+            Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Palette => self.run(Action::Palette),

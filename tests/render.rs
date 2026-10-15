@@ -13,6 +13,7 @@ use noble::app::{App, View};
 use noble::config::Config;
 use noble::event::AppEvent;
 use noble::keys::Action;
+use noble::pr::{Checks, PrInfo, PrState};
 use noble::projects::{GitInfo, Project};
 use noble::sensors::{DiskInfo, ProcInfo, SensorSample, StaticInfo};
 use noble::store::{SavedTab, Workspace};
@@ -589,6 +590,60 @@ fn click(app: &mut App, x: u16, y: u16) {
             modifiers: KeyModifiers::NONE,
         })));
     }
+}
+
+/// Home's project card: the selected project's pull request, its CI and its listening ports sit on the
+/// card's spacer row and are clickable (hit targets only: a click would open a browser). Changing the
+/// checks changes the CI part; a small terminal moves the same parts to the footer summary, and a
+/// tiny one drops them without overflow.
+#[test]
+fn project_card_shows_pull_request_and_ports() {
+    use noble::app::{Hit, PrEntry};
+    let mut app = demo_app(160, 45);
+    let project = app.selected_project().expect("a selected project").clone();
+    let pr = |checks: Checks| PrInfo {
+        number: 42,
+        title: "Show pull requests and ports on the project card".into(),
+        state: PrState::Open,
+        url: "https://github.com/MertSoylu/noble/pull/42".into(),
+        checks,
+    };
+    let answer = |app: &mut App, info: Option<PrInfo>| {
+        app.prs.insert(project.path.clone(), PrEntry { branch: project.branch.clone(), info, fetched: Instant::now() });
+    };
+    answer(&mut app, Some(pr(Checks { passed: 12, failed: 0, pending: 0 })));
+    app.ports.insert(project.path.clone(), vec![3000, 5173]);
+
+    let text = render(&mut app, 160, 45);
+    save("home-project-live-160x45", &text);
+    assert!(text.contains("PR #42 open · ✓ CI 12/12"), "{text}");
+    assert!(text.contains("⇄ :3000 :5173"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some(), "PR hit");
+    assert!(find_hit(&app, |h| *h == Hit::Port(3000)).is_some(), "port hit");
+    assert!(find_hit(&app, |h| *h == Hit::Port(5173)).is_some(), "second port hit");
+
+    answer(&mut app, Some(pr(Checks { passed: 10, failed: 2, pending: 0 })));
+    assert!(render(&mut app, 160, 45).contains("✗ CI 2 failing"));
+    answer(&mut app, Some(pr(Checks { passed: 9, failed: 0, pending: 3 })));
+    assert!(render(&mut app, 160, 45).contains("● CI 3 running"));
+    // A pull request answer for another branch is not shown.
+    app.prs.get_mut(&project.path).unwrap().branch = Some("old-branch".into());
+    assert!(!render(&mut app, 160, 45).contains("PR #42"));
+    answer(&mut app, None);
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("⇄ :3000 :5173") && !text.contains("PR #42"), "{text}");
+
+    // 80x24: the card may be shown or hidden; either way the PR and the port are on screen and clickable.
+    answer(&mut app, Some(pr(Checks { passed: 12, failed: 0, pending: 0 })));
+    for size in [(80, 24), (40, 12)] {
+        let text = render(&mut app, size.0, size.1);
+        save(&format!("home-project-live-{}x{}", size.0, size.1), &text);
+        assert!(text.lines().all(|l| l.chars().count() <= size.0 as usize), "overflow at {size:?}");
+    }
+    let text = render(&mut app, 80, 24);
+    assert!(text.contains("PR #42") && text.contains(":3000"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some());
+    assert!(find_hit(&app, |h| *h == Hit::Port(3000)).is_some());
 }
 
 fn find_hit(app: &App, pred: impl Fn(&noble::app::Hit) -> bool) -> Option<ratatui::layout::Rect> {

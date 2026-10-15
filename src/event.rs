@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::ai::ProviderState;
+use crate::pr::PrInfo;
 use crate::projects::{GitInfo, Project};
 use crate::sensors::{SensorSample, StaticInfo};
 use crate::term::layout::PaneId;
@@ -30,6 +31,10 @@ pub enum AppEvent {
     /// The OS asks NOBLE to end (SIGHUP/SIGTERM, or the console closing / logoff / shutdown on
     /// Windows): the normal shutdown path runs, which saves the session.
     Quit,
+    /// Listening TCP ports per project folder (`ports`): the answer to a scan request.
+    Ports(Vec<(PathBuf, Vec<u16>)>),
+    /// Pull request of a project's branch (`pr`): the folder and the pull request, when there is one.
+    Pr(PathBuf, Option<PrInfo>),
 }
 
 pub type Tx = std::sync::mpsc::Sender<AppEvent>;

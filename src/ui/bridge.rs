@@ -10,6 +10,8 @@ use ratatui::style::{Modifier, Style};
 use super::hud;
 use crate::ai::{ProviderState, Status};
 use crate::app::{AgentState, AgentsByProject, App, Hit, ProjectAct};
+use crate::pr::{Checks, PrInfo, PrState};
+use crate::projects::Project;
 use crate::theme::Theme;
 use crate::util;
 
@@ -446,7 +448,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
     if card_h > 0
         && let Some(p) = app.selected_project()
     {
-        card_used = project_card(buf, Rect::new(inner.x, y + list_h, inner.width, card_h), app, p);
+        card_used = project_card(buf, Rect::new(inner.x, y + list_h, inner.width, card_h), app, p, hits);
         card_top = y + list_h;
     }
     if footer_h == 0 {
@@ -467,15 +469,19 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
                 Some((s, None)) => format!("last commit: {s}"),
                 None => util::tilde(&p.path),
             };
-            let mut parts: Vec<(String, Style)> =
-                git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c))).collect();
+            let mut parts: Vec<(String, Style, Option<Hit>)> =
+                git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c), None)).collect();
             for &(kind, state) in agents.get(&p.path).into_iter().flatten() {
                 let (_, color) = state_glyph(state, th);
-                parts.push((format!("{kind} {}", state.label()), Style::default().fg(color)));
+                parts.push((format!("{kind} {}", state.label()), Style::default().fg(color), None));
             }
-            parts.push((detail, th.dim()));
+            // Without the card (a small terminal), the pull request and the ports go here.
+            if card_h == 0 {
+                parts.extend(footer_live_parts(app, p));
+            }
+            parts.push((detail, th.dim(), None));
             let mut cx = x + 1;
-            for (i, (text, style)) in parts.iter().enumerate() {
+            for (i, (text, style, hit)) in parts.iter().enumerate() {
                 // A separator only goes before a part that still gets a few readable cells.
                 if i > 0 {
                     if (x + w).saturating_sub(cx) < 3 + 4 {
@@ -484,7 +490,13 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
                     cx = hud::put(buf, cx, by - 2, " · ", th.dim(), (x + w).saturating_sub(cx));
                 }
                 let room = (x + w).saturating_sub(cx);
+                let start = cx;
                 cx = hud::put(buf, cx, by - 2, &util::truncate(text, room as usize), *style, room);
+                if let Some(hit) = hit
+                    && cx > start
+                {
+                    hits.push((Rect::new(start, by - 2, cx - start, 1), hit.clone()));
+                }
             }
         }
     }
@@ -518,7 +530,7 @@ const CARD_MIN: u16 = 6;
 
 /// The selected project's card: recent commits and changed files. The data comes
 /// from the `git status` / `git log` output the project scan already runs.
-fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Project) -> u16 {
+fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut Vec<(Rect, Hit)>) -> u16 {
     let th = &app.theme;
     let x = area.x + 1;
     let w = area.width.saturating_sub(2);
@@ -528,6 +540,8 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
     let title = format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize));
     hud::put(buf, x + 1, y, &title, th.accent_bold(), w);
     y += 1;
+    // The spacer row under the title carries the pull request and the ports.
+    live_row(buf, x, area.y + 1, w, app, p, hits);
     let rows = area.bottom().saturating_sub(y);
     let Some(g) = p.git.as_ref() else {
         let text = if p.repo { "checking git status…" } else { "not a git repository" };
@@ -590,6 +604,133 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &crate::projects::Pr
         hud::put(buf, x + col as u16 * col_w, y + row as u16, &more, th.dim(), col_w);
     }
     y + change_rows
+}
+
+/// The spacer row under a card's title: the selected project's pull request with its CI (`PR #42 open ·
+/// ✓ CI 12/12`), then its listening ports (`⇄ :3000 :5173 +1`). Each part is drawn whole or left out; the
+/// `+N` counts the ports that did not fit. Both are clickable.
+fn live_row(buf: &mut Buffer, x: u16, y: u16, w: u16, app: &App, p: &Project, hits: &mut Vec<(Rect, Hit)>) {
+    let th = &app.theme;
+    let right = x + w;
+    let mut cx = x;
+    let mut room = w as usize;
+    if let Some(pr) = app.project_pr(p) {
+        let head = pr_head(pr, th);
+        let head_w = spans_width(&head);
+        let mut segment = head.clone();
+        let mut seg_w = head_w;
+        if let Some((text, color)) = ci_part(pr.checks, th) {
+            let ci_w = 3 + util::width(&text);
+            if head_w + ci_w <= room {
+                segment.push((" · ".into(), th.dim()));
+                segment.push((text, Style::default().fg(color)));
+                seg_w += ci_w;
+            }
+        }
+        if seg_w <= room {
+            let refs: Vec<(&str, Style)> = segment.iter().map(|(t, st)| (t.as_str(), *st)).collect();
+            cx = hud::put_spans(buf, cx, y, &refs, seg_w as u16);
+            hits.push((Rect::new(x, y, seg_w as u16, 1), Hit::ProjectPr));
+            room -= seg_w;
+        }
+    }
+    let ports = app.project_ports(p);
+    if !ports.is_empty() {
+        let sep = if cx > x { 3 } else { 0 };
+        if let Some(shown) = ports_shown(ports, room.saturating_sub(sep)) {
+            if sep > 0 {
+                cx = hud::put(buf, cx, y, " · ", th.dim(), right.saturating_sub(cx));
+            }
+            cx = hud::put(buf, cx, y, "⇄", th.accent2(), right.saturating_sub(cx));
+            for port in &ports[..shown] {
+                let token = format!(":{port}");
+                let start = cx + 1;
+                cx = hud::put(buf, cx, y, &format!(" {token}"), th.accent(), right.saturating_sub(cx));
+                hits.push((Rect::new(start, y, util::width(&token) as u16, 1), Hit::Port(*port)));
+            }
+            if shown < ports.len() {
+                cx = hud::put(buf, cx, y, &format!(" +{}", ports.len() - shown), th.dim(), right.saturating_sub(cx));
+            }
+        }
+    }
+    let _ = cx;
+}
+
+/// The ports as `⇄ :3000 :5173` with the first `shown` ports and `+N` for the rest.
+fn ports_text(ports: &[u16], shown: usize) -> String {
+    let mut text = String::from("⇄");
+    for port in &ports[..shown] {
+        text.push_str(&format!(" :{port}"));
+    }
+    if shown < ports.len() {
+        text.push_str(&format!(" +{}", ports.len() - shown));
+    }
+    text
+}
+
+/// How many ports fit in `avail` columns (the most that do); `None` when not even the mark and `+N` fit.
+fn ports_shown(ports: &[u16], avail: usize) -> Option<usize> {
+    (0..=ports.len()).rev().find(|&shown| util::width(&ports_text(ports, shown)) <= avail)
+}
+
+/// The pull request's state and number: `PR #42 open`; the state is dim unless the pull request is open.
+fn pr_head(pr: &PrInfo, th: &Theme) -> Vec<(String, Style)> {
+    let (label, dim) = match pr.state {
+        PrState::Open => ("open", false),
+        PrState::Draft => ("draft", true),
+        PrState::Merged => ("merged", true),
+        PrState::Closed => ("closed", true),
+    };
+    let label_style = if dim { th.dim() } else { th.text() };
+    vec![(format!("PR #{}", pr.number), th.accent_bold()), (format!(" {label}"), label_style)]
+}
+
+/// The CI part of a pull request: `✗ CI 2 failing`, `● CI 3 running` or `✓ CI 12/12`; `None` without checks.
+fn ci_part(checks: Checks, th: &Theme) -> Option<(String, ratatui::style::Color)> {
+    let total = checks.passed + checks.failed + checks.pending;
+    if total == 0 {
+        return None;
+    }
+    Some(if checks.failed > 0 {
+        (format!("✗ CI {} failing", checks.failed), th.crit)
+    } else if checks.pending > 0 {
+        (format!("● CI {} running", checks.pending), th.accent2)
+    } else {
+        (format!("✓ CI {}/{}", checks.passed, total), th.ok)
+    })
+}
+
+/// Columns of styled text parts written one after another.
+fn spans_width(parts: &[(String, Style)]) -> usize {
+    parts.iter().map(|(t, _)| util::width(t)).sum()
+}
+
+/// The pull request and the ports as footer parts, for a screen without the card: `PR #42 ✓`, then up to
+/// three ports (each clickable) and `+N`.
+fn footer_live_parts(app: &App, p: &Project) -> Vec<(String, Style, Option<Hit>)> {
+    let th = &app.theme;
+    let mut parts = Vec::new();
+    if let Some(pr) = app.project_pr(p) {
+        let checks = pr.checks;
+        let (mark, color) = if checks.failed > 0 {
+            (" ✗", th.crit)
+        } else if checks.pending > 0 {
+            (" ●", th.accent2)
+        } else if checks.passed > 0 {
+            (" ✓", th.ok)
+        } else {
+            ("", th.accent)
+        };
+        parts.push((format!("PR #{}{mark}", pr.number), Style::default().fg(color), Some(Hit::ProjectPr)));
+    }
+    let ports = app.project_ports(p);
+    for port in ports.iter().take(3) {
+        parts.push((format!(":{port}"), th.accent(), Some(Hit::Port(*port))));
+    }
+    if ports.len() > 3 {
+        parts.push((format!("+{}", ports.len() - 3), th.dim(), None));
+    }
+    parts
 }
 
 /// Section header: bold dim label, an optional warn count and a faint rule to the edge (as in Settings).
