@@ -10,12 +10,39 @@ All notable changes to NOBLE are documented here. The format is based on
 - Prefix `u` (Open Link on Screen, `open_link`) lists the URLs and `file:line` links on the focused pane's
   screen, newest first, and opens the chosen one: the keyboard way to ctrl+click, which iTerm2 and Terminal.app
   on macOS keep for their own menu.
+- Home's project card shows the selected project's pull request and CI state (`PR #42 open · ✓ CI 12/12`, read
+  with the GitHub CLI `gh`; needs `gh` installed and `gh auth login`) and the TCP ports its running processes
+  listen on (`⇄ :3000 :5173`). Click the PR to open it in the browser, a port to open http://localhost:<port>.
+  Without the card (small terminals) both move to the footer line.
+- The tab bar's "+N" chip opens the command palette listing only the tabs, for the tabs the bar has no room for.
+- Actions `enable_hooks` and `dismiss_hooks_offer`: the one-time Claude status offer can be accepted or
+  dismissed from the palette while it shows.
+
+### Changed
+- Closing a tab with several panes asks first, even when they are idle.
+- Removing a project from the list asks first (`A` on Home adds it back).
+- Saving a workspace under a name that is already taken asks before replacing it; a blank name keeps the prompt
+  open with an error.
+- System's Processes panel has "/ Filter" and "K Terminate" buttons; its status bar shows only the keys the
+  panel does not show.
+- Home's "/ search" label starts the project filter when clicked.
+- One name per feature: "Pass Keys to the App" in the palette and "? keys" in the hints.
+- Search Scrollback and Pass Keys to the App are listed in the palette only in a terminal, where they apply.
 
 ### Fixed
 - Key hints follow the keymap: the help's tab rows, the welcome screen's palette key, the terminal status bar's
   home key and the status-bar tips show rebound keys and leave out unbound ones instead of the defaults.
 - Platform text: the terminal scheme preview shows a Unix prompt on Linux/macOS instead of `PS C:\>`, and the
   color-scheme tip mentions Windows Terminal only on Windows.
+- Palette hints match the view: in a terminal they show the keys that reach NOBLE there (none while the pane's
+  keys are locked); on Home they show the single keys Home handles itself (`r`, `R`, `a`, `A`).
+- Home keeps the "esc clear" hint while a kept filter is non-empty, even when it matches nothing.
+- Below 50 columns the status bar still shows the palette key as a chip.
+- Home's `o` (and the Folder button) with no project selected says "select a project first" instead of doing
+  nothing.
+- Help says "enlarge window" when the terminal is too small to show it.
+- Confirmation dialogs wrap long text instead of cutting it off.
+- Dialogs next to a panel frame no longer show doubled corners at small sizes.
 
 ## [1.9.0] - 2026-10-06
 

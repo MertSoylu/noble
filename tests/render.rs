@@ -13,6 +13,7 @@ use noble::app::{App, View};
 use noble::config::Config;
 use noble::event::AppEvent;
 use noble::keys::Action;
+use noble::pr::{Checks, PrInfo, PrState};
 use noble::projects::{GitInfo, Project};
 use noble::sensors::{DiskInfo, ProcInfo, SensorSample, StaticInfo};
 use noble::store::{SavedTab, Workspace};
@@ -413,6 +414,8 @@ fn real_terminal_session() {
     let snapshot = app.snapshot("t");
     assert_eq!(snapshot.pane_count(), 2);
     app.run(Action::CloseTab);
+    // Two panes are left: closing the tab asks first.
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
     assert_eq!(app.view, View::Bridge);
     assert_eq!(app.pane_count(), 0);
@@ -587,6 +590,98 @@ fn click(app: &mut App, x: u16, y: u16) {
             modifiers: KeyModifiers::NONE,
         })));
     }
+}
+
+/// Home's project card: the selected project's pull request, its CI and its listening ports sit on the
+/// card's spacer row and are clickable (hit targets only: a click would open a browser). Changing the
+/// checks changes the CI part; a small terminal moves the same parts to the footer summary, and a
+/// tiny one drops them without overflow.
+#[test]
+fn project_card_shows_pull_request_and_ports() {
+    use noble::app::{Hit, PrEntry};
+    let mut app = demo_app(160, 45);
+    let project = app.selected_project().expect("a selected project").clone();
+    let pr = |checks: Checks| PrInfo {
+        number: 42,
+        title: "Show pull requests and ports on the project card".into(),
+        state: PrState::Open,
+        url: "https://github.com/MertSoylu/noble/pull/42".into(),
+        branch: project.branch.clone().unwrap_or_default(),
+        checks,
+    };
+    let answer = |app: &mut App, info: Option<PrInfo>| {
+        app.prs.insert(project.path.clone(), PrEntry { branch: project.branch.clone(), info, fetched: Instant::now() });
+    };
+    answer(&mut app, Some(pr(Checks { passed: 12, failed: 0, pending: 0 })));
+    app.ports.insert(project.path.clone(), vec![3000, 5173]);
+
+    let text = render(&mut app, 160, 45);
+    save("home-project-live-160x45", &text);
+    assert!(text.contains("PR #42 open · ✓ CI 12/12"), "{text}");
+    assert!(text.contains("⇄ :3000 :5173"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some(), "PR hit");
+    assert!(find_hit(&app, |h| *h == Hit::Port(3000)).is_some(), "port hit");
+    assert!(find_hit(&app, |h| *h == Hit::Port(5173)).is_some(), "second port hit");
+
+    answer(&mut app, Some(pr(Checks { passed: 10, failed: 2, pending: 0 })));
+    assert!(render(&mut app, 160, 45).contains("✗ CI 2 failing"));
+    answer(&mut app, Some(pr(Checks { passed: 9, failed: 0, pending: 3 })));
+    assert!(render(&mut app, 160, 45).contains("● CI 3 running"));
+    // A pull request answer for another branch is not shown.
+    app.prs.get_mut(&project.path).unwrap().branch = Some("old-branch".into());
+    assert!(!render(&mut app, 160, 45).contains("PR #42"));
+    answer(&mut app, None);
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("⇄ :3000 :5173") && !text.contains("PR #42"), "{text}");
+
+    // 80x24: the card may be shown or hidden; either way the PR and the port are on screen and clickable.
+    answer(&mut app, Some(pr(Checks { passed: 12, failed: 0, pending: 0 })));
+    for size in [(80, 24), (40, 12)] {
+        let text = render(&mut app, size.0, size.1);
+        save(&format!("home-project-live-{}x{}", size.0, size.1), &text);
+        assert!(text.lines().all(|l| l.chars().count() <= size.0 as usize), "overflow at {size:?}");
+    }
+    let text = render(&mut app, 80, 24);
+    assert!(text.contains("PR #42") && text.contains(":3000"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some());
+    assert!(find_hit(&app, |h| *h == Hit::Port(3000)).is_some());
+}
+
+/// Without the card (a narrow window) the Home footer carries the pull request and the ports: each is
+/// drawn whole or left out, never cut to a clickable stub such as `PR #4…`, at any width.
+#[test]
+fn footer_pull_request_is_drawn_whole_or_not_at_all() {
+    use noble::app::{Hit, PrEntry};
+    let mut app = demo_app(110, 30);
+    let project = app.selected_project().expect("a selected project").clone();
+    let info = PrInfo {
+        number: 42,
+        title: "Show pull requests and ports on the project card".into(),
+        state: PrState::Open,
+        url: "https://github.com/MertSoylu/noble/pull/42".into(),
+        branch: project.branch.clone().unwrap_or_default(),
+        checks: Checks { passed: 12, failed: 0, pending: 0 },
+    };
+    app.prs.insert(
+        project.path.clone(),
+        PrEntry { branch: project.branch.clone(), info: Some(info), fetched: Instant::now() },
+    );
+    app.ports.insert(project.path.clone(), vec![3000, 5173]);
+    let mut footer_pr = false;
+    for w in 24..=110u16 {
+        let text = render(&mut app, w, 24);
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "overflow at {w}:\n{text}");
+        for (at, _) in text.match_indices("PR #") {
+            // The card's row says `PR #42 open`; the footer `PR #42 ✓`. Anything else is a cut part.
+            let whole = text[at..].starts_with("PR #42 open") || text[at..].starts_with("PR #42 ✓");
+            assert!(whole, "a cut pull request at {w} columns:\n{text}");
+        }
+        footer_pr |= text.contains("PR #42 ✓");
+        if text.contains("PR #42 ✓") {
+            assert!(find_hit(&app, |h| *h == Hit::ProjectPr).is_some(), "footer PR is clickable at {w}");
+        }
+    }
+    assert!(footer_pr, "the footer never showed the pull request");
 }
 
 fn find_hit(app: &App, pred: impl Fn(&noble::app::Hit) -> bool) -> Option<ratatui::layout::Rect> {
@@ -1141,8 +1236,10 @@ fn effects_play_and_settle() {
     // Settled: the same picture as without animations.
     // The "Animations" row itself shows the setting and is left out, and the clock's digits are masked:
     // a minute may turn between the two frames. (The palette cursor stays lit: the demo runs on battery.)
+    // The palette's one-cell gap cuts the row's label behind it short, so the row is matched by the prefix
+    // that survives the cut.
     let without_setting = |s: String| {
-        let mut lines = s.lines().filter(|l| !l.contains("Animati")).map(str::to_string).collect::<Vec<_>>();
+        let mut lines = s.lines().filter(|l| !l.contains("Animat")).map(str::to_string).collect::<Vec<_>>();
         lines[0] = lines[0].replace(|c: char| c.is_ascii_digit(), "#");
         lines.join("\n")
     };
@@ -1515,6 +1612,7 @@ fn welcome_card_picks_prefix() {
     for (w, h) in SIZES {
         save(&format!("welcome-{w}x{h}"), &render(&mut app, w, h));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     render(&mut app, 110, 30);
     // Clicking the background does not close the card; clicking the ctrl+g chip picks it.
     click(&mut app, 1, 29);
@@ -1916,6 +2014,9 @@ fn context_menus_on_tabs_and_panes() {
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // The tab has two panes: the menu's close asks first.
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
     // The menu does not overflow even on a small screen.
     app.new_tab(std::env::temp_dir(), None, Some("tiny".into()));
@@ -2133,6 +2234,11 @@ fn remove_and_add_projects() {
     assert!(text.contains("Remove from list"), "{text}");
     let row = find_hit(&app, |h| *h == Hit::MenuItem(remove)).unwrap();
     click(&mut app, row.x + 1, row.y);
+    // Removing asks first and names the project; nothing changes until Yes.
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("REMOVE PROJECT") && text.contains("“demo”") && text.contains("A on Home adds it back"));
+    assert!(app.projects.iter().any(|p| p.path == demo), "still listed before the confirm");
+    key(&mut app, KeyCode::Char('y'));
     assert!(app.overlay.is_none());
     assert!(!app.projects.iter().any(|p| p.path == demo), "gone from the list");
     assert!(!app.ui_state.is_pinned(&demo), "removing unpins");
@@ -2155,6 +2261,7 @@ fn remove_and_add_projects() {
     for size in [(60, 12), (30, 8)] {
         save(&format!("add-project-{}x{}", size.0, size.1), &render(&mut app, size.0, size.1));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     // A plain folder (no git) is added and selected; a missing one is refused.
     for c in plain.display().to_string().chars() {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -2186,6 +2293,8 @@ fn remove_and_add_projects() {
     // The palette's remove acts on the selected project.
     let sel = app.selected_project().unwrap().path.clone();
     app.run(Action::RemoveProject);
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))), "the palette's remove asks first");
+    key(&mut app, KeyCode::Char('y'));
     assert!(!app.projects.iter().any(|p| p.path == sel));
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -3322,17 +3431,31 @@ fn random_input_never_panics() {
         KeyCode::F(1),
     ];
     let mods = [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL];
-    let safe_click = |h: &Hit| {
+    // A press that starts an external program (an editor, the file manager, a browser) or writes the
+    // headless (relative) config path is never sent: neither a left click nor a right click (which steps a
+    // Settings row and runs the buttons too).
+    fn allowed(app: &App, hit: &Hit, spawn_ok: bool) -> bool {
+        let config_row =
+            |i: usize| matches!(app.settings_items().get(i), Some(SettingItem::OpenConfig | SettingItem::ReloadConfig));
         !matches!(
-            h,
+            hit,
             Hit::Launcher(_)
                 | Hit::MenuItem(_)
                 | Hit::PaletteItem(_)
                 | Hit::OpenFiles
                 | Hit::OpenSelected
                 | Hit::Update
-        )
-    };
+                | Hit::ProjectPr
+                | Hit::Port(_)
+        ) && !matches!(hit, Hit::Setting(i) if config_row(*i))
+            && (spawn_ok || !matches!(hit, Hit::NewTab | Hit::PaneSplit { .. }))
+    }
+    // The press goes to the topmost target under the point (`hit_at`), which can be another one than the
+    // target picked (a Settings row under an overlay's backdrop).
+    fn press_is_safe(app: &App, x: u16, y: u16, spawn_ok: bool) -> bool {
+        let at = ratatui::layout::Position { x, y };
+        app.hits.iter().rev().find(|(r, _)| r.contains(at)).is_none_or(|(_, hit)| allowed(app, hit, spawn_ok))
+    }
     let (mut w, mut h) = (100u16, 30u16);
     for step in 0..fuzz_steps(4000) {
         // A random click on the Settings row could turn it back on (and write the real clipboard).
@@ -3394,6 +3517,12 @@ fn random_input_never_panics() {
                     MouseEventKind::Drag(MouseButton::Left),
                 ]);
                 let (x, y) = (rng.below(w as usize + 4) as u16, rng.below(h as usize + 4) as u16);
+                // An unsafe press becomes a plain move (the step still draws a frame).
+                let kind = if matches!(kind, MouseEventKind::Down(_)) && !press_is_safe(&app, x, y, spawn_ok) {
+                    MouseEventKind::Moved
+                } else {
+                    kind
+                };
                 app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
                     kind,
                     column: x,
@@ -3404,21 +3533,13 @@ fn random_input_never_panics() {
             7 | 8 => {
                 // Left press on a random safe target (at a random point inside it), sometimes dragged.
                 // "Open config" starts an editor and "Reload config" writes the headless (relative) path.
-                let items = app.settings_items();
-                let config_row =
-                    |i: usize| matches!(items.get(i), Some(SettingItem::OpenConfig | SettingItem::ReloadConfig));
-                let targets: Vec<ratatui::layout::Rect> = app
-                    .hits
-                    .iter()
-                    .filter(|(_, hit)| safe_click(hit))
-                    .filter(|(_, hit)| !matches!(hit, Hit::Setting(i) if config_row(*i)))
-                    .filter(|(_, hit)| spawn_ok || !matches!(hit, Hit::NewTab | Hit::PaneSplit { .. }))
-                    .map(|(r, _)| *r)
-                    .collect();
-                if !targets.is_empty() {
+                let targets: Vec<ratatui::layout::Rect> =
+                    app.hits.iter().filter(|(_, hit)| allowed(&app, hit, spawn_ok)).map(|(r, _)| *r).collect();
+                let point = (!targets.is_empty()).then(|| {
                     let r = *rng.pick(&targets);
-                    let x = r.x + rng.below(r.width as usize) as u16;
-                    let y = r.y + rng.below(r.height as usize) as u16;
+                    (r.x + rng.below(r.width as usize) as u16, r.y + rng.below(r.height as usize) as u16)
+                });
+                if let Some((x, y)) = point.filter(|&(x, y)| press_is_safe(&app, x, y, spawn_ok)) {
                     mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
                     if rng.below(2) == 0 {
                         let (dx, dy) = (rng.below(w as usize + 2) as u16, rng.below(h as usize + 2) as u16);
@@ -5195,6 +5316,9 @@ fn double_click_title_zooms_and_middle_click_closes_tab() {
     let tab = find_hit(&app, |h| *h == Hit::Tab(0)).unwrap();
     mouse(&mut app, MouseEventKind::Down(MouseButton::Middle), tab.x + 2, tab.y);
     mouse(&mut app, MouseEventKind::Up(MouseButton::Middle), tab.x + 2, tab.y);
+    // The tab has split panes: the middle click asks first.
+    assert!(matches!(app.overlay, Some(noble::app::Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 1);
     assert!(app.tab_title(0).starts_with("second"), "{}", app.tab_title(0));
     assert_eq!(app.view, View::Term(0));
@@ -5370,22 +5494,22 @@ fn narrow_home_shows_a_quota_strip() {
     assert!(!wide.contains("claude 71%"), "{wide}");
 }
 
-/// "? help" is the first hint on Home, so it is the last to go when the bar is narrow.
+/// "? keys" is the first hint on Home, so it is the last to go when the bar is narrow.
 #[test]
 fn status_bar_keeps_help_longest() {
     let mut app = demo_app(120, 30);
     let wide = render(&mut app, 120, 30);
-    assert!(wide.lines().last().unwrap().contains("? help"), "{wide}");
+    assert!(wide.lines().last().unwrap().contains("? keys"), "{wide}");
     for w in [70u16, 56, 50] {
         let text = render(&mut app, w, 24);
         let last = text.lines().last().unwrap();
-        assert!(last.contains("? help"), "{w}: {last}");
+        assert!(last.contains("? keys"), "{w}: {last}");
     }
     let text = render(&mut app, 50, 24);
     assert!(!text.lines().last().unwrap().contains("pin / more"), "{text}");
 }
 
-/// The "commands" chip on the status bar opens the palette; System calls the kill key "terminate".
+/// The "commands" chip on the status bar opens the palette; System's kill button is labelled "Terminate".
 #[test]
 fn status_bar_palette_chip_is_clickable() {
     use noble::app::{Hit, Overlay};
@@ -5399,7 +5523,181 @@ fn status_bar_palette_chip_is_clickable() {
     app.view = View::System;
     let text = render(&mut app, 110, 30);
     let last = text.lines().last().unwrap();
-    assert!(last.contains("terminate") && !last.contains("end task"), "{last}");
+    assert!(!last.contains("terminate") && !last.contains("end task"), "{last}");
+    assert!(text.contains("K Terminate") && !text.contains("end task"), "{text}");
+}
+
+/// The text of the buffer cells under a rect (one row).
+fn cells_text(buf: &ratatui::buffer::Buffer, r: ratatui::layout::Rect) -> String {
+    (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect()
+}
+
+/// The "+N" chip of the tab bar is a button: it opens the palette listing only the tabs, the hidden ones too.
+#[test]
+fn hidden_tabs_chip_opens_the_tab_list() {
+    use noble::app::{Hit, Overlay, PaletteCmd};
+    let mut app = demo_app(80, 24);
+    for i in 0..12 {
+        named_tab(&mut app, &format!("tab{i}"));
+    }
+    app.view = View::Term(0);
+    let (text, buf) = render_buf(&mut app, 80, 24);
+    let chip = find_hit(&app, |h| *h == Hit::HiddenTabs).expect("+N chip");
+    assert_eq!(chip.y, 0);
+    assert!(cells_text(&buf, chip).trim_start().starts_with('+'), "{text}");
+    click(&mut app, chip.x, chip.y);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no palette: {text}") };
+    assert_eq!(st.query, "");
+    let listed: Vec<PaletteCmd> = st.matches.iter().map(|i| st.all[*i].cmd.clone()).collect();
+    // The tab bar hides the last tabs: the palette lists all of them, and nothing else.
+    assert_eq!(listed, (1..=12).map(PaletteCmd::GoTab).collect::<Vec<_>>());
+    let text = render(&mut app, 80, 24);
+    save("palette-hidden-tabs-80x24", &text);
+    assert!(text.contains("Tab 12: tab11"), "{text}");
+}
+
+/// System's Processes panel: "/ Filter" and "K Terminate" are buttons that do what the keys do; the
+/// status bar lists only the keys the panel does not show.
+#[test]
+fn system_panel_buttons_run_the_keys() {
+    use noble::app::{ConfirmAction, Hit, Overlay};
+    let mut app = demo_app(120, 34);
+    app.run(Action::System);
+    let (text, buf) = render_buf(&mut app, 120, 34);
+    save("system-buttons-120x34", &text);
+    let bar = text.lines().last().unwrap();
+    assert!(bar.contains("esc home") && !bar.contains("terminate") && !bar.contains("filter"), "{bar}");
+    let filter = find_hit(&app, |h| *h == Hit::SystemFilter).expect("filter button");
+    let kill = find_hit(&app, |h| *h == Hit::SystemTerminate).expect("terminate button");
+    assert_eq!(filter.y, kill.y);
+    assert_eq!(cells_text(&buf, filter).trim(), "/ Filter");
+    assert_eq!(cells_text(&buf, kill).trim(), "K Terminate");
+    // Without a selected process the button only says so, as the key does.
+    app.system.selected_pid = None;
+    click(&mut app, kill.x + 1, kill.y);
+    assert!(app.overlay.is_none());
+    // With one selected it asks first (the same confirmation as K); "No" keeps the process.
+    let row = find_hit(&app, |h| matches!(h, Hit::Proc(_))).expect("a process row");
+    click(&mut app, row.x + 5, row.y);
+    render(&mut app, 120, 34);
+    let kill = find_hit(&app, |h| *h == Hit::SystemTerminate).expect("terminate button");
+    click(&mut app, kill.x + 1, kill.y);
+    let Some(Overlay::Confirm(c)) = &app.overlay else { panic!("no confirmation") };
+    assert!(matches!(c.action, ConfirmAction::Kill { .. }));
+    render(&mut app, 120, 34);
+    let no = find_hit(&app, |h| *h == Hit::ConfirmNo).expect("no button");
+    click(&mut app, no.x, no.y);
+    assert!(app.overlay.is_none());
+    // The filter button starts the filter as "/" does; Esc leaves it.
+    render(&mut app, 120, 34);
+    let filter = find_hit(&app, |h| *h == Hit::SystemFilter).expect("filter button");
+    click(&mut app, filter.x + 1, filter.y);
+    assert!(app.system.filtering && app.system.filter.is_empty());
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.system.filtering);
+
+    // Small sizes: a button that does not fit is left out, never cut in half.
+    for (w, h) in [(90, 28), (60, 18), (40, 12), (30, 8)] {
+        let mut app = demo_app(w, h);
+        app.run(Action::System);
+        let (text, buf) = render_buf(&mut app, w, h);
+        save(&format!("system-buttons-{w}x{h}"), &text);
+        match find_hit(&app, |h| *h == Hit::SystemFilter) {
+            Some(r) => assert_eq!(cells_text(&buf, r).trim(), "/ Filter", "{w}x{h}"),
+            None => assert!(!text.contains("Filt"), "{w}x{h}: {text}"),
+        }
+        match find_hit(&app, |h| *h == Hit::SystemTerminate) {
+            Some(r) => assert_eq!(cells_text(&buf, r).trim(), "K Terminate", "{w}x{h}"),
+            None => assert!(!text.contains("Termi"), "{w}x{h}: {text}"),
+        }
+    }
+}
+
+/// A filter kept after Enter with no match still shows how to clear it.
+#[test]
+fn home_filter_keeps_esc_clear_when_nothing_matches() {
+    let mut app = demo_app(120, 34);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    key(&mut app, KeyCode::Char('/'));
+    for c in "zzqx".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.bridge.filtering);
+    assert_eq!(app.bridge.filter, "zzqx");
+    let text = render(&mut app, 120, 34);
+    save("bridge-nomatch-120x34", &text);
+    assert!(text.contains("Nothing matches"), "{text}");
+    assert!(text.lines().last().unwrap().contains("esc clear"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.bridge.filter.is_empty());
+    let text = render(&mut app, 120, 34);
+    assert!(!text.lines().last().unwrap().contains("esc clear"), "{text}");
+}
+
+/// System with a kept filter: Esc clears the filter, so the hint bar says "esc clear" until it is empty.
+#[test]
+fn system_filter_hint_says_esc_clears() {
+    let mut app = demo_app(120, 34);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    app.run(Action::System);
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Char('/'));
+    for c in "zzqx".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.system.filtering);
+    assert_eq!(app.system.filter, "zzqx");
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc clear"), "{text}");
+    assert!(!text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.system.filter.is_empty());
+    assert_eq!(app.view, View::System, "the first Esc only clears the filter");
+    let text = render(&mut app, 120, 34);
+    assert!(text.lines().last().unwrap().contains("esc home"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, View::Bridge);
+}
+
+/// Home's "/ search" label is a button: a click starts the project filter, as "/" does.
+#[test]
+fn home_search_label_starts_the_filter() {
+    use noble::app::Hit;
+    let mut app = demo_app(120, 34);
+    let (text, buf) = render_buf(&mut app, 120, 34);
+    assert!(text.contains("/ search"), "{text}");
+    let label = find_hit(&app, |h| *h == Hit::HomeSearch).expect("search label");
+    assert_eq!(cells_text(&buf, label), "/ search");
+    assert!(!app.bridge.filtering);
+    click(&mut app, label.x + 2, label.y);
+    assert!(app.bridge.filtering && app.bridge.filter.is_empty());
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.bridge.filtering);
+}
+
+/// Below 50 columns the status bar's palette chip is just the key; it is dropped when even that does not fit.
+#[test]
+fn narrow_status_bar_palette_chip_shows_the_key() {
+    use noble::app::Hit;
+    let mut app = demo_app(49, 20);
+    let (text, buf) = render_buf(&mut app, 49, 20);
+    let chip = find_hit(&app, |h| *h == Hit::Palette).expect("key-only palette chip");
+    assert_eq!(chip.y, 19);
+    let shown = cells_text(&buf, chip);
+    assert!(!shown.contains("commands") && !shown.trim().is_empty(), "{shown:?}: {text}");
+    save("bridge-narrow-49x20", &text);
+    // Wide enough again: the full chip with its word.
+    let mut app = demo_app(50, 20);
+    let (_, buf) = render_buf(&mut app, 50, 20);
+    let chip = find_hit(&app, |h| *h == Hit::Palette).expect("palette chip");
+    assert!(cells_text(&buf, chip).contains("commands"));
+    // Too narrow for the key: no chip, and nothing is cut.
+    let mut app = demo_app(6, 20);
+    render(&mut app, 6, 20);
+    assert!(find_hit(&app, |h| *h == Hit::Palette).is_none());
 }
 
 /// The welcome card lists launcher keys only for CLIs that are installed.
@@ -5467,6 +5765,10 @@ fn workspaces_delete_replace_and_limit_are_announced() {
     let save_as = |app: &mut App, name: &str| {
         let p = noble::app::Prompt::new(String::new(), name.into(), PromptPurpose::SaveWorkspace);
         app.submit_prompt(p);
+        // A name that is taken asks first: say yes.
+        if matches!(app.overlay, Some(Overlay::Confirm(_))) {
+            app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        }
         toast_texts(app).last().cloned().unwrap_or_default()
     };
     assert!(save_as(&mut app, "alpha").contains("saved"));
@@ -5695,6 +5997,7 @@ fn hooks_offer_notice() {
     for (w, h) in [(80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }
+    assert_no_doubled_frame(&render(&mut app, 30, 8));
     render(&mut app, 120, 32);
     let enable = find_hit(&app, |h| *h == Hit::HooksOffer).expect("enable hit");
     click(&mut app, enable.x + 1, enable.y);
@@ -5711,6 +6014,54 @@ fn hooks_offer_notice() {
     let close = find_hit(&app, |h| *h == Hit::HooksOfferDismiss).expect("dismiss hit");
     click(&mut app, close.x, close.y);
     assert!(!app.hooks_offer);
+}
+
+/// Palette hints follow the view: in a terminal a hint is a key that reaches NOBLE there (never a shell key such
+/// as alt+t, and no direct key while the pane's keys are locked). Search and Pass keys are offered only in a
+/// terminal, Home shows the single keys it handles itself, and the hooks offer actions only while the offer shows.
+#[test]
+fn palette_hints_follow_the_view() {
+    let titles = |app: &App| app.palette_items().into_iter().map(|i| i.title).collect::<Vec<_>>();
+    let hint_of = |app: &App, title: &str| {
+        app.palette_items().into_iter().find(|i| i.title == title).unwrap_or_else(|| panic!("no {title}")).hint
+    };
+    let mut app = demo_app(120, 30);
+    let home = titles(&app);
+    assert!(!home.iter().any(|t| t == "Search Scrollback" || t == "Pass Keys to the App"), "{home:?}");
+    assert_eq!(hint_of(&app, "Rescan Projects"), "r");
+    assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
+    assert_eq!(hint_of(&app, "Add Folder to Scan for Projects…"), "a");
+    assert_eq!(hint_of(&app, "Add Project…"), "A");
+
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let term = titles(&app);
+    assert!(term.iter().any(|t| t == "Search Scrollback") && term.iter().any(|t| t == "Pass Keys to the App"));
+    let shell = hint_of(&app, "New Terminal Tab");
+    assert_ne!(shell, "alt+t", "alt+t goes to the shell in a terminal");
+    assert_eq!(shell, app.keymap.term_hint(Action::NewTab, false).unwrap_or_default());
+    app.run(Action::Passthrough);
+    assert!(app.focused_locked());
+    let locked = hint_of(&app, "New Terminal Tab");
+    assert_eq!(locked, app.keymap.term_hint(Action::NewTab, true).unwrap_or_default());
+    assert!(!locked.contains("alt+t"), "{locked}");
+    app.run(Action::Passthrough);
+
+    app.run(Action::Bridge);
+    let hooks = |app: &App| {
+        let t = titles(app);
+        (t.iter().any(|x| x == "Enable Claude Status Hooks"), t.iter().any(|x| x == "Dismiss Claude Status Offer"))
+    };
+    assert_eq!(hooks(&app), (false, false));
+    app.hooks_offer = true;
+    assert_eq!(hooks(&app), (true, true));
+    app.run(Action::DismissHooksOffer);
+    assert!(!app.hooks_offer);
+    assert_eq!(hooks(&app), (false, false));
+    app.hooks_offer = true;
+    app.run(Action::EnableHooks);
+    assert!(!app.hooks_offer, "the palette answers the offer");
+    assert!(!app.hooks_installed, "headless never touches ~/.claude");
+    assert_eq!(hooks(&app), (false, false));
 }
 
 /// The keyboard way to ctrl+click (macOS terminals keep ctrl+click for their own menu): the links on the pane's
@@ -5744,4 +6095,213 @@ fn open_link_lists_the_links_on_screen() {
     assert!(app.overlay.is_none());
     app.run(Action::CloseTab);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two frame glyphs side by side (an overlay box right against the panel under it) read as a doubled border.
+fn assert_no_doubled_frame(text: &str) {
+    for pair in ["╭╭", "╮╮", "╰╰", "╯╯", "││"] {
+        assert!(!text.contains(pair), "doubled border {pair}:\n{text}");
+    }
+}
+
+/// The text inside the box whose title row holds `title`: its rows (up to the "confirm" button row)
+/// joined with single spaces.
+fn box_text(text: &str, title: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().position(|l| l.contains(&format!("╭ {title} "))).expect("box title row");
+    let start = lines[top].find(&format!("╭ {title} ")).unwrap();
+    let left = lines[top][..start].chars().count();
+    let right = left + lines[top][start..].chars().position(|c| c == '╮').expect("box corner");
+    let mut parts = Vec::new();
+    for line in &lines[top + 1..] {
+        if line.contains(" confirm") {
+            break;
+        }
+        let inner: String = line.chars().skip(left + 1).take(right - left - 1).collect();
+        if !inner.trim().is_empty() {
+            parts.push(inner.trim().to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+/// Closing a tab with several panes asks first, idle or not; a single idle pane still closes at once.
+#[test]
+fn closing_a_tab_with_several_panes_asks_first() {
+    use noble::app::Overlay;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("three".into()));
+    app.run(Action::SplitRight);
+    app.run(Action::SplitDown);
+    assert_eq!(app.tabs[0].panes().len(), 3);
+    app.run(Action::CloseTab);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("CLOSE TAB") && text.contains("close the tab and its 3 panes?"), "{text}");
+    // No keeps the tab and all its panes.
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].panes().len(), 3);
+    // Yes closes the tab.
+    app.run(Action::CloseTab);
+    assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.tabs.is_empty());
+    // A single idle pane closes at once.
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    app.run(Action::CloseTab);
+    assert!(app.overlay.is_none());
+    assert!(app.tabs.is_empty());
+}
+
+/// Saving a workspace: a blank name keeps the prompt open and says why; a taken name asks before it is
+/// replaced, and No leaves the saved workspace as it was.
+#[test]
+fn workspace_names_are_checked_before_saving() {
+    use noble::app::{Overlay, PromptPurpose};
+    let mut app = demo_app(110, 30);
+    app.workspaces.list.clear();
+    app.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    let prompt = |name: &str| noble::app::Prompt::new("SAVE WORKSPACE AS", name.into(), PromptPurpose::SaveWorkspace);
+    app.submit_prompt(prompt("   "));
+    let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("the prompt closed on a blank name") };
+    assert!(p.error.is_some());
+    assert!(app.workspaces.list.is_empty());
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("type a name first"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    app.submit_prompt(prompt("alpha"));
+    assert_eq!(app.workspaces.list.len(), 1);
+    app.submit_prompt(prompt("ALPHA"));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("REPLACE WORKSPACE") && text.contains("“ALPHA” exists — replace it?"), "{text}");
+    assert_eq!(app.workspaces.list[0].name, "alpha", "nothing is replaced before the confirm");
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.workspaces.list[0].name, "alpha", "No keeps the old workspace");
+    app.submit_prompt(prompt("ALPHA"));
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.workspaces.list.len(), 1);
+    assert!(toast_texts(&app).last().is_some_and(|t| t.contains("replaced")), "{:?}", toast_texts(&app));
+}
+
+/// `o` and the "Folder" button with no project selected say why, instead of doing nothing.
+#[test]
+fn open_folder_without_a_project_says_so() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.handle(AppEvent::Projects(Vec::new()));
+    assert!(app.selected_project().is_none());
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+    let text = render(&mut app, 110, 30);
+    let folder = find_hit(&app, |h| *h == Hit::OpenFiles).expect("folder button");
+    assert!(text.contains("Folder"), "{text}");
+    click(&mut app, folder.x + 1, folder.y);
+    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+}
+
+/// Help at a size too small for the key list says so; nothing panics down to a 1×1 terminal.
+#[test]
+fn help_at_a_tiny_size_says_so() {
+    let mut app = demo_app(110, 30);
+    app.run(Action::Help);
+    let text = render(&mut app, 30, 8);
+    assert!(text.contains("enlarge window"), "{text}");
+    for (w, h) in [(1, 1), (2, 3), (12, 5), (29, 40), (40, 5)] {
+        render(&mut app, w, h);
+    }
+    // Big enough again: the key list is back.
+    assert!(render(&mut app, 110, 30).contains("KEYBOARD REFERENCE"));
+}
+
+/// A long question wraps over several rows: the whole text and the buttons stay visible, also at 30x8.
+#[test]
+fn confirm_wraps_a_long_question() {
+    use noble::app::{Confirm, ConfirmAction, Overlay};
+    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let mut app = demo_app(110, 30);
+    app.overlay =
+        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    let text = render(&mut app, 110, 30);
+    save("confirm-wrap-110x30", &text);
+    assert_eq!(box_text(&text, "CLOSE PANE"), body, "{text}");
+    assert!(text.contains("confirm") && text.contains("cancel"), "{text}");
+    let small = render(&mut app, 30, 8);
+    save("confirm-wrap-30x8", &small);
+    // Too narrow for the button words: the keys and their buttons stay.
+    assert!(small.contains(" y ") && small.contains("n/esc"), "{small}");
+    assert_no_doubled_frame(&small);
+    for (w, h) in [(1, 1), (3, 2), (10, 4)] {
+        render(&mut app, w, h);
+    }
+}
+
+/// A narrow confirmation: the chips stay inside the frame (the n/esc chip is left out when it does not
+/// fit) and a question that does not fit ends with "…" on its last visible line.
+#[test]
+fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
+    use noble::app::{Confirm, ConfirmAction, Overlay};
+    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let mut app = demo_app(110, 30);
+    for (w, h) in [(16u16, 8u16), (30, 8)] {
+        app.overlay = None;
+        let (_, plain) = render_buf(&mut app, w, h);
+        app.overlay = Some(Overlay::Confirm(Confirm {
+            title: "CLOSE PANE".into(),
+            body: body.into(),
+            action: ConfirmAction::Quit,
+        }));
+        let (text, buf) = render_buf(&mut app, w, h);
+        save(&format!("confirm-narrow-{w}x{h}"), &text);
+        // The box: centered, as wide as the window allows (at most 52), the frame's right column last.
+        let box_w = (w - 2).min(52);
+        let left = (w - box_w) / 2;
+        let right = left + box_w - 1;
+        // Nothing is drawn right of the frame: the cells past its ring match the screen without the box.
+        for y in 0..h {
+            for x in right + 2..w {
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    plain[(x, y)].symbol(),
+                    "drawn past the frame at ({x},{y}) {w}x{h}:\n{text}"
+                );
+            }
+        }
+        let top = (0..h).find(|&y| buf[(left, y)].symbol() == "╭").expect("box top");
+        let bottom = (top..h).find(|&y| buf[(left, y)].symbol() == "╰").expect("box bottom");
+        let row = |y: u16| -> String { (left + 1..right).map(|x| buf[(x, y)].symbol()).collect() };
+        let buttons = row(bottom - 1);
+        assert!(buttons.contains(" y "), "yes chip at {w}x{h}: {text}");
+        // The question is cut: its last visible line ends with "…", and what is shown is the start of it.
+        let shown: Vec<String> = (top + 1..bottom - 1).map(row).filter(|l| !l.trim().is_empty()).collect();
+        let shown = shown.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        assert!(shown.ends_with('…'), "the cut question has no ellipsis at {w}x{h}: {shown:?}\n{text}");
+        let words: String = shown.trim_end_matches('…').chars().filter(|c| *c != ' ').collect();
+        assert!(body.replace(' ', "").starts_with(&words), "{shown:?}");
+        assert!(words.len() > 10, "too little of the question is shown at {w}x{h}: {shown:?}");
+    }
+    // At 16 columns the n/esc chip does not fit inside the frame: it is left out, and so is its click target.
+    app.overlay =
+        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    let text = render(&mut app, 16, 8);
+    assert!(!text.contains("n/esc"), "{text}");
+    assert!(find_hit(&app, |h| *h == noble::app::Hit::ConfirmNo).is_none(), "no cancel target when it is not drawn");
+    let text = render(&mut app, 30, 8);
+    assert!(text.contains("n/esc"), "{text}");
+}
+
+/// The wrapping keeps words whole and cuts a word that is wider than the box.
+#[test]
+fn wrapped_confirm_text_keeps_whole_words() {
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(noble::app::Overlay::Confirm(noble::app::Confirm {
+        title: "WIDE".into(),
+        body: "x".repeat(120),
+        action: noble::app::ConfirmAction::Quit,
+    }));
+    let text = render(&mut app, 110, 30);
+    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there.
+    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
 }

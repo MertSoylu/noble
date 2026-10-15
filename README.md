@@ -60,7 +60,10 @@ or hovered pane shows its buttons on the title line: `◫` split right, `⊟` sp
 **📁 Projects at a glance**<br>
 Finds your git repositories and shows branch, changes, commits to push or pull, recent commits and changed
 files. The status refreshes as soon as a command finishes in that repository. Add any folder by hand (`A`) or
-remove one you do not want (⋯ → Remove from list).
+remove one you do not want (⋯ → Remove from list). The selected project's card also shows its branch's pull
+request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) signed in via
+`gh auth login`) and the ports that processes running inside the project listen on (`⇄ :3000 :5173`), on
+Windows, Linux and macOS; click either one to open it.
 
 </td>
 </tr>
@@ -217,7 +220,7 @@ false` (Settings → Leave shell keys to the shell) gives them back to NOBLE eve
 
 When an app in a pane needs one of NOBLE's other shortcuts (e.g. `alt+m`, `alt+z`), **prefix `i`** locks the
 pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
-working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there is no lock: prefix + a shortcut
+working. With `passthrough = "once"` (Settings → Pass keys to the app) there is no lock: prefix + a shortcut
 (e.g. `ctrl+a alt+m`) sends just that key, and prefix `i` sends the next key.
 
 | Direct | | Prefix, then | |
@@ -227,16 +230,17 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 | `alt+t`\* | new tab | `s` `-` | split down |
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
 | `alt+m` | system monitor | `z` | zoom pane |
-| `alt+s`\* | settings | `S` | settings |
+| `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
-| `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
+| `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` `b` | tabs · Home |
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
+| | | `pgup` `pgdn` `[` `]` | scroll up / down (page) |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
-| | | `i` | pass shortcuts to the app (lock / next key) |
+| | | `i` | pass keys to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
-| | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
+| | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
 
 <details>
 <summary><b>Per-screen keys and mouse</b></summary>
@@ -244,14 +248,15 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 <br>
 
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
-  (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
+  (Settings → Quick launch) · `/` search (or click its label) · `t` terminal at home · `o` open folder · `w` save workspace ·
   `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
-  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI ·
-  `m` system · `s` settings · `q` quit.
+  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
+  `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
+  browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
   click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
-- **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
-  `K` or `del` terminate (asks first) · `esc` back.
+- **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
+  "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
@@ -261,8 +266,8 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
   Settings → Pointer reports ctrl-click to apps) and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
-  there · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
-  middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
+  there · right-click a tab, pane title or project for a menu · the `+N` chip at the end of the tab bar lists the
+  tabs that do not fit · drag tabs to reorder, double-click to rename, middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
   drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
@@ -344,7 +349,8 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
-remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update`.
+remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
+dismiss_hooks_offer`.
 
 </details>
 
@@ -474,6 +480,9 @@ under heavy output. Everything else runs only while it is on screen:
 
 - System sensors: every second on the System screen and on Home (every 2 s on battery), every 5 s elsewhere.
 - Git status: when a command finishes, when Home opens, or when a repository changes.
+- Listening ports and the pull request / CI state of the selected project: only while Home is open. Ports are
+  scanned every 5 s (15 s on battery); the PR is asked for only when the selected project's branch changed or
+  its answer is older than 60 s (180 s on battery).
 - AI quota: only while Home is open.
 - On battery the Home clock drops its seconds and the blinking colon, and the cursor of the command palette
   and prompts stops blinking.

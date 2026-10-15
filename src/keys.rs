@@ -198,10 +198,12 @@ pub enum Action {
     Passthrough,
     JumpToAgent,
     OpenLink,
+    EnableHooks,
+    DismissHooksOffer,
 }
 
 impl Action {
-    pub const ALL: [Action; 54] = [
+    pub const ALL: [Action; 56] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -256,6 +258,8 @@ impl Action {
         Action::Passthrough,
         Action::JumpToAgent,
         Action::OpenLink,
+        Action::EnableHooks,
+        Action::DismissHooksOffer,
     ];
 
     pub fn id(&self) -> String {
@@ -308,6 +312,8 @@ impl Action {
                     Action::Passthrough => "passthrough",
                     Action::JumpToAgent => "jump_to_agent",
                     Action::OpenLink => "open_link",
+                    Action::EnableHooks => "enable_hooks",
+                    Action::DismissHooksOffer => "dismiss_hooks_offer",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -369,10 +375,12 @@ impl Action {
             Action::Passthrough => "Pass Keys to the App".into(),
             Action::JumpToAgent => "Jump to Waiting Agent".into(),
             Action::OpenLink => "Open Link on Screen".into(),
+            Action::EnableHooks => "Enable Claude Status Hooks".into(),
+            Action::DismissHooksOffer => "Dismiss Claude Status Offer".into(),
         }
     }
 
-    /// Palette'teki grup etiketi.
+    /// Group label in the palette.
     pub fn group(&self) -> &'static str {
         match self {
             Action::Bridge

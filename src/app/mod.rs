@@ -4,6 +4,7 @@
 mod agents;
 pub mod fx;
 mod input;
+mod live;
 mod menu;
 mod ops;
 mod palette;
@@ -30,6 +31,7 @@ use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert};
 use crate::theme::Theme;
 
+pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
 pub use settings::{LAUNCH_KEYS, PREFIXES, PROVIDER_KEYS, SettingItem, SettingKey};
@@ -88,6 +90,10 @@ pub enum ConfirmAction {
     },
     /// The saved workspace by name (another window may have changed the list meanwhile).
     DeleteWorkspace(String),
+    /// Save the open tabs under this name over the workspace that has it.
+    ReplaceWorkspace(String),
+    /// Remove the project at this path from the list.
+    RemoveProject(std::path::PathBuf),
 }
 
 pub struct Confirm {
@@ -363,6 +369,18 @@ pub enum Hit {
     /// One-time offer to enable the Claude status hooks: enable / dismiss.
     HooksOffer,
     HooksOfferDismiss,
+    /// "+N" chip of the tab bar: opens the command palette listing the hidden tabs.
+    HiddenTabs,
+    /// System: "/ Filter" button of the Processes panel (as the "/" key).
+    SystemFilter,
+    /// System: "K Terminate" button of the Processes panel (as the "K" key, asks first).
+    SystemTerminate,
+    /// Home: "/ search" label at the right end of the Projects panel (as the "/" key).
+    HomeSearch,
+    /// Home's project card: the selected project's pull request and CI (opens the PR's page).
+    ProjectPr,
+    /// A listening port on Home's project card (opens `http://localhost:<port>`).
+    Port(u16),
 }
 
 pub(crate) enum Drag {
@@ -546,6 +564,10 @@ pub struct Services {
     /// Hidden and manually added projects for the scan thread (kept in sync with `ui_state`).
     pub proj_manual: Arc<Mutex<crate::projects::Manual>>,
     pub ai_cfg: Arc<Mutex<config::AiCfg>>,
+    /// Project folders whose listening ports are scanned (answered with `AppEvent::Ports`).
+    pub ports_req: Sender<Vec<PathBuf>>,
+    /// A project folder whose branch's pull request is looked up (answered with `AppEvent::Pr`).
+    pub pr_req: Sender<PathBuf>,
 }
 
 pub struct App {
@@ -620,6 +642,9 @@ pub struct App {
     #[doc(hidden)]
     pub dir_probe: fn(&Path) -> bool,
     pub operator: String,
+    /// The time the clocks show instead of now (the README screenshots); `None` in the app.
+    #[doc(hidden)]
+    pub clock: Option<chrono::DateTime<chrono::Local>>,
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
     pub search: Option<SearchState>,
@@ -674,6 +699,16 @@ pub struct App {
     session_dirty_since: Option<Instant>,
     /// When the tabs were last compared with `session_saved`.
     session_checked: Instant,
+    /// Listening TCP ports per project folder, from the last scan (`ports` thread).
+    pub ports: HashMap<PathBuf, Vec<u16>>,
+    /// Pull request answers per project folder (`pr` thread).
+    pub prs: HashMap<PathBuf, PrEntry>,
+    /// When the ports were last asked for (`None`: at once, e.g. on entering Home).
+    ports_asked: Option<Instant>,
+    /// A port scan is on its way.
+    ports_in_flight: bool,
+    /// The pull request request on its way: the folder and the branch it is for.
+    pr_in_flight: Option<(PathBuf, String)>,
 }
 
 /// How long the tabs must have differed from the saved session before it is written again (debounce).
@@ -757,9 +792,21 @@ impl App {
         let ai_cfg = Arc::new(Mutex::new(cfg.ai.clone()));
         let (ai_tx, ai_rx) = std::sync::mpsc::channel();
         ai::spawn(ai_cfg.clone(), paths.data_file("ai-cache.json"), tx.clone(), ai_rx);
+        let (ports_tx, ports_rx) = std::sync::mpsc::channel();
+        crate::ports::spawn(tx.clone(), ports_rx);
+        let (pr_tx, pr_rx) = std::sync::mpsc::channel();
+        crate::pr::spawn(tx.clone(), pr_rx);
 
-        let services =
-            Services { sensor_req: sensor_tx, rescan: rescan_tx, ai_refresh: ai_tx, proj_cfg, proj_manual, ai_cfg };
+        let services = Services {
+            sensor_req: sensor_tx,
+            rescan: rescan_tx,
+            ai_refresh: ai_tx,
+            proj_cfg,
+            proj_manual,
+            ai_cfg,
+            ports_req: ports_tx,
+            pr_req: pr_tx,
+        };
         let cache = ai::load_cache(&paths.data_file("ai-cache.json"));
         let mut app = App::build(cfg, paths, Some(services), tx, size, recent, workspaces);
         app.ai_installed = ai::installed_providers();
@@ -889,6 +936,7 @@ impl App {
             instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
             operator,
+            clock: None,
             git_requested: HashMap::new(),
             search: None,
             link_hover: None,
@@ -917,6 +965,11 @@ impl App {
             session_saved: Vec::new(),
             session_dirty_since: None,
             session_checked: Instant::now(),
+            ports: HashMap::new(),
+            prs: HashMap::new(),
+            ports_asked: None,
+            ports_in_flight: false,
+            pr_in_flight: None,
             cfg,
         }
     }
@@ -986,12 +1039,14 @@ impl App {
             AppEvent::Projects(_) | AppEvent::Git(..) | AppEvent::Ai(_) => {
                 self.view == View::Bridge || self.overlay.is_some()
             }
+            // Decided by `apply`: only a value that Home shows counts.
+            AppEvent::Ports(_) | AppEvent::Pr(..) => false,
         };
         let before = self.ui_fingerprint();
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
         let power = self.on_battery();
-        let pty_shown = self.apply(ev);
-        shown || pty_shown || self.ui_fingerprint() != before || self.on_battery() != power
+        let changed = self.apply(ev);
+        shown || changed || self.ui_fingerprint() != before || self.on_battery() != power
     }
 
     /// Whether a non-event change happened since the last draw (read once).
@@ -1004,7 +1059,7 @@ impl App {
         (self.toast_serial, self.toasts.len(), self.tabs.iter().map(|t| (t.activity, t.alert)).collect())
     }
 
-    /// The event's state change. `true`: output arrived in a visible pane.
+    /// The event's state change. `true`: something visible changed (output in a visible pane, a value Home shows).
     fn apply(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::Input(e) => self.on_input(e),
@@ -1055,6 +1110,8 @@ impl App {
                     |id: &str| crate::ai::providers::registry().iter().position(|d| d.id == id).unwrap_or(usize::MAX);
                 self.ai.sort_by_key(|s| order(s.id));
             }
+            AppEvent::Ports(list) => return self.set_ports(list),
+            AppEvent::Pr(path, info) => return self.set_pr(path, info),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();
                 self.edit_ui_state(|d| {
@@ -1439,6 +1496,11 @@ impl App {
         !self.on_battery()
     }
 
+    /// The time the clocks show: now, or the fixed `clock` of the screenshots.
+    pub fn now(&self) -> chrono::DateTime<chrono::Local> {
+        self.clock.unwrap_or_else(chrono::Local::now)
+    }
+
     /// Whether a text field's cursor is drawn now: it blinks every 500 ms, and like the
     /// Home clock it stays lit on battery so an open palette does not redraw twice a second.
     pub fn cursor_lit(&self) -> bool {
@@ -1469,6 +1531,7 @@ impl App {
             let _ = s.ai_refresh.send(crate::ai::AiReq::Visible(home));
         }
         if self.view == View::Bridge && self.last_view != Some(View::Bridge) {
+            self.ports_asked = None;
             let vis = self.visible_projects();
             let from = self.bridge.proj_sel.saturating_sub(10);
             let paths: Vec<PathBuf> = vis.iter().skip(from).take(25).map(|i| self.projects[*i].path.clone()).collect();
@@ -1585,6 +1648,7 @@ impl App {
         self.toasts.retain(|t| t.until + linger > now);
         self.request_visible_git();
         self.sync_power_state();
+        self.request_home_live_data();
         let hooks_live = self.hooks_installed || !self.agent_hooks.is_empty();
         if self.services.is_some() && hooks_live && self.last_hook_scan.elapsed() >= Duration::from_secs(1) {
             self.last_hook_scan = now;

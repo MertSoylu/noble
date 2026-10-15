@@ -266,6 +266,11 @@ impl App {
             self.toggle_claude_hooks();
         }
     }
+
+    /// Click on the notice's x, or the palette's "Dismiss Claude Status Offer": hides the offer for this run.
+    pub(super) fn dismiss_hooks_offer(&mut self) {
+        self.hooks_offer = false;
+    }
 }
 
 #[cfg(test)]

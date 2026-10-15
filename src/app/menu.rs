@@ -95,7 +95,7 @@ impl App {
         let label = p.label();
         let pass_label = match (self.pass_once(), p.passthrough) {
             (true, _) => "Send next key to the app",
-            (false, false) => "Lock keys to the app",
+            (false, false) => "Pass keys to the app",
             (false, true) => "Unlock keys",
         };
         let hint = |a| self.keymap.hint(a).unwrap_or_default();
@@ -200,7 +200,7 @@ impl App {
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
-            MenuCmd::RemoveProject(path) => self.remove_project(&path),
+            MenuCmd::RemoveProject(path) => self.request_remove_project(path),
             MenuCmd::OpenLink(target) => self.open_link(target),
         }
     }

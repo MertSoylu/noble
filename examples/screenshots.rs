@@ -15,11 +15,13 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
+use chrono::TimeZone;
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
-use noble::app::{App, View};
+use noble::app::{App, PrEntry, View};
 use noble::config::Config;
 use noble::event::AppEvent;
 use noble::keys::Action;
+use noble::pr::{Checks, PrInfo, PrState};
 use noble::projects::{Commit, GitInfo, Project};
 use noble::sensors::{DiskInfo, ProcInfo, SensorSample, StaticInfo};
 use noble::theme::THEMES;
@@ -123,7 +125,7 @@ fn snapshot(app: &mut App, w: u16, h: u16) -> Buffer {
     term.backend().buffer().clone()
 }
 
-// ─── Sahte veri ──────────────────────────────────────────────────────────────
+// ─── Fake data ───────────────────────────────────────────────────────────────
 
 fn demo(theme: &str, w: u16, h: u16) -> App {
     let mut cfg = Config::default();
@@ -131,6 +133,8 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     cfg.general.theme = theme.into();
     let mut app = App::headless(cfg, (w, h));
     app.operator = "ada".into();
+    // A fixed time, so the images change only when the screens do.
+    app.clock = chrono::Local.with_ymd_and_hms(2026, 9, 30, 18, 20, 0).single();
     // Show the rotating tips, not the first-run prefix hint.
     app.ui_state.data.prefix_used = true;
     // The image must not depend on which CLIs are installed on this machine.
@@ -258,6 +262,24 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         mk("infra", "main", 60 * 24 * 12, Some(GitInfo::default())),
         mk("blog", "master", 60 * 24 * 40, None),
     ]));
+    // The selected project's card: its pull request with all checks passing, and a dev server port.
+    let noble_path = PathBuf::from(r"D:\dev\noble");
+    app.prs.insert(
+        noble_path.clone(),
+        PrEntry {
+            branch: Some("main".into()),
+            info: Some(PrInfo {
+                number: 42,
+                title: "Show pull requests and ports on the project card".into(),
+                state: PrState::Open,
+                url: "https://github.com/MertSoylu/noble/pull/42".into(),
+                branch: "main".into(),
+                checks: Checks { passed: 12, failed: 0, pending: 0 },
+            }),
+            fetched: Instant::now(),
+        },
+    );
+    app.ports.insert(noble_path, vec![5173]);
 
     let reset = ts + 2 * 3600 + 14 * 60;
     let provider = |id: &'static str, name: &'static str, plan: &str, windows: Vec<Window>| ProviderState {

@@ -117,7 +117,7 @@ impl App {
                         self.term_key(k)
                     }
                     None => self
-                        .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for help", self.keymap.prefix)),
+                        .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for keys", self.keymap.prefix)),
                 }
             }
             return;
@@ -472,6 +472,15 @@ impl App {
         self.selected_project().map(|p| p.path.clone())
     }
 
+    /// `o` and the "Folder" button: the selected project's folder in the file manager. With no
+    /// project selected (empty list, a filter without matches) it says so instead of doing nothing.
+    fn open_selected_folder(&mut self) {
+        match self.bridge_target_dir() {
+            Some(p) => self.open_in_file_manager(&p),
+            None => self.toast(ToastLevel::Info, "select a project first"),
+        }
+    }
+
     fn open_selected(&mut self) {
         match self.selected_project().map(|p| p.path.clone()) {
             Some(p) => self.open_project_shell(p),
@@ -562,11 +571,7 @@ impl App {
             KeyCode::Home => self.move_project(-10_000),
             KeyCode::End => self.move_project(10_000),
             KeyCode::Enter => self.open_selected(),
-            KeyCode::Char('/') => {
-                self.bridge.filtering = true;
-                self.bridge.filter.clear();
-                self.bridge.proj_sel = 0;
-            }
+            KeyCode::Char('/') => self.start_home_filter(),
             KeyCode::Esc => self.bridge.filter.clear(),
             KeyCode::Char('t') => self.run(Action::NewTab),
             KeyCode::Char('m') => self.run(Action::System),
@@ -580,13 +585,32 @@ impl App {
             KeyCode::Char('R') => self.refresh_ai(),
             KeyCode::Char('a') => self.run(Action::AddProjectFolder),
             KeyCode::Char('A') => self.run(Action::AddProject),
-            KeyCode::Char('o') => {
-                if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_file_manager(&p);
-                }
-            }
+            KeyCode::Char('o') => self.open_selected_folder(),
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
             _ => {}
+        }
+    }
+
+    /// Home's "/": the project filter starts empty.
+    fn start_home_filter(&mut self) {
+        self.bridge.filtering = true;
+        self.bridge.filter.clear();
+        self.bridge.proj_sel = 0;
+    }
+
+    /// System's "/": the process filter starts empty.
+    fn start_system_filter(&mut self) {
+        self.system.filtering = true;
+        self.system.filter.clear();
+    }
+
+    /// System's "K" and its button: asks before terminating the selected process.
+    fn terminate_selected(&mut self) {
+        let procs = self.visible_procs();
+        if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
+            self.request_kill(p.pid, p.name.clone());
+        } else {
+            self.toast(ToastLevel::Info, "select a process first (↑/↓)");
         }
     }
 
@@ -622,18 +646,8 @@ impl App {
             KeyCode::Char('m') => self.set_sort(SortKey::Mem),
             KeyCode::Char('p') => self.set_sort(SortKey::Pid),
             KeyCode::Char('n') => self.set_sort(SortKey::Name),
-            KeyCode::Char('/') => {
-                self.system.filtering = true;
-                self.system.filter.clear();
-            }
-            KeyCode::Char('K') | KeyCode::Delete => {
-                let procs = self.visible_procs();
-                if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
-                    self.request_kill(p.pid, p.name.clone());
-                } else {
-                    self.toast(ToastLevel::Info, "select a process first (↑/↓)");
-                }
-            }
+            KeyCode::Char('/') => self.start_system_filter(),
+            KeyCode::Char('K') | KeyCode::Delete => self.terminate_selected(),
             KeyCode::Esc => {
                 if self.system.filter.is_empty() {
                     self.view = View::Bridge;
@@ -850,10 +864,18 @@ impl App {
             Hit::Update => self.start_update(),
             Hit::UpdateDismiss => self.dismiss_update(),
             Hit::HooksOffer => self.accept_hooks_offer(),
-            Hit::HooksOfferDismiss => self.hooks_offer = false,
+            Hit::HooksOfferDismiss => self.dismiss_hooks_offer(),
+            Hit::ProjectPr => {
+                let url = self.selected_project().and_then(|p| self.project_pr(p)).map(|pr| pr.url.clone());
+                if let Some(url) = url {
+                    self.open_link(crate::term::link::Link::Url(url));
+                }
+            }
+            Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Palette => self.run(Action::Palette),
+            Hit::HiddenTabs => self.open_tab_list(),
             Hit::Pane { pane, inner } => {
                 if let Some(ti) = self.tab_of(pane) {
                     self.tabs[ti].focus = pane;
@@ -988,13 +1010,12 @@ impl App {
                 let dir = self.bridge_target_dir();
                 self.launch(i, dir);
             }
-            Hit::OpenFiles => {
-                if let Some(p) = self.bridge_target_dir() {
-                    self.open_in_file_manager(&p);
-                }
-            }
+            Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),
+            Hit::SystemFilter => self.start_system_filter(),
+            Hit::SystemTerminate => self.terminate_selected(),
+            Hit::HomeSearch => self.start_home_filter(),
             Hit::PaletteItem(i) => {
                 if let Some(Overlay::Palette(st)) = &mut self.overlay {
                     st.selected = i;

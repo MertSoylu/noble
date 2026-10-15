@@ -77,7 +77,7 @@ impl SettingKey {
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
-            SettingKey::Passthrough => "Pass shortcuts to apps",
+            SettingKey::Passthrough => "Pass keys to the app",
             SettingKey::ShellFirst => "Leave shell keys to the shell",
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
