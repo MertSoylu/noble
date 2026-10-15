@@ -65,6 +65,17 @@ impl PaletteState {
     }
 }
 
+/// The single key Home handles itself for an action that has no keymap binding (`input.rs` `bridge_key`).
+fn home_key(a: Action) -> Option<&'static str> {
+    match a {
+        Action::RescanProjects => Some("r"),
+        Action::RefreshAi => Some("R"),
+        Action::AddProjectFolder => Some("a"),
+        Action::AddProject => Some("A"),
+        _ => None,
+    }
+}
+
 impl App {
     pub fn palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
@@ -93,8 +104,11 @@ impl App {
                 | Action::MoveTabLeft
                 | Action::MoveTabRight
                 | Action::PaneMenu
-                | Action::OpenLink => in_term,
+                | Action::OpenLink
+                | Action::Search
+                | Action::Passthrough => in_term,
                 Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
+                Action::EnableHooks | Action::DismissHooksOffer => self.hooks_offer_notice(),
                 Action::Palette => false,
                 _ => true,
             };
@@ -105,10 +119,18 @@ impl App {
             if matches!(a, Action::GoTab(_)) {
                 continue;
             }
+            // In a terminal the hint is a key that reaches NOBLE there (not a shell key, none while the pane's
+            // keys are locked); on Home the single keys that Home handles itself are the fallback.
+            let hint = if in_term {
+                self.keymap.term_hint(a, self.focused_locked())
+            } else {
+                let home = if self.view == View::Bridge { home_key(a) } else { None };
+                self.keymap.hint(a).or_else(|| home.map(String::from))
+            };
             items.push(PaletteItem {
                 title: a.title(),
                 group: a.group(),
-                hint: self.keymap.hint(a).unwrap_or_default(),
+                hint: hint.unwrap_or_default(),
                 cmd: PaletteCmd::Action(a),
             });
         }

@@ -95,7 +95,7 @@ impl App {
         let label = p.label();
         let pass_label = match (self.pass_once(), p.passthrough) {
             (true, _) => "Send next key to the app",
-            (false, false) => "Lock keys to the app",
+            (false, false) => "Pass keys to the app",
             (false, true) => "Unlock keys",
         };
         let hint = |a| self.keymap.hint(a).unwrap_or_default();

@@ -117,7 +117,7 @@ impl App {
                         self.term_key(k)
                     }
                     None => self
-                        .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for help", self.keymap.prefix)),
+                        .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for keys", self.keymap.prefix)),
                 }
             }
             return;
@@ -850,7 +850,7 @@ impl App {
             Hit::Update => self.start_update(),
             Hit::UpdateDismiss => self.dismiss_update(),
             Hit::HooksOffer => self.accept_hooks_offer(),
-            Hit::HooksOfferDismiss => self.hooks_offer = false,
+            Hit::HooksOfferDismiss => self.dismiss_hooks_offer(),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Palette => self.run(Action::Palette),

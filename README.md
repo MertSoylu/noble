@@ -217,7 +217,7 @@ false` (Settings → Leave shell keys to the shell) gives them back to NOBLE eve
 
 When an app in a pane needs one of NOBLE's other shortcuts (e.g. `alt+m`, `alt+z`), **prefix `i`** locks the
 pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
-working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there is no lock: prefix + a shortcut
+working. With `passthrough = "once"` (Settings → Pass keys to the app) there is no lock: prefix + a shortcut
 (e.g. `ctrl+a alt+m`) sends just that key, and prefix `i` sends the next key.
 
 | Direct | | Prefix, then | |
@@ -227,16 +227,17 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 | `alt+t`\* | new tab | `s` `-` | split down |
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
 | `alt+m` | system monitor | `z` | zoom pane |
-| `alt+s`\* | settings | `S` | settings |
+| `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
-| `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` | tabs · Home |
+| `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` `b` | tabs · Home |
 | `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
+| | | `pgup` `pgdn` `[` `]` | scroll up / down (page) |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass shortcuts to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
-| | | `,` `w` `:` `?` `r` `q` | rename · save workspace · palette · help · reload config · quit |
+| | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
 
 <details>
 <summary><b>Per-screen keys and mouse</b></summary>
@@ -246,7 +247,7 @@ working. With `passthrough = "once"` (Settings → Pass shortcuts to apps) there
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
   `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
-  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI ·
+  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
   `m` system · `s` settings · `q` quit.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
   click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
@@ -344,7 +345,8 @@ show = true              # false hides it from Home (Settings → Quick launch)
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
-remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update`.
+remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
+dismiss_hooks_offer`.
 
 </details>
 

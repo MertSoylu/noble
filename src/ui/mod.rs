@@ -619,9 +619,9 @@ fn hints(app: &App) -> Vec<(String, String)> {
             if app.bridge.proj_act.is_some() {
                 return vec![h("←→", "choose"), h("⏎", "apply"), h("esc", "back")];
             }
-            // Hints are dropped from the end when the bar is narrow: "? help" comes first so it survives longest.
+            // Hints are dropped from the end when the bar is narrow: "? keys" comes first so it survives longest.
             vec![
-                h("?", "help"),
+                h("?", "keys"),
                 h("a A", "add folder / project"),
                 h("t", "terminal"),
                 h("r", "rescan"),

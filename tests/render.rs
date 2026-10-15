@@ -5370,16 +5370,16 @@ fn narrow_home_shows_a_quota_strip() {
     assert!(!wide.contains("claude 71%"), "{wide}");
 }
 
-/// "? help" is the first hint on Home, so it is the last to go when the bar is narrow.
+/// "? keys" is the first hint on Home, so it is the last to go when the bar is narrow.
 #[test]
 fn status_bar_keeps_help_longest() {
     let mut app = demo_app(120, 30);
     let wide = render(&mut app, 120, 30);
-    assert!(wide.lines().last().unwrap().contains("? help"), "{wide}");
+    assert!(wide.lines().last().unwrap().contains("? keys"), "{wide}");
     for w in [70u16, 56, 50] {
         let text = render(&mut app, w, 24);
         let last = text.lines().last().unwrap();
-        assert!(last.contains("? help"), "{w}: {last}");
+        assert!(last.contains("? keys"), "{w}: {last}");
     }
     let text = render(&mut app, 50, 24);
     assert!(!text.lines().last().unwrap().contains("pin / more"), "{text}");
@@ -5711,6 +5711,54 @@ fn hooks_offer_notice() {
     let close = find_hit(&app, |h| *h == Hit::HooksOfferDismiss).expect("dismiss hit");
     click(&mut app, close.x, close.y);
     assert!(!app.hooks_offer);
+}
+
+/// Palette hints follow the view: in a terminal a hint is a key that reaches NOBLE there (never a shell key such
+/// as alt+t, and no direct key while the pane's keys are locked). Search and Pass keys are offered only in a
+/// terminal, Home shows the single keys it handles itself, and the hooks offer actions only while the offer shows.
+#[test]
+fn palette_hints_follow_the_view() {
+    let titles = |app: &App| app.palette_items().into_iter().map(|i| i.title).collect::<Vec<_>>();
+    let hint_of = |app: &App, title: &str| {
+        app.palette_items().into_iter().find(|i| i.title == title).unwrap_or_else(|| panic!("no {title}")).hint
+    };
+    let mut app = demo_app(120, 30);
+    let home = titles(&app);
+    assert!(!home.iter().any(|t| t == "Search Scrollback" || t == "Pass Keys to the App"), "{home:?}");
+    assert_eq!(hint_of(&app, "Rescan Projects"), "r");
+    assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
+    assert_eq!(hint_of(&app, "Add Folder to Scan for Projects…"), "a");
+    assert_eq!(hint_of(&app, "Add Project…"), "A");
+
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let term = titles(&app);
+    assert!(term.iter().any(|t| t == "Search Scrollback") && term.iter().any(|t| t == "Pass Keys to the App"));
+    let shell = hint_of(&app, "New Terminal Tab");
+    assert_ne!(shell, "alt+t", "alt+t goes to the shell in a terminal");
+    assert_eq!(shell, app.keymap.term_hint(Action::NewTab, false).unwrap_or_default());
+    app.run(Action::Passthrough);
+    assert!(app.focused_locked());
+    let locked = hint_of(&app, "New Terminal Tab");
+    assert_eq!(locked, app.keymap.term_hint(Action::NewTab, true).unwrap_or_default());
+    assert!(!locked.contains("alt+t"), "{locked}");
+    app.run(Action::Passthrough);
+
+    app.run(Action::Bridge);
+    let hooks = |app: &App| {
+        let t = titles(app);
+        (t.iter().any(|x| x == "Enable Claude Status Hooks"), t.iter().any(|x| x == "Dismiss Claude Status Offer"))
+    };
+    assert_eq!(hooks(&app), (false, false));
+    app.hooks_offer = true;
+    assert_eq!(hooks(&app), (true, true));
+    app.run(Action::DismissHooksOffer);
+    assert!(!app.hooks_offer);
+    assert_eq!(hooks(&app), (false, false));
+    app.hooks_offer = true;
+    app.run(Action::EnableHooks);
+    assert!(!app.hooks_offer, "the palette answers the offer");
+    assert!(!app.hooks_installed, "headless never touches ~/.claude");
+    assert_eq!(hooks(&app), (false, false));
 }
 
 /// The keyboard way to ctrl+click (macOS terminals keep ctrl+click for their own menu): the links on the pane's

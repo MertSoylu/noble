@@ -152,6 +152,8 @@ impl App {
                 }
             }
             Action::DismissUpdate => self.dismiss_update(),
+            Action::EnableHooks => self.accept_hooks_offer(),
+            Action::DismissHooksOffer => self.dismiss_hooks_offer(),
         }
     }
 
