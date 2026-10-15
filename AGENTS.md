@@ -84,6 +84,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   list, Home: 1 s — 2 s on battery, otherwise 5 s), git status when a command finishes / Home opens / for a
   changed repo, AI quota only while Home is open (`AiReq::Visible`; entering Home fetches at once only if the
   last fetch is older than 30 s, `AiReq::Refresh` — config change, R key — fetches even while Home is hidden).
+  Listening ports (every 5 s, 15 s on battery) and the selected project's PR/CI state (60 s, 180 s on battery,
+  or at once when its branch changed) are requested only while Home is open (`app/live.rs`).
   The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`) the Home clock has no
   seconds and does not blink.
   When adding periodic work, run it only while the relevant screen is open; measure with
@@ -153,6 +155,13 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `projects::Manual`) with atomic JSON writes (`store::write_json`, also used for `ai-cache.json`). The session file is shared by every window of a build: each window (`store::instance_id`)
   merges only its own tabs in (`session_save`, under a `.lock` file), and only the first window of a run
   restores (`session_begin`, liveness via pid + process start time).
+- **Project live data:** `ports.rs` lists the TCP ports of processes whose current folder is inside a project
+  (Linux reads `/proc`; macOS filters with sysinfo and runs `lsof` only for those pids; Windows reads
+  `GetExtendedTcpTable` and takes the folders from sysinfo). `pr.rs` runs `gh pr view --json` through
+  `ai::run_command` (10 s) and turns every failure (no `gh`, no PR, not signed in, `ai::isolated`) into a silent
+  `None`. `app/live.rs` schedules the requests (`request_home_live_data`) and handles `AppEvent::Ports` and
+  `AppEvent::Pr`. Tests never run `gh`: `ai::isolated` turns it off in e2e, and headless apps have no `services`,
+  so they send no request.
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
   (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running

@@ -60,7 +60,9 @@ or hovered pane shows its buttons on the title line: `◫` split right, `⊟` sp
 **📁 Projects at a glance**<br>
 Finds your git repositories and shows branch, changes, commits to push or pull, recent commits and changed
 files. The status refreshes as soon as a command finishes in that repository. Add any folder by hand (`A`) or
-remove one you do not want (⋯ → Remove from list).
+remove one you do not want (⋯ → Remove from list). The selected project's card also shows its branch's pull
+request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) `gh`) and the
+ports its running processes listen on (`⇄ :3000 :5173`); click either one to open it.
 
 </td>
 </tr>
@@ -245,14 +247,15 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 <br>
 
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
-  (Settings → Quick launch) · `/` search · `t` terminal at home · `o` open folder · `w` save workspace ·
+  (Settings → Quick launch) · `/` search (or click its label) · `t` terminal at home · `o` open folder · `w` save workspace ·
   `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
   prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
-  `m` system · `s` settings · `q` quit.
+  `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
+  browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
   click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
-- **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter ·
-  `K` or `del` terminate (asks first) · `esc` back.
+- **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
+  "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` back.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
@@ -262,8 +265,8 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
   Settings → Pointer reports ctrl-click to apps) and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
-  there · right-click a tab, pane title or project for a menu · drag tabs to reorder, double-click to rename,
-  middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
+  there · right-click a tab, pane title or project for a menu · the `+N` chip at the end of the tab bar lists the
+  tabs that do not fit · drag tabs to reorder, double-click to rename, middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
   drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
@@ -476,6 +479,9 @@ under heavy output. Everything else runs only while it is on screen:
 
 - System sensors: every second on the System screen and on Home (every 2 s on battery), every 5 s elsewhere.
 - Git status: when a command finishes, when Home opens, or when a repository changes.
+- Listening ports and the pull request / CI state of the selected project: only while Home is open. Ports are
+  scanned every 5 s (15 s on battery); the PR is asked for only when the selected project's branch changed or
+  its answer is older than 60 s (180 s on battery).
 - AI quota: only while Home is open.
 - On battery the Home clock drops its seconds and the blinking colon, and the cursor of the command palette
   and prompts stops blinking.
