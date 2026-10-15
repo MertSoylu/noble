@@ -3431,17 +3431,31 @@ fn random_input_never_panics() {
         KeyCode::F(1),
     ];
     let mods = [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL];
-    let safe_click = |h: &Hit| {
+    // A press that starts an external program (an editor, the file manager, a browser) or writes the
+    // headless (relative) config path is never sent: neither a left click nor a right click (which steps a
+    // Settings row and runs the buttons too).
+    fn allowed(app: &App, hit: &Hit, spawn_ok: bool) -> bool {
+        let config_row =
+            |i: usize| matches!(app.settings_items().get(i), Some(SettingItem::OpenConfig | SettingItem::ReloadConfig));
         !matches!(
-            h,
+            hit,
             Hit::Launcher(_)
                 | Hit::MenuItem(_)
                 | Hit::PaletteItem(_)
                 | Hit::OpenFiles
                 | Hit::OpenSelected
                 | Hit::Update
-        )
-    };
+                | Hit::ProjectPr
+                | Hit::Port(_)
+        ) && !matches!(hit, Hit::Setting(i) if config_row(*i))
+            && (spawn_ok || !matches!(hit, Hit::NewTab | Hit::PaneSplit { .. }))
+    }
+    // The press goes to the topmost target under the point (`hit_at`), which can be another one than the
+    // target picked (a Settings row under an overlay's backdrop).
+    fn press_is_safe(app: &App, x: u16, y: u16, spawn_ok: bool) -> bool {
+        let at = ratatui::layout::Position { x, y };
+        app.hits.iter().rev().find(|(r, _)| r.contains(at)).is_none_or(|(_, hit)| allowed(app, hit, spawn_ok))
+    }
     let (mut w, mut h) = (100u16, 30u16);
     for step in 0..fuzz_steps(4000) {
         // A random click on the Settings row could turn it back on (and write the real clipboard).
@@ -3503,6 +3517,12 @@ fn random_input_never_panics() {
                     MouseEventKind::Drag(MouseButton::Left),
                 ]);
                 let (x, y) = (rng.below(w as usize + 4) as u16, rng.below(h as usize + 4) as u16);
+                // An unsafe press becomes a plain move (the step still draws a frame).
+                let kind = if matches!(kind, MouseEventKind::Down(_)) && !press_is_safe(&app, x, y, spawn_ok) {
+                    MouseEventKind::Moved
+                } else {
+                    kind
+                };
                 app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
                     kind,
                     column: x,
@@ -3513,21 +3533,13 @@ fn random_input_never_panics() {
             7 | 8 => {
                 // Left press on a random safe target (at a random point inside it), sometimes dragged.
                 // "Open config" starts an editor and "Reload config" writes the headless (relative) path.
-                let items = app.settings_items();
-                let config_row =
-                    |i: usize| matches!(items.get(i), Some(SettingItem::OpenConfig | SettingItem::ReloadConfig));
-                let targets: Vec<ratatui::layout::Rect> = app
-                    .hits
-                    .iter()
-                    .filter(|(_, hit)| safe_click(hit))
-                    .filter(|(_, hit)| !matches!(hit, Hit::Setting(i) if config_row(*i)))
-                    .filter(|(_, hit)| spawn_ok || !matches!(hit, Hit::NewTab | Hit::PaneSplit { .. }))
-                    .map(|(r, _)| *r)
-                    .collect();
-                if !targets.is_empty() {
+                let targets: Vec<ratatui::layout::Rect> =
+                    app.hits.iter().filter(|(_, hit)| allowed(&app, hit, spawn_ok)).map(|(r, _)| *r).collect();
+                let point = (!targets.is_empty()).then(|| {
                     let r = *rng.pick(&targets);
-                    let x = r.x + rng.below(r.width as usize) as u16;
-                    let y = r.y + rng.below(r.height as usize) as u16;
+                    (r.x + rng.below(r.width as usize) as u16, r.y + rng.below(r.height as usize) as u16)
+                });
+                if let Some((x, y)) = point.filter(|&(x, y)| press_is_safe(&app, x, y, spawn_ok)) {
                     mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
                     if rng.below(2) == 0 {
                         let (dx, dy) = (rng.below(w as usize + 2) as u16, rng.below(h as usize + 2) as u16);
