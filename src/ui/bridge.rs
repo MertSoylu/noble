@@ -506,7 +506,10 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
     }
     button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
     if cx + 12 <= end {
-        hud::put_right(buf, end, by, "/ search", th.dim());
+        // Clicking it starts the filter, as "/" does.
+        let label = "/ search";
+        let start = hud::put_right(buf, end, by, label, th.dim());
+        hits.push((Rect::new(start, by, util::width(label) as u16, 1), Hit::HomeSearch));
     }
 }
 

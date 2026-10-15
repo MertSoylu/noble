@@ -562,11 +562,7 @@ impl App {
             KeyCode::Home => self.move_project(-10_000),
             KeyCode::End => self.move_project(10_000),
             KeyCode::Enter => self.open_selected(),
-            KeyCode::Char('/') => {
-                self.bridge.filtering = true;
-                self.bridge.filter.clear();
-                self.bridge.proj_sel = 0;
-            }
+            KeyCode::Char('/') => self.start_home_filter(),
             KeyCode::Esc => self.bridge.filter.clear(),
             KeyCode::Char('t') => self.run(Action::NewTab),
             KeyCode::Char('m') => self.run(Action::System),
@@ -587,6 +583,29 @@ impl App {
             }
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
             _ => {}
+        }
+    }
+
+    /// Home's "/": the project filter starts empty.
+    fn start_home_filter(&mut self) {
+        self.bridge.filtering = true;
+        self.bridge.filter.clear();
+        self.bridge.proj_sel = 0;
+    }
+
+    /// System's "/": the process filter starts empty.
+    fn start_system_filter(&mut self) {
+        self.system.filtering = true;
+        self.system.filter.clear();
+    }
+
+    /// System's "K" and its button: asks before terminating the selected process.
+    fn terminate_selected(&mut self) {
+        let procs = self.visible_procs();
+        if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
+            self.request_kill(p.pid, p.name.clone());
+        } else {
+            self.toast(ToastLevel::Info, "select a process first (↑/↓)");
         }
     }
 
@@ -622,18 +641,8 @@ impl App {
             KeyCode::Char('m') => self.set_sort(SortKey::Mem),
             KeyCode::Char('p') => self.set_sort(SortKey::Pid),
             KeyCode::Char('n') => self.set_sort(SortKey::Name),
-            KeyCode::Char('/') => {
-                self.system.filtering = true;
-                self.system.filter.clear();
-            }
-            KeyCode::Char('K') | KeyCode::Delete => {
-                let procs = self.visible_procs();
-                if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
-                    self.request_kill(p.pid, p.name.clone());
-                } else {
-                    self.toast(ToastLevel::Info, "select a process first (↑/↓)");
-                }
-            }
+            KeyCode::Char('/') => self.start_system_filter(),
+            KeyCode::Char('K') | KeyCode::Delete => self.terminate_selected(),
             KeyCode::Esc => {
                 if self.system.filter.is_empty() {
                     self.view = View::Bridge;
@@ -854,6 +863,7 @@ impl App {
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Palette => self.run(Action::Palette),
+            Hit::HiddenTabs => self.open_tab_list(),
             Hit::Pane { pane, inner } => {
                 if let Some(ti) = self.tab_of(pane) {
                     self.tabs[ti].focus = pane;
@@ -995,6 +1005,9 @@ impl App {
             }
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),
+            Hit::SystemFilter => self.start_system_filter(),
+            Hit::SystemTerminate => self.terminate_selected(),
+            Hit::HomeSearch => self.start_home_filter(),
             Hit::PaletteItem(i) => {
                 if let Some(Overlay::Palette(st)) = &mut self.overlay {
                     st.selected = i;

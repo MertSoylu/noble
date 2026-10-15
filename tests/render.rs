@@ -5385,7 +5385,7 @@ fn status_bar_keeps_help_longest() {
     assert!(!text.lines().last().unwrap().contains("pin / more"), "{text}");
 }
 
-/// The "commands" chip on the status bar opens the palette; System calls the kill key "terminate".
+/// The "commands" chip on the status bar opens the palette; System's kill button is labelled "Terminate".
 #[test]
 fn status_bar_palette_chip_is_clickable() {
     use noble::app::{Hit, Overlay};
@@ -5399,7 +5399,154 @@ fn status_bar_palette_chip_is_clickable() {
     app.view = View::System;
     let text = render(&mut app, 110, 30);
     let last = text.lines().last().unwrap();
-    assert!(last.contains("terminate") && !last.contains("end task"), "{last}");
+    assert!(!last.contains("terminate") && !last.contains("end task"), "{last}");
+    assert!(text.contains("K Terminate") && !text.contains("end task"), "{text}");
+}
+
+/// The text of the buffer cells under a rect (one row).
+fn cells_text(buf: &ratatui::buffer::Buffer, r: ratatui::layout::Rect) -> String {
+    (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect()
+}
+
+/// The "+N" chip of the tab bar is a button: it opens the palette listing only the tabs, the hidden ones too.
+#[test]
+fn hidden_tabs_chip_opens_the_tab_list() {
+    use noble::app::{Hit, Overlay, PaletteCmd};
+    let mut app = demo_app(80, 24);
+    for i in 0..12 {
+        named_tab(&mut app, &format!("tab{i}"));
+    }
+    app.view = View::Term(0);
+    let (text, buf) = render_buf(&mut app, 80, 24);
+    let chip = find_hit(&app, |h| *h == Hit::HiddenTabs).expect("+N chip");
+    assert_eq!(chip.y, 0);
+    assert!(cells_text(&buf, chip).trim_start().starts_with('+'), "{text}");
+    click(&mut app, chip.x, chip.y);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no palette: {text}") };
+    assert_eq!(st.query, "");
+    let listed: Vec<PaletteCmd> = st.matches.iter().map(|i| st.all[*i].cmd.clone()).collect();
+    // The tab bar hides the last tabs: the palette lists all of them, and nothing else.
+    assert_eq!(listed, (1..=12).map(PaletteCmd::GoTab).collect::<Vec<_>>());
+    let text = render(&mut app, 80, 24);
+    save("palette-hidden-tabs-80x24", &text);
+    assert!(text.contains("Tab 12: tab11"), "{text}");
+}
+
+/// System's Processes panel: "/ Filter" and "K Terminate" are buttons that do what the keys do; the
+/// status bar lists only the keys the panel does not show.
+#[test]
+fn system_panel_buttons_run_the_keys() {
+    use noble::app::{ConfirmAction, Hit, Overlay};
+    let mut app = demo_app(120, 34);
+    app.run(Action::System);
+    let (text, buf) = render_buf(&mut app, 120, 34);
+    save("system-buttons-120x34", &text);
+    let bar = text.lines().last().unwrap();
+    assert!(bar.contains("esc home") && !bar.contains("terminate") && !bar.contains("filter"), "{bar}");
+    let filter = find_hit(&app, |h| *h == Hit::SystemFilter).expect("filter button");
+    let kill = find_hit(&app, |h| *h == Hit::SystemTerminate).expect("terminate button");
+    assert_eq!(filter.y, kill.y);
+    assert_eq!(cells_text(&buf, filter).trim(), "/ Filter");
+    assert_eq!(cells_text(&buf, kill).trim(), "K Terminate");
+    // Without a selected process the button only says so, as the key does.
+    app.system.selected_pid = None;
+    click(&mut app, kill.x + 1, kill.y);
+    assert!(app.overlay.is_none());
+    // With one selected it asks first (the same confirmation as K); "No" keeps the process.
+    let row = find_hit(&app, |h| matches!(h, Hit::Proc(_))).expect("a process row");
+    click(&mut app, row.x + 5, row.y);
+    render(&mut app, 120, 34);
+    let kill = find_hit(&app, |h| *h == Hit::SystemTerminate).expect("terminate button");
+    click(&mut app, kill.x + 1, kill.y);
+    let Some(Overlay::Confirm(c)) = &app.overlay else { panic!("no confirmation") };
+    assert!(matches!(c.action, ConfirmAction::Kill { .. }));
+    render(&mut app, 120, 34);
+    let no = find_hit(&app, |h| *h == Hit::ConfirmNo).expect("no button");
+    click(&mut app, no.x, no.y);
+    assert!(app.overlay.is_none());
+    // The filter button starts the filter as "/" does; Esc leaves it.
+    render(&mut app, 120, 34);
+    let filter = find_hit(&app, |h| *h == Hit::SystemFilter).expect("filter button");
+    click(&mut app, filter.x + 1, filter.y);
+    assert!(app.system.filtering && app.system.filter.is_empty());
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.system.filtering);
+
+    // Small sizes: a button that does not fit is left out, never cut in half.
+    for (w, h) in [(90, 28), (60, 18), (40, 12), (30, 8)] {
+        let mut app = demo_app(w, h);
+        app.run(Action::System);
+        let (text, buf) = render_buf(&mut app, w, h);
+        save(&format!("system-buttons-{w}x{h}"), &text);
+        match find_hit(&app, |h| *h == Hit::SystemFilter) {
+            Some(r) => assert_eq!(cells_text(&buf, r).trim(), "/ Filter", "{w}x{h}"),
+            None => assert!(!text.contains("Filt"), "{w}x{h}: {text}"),
+        }
+        match find_hit(&app, |h| *h == Hit::SystemTerminate) {
+            Some(r) => assert_eq!(cells_text(&buf, r).trim(), "K Terminate", "{w}x{h}"),
+            None => assert!(!text.contains("Termi"), "{w}x{h}: {text}"),
+        }
+    }
+}
+
+/// A filter kept after Enter with no match still shows how to clear it.
+#[test]
+fn home_filter_keeps_esc_clear_when_nothing_matches() {
+    let mut app = demo_app(120, 34);
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    key(&mut app, KeyCode::Char('/'));
+    for c in "zzqx".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.bridge.filtering);
+    assert_eq!(app.bridge.filter, "zzqx");
+    let text = render(&mut app, 120, 34);
+    save("bridge-nomatch-120x34", &text);
+    assert!(text.contains("Nothing matches"), "{text}");
+    assert!(text.lines().last().unwrap().contains("esc clear"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.bridge.filter.is_empty());
+    let text = render(&mut app, 120, 34);
+    assert!(!text.lines().last().unwrap().contains("esc clear"), "{text}");
+}
+
+/// Home's "/ search" label is a button: a click starts the project filter, as "/" does.
+#[test]
+fn home_search_label_starts_the_filter() {
+    use noble::app::Hit;
+    let mut app = demo_app(120, 34);
+    let (text, buf) = render_buf(&mut app, 120, 34);
+    assert!(text.contains("/ search"), "{text}");
+    let label = find_hit(&app, |h| *h == Hit::HomeSearch).expect("search label");
+    assert_eq!(cells_text(&buf, label), "/ search");
+    assert!(!app.bridge.filtering);
+    click(&mut app, label.x + 2, label.y);
+    assert!(app.bridge.filtering && app.bridge.filter.is_empty());
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.bridge.filtering);
+}
+
+/// Below 50 columns the status bar's palette chip is just the key; it is dropped when even that does not fit.
+#[test]
+fn narrow_status_bar_palette_chip_shows_the_key() {
+    use noble::app::Hit;
+    let mut app = demo_app(49, 20);
+    let (text, buf) = render_buf(&mut app, 49, 20);
+    let chip = find_hit(&app, |h| *h == Hit::Palette).expect("key-only palette chip");
+    assert_eq!(chip.y, 19);
+    let shown = cells_text(&buf, chip);
+    assert!(!shown.contains("commands") && !shown.trim().is_empty(), "{shown:?}: {text}");
+    save("bridge-narrow-49x20", &text);
+    // Wide enough again: the full chip with its word.
+    let mut app = demo_app(50, 20);
+    let (_, buf) = render_buf(&mut app, 50, 20);
+    let chip = find_hit(&app, |h| *h == Hit::Palette).expect("palette chip");
+    assert!(cells_text(&buf, chip).contains("commands"));
+    // Too narrow for the key: no chip, and nothing is cut.
+    let mut app = demo_app(6, 20);
+    render(&mut app, 6, 20);
+    assert!(find_hit(&app, |h| *h == Hit::Palette).is_none());
 }
 
 /// The welcome card lists launcher keys only for CLIs that are installed.

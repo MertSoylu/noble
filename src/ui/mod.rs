@@ -530,7 +530,12 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             spans.push((glyph, style.bg(th.raised)));
         }
         spans.push((" ", th.dim().bg(th.raised)));
+        let start = x;
         x = hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x));
+        // The chip lists the hidden tabs in the command palette.
+        if x > start {
+            hits.push((Rect::new(start, y, x - start, 1), Hit::HiddenTabs));
+        }
     }
     let start = x;
     x = hud::put(buf, x, y, " + ", Style::default().fg(th.accent).bg(th.raised), limit.saturating_sub(x));
@@ -620,20 +625,26 @@ fn hints(app: &App) -> Vec<(String, String)> {
                 return vec![h("←→", "choose"), h("⏎", "apply"), h("esc", "back")];
             }
             // Hints are dropped from the end when the bar is narrow: "? keys" comes first so it survives longest.
-            vec![
+            let mut v = vec![
                 h("?", "keys"),
                 h("a A", "add folder / project"),
                 h("t", "terminal"),
                 h("r", "rescan"),
                 h("s", "settings"),
                 h("→", "pin / more"),
-            ]
+            ];
+            // A kept filter (after Enter, with no match) has no other way out: "esc clear" comes first.
+            if !app.bridge.filter.is_empty() {
+                v.insert(0, h("esc", "clear"));
+            }
+            v
         }
         View::System => {
             if app.system.filtering {
                 return vec![h("type", "filter"), h("⏎", "done"), h("esc", "clear")];
             }
-            vec![h("↑↓", "select"), h("c m p n", "sort"), h("/", "filter"), h("K", "terminate"), h("esc", "home")]
+            // "/ Filter" and "K Terminate" are buttons on the Processes panel.
+            vec![h("↑↓", "select"), h("c m p n", "sort"), h("esc", "home")]
         }
         View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
         View::Term(_) if app.search.is_some() => {
@@ -789,23 +800,20 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
         app.keymap.hint(Action::Palette)
     };
     let key = palette.unwrap_or_else(|| format!("{} :", app.keymap.prefix));
-    let right_w = (util::width(&key) + " commands ".len()) as u16;
+    // Below 50 columns the chip is just the key (no "commands" word), and only when it fits.
+    let wide = area.width >= 50;
+    let right_w = (util::width(&key) + if wide { " commands ".len() } else { 0 }) as u16;
     let armed = app.prefix_armed;
+    let avail = edge.saturating_sub(area.x);
     // Armed: the bar is all about the next key, so the palette shortcut steps aside.
-    let show_right = !armed && area.width >= 50 && edge.saturating_sub(area.x) >= right_w + 12;
+    let show_right = !armed && if wide { avail >= right_w + 12 } else { avail >= right_w + 2 };
     let limit = if show_right { edge.saturating_sub(right_w + 2) } else { edge };
     if show_right {
         let start = edge.saturating_sub(right_w);
-        hud::put_spans(
-            buf,
-            start,
-            y,
-            &[
-                (key.as_str(), Style::default().fg(th.accent).bg(th.raised).add_modifier(Modifier::BOLD)),
-                (" commands ", th.dim().bg(th.raised)),
-            ],
-            right_w,
-        );
+        let key_span = (key.as_str(), Style::default().fg(th.accent).bg(th.raised).add_modifier(Modifier::BOLD));
+        let spans: &[(&str, Style)] =
+            if wide { &[key_span, (" commands ", th.dim().bg(th.raised))] } else { &[key_span] };
+        hud::put_spans(buf, start, y, spans, right_w);
         // The chip opens the palette, like its shortcut.
         hits.push((Rect::new(start, y, right_w, 1), Hit::Palette));
     }

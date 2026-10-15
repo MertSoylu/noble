@@ -263,29 +263,18 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         hud::put(buf, cx, ry, &util::pad_left(&util::fmt_bytes(p.mem), mem_w as usize), th.text().bg(bgc), mem_w);
         hits.push((Rect::new(inner.x, ry, inner.width, 1), Hit::Proc(p.pid)));
     }
-    // Keys in the accent color, their meaning dimmed.
-    let (k, d) = (th.accent(), th.dim());
-    let sep = ("  ", d);
-    hud::put_spans(
-        buf,
-        x,
-        inner.bottom() - 1,
-        &[
-            ("↑↓", k),
-            (" select", d),
-            sep,
-            ("c m p n", k),
-            (" sort", d),
-            sep,
-            ("/", k),
-            (" filter", d),
-            sep,
-            ("K", k),
-            (" terminate", d),
-            sep,
-            ("esc", k),
-            (" back", d),
-        ],
-        w,
-    );
+    // The panel's actions: buttons on the reserved bottom row. One that does not fit is left out, never cut.
+    let by = inner.bottom() - 1;
+    let mut cx = x;
+    let actions = [("/", "Filter", Hit::SystemFilter, true), ("K", "Terminate", Hit::SystemTerminate, sel.is_some())];
+    for (key, label, hit, enabled) in actions {
+        let need = (util::width(key) + util::width(label) + 4) as u16;
+        if cx + need > x + w {
+            break;
+        }
+        let start = cx;
+        cx = hud::button(buf, cx, by, key, label, th, enabled);
+        hits.push((Rect::new(start, by, cx - start, 1), hit));
+        cx += 1;
+    }
 }

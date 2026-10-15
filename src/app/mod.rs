@@ -363,6 +363,14 @@ pub enum Hit {
     /// One-time offer to enable the Claude status hooks: enable / dismiss.
     HooksOffer,
     HooksOfferDismiss,
+    /// "+N" chip of the tab bar: opens the command palette listing the hidden tabs.
+    HiddenTabs,
+    /// System: "/ Filter" button of the Processes panel (as the "/" key).
+    SystemFilter,
+    /// System: "K Terminate" button of the Processes panel (as the "K" key, asks first).
+    SystemTerminate,
+    /// Home: "/ search" label at the right end of the Projects panel (as the "/" key).
+    HomeSearch,
 }
 
 pub(crate) enum Drag {

@@ -219,7 +219,18 @@ impl App {
     }
 
     pub fn open_palette(&mut self) {
-        let mut st = PaletteState { query: String::new(), selected: 0, all: self.palette_items(), matches: Vec::new() };
+        let all = self.palette_items();
+        self.open_palette_on(all);
+    }
+
+    /// The palette listing only the tabs: the tab bar's "+N" chip, for the tabs the bar has no room for.
+    pub fn open_tab_list(&mut self) {
+        let tabs = self.palette_items().into_iter().filter(|i| matches!(i.cmd, PaletteCmd::GoTab(_))).collect();
+        self.open_palette_on(tabs);
+    }
+
+    fn open_palette_on(&mut self, all: Vec<PaletteItem>) {
+        let mut st = PaletteState { query: String::new(), selected: 0, all, matches: Vec::new() };
         st.refilter();
         self.overlay = Some(Overlay::Palette(st));
     }
