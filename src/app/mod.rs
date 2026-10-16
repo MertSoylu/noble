@@ -327,6 +327,8 @@ pub enum ToastTarget {
 }
 
 pub struct Toast {
+    /// Stable for the toast's life (the index in `App::toasts` shifts when another one leaves).
+    pub id: u64,
     pub text: String,
     pub level: ToastLevel,
     pub born: Instant,
@@ -467,8 +469,8 @@ pub enum Hit {
     ProjectPr,
     /// A listening port on Home's project card (opens `http://localhost:<port>`).
     Port(u16),
-    /// A notification (index into `App::toasts`): a click dismisses it, and runs its `ToastTarget`.
-    Toast(usize),
+    /// A notification (by its `Toast::id`): a click dismisses it, and runs its `ToastTarget`.
+    Toast(u64),
 }
 
 pub(crate) enum Drag {
@@ -746,6 +748,10 @@ pub struct App {
     /// (`ops::DIR_PROBE_TIMEOUT`). Replaceable so tests can simulate a hanging network share.
     #[doc(hidden)]
     pub dir_probe: fn(&Path) -> bool,
+    /// Whether a folder holds repositories two levels down (the add prompt's auto mode), probed on a
+    /// helper thread with the same timeout. Replaceable so tests can simulate a hanging folder.
+    #[doc(hidden)]
+    pub repo_probe: fn(&Path, &[String]) -> bool,
     pub operator: String,
     /// The time the clocks show instead of now (the README screenshots); `None` in the app.
     #[doc(hidden)]
@@ -922,9 +928,15 @@ impl App {
         app.reload_schemes();
         app.ui_state = ui_state;
         let version = env!("CARGO_PKG_VERSION");
-        if boot && boot_due(app.cfg.general.boot_animation, &app.ui_state.data.boot_version, version) {
+        // `noble` and `noble-dev` keep their own record, so alternating between them does not replay it.
+        let dev = app.dev;
+        let last = if dev { &app.ui_state.data.boot_version_dev } else { &app.ui_state.data.boot_version };
+        if boot && boot_due(app.cfg.general.boot_animation, last, version) {
             app.boot = Some(Boot::now());
-            app.edit_ui_state(|d| d.boot_version = version.to_string());
+            app.edit_ui_state(|d| {
+                let slot = if dev { &mut d.boot_version_dev } else { &mut d.boot_version };
+                *slot = version.to_string();
+            });
         }
         crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
@@ -1051,6 +1063,7 @@ impl App {
             dev: false,
             instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
+            repo_probe: |p, exclude| crate::projects::holds_repos(p, 2, exclude),
             operator,
             clock: None,
             git_requested: HashMap::new(),
@@ -1111,6 +1124,7 @@ impl App {
         }
         self.toasts.retain(|t| t.text != text);
         self.toasts.push(Toast {
+            id: self.toast_serial,
             text,
             level,
             born: Instant::now(),
@@ -1178,7 +1192,7 @@ impl App {
                 self.view == View::Bridge || self.overlay.is_some()
             }
             // Decided by `apply`: only a value that Home shows counts.
-            AppEvent::Ports(_) | AppEvent::Pr(..) => false,
+            AppEvent::Ports(_) | AppEvent::Pr(..) | AppEvent::AddDecided { .. } => false,
         };
         let before = self.ui_fingerprint();
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
@@ -1250,6 +1264,13 @@ impl App {
                 self.ai.sort_by_key(|s| order(s.id));
             }
             AppEvent::Ports(list) => return self.set_ports(list),
+            AppEvent::AddDecided { raw, scan } => {
+                if scan {
+                    self.add_project_root(&raw);
+                } else {
+                    self.add_project(&raw);
+                }
+            }
             AppEvent::Pr(path, info) => return self.set_pr(path, info),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();

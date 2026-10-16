@@ -2,7 +2,11 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use std::path::{Path, PathBuf};
+
+use super::ops::DIR_PROBE_TIMEOUT;
 use super::{AddMode, App, ToastLevel, View};
+use crate::event::AppEvent;
 use crate::theme::THEMES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +210,18 @@ pub fn shell_options() -> Vec<String> {
 fn cycle<T: PartialEq + Clone>(options: &[T], current: &T, dir: i32) -> T {
     let i = options.iter().position(|o| o == current).unwrap_or(0) as i32;
     options[(i + dir).rem_euclid(options.len() as i32) as usize].clone()
+}
+
+/// Whether `path` holds repositories (`probe`), answered within `DIR_PROBE_TIMEOUT`: a folder that does
+/// not answer in time (a network share that stopped responding) counts as holding none, so it is added
+/// as a project. The probe runs on its own thread, which is left to finish when the answer comes late
+/// (as `util::usable_dirs` does).
+fn holds_repos_in_time(path: PathBuf, probe: fn(&Path, &[String]) -> bool, exclude: Vec<String>) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("add-probe".into()).spawn(move || {
+        let _ = tx.send(probe(&path, &exclude));
+    });
+    spawned.is_ok() && rx.recv_timeout(DIR_PROBE_TIMEOUT).unwrap_or(false)
 }
 
 impl App {
@@ -797,18 +813,25 @@ impl App {
 
     /// The add prompt's action. Auto mode: a git repository, or a folder with no repository
     /// within two levels (`projects::holds_repos`), is added as a project; a folder that holds
-    /// repositories is scanned for them. The toast names what happened.
+    /// repositories is scanned for them. The toast names what happened. The folder walk runs on a
+    /// helper thread: its answer arrives as `AppEvent::AddDecided`, so the UI keeps running meanwhile.
     pub fn add_by_mode(&mut self, mode: AddMode, raw: &str) {
         match mode {
             AddMode::Project => self.add_project(raw),
             AddMode::Folder => self.add_project_root(raw),
             AddMode::Auto => {
                 let Ok(path) = Self::resolve_folder(raw) else { return };
-                let scan = crate::projects::git_dir(&path).is_none()
-                    && crate::projects::holds_repos(&path, 2, &self.cfg.projects.exclude);
-                if scan {
-                    self.add_project_root(raw);
-                } else {
+                if crate::projects::git_dir(&path).is_some() {
+                    return self.add_project(raw);
+                }
+                let (tx, probe, exclude) = (self.tx.clone(), self.repo_probe, self.cfg.projects.exclude.clone());
+                let raw_owned = raw.to_string();
+                let spawned = std::thread::Builder::new().name("add-decide".into()).spawn(move || {
+                    let scan = holds_repos_in_time(path, probe, exclude);
+                    let _ = tx.send(AppEvent::AddDecided { raw: raw_owned, scan });
+                });
+                // No thread to spare: the folder is added as a project, the answer that cannot be checked.
+                if spawned.is_err() {
                     self.add_project(raw);
                 }
             }

@@ -313,7 +313,6 @@ impl App {
         self.open_palette_on(all);
     }
 
-    /// The palette listing only the tabs: the tab bar's "+N" chip, for the tabs the bar has no room for.
     /// The palette listing only the selected project's tasks: Home's `T`. Nothing opens without tasks.
     pub fn open_task_list(&mut self) {
         let Some(p) = self.selected_project() else { return };
@@ -323,6 +322,7 @@ impl App {
         }
     }
 
+    /// The palette listing only the tabs: the tab bar's "+N" chip, for the tabs the bar has no room for.
     pub fn open_tab_list(&mut self) {
         let tabs = self.palette_items().into_iter().filter(|i| matches!(i.cmd, PaletteCmd::GoTab(_))).collect();
         self.open_palette_on(tabs);

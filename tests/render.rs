@@ -1892,10 +1892,13 @@ fn auto_add_decides_between_project_and_scan() {
         app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
     );
     assert!(app.cfg.projects.roots.is_empty(), "a repository is not a scan root");
+    // The folder walk answers on a helper thread: the toast comes once it is pumped.
     app.add_by_mode(AddMode::Auto, &group.display().to_string());
+    pump_until(&mut app, "scan answer", |a| a.toasts.iter().any(|t| t.text.starts_with("scanning ")));
     assert!(app.toasts.iter().any(|t| t.text.starts_with("scanning ") && t.text.ends_with("group for projects")));
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1, "the folder is a scan root");
     app.add_by_mode(AddMode::Auto, &notes.display().to_string());
+    pump_until(&mut app, "notes answer", |a| a.toasts.iter().any(|t| t.text == "added project notes"));
     assert!(app.toasts.iter().any(|t| t.text == "added project notes"));
     assert!(app.projects.iter().any(|p| p.path == notes && !p.repo), "a folder with no repository is a plain project");
     // Folder mode scans even a folder that holds no repository yet.
@@ -1904,6 +1907,32 @@ fn auto_add_decides_between_project_and_scan() {
     // Project mode (the prompt's forced mode) adds a folder as a project even when it only holds repositories.
     app.add_by_mode(AddMode::Project, &group.display().to_string());
     assert!(app.projects.iter().any(|p| p.path == group && !p.repo));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A folder whose repository check does not answer in time is added as a project, not scanned.
+#[test]
+fn auto_add_treats_a_silent_folder_as_a_project() {
+    use noble::app::AddMode;
+    let base = std::env::temp_dir().join(format!("noble-auto-add-slow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let folder = base.join("share");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut app = demo_app(110, 30);
+    app.repo_probe = |_, _| {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        true
+    };
+    let started = std::time::Instant::now();
+    app.add_by_mode(AddMode::Auto, &folder.display().to_string());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1), "the prompt does not wait for the check");
+    pump_until(&mut app, "share answer", |a| a.toasts.iter().any(|t| t.text == "added project share"));
+    assert!(
+        app.toasts.iter().any(|t| t.text == "added project share"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(app.cfg.projects.roots.is_empty(), "not scanned");
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -6850,9 +6879,18 @@ fn clicking_a_toast_removes_it() {
     app.toast(ToastLevel::Error, "first, an error");
     app.toast(ToastLevel::Info, "second note");
     render(&mut app, 110, 30);
-    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(0))).expect("toast hit");
+    let id = app.toasts[0].id;
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
     click(&mut app, rect.x + 1, rect.y);
     assert_eq!(toast_texts(&app), vec!["second note"]);
+    // Adding a toast does not change the ids of the ones before it.
+    render(&mut app, 110, 30);
+    let id = app.toasts[0].id;
+    app.toast(ToastLevel::Info, "third note");
+    render(&mut app, 110, 30);
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
+    click(&mut app, rect.x + 1, rect.y);
+    assert_eq!(toast_texts(&app), vec!["third note"]);
 }
 
 /// The pointer on a notification pauses its countdown; once it leaves, the countdown goes on.
@@ -6863,7 +6901,8 @@ fn hovered_toast_waits_for_the_pointer_to_leave() {
     app.toasts.clear();
     app.toast(ToastLevel::Info, "hover me");
     render(&mut app, 110, 30);
-    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(0))).expect("toast hit");
+    let id = app.toasts[0].id;
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
     age_toasts(&mut app, 60);
     mouse(&mut app, MouseEventKind::Moved, rect.x + 1, rect.y);
     app.tick();

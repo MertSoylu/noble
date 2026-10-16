@@ -10,8 +10,8 @@ All notable changes to NOBLE are documented here. The format is based on
 - Settings → Key bindings (in the Keys section) edits every shortcut from the screen: a list of all actions with
   their prefix and direct keys, ↑↓ to select, `/` to filter, `⏎` to rebind the prefix key, `d` for the direct chord,
   `x` (or del) to unbind and `r` to restore the default. A key another action already has is asked about first
-  ("ctrl+a n is Next Tab — replace? y/n"); keys NOBLE cannot bind (the prefix itself, ctrl+alt with a symbol, a plain
-  letter as a direct key) are refused with the reason. Each change is written to `config.toml` under its table, the
+  ("ctrl+a n is Next Tab — replace? y/n"); keys NOBLE cannot bind (the prefix itself, ctrl+alt with a symbol, a direct key
+  without ctrl or alt such as a letter, Enter or an arrow, except F1–F12) are refused with the reason. Each change is written to `config.toml` under its table, the
   rest of the file and its comments are kept, and the keys reload at once. Clicking a row selects it; double-clicking
   starts the rebinding. The `?` reference points to it.
 - Home's project card lists the selected project's quick tasks as a TASKS row of clickable chips (`▸ npm run dev`)
@@ -100,6 +100,14 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Resetting a shortcut (`r`) keeps a key that another action has taken since, and says so ("ctrl+a t stays on
+  Zoom"). Clicking a notification dismisses that notification even when another one left the screen first.
+- The key editor refuses to write while `config.toml` does not parse (the error names the line), and refuses a
+  bindings table written inline or as dotted keys rather than adding a second one. Spaces inside table headers are
+  accepted.
+- The startup animation plays once for `noble` and once for `noble-dev`: alternating between them no longer replays it.
+- Adding a folder in auto mode no longer freezes the screen while its subfolders are checked: a folder that does
+  not answer within two seconds is added as a project.
 - The README terminal screenshot shows the full pane path (`D:\dev\noble`); the screenshot generator wrote only as
   many characters as the text it replaced, which cut the path short.
 - The active terminal tab no longer hides inside the "+N" chip when there are more tabs than fit in the top bar.

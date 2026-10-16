@@ -691,11 +691,41 @@ fn push_at_table_end(out: &mut Vec<String>, entry: &str) {
     out.extend(tail);
 }
 
+/// The dotted name of the table a header line opens (`[keys.prefix_bindings]`, also spelled
+/// `[ keys . "prefix_bindings" ]`); `None` for other lines and for arrays of tables (`[[launchers]]`).
+fn header_name(line: &str) -> Option<String> {
+    let inner = strip_comment(line.trim()).trim().strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('[') || inner.ends_with(']') {
+        return None;
+    }
+    let parts: Vec<&str> = inner.split('.').map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'')).collect();
+    Some(parts.join("."))
+}
+
+/// Whether `table` exists in the text without a header line for it: an inline table
+/// (`prefix_bindings = { … }`) or dotted keys (`prefix_bindings."x" = …`). Adding a header for it
+/// would then make a duplicate table, so the edit is refused instead.
+fn defined_without_header(text: &str, table: &str) -> bool {
+    let Ok(doc) = text.parse::<toml::Table>() else { return false };
+    let mut node: Option<&toml::Table> = Some(&doc);
+    for part in table.split('.') {
+        node = node.and_then(|t| t.get(part)).and_then(toml::Value::as_table);
+    }
+    node.is_some() && !text.lines().any(|l| header_name(l).as_deref() == Some(table))
+}
+
 /// The one edit behind `set_binding` and `remove_binding`: `Some(value)` writes `"chord" = "value"` in
 /// `[table]` (in place of the line of that chord, its comment kept; else at the end of the table; the
 /// table is created at the end of the file when missing), `None` deletes the chord's line. Everything
-/// else stays as it is; a file without a change is returned untouched.
-fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> String {
+/// else stays as it is; a file without a change is returned untouched. The result must parse as a
+/// config: otherwise nothing is written and the error says why. A table written in another form
+/// (see `defined_without_header`) is refused rather than duplicated.
+fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> Result<String, String> {
+    if defined_without_header(text, table) {
+        return Err(format!(
+            "{table} is written in another form in config.toml (inline or dotted keys): edit it by hand"
+        ));
+    }
     let header = format!("[{table}]");
     let entry = value.map(|v| format!("{} = {}", quoted(chord), quoted(v)));
     let mut out: Vec<String> = Vec::new();
@@ -713,7 +743,7 @@ fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> St
                 }
                 done = true;
             }
-            in_table = strip_comment(trimmed).trim_end() == header;
+            in_table = header_name(line).as_deref() == Some(table);
             seen_table |= in_table;
         } else if in_table && line_key(line).is_some_and(|k| same_chord(&k, chord)) {
             // The first line of the chord is replaced (or dropped); any later duplicate is dropped.
@@ -740,22 +770,27 @@ fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> St
             changed = true;
         }
     }
-    if !changed {
-        return text.to_string();
+    let updated = if changed {
+        let mut s = out.join("\n");
+        s.push('\n');
+        s
+    } else {
+        text.to_string()
+    };
+    match parse(&updated) {
+        Ok(_) => Ok(updated),
+        Err(e) => Err(format!("not saved, the edit would break config.toml: {}", e.text)),
     }
-    let mut s = out.join("\n");
-    s.push('\n');
-    s
 }
 
 /// Sets `"chord" = "value"` in the `[table]` of the config text (`value` "none" unbinds the chord),
 /// preserving the comments and every other line.
-pub fn set_binding(text: &str, table: &str, chord: &str, value: &str) -> String {
+pub fn set_binding(text: &str, table: &str, chord: &str, value: &str) -> Result<String, String> {
     edit_binding(text, table, chord, Some(value))
 }
 
 /// Removes the `chord` line from the `[table]` of the config text, so the default binding applies again.
-pub fn remove_binding(text: &str, table: &str, chord: &str) -> String {
+pub fn remove_binding(text: &str, table: &str, chord: &str) -> Result<String, String> {
     edit_binding(text, table, chord, None)
 }
 
@@ -1016,40 +1051,62 @@ theme = \"ice\"
     fn set_binding_writes_into_its_table_and_keeps_the_rest() {
         let text = "[keys]\nprefix = \"ctrl+a\"   # the prefix\n\n[keys.prefix_bindings]\n# \"%\" = \"zoom\"\n\"v\" = \"split_right\"  # old\n\n[terminal]\nscrollback = 5000\n";
         // A chord with a line is rewritten in place, its comment kept.
-        let out = set_binding(text, "keys.prefix_bindings", "v", "none");
+        let out = set_binding(text, "keys.prefix_bindings", "v", "none").unwrap();
         assert!(out.contains("\"v\" = \"none\"  # old\n"), "{out}");
         assert!(out.contains("prefix = \"ctrl+a\"   # the prefix\n"), "{out}");
         assert!(out.contains("# \"%\" = \"zoom\"\n"), "a commented example stays: {out}");
         assert!(out.contains("scrollback = 5000\n"), "{out}");
         // A new chord goes to the end of its table, before the blank line that separates the next one.
-        let out = set_binding(&out, "keys.prefix_bindings", "%", "split_right");
+        let out = set_binding(&out, "keys.prefix_bindings", "%", "split_right").unwrap();
         assert!(out.contains("\"v\" = \"none\"  # old\n\"%\" = \"split_right\"\n\n[terminal]"), "{out}");
         // Another spelling of a line's chord ("Ctrl+A" for "ctrl+a") replaces that line.
         let with_line = "[keys.prefix_bindings]\n\"ctrl+a\" = \"zoom\"\n";
-        let out2 = set_binding(with_line, "keys.prefix_bindings", "Ctrl+A", "help");
+        let out2 = set_binding(with_line, "keys.prefix_bindings", "Ctrl+A", "help").unwrap();
         assert_eq!(out2, "[keys.prefix_bindings]\n\"Ctrl+A\" = \"help\"\n", "{out2}");
         // A missing table is created at the end of the file.
-        let out = set_binding("[general]\ntheme = \"amber\"\n", "keys.direct_bindings", "alt+t", "new_tab");
+        let out = set_binding("[general]\ntheme = \"amber\"\n", "keys.direct_bindings", "alt+t", "new_tab").unwrap();
         assert_eq!(out, "[general]\ntheme = \"amber\"\n\n[keys.direct_bindings]\n\"alt+t\" = \"new_tab\"\n");
         // Keys that TOML would read as syntax are quoted properly and read back.
-        let out = set_binding("", "keys.prefix_bindings", "=", "zoom");
-        let out = set_binding(&out, "keys.prefix_bindings", "\"", "help");
+        let out = set_binding("", "keys.prefix_bindings", "=", "zoom").unwrap();
+        let out = set_binding(&out, "keys.prefix_bindings", "\"", "help").unwrap();
         let parsed = parse(&out).expect("valid config");
         assert_eq!(parsed.keys.prefix_bindings.get("="), Some(&"zoom".to_string()));
         assert_eq!(parsed.keys.prefix_bindings.get("\""), Some(&"help".to_string()));
         // Writing the value a line already has changes nothing.
-        assert_eq!(set_binding(text, "keys.prefix_bindings", "v", "split_right"), text);
+        assert_eq!(set_binding(text, "keys.prefix_bindings", "v", "split_right").unwrap(), text);
     }
 
     #[test]
     fn remove_binding_restores_the_default_line_away() {
         let text = "[keys.direct_bindings]\n\"alt+t\" = \"zoom\"\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n";
-        let out = remove_binding(text, "keys.direct_bindings", "alt+t");
+        let out = remove_binding(text, "keys.direct_bindings", "alt+t").unwrap();
         assert_eq!(out, "[keys.direct_bindings]\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n");
         // Nothing to remove: the text is returned as it was (line endings included).
         let crlf = "[keys.direct_bindings]\r\n\"alt+x\" = \"none\"\r\n";
-        assert_eq!(remove_binding(crlf, "keys.direct_bindings", "alt+t"), crlf);
-        assert_eq!(remove_binding(crlf, "keys.prefix_bindings", "alt+t"), crlf);
+        assert_eq!(remove_binding(crlf, "keys.direct_bindings", "alt+t").unwrap(), crlf);
+        assert_eq!(remove_binding(crlf, "keys.prefix_bindings", "alt+t").unwrap(), crlf);
+    }
+
+    #[test]
+    fn binding_edits_accept_spaced_headers_and_refuse_other_forms() {
+        // Whitespace around the brackets and the dots names the same table.
+        let spaced = "[ keys . prefix_bindings ]\n\"v\" = \"zoom\"\n";
+        assert_eq!(
+            set_binding(spaced, "keys.prefix_bindings", "v", "none").unwrap(),
+            "[ keys . prefix_bindings ]\n\"v\" = \"none\"\n"
+        );
+        // An inline table or dotted keys already hold the table: a second header would duplicate it.
+        let inline = "[keys]\nprefix_bindings = { v = \"zoom\" }\n";
+        assert!(set_binding(inline, "keys.prefix_bindings", "x", "zoom").is_err());
+        let dotted = "[keys]\nprefix_bindings.\"v\" = \"zoom\"\n";
+        assert!(remove_binding(dotted, "keys.prefix_bindings", "v").is_err());
+        let root_dotted = "keys.direct_bindings.\"alt+t\" = \"zoom\"\n";
+        assert!(set_binding(root_dotted, "keys.direct_bindings", "alt+x", "zoom").is_err());
+        // An edit that leaves an invalid config is not returned: `keys` is an inline table here.
+        let inline_keys = "keys = { prefix = \"ctrl+a\" }\n";
+        assert!(set_binding(inline_keys, "keys.prefix_bindings", "v", "zoom").is_err());
+        // A file that does not parse is refused too.
+        assert!(set_binding("[keys\n", "keys.prefix_bindings", "v", "zoom").is_err());
     }
 
     #[test]

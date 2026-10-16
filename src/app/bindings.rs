@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use super::{App, Overlay, ToastLevel};
+use super::{App, Overlay, ToastLevel, ToastTarget};
 use crate::config::{self, KeysCfg};
 use crate::keys::{Action, Chord, chords_of, default_direct_bindings, default_prefix_bindings};
 use crate::term::input::is_altgr_char;
@@ -69,7 +69,7 @@ pub enum Edit {
 }
 
 impl Edit {
-    fn apply_text(&self, text: &str) -> String {
+    fn apply_text(&self, text: &str) -> Result<String, String> {
         match self {
             Edit::Set { slot, chord, value } => config::set_binding(text, slot.table(), &chord.config_name(), value),
             Edit::Remove { slot, chord } => config::remove_binding(text, slot.table(), &chord.config_name()),
@@ -94,8 +94,9 @@ impl Edit {
 }
 
 /// The chord a captured key stands for, or why NOBLE cannot bind it. The checks mirror the config
-/// parser (`Chord::parse`) and add the rules a key table needs: not the prefix itself, and no plain
-/// letter as a direct key (every shell would lose it).
+/// parser (`Chord::parse`) and add the rules a key table needs: not the prefix itself, and no direct
+/// key without ctrl or alt (every shell needs plain keys: letters, Enter, Tab, arrows …). F1–F12 are
+/// the exception; after the prefix any key is allowed.
 pub fn capture_chord(k: &KeyEvent, slot: Slot, prefix: Chord) -> Result<Chord, String> {
     // Windows reports AltGr as ctrl+alt: such a key is a character, not a chord.
     if let KeyCode::Char(c) = k.code
@@ -110,10 +111,23 @@ pub fn capture_chord(k: &KeyEvent, slot: Slot, prefix: Chord) -> Result<Chord, S
     if chord == prefix {
         return Err(format!("{prefix} is the prefix key itself"));
     }
-    if slot == Slot::Direct && matches!(chord.code, KeyCode::Char(_)) && chord.mods.is_empty() {
-        return Err("a plain letter would be taken from every shell: add ctrl, alt or shift".into());
+    let plain = !chord.mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    if slot == Slot::Direct && plain && !matches!(chord.code, KeyCode::F(1..=12)) {
+        return Err(match chord.code {
+            KeyCode::Char(_) => "a plain letter would be taken from every shell: add ctrl or alt".into(),
+            _ => "the shell needs this key: add ctrl or alt (only F1–F12 work alone)".into(),
+        });
     }
     Ok(chord)
+}
+
+/// The config text must parse before it is edited. The error is the toast's text and the line the
+/// toast's click opens.
+fn check_config_text(text: &str) -> Result<(), (String, Option<u32>)> {
+    config::parse(text).map(|_| ()).map_err(|e| {
+        let at = e.line.map(|n| format!(" (line {n})")).unwrap_or_default();
+        (format!("fix config.toml first{at}"), e.line)
+    })
 }
 
 /// The box and its columns for a screen; the columns are offsets from the left edge of the text.
@@ -277,8 +291,12 @@ impl App {
             }
             KeyCode::Char('r') if !alt => {
                 if let Some(a) = sel {
-                    let edits = self.reset_edits(a);
-                    self.save_bindings(st, &edits, format!("saved · {} back to its default keys", a.title()));
+                    let (edits, kept) = self.reset_edits(a);
+                    let mut done = format!("saved · {} back to its default keys", a.title());
+                    if !kept.is_empty() {
+                        done = format!("{done} · {}", kept.join(" · "));
+                    }
+                    self.save_bindings(st, &edits, done);
                 }
             }
             _ => {}
@@ -359,8 +377,10 @@ impl App {
     }
 
     /// Back to the defaults: the user's lines for the action, and the default chords of it, are deleted.
-    fn reset_edits(&self, action: Action) -> Vec<Edit> {
+    /// A chord that another action holds now stays with it (no edit for it); the notes name those.
+    fn reset_edits(&self, action: Action) -> (Vec<Edit>, Vec<String>) {
         let mut edits = Vec::new();
+        let mut kept = Vec::new();
         for slot in [Slot::Prefix, Slot::Direct] {
             let (user, defaults) = match slot {
                 Slot::Prefix => (&self.cfg.keys.prefix_bindings, default_prefix_bindings()),
@@ -374,12 +394,18 @@ impl App {
             chords.extend(defaults.iter().filter(|(_, a)| *a == action).map(|(c, _)| *c));
             let mut seen = HashSet::new();
             for chord in chords {
-                if seen.insert(chord) {
-                    edits.push(Edit::Remove { slot, chord });
+                if !seen.insert(chord) {
+                    continue;
+                }
+                match self.slot_map(slot).get(&chord).copied() {
+                    Some(other) if other != action => {
+                        kept.push(format!("{} stays on {}", self.key_label(slot, chord), other.title()));
+                    }
+                    _ => edits.push(Edit::Remove { slot, chord }),
                 }
             }
         }
-        edits
+        (edits, kept)
     }
 
     /// Writes the edits to `config.toml` and reloads the keys from the new settings. Without background
@@ -391,7 +417,18 @@ impl App {
                 Ok(text) => text,
                 Err(e) => return self.toast(ToastLevel::Error, e),
             };
-            let updated = edits.iter().fold(text, |acc, e| e.apply_text(&acc));
+            // A file that does not parse is left alone: the user fixes it first (its toast opens the line).
+            if let Err((msg, line)) = check_config_text(&text) {
+                st.note = Some(msg.clone());
+                return self.toast_target(ToastLevel::Error, msg, Some(ToastTarget::Config { line }));
+            }
+            let updated = match edits.iter().try_fold(text, |acc, e| e.apply_text(&acc)) {
+                Ok(updated) => updated,
+                Err(e) => {
+                    st.note = Some(e.clone());
+                    return self.toast(ToastLevel::Error, e);
+                }
+            };
             if !self.write_config(updated) {
                 return;
             }
@@ -467,13 +504,33 @@ mod tests {
         // The prefix itself is no key of its own, in either table.
         assert!(capture_chord(&key(KeyCode::Char('a'), KeyModifiers::CONTROL), Slot::Prefix, prefix).is_err());
         assert!(capture_chord(&key(KeyCode::Char('a'), KeyModifiers::CONTROL), Slot::Direct, prefix).is_err());
-        // A plain letter cannot be a direct key; after the prefix it can, and so can arrows as direct keys.
+        // A direct key needs ctrl or alt, except F1–F12. After the prefix, any key is fine.
         assert!(capture_chord(&key(KeyCode::Char('q'), KeyModifiers::NONE), Slot::Direct, prefix).is_err());
         assert_eq!(
             capture_chord(&key(KeyCode::Char('q'), KeyModifiers::NONE), Slot::Prefix, prefix),
             Ok(Chord::new(KeyCode::Char('q'), KeyModifiers::NONE))
         );
-        assert!(capture_chord(&key(KeyCode::Up, KeyModifiers::SHIFT), Slot::Direct, prefix).is_ok());
+        assert_eq!(
+            capture_chord(&key(KeyCode::Enter, KeyModifiers::NONE), Slot::Prefix, prefix),
+            Ok(Chord::new(KeyCode::Enter, KeyModifiers::NONE))
+        );
+        for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::BackTab, KeyCode::Backspace, KeyCode::Esc] {
+            assert!(capture_chord(&key(code, KeyModifiers::NONE), Slot::Direct, prefix).is_err(), "{code:?}");
+        }
+        for code in [KeyCode::Up, KeyCode::Home, KeyCode::PageDown, KeyCode::Insert, KeyCode::Delete] {
+            assert!(capture_chord(&key(code, KeyModifiers::NONE), Slot::Direct, prefix).is_err(), "{code:?}");
+            assert!(capture_chord(&key(code, KeyModifiers::SHIFT), Slot::Direct, prefix).is_err(), "shift {code:?}");
+        }
+        // Shift+letter is a plain letter (uppercase, no modifier): the refusal asks for ctrl or alt.
+        let why = capture_chord(&key(KeyCode::Char('Q'), KeyModifiers::SHIFT), Slot::Direct, prefix).unwrap_err();
+        assert!(why.contains("add ctrl or alt") && !why.contains("shift"), "{why}");
+        // F1–F12 stand alone as direct keys; F13 is not one of them.
+        assert!(capture_chord(&key(KeyCode::F(5), KeyModifiers::NONE), Slot::Direct, prefix).is_ok());
+        assert!(capture_chord(&key(KeyCode::F(12), KeyModifiers::NONE), Slot::Direct, prefix).is_ok());
+        assert!(capture_chord(&key(KeyCode::F(13), KeyModifiers::NONE), Slot::Direct, prefix).is_err());
+        // Ctrl or alt make any of them a chord.
+        assert!(capture_chord(&key(KeyCode::Up, KeyModifiers::ALT), Slot::Direct, prefix).is_ok());
+        assert!(capture_chord(&key(KeyCode::Enter, KeyModifiers::CONTROL), Slot::Direct, prefix).is_ok());
     }
 
     #[test]
@@ -541,13 +598,40 @@ mod tests {
     }
 
     #[test]
+    fn reset_leaves_a_key_that_another_action_holds() {
+        let mut app = App::headless(Config::default(), (110, 30));
+        app.open_bindings();
+        // NewTab gives up "t"; Zoom takes it. Resetting NewTab must not take "t" back from Zoom.
+        select(&mut app, Action::NewTab);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        select(&mut app, Action::Zoom);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        let t = Chord::parse("t").unwrap();
+        assert_eq!(app.keymap.prefix_map.get(&t), Some(&Action::Zoom));
+        select(&mut app, Action::NewTab);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(app.keymap.prefix_map.get(&t), Some(&Action::Zoom), "Zoom keeps t");
+        assert_eq!(app.keymap.prefix_map.get(&Chord::parse("c").unwrap()), Some(&Action::NewTab));
+        let done = bindings(&app).done.clone().unwrap_or_default();
+        assert!(done.contains("t stays on Zoom"), "{done}");
+    }
+
+    #[test]
+    fn a_broken_config_is_not_edited() {
+        let (msg, line) = check_config_text("[keys\n").unwrap_err();
+        assert!(msg.starts_with("fix config.toml first (line ") && line.is_some(), "{msg}");
+        assert!(check_config_text(config::DEFAULT_CONFIG).is_ok());
+    }
+
+    #[test]
     fn edits_write_the_same_result_to_text_and_to_the_keys() {
         let edits = [
             Edit::Set { slot: Slot::Prefix, chord: Chord::parse("%").unwrap(), value: "split_right".into() },
             Edit::Set { slot: Slot::Direct, chord: Chord::parse("alt+enter").unwrap(), value: "zoom".into() },
             Edit::Remove { slot: Slot::Direct, chord: Chord::parse("alt+enter").unwrap() },
         ];
-        let text = edits.iter().fold(String::new(), |acc, e| e.apply_text(&acc));
+        let text = edits.iter().try_fold(String::new(), |acc, e| e.apply_text(&acc)).expect("valid edits");
         let parsed = config::parse(&text).expect("valid config");
         let mut cfg = Config::default().keys;
         for e in &edits {
@@ -568,7 +652,10 @@ mod tests {
             Edit::Remove { slot: Slot::Direct, chord: Chord::parse("alt+enter").unwrap() },
         ];
         // The first run's file: comments, the launcher blocks and the commented examples all stay.
-        let text = edits.iter().fold(config::DEFAULT_CONFIG.to_string(), |acc, e| e.apply_text(&acc));
+        let text = edits
+            .iter()
+            .try_fold(config::DEFAULT_CONFIG.to_string(), |acc, e| e.apply_text(&acc))
+            .expect("valid edits");
         assert!(text.contains("# \"%\" = \"split_right\"") && text.contains("[[launchers]]"), "{text}");
         let parsed = config::parse(&text).expect("valid config");
         let mut cfg = config::parse(config::DEFAULT_CONFIG).expect("template").keys;

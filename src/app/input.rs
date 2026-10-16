@@ -810,20 +810,19 @@ impl App {
     /// The pointer on a notification pauses its countdown; off it, the countdown goes on.
     fn hold_toasts(&mut self, x: u16, y: u16) {
         let over = match self.hit_at(x, y) {
-            Some(Hit::Toast(i)) => Some(i),
+            Some(Hit::Toast(id)) => Some(id),
             _ => None,
         };
         let now = Instant::now();
-        for (i, t) in self.toasts.iter_mut().enumerate() {
-            t.set_hovered(over == Some(i), now);
+        for t in self.toasts.iter_mut() {
+            t.set_hovered(over == Some(t.id), now);
         }
     }
 
-    /// A click dismisses a notification; a config error also opens the config file at its line.
-    fn toast_clicked(&mut self, i: usize) {
-        if i >= self.toasts.len() {
-            return;
-        }
+    /// A click dismisses a notification (by its id: the list may have changed since the last frame);
+    /// a config error also opens the config file at its line.
+    fn toast_clicked(&mut self, id: u64) {
+        let Some(i) = self.toasts.iter().position(|t| t.id == id) else { return };
         let toast = self.toasts.remove(i);
         self.dirty = true;
         match toast.target {
@@ -973,7 +972,7 @@ impl App {
                     self.open_link(crate::term::link::Link::Url(url));
                 }
             }
-            Hit::Toast(i) => self.toast_clicked(i),
+            Hit::Toast(id) => self.toast_clicked(id),
             Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),

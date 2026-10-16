@@ -977,7 +977,7 @@ pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
 fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let mut y = area.bottom().saturating_sub(3);
-    for (i, t) in app.toasts.iter().enumerate().rev() {
+    for t in app.toasts.iter().rev() {
         if y <= area.y + 1 {
             break;
         }
@@ -1005,7 +1005,7 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) 
         hud::put(buf, x, y, "▌", Style::default().fg(color).bg(th.raised), room.min(1));
         hud::put(buf, x + 1, y, &text, Style::default().fg(th.fg).bg(th.raised), w.min(room.saturating_sub(1)));
         if room > 0 {
-            hits.push((Rect::new(x, y, w.min(room), 1), Hit::Toast(i)));
+            hits.push((Rect::new(x, y, w.min(room), 1), Hit::Toast(t.id)));
         }
         // Countdown: the time already spent darkens the toast from its right end (a sticky one has none).
         if let Some(life) = t.life.filter(|_| app.fx.enabled()) {

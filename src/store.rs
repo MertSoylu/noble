@@ -492,6 +492,8 @@ pub struct UiStateData {
     pub hooks_offered: bool,
     /// The NOBLE version that last played the startup animation ("" before the first launch).
     pub boot_version: String,
+    /// The same for `noble-dev` (its own state, so alternating with `noble` does not replay the animation).
+    pub boot_version_dev: String,
     /// Shell keys (as "alt+t") whose first use already told the user where NOBLE's action is.
     pub shell_keys_told: Vec<String>,
     /// Palette commands run lately, newest first (`App::palette_key`); listed first on an empty query.
