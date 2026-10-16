@@ -17,6 +17,9 @@ use crate::theme;
 /// network share that stopped responding would otherwise hold up startup.
 pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How many closed tabs `reopen_tab` can bring back.
+const CLOSED_TABS_KEPT: usize = 10;
+
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
@@ -50,6 +53,7 @@ impl App {
                 View::Term(i) => self.request_close_tab(i),
                 _ => self.no_op("no tab here — open a terminal tab first"),
             },
+            Action::ReopenTab => self.reopen_tab(),
             Action::NextTab => self.cycle_tab(1),
             Action::PrevTab => self.cycle_tab(-1),
             Action::GoTab(n) => self.go_tab(n as usize),
@@ -358,9 +362,23 @@ impl App {
         }
     }
 
+    /// Closes tab `i` the user asked for: it is kept for `reopen_tab`, and a toast names the key.
     pub fn remove_tab(&mut self, i: usize) {
+        self.remove_tab_as(i, true);
+    }
+
+    /// `user` is false when the tab's last shell exited on its own: that is not kept and not announced.
+    fn remove_tab_as(&mut self, i: usize, user: bool) {
         if i >= self.tabs.len() {
             return;
+        }
+        // Snapshot first: the panes' directories and launchers are read from `self.panes`.
+        if user {
+            let saved = self.saved_tab(&self.tabs[i]);
+            self.closed_tabs.push((i, saved));
+            if self.closed_tabs.len() > CLOSED_TABS_KEPT {
+                self.closed_tabs.remove(0);
+            }
         }
         let tab = self.tabs.remove(i);
         for id in tab.panes() {
@@ -380,6 +398,35 @@ impl App {
         };
         if let View::Term(v) = self.view {
             self.tabs[v].activity = false;
+        }
+        if user {
+            let text = match self.keymap.hint(Action::ReopenTab) {
+                Some(key) => format!("tab closed · {key} reopens"),
+                None => "tab closed".into(),
+            };
+            self.toast(ToastLevel::Info, text);
+        }
+    }
+
+    /// Reopens the most recently closed tab through the restore path, at its old index (or the end),
+    /// and focuses it. Nothing to reopen: a toast says so.
+    pub fn reopen_tab(&mut self) {
+        let Some((index, tab)) = self.closed_tabs.last().cloned() else {
+            return self.no_op("no closed tab to reopen");
+        };
+        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab] };
+        let before = self.tabs.len();
+        if self.open_workspace(&ws) == 0 {
+            // Every pane failed to start (already reported): the tab stays in the list for another try.
+            return;
+        }
+        self.closed_tabs.pop();
+        if self.tabs.len() == before + 1
+            && let Some(opened) = self.tabs.pop()
+        {
+            let at = index.min(self.tabs.len());
+            self.tabs.insert(at, opened);
+            self.view = View::Term(at);
         }
     }
 
@@ -490,14 +537,24 @@ impl App {
         }));
     }
 
+    /// Closes a pane the user asked to close (a closed last pane closes its tab, kept for `reopen_tab`).
     pub fn close_pane(&mut self, id: PaneId) {
-        self.panes.remove(&id);
-        self.forget_agent(id);
-        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
+        self.close_pane_as(id, true);
+    }
+
+    /// `user` is false when the pane's shell exited on its own (see `remove_tab_as`).
+    pub(super) fn close_pane_as(&mut self, id: PaneId, user: bool) {
+        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else {
+            self.panes.remove(&id);
+            self.forget_agent(id);
+            return;
+        };
         if self.tabs[ti].panes().len() <= 1 {
-            self.remove_tab(ti);
+            self.remove_tab_as(ti, user);
             return;
         }
+        self.panes.remove(&id);
+        self.forget_agent(id);
         let body = self.body();
         let tab = &mut self.tabs[ti];
         let (rects, _) = tab.root.layout(body);
@@ -856,29 +913,28 @@ impl App {
         }
     }
 
+    /// One tab as the session file and the workspaces store it.
+    fn saved_tab(&self, t: &Tab) -> SavedTab {
+        let layout = self.save_node(&t.root);
+        // A launcher tab whose launcher pane is gone restores as a plain tab, so it is
+        // saved under the project name alone (`open_workspace` marks it by its panes).
+        let origin = match t.origin.rsplit_once(" · ") {
+            Some((base, _)) if t.launched && !has_launch(&layout) => base.to_string(),
+            _ => t.origin.clone(),
+        };
+        SavedTab {
+            name: t.name.clone(),
+            origin,
+            layout,
+            focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
+        }
+    }
+
     pub fn snapshot(&self, name: &str) -> Workspace {
         Workspace {
             name: name.to_string(),
             saved_at: chrono::Utc::now().timestamp(),
-            tabs: self
-                .tabs
-                .iter()
-                .map(|t| {
-                    let layout = self.save_node(&t.root);
-                    // A launcher tab whose launcher pane is gone restores as a plain tab, so it is
-                    // saved under the project name alone (`open_workspace` marks it by its panes).
-                    let origin = match t.origin.rsplit_once(" · ") {
-                        Some((base, _)) if t.launched && !has_launch(&layout) => base.to_string(),
-                        _ => t.origin.clone(),
-                    };
-                    SavedTab {
-                        name: t.name.clone(),
-                        origin,
-                        layout,
-                        focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
-                    }
-                })
-                .collect(),
+            tabs: self.tabs.iter().map(|t| self.saved_tab(t)).collect(),
         }
     }
 

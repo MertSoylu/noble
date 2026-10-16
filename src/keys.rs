@@ -157,6 +157,7 @@ pub enum Action {
     Settings,
     NewTab,
     CloseTab,
+    ReopenTab,
     NextTab,
     PrevTab,
     GoTab(u8),
@@ -204,12 +205,13 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 57] = [
+    pub const ALL: [Action; 58] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
         Action::NewTab,
         Action::CloseTab,
+        Action::ReopenTab,
         Action::NextTab,
         Action::PrevTab,
         Action::GoTab(1),
@@ -274,6 +276,7 @@ impl Action {
                     Action::Settings => "settings",
                     Action::NewTab => "new_tab",
                     Action::CloseTab => "close_tab",
+                    Action::ReopenTab => "reopen_tab",
                     Action::NextTab => "next_tab",
                     Action::PrevTab => "prev_tab",
                     Action::SplitRight => "split_right",
@@ -337,6 +340,7 @@ impl Action {
             Action::Settings => "Open Settings".into(),
             Action::NewTab => "New Terminal Tab".into(),
             Action::CloseTab => "Close Tab".into(),
+            Action::ReopenTab => "Reopen Closed Tab".into(),
             Action::NextTab => "Next Tab".into(),
             Action::PrevTab => "Previous Tab".into(),
             Action::GoTab(n) => format!("Go to Tab {n}"),
@@ -396,6 +400,7 @@ impl Action {
             | Action::JumpToAgent => "NAV",
             Action::NewTab
             | Action::CloseTab
+            | Action::ReopenTab
             | Action::NextTab
             | Action::PrevTab
             | Action::GoTab(_)
@@ -451,6 +456,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("t"), Action::NewTab),
         (c("c"), Action::NewTab),
         (c("X"), Action::CloseTab),
+        (c("T"), Action::ReopenTab),
         (c("n"), Action::NextTab),
         (c("p"), Action::PrevTab),
         (c("0"), Action::Bridge),

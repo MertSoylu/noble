@@ -26,7 +26,7 @@ use crate::event::{AppEvent, Tx};
 use crate::keys::Keymap;
 use crate::projects::{Project, ProjectReq};
 use crate::sensors::{self, SensorMode, SensorRequest, Sensors};
-use crate::store::{Recent, UsageHistory, Workspaces};
+use crate::store::{Recent, SavedTab, UsageHistory, Workspaces};
 use crate::term::layout::{Divider, PaneId};
 use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert};
@@ -728,6 +728,8 @@ pub struct App {
     pub quit: bool,
     pub started: Instant,
     pub restored_tabs: usize,
+    /// Tabs the user closed, most recent last, with their index at the time (`reopen_tab`). In memory only.
+    pub closed_tabs: Vec<(usize, SavedTab)>,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
     /// This window's id in the shared session file (`store::instance_id`).
@@ -1037,6 +1039,7 @@ impl App {
             quit: false,
             started: Instant::now(),
             restored_tabs: 0,
+            closed_tabs: Vec::new(),
             dev: false,
             instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
@@ -1198,7 +1201,8 @@ impl App {
                 }
                 if self.panes.contains_key(&id) {
                     let label = self.panes.get(&id).map(|p| p.label()).unwrap_or_default();
-                    self.close_pane(id);
+                    // The shell exited on its own: not a close the user made, so nothing is kept for reopening.
+                    self.close_pane_as(id, false);
                     self.toast(ToastLevel::Info, format!("{label} exited"));
                 }
             }

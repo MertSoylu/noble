@@ -7,6 +7,11 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Closing a terminal tab (close tab, its last pane, middle-click or ×) can be undone: prefix `T` (Reopen Closed
+  Tab, `reopen_tab`) brings back the last ten closed tabs, most recent first, with their split layout, each
+  pane's directory, launcher and name, at their old index and focused. The tab-closed notice names the key; the
+  palette lists the action only when there is something to reopen. The history is kept in memory, not saved,
+  and a shell that exits on its own is not kept.
 - Home has one add key: `a` opens the add prompt in auto mode, which decides on Enter. A git repository (or a
   folder with no repository within two levels) is added as a project ("added project X"); a folder with git
   repositories inside is scanned for them ("scanning X for projects"). `tab` cycles auto, folder to scan and one

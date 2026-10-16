@@ -2279,6 +2279,91 @@ fn tabs_drag_and_rename() {
     app.run(Action::CloseTab);
 }
 
+/// Closing a split tab keeps it: `reopen_tab` brings its panes back in their directories, at the old
+/// index and focused, and the palette lists the action only while there is something to reopen. With
+/// nothing to reopen it says so; a shell that exits on its own is not kept.
+#[test]
+fn closed_tab_reopens_with_its_panes() {
+    use noble::term::layout::Dir;
+    let has_reopen = |app: &App| app.palette_items().iter().any(|i| i.title == "Reopen Closed Tab");
+    let base = std::env::temp_dir().join(format!("noble-reopen-{}", std::process::id()));
+    let (alpha, beta) = (base.join("alpha"), base.join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+
+    let mut app = demo_app(110, 30);
+    assert_eq!(app.keymap.prefix_key(Action::ReopenTab).as_deref(), Some("T"), "prefix T is free");
+    app.new_tab(std::env::temp_dir(), None, Some("first".into()));
+    let layout = SavedNode::Split {
+        dir: Dir::Row,
+        ratio: 0.5,
+        a: Box::new(SavedNode::Leaf { cwd: alpha.display().to_string(), launch: None }),
+        b: Box::new(SavedNode::Leaf { cwd: beta.display().to_string(), launch: None }),
+    };
+    let ws = Workspace {
+        name: "split".into(),
+        saved_at: 0,
+        tabs: vec![SavedTab { name: Some("grid".into()), origin: "grid".into(), layout, focus: 1 }],
+    };
+    assert_eq!(app.open_workspace(&ws), 1);
+    app.view = View::Term(1);
+    let dirs = |app: &App| -> Vec<PathBuf> { app.tabs[1].panes().iter().map(|id| app.panes[id].cwd()).collect() };
+    let before = dirs(&app);
+    assert_eq!(before, vec![alpha.clone(), beta.clone()]);
+    assert!(!has_reopen(&app), "nothing closed yet");
+
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.tabs.len(), 1, "the split tab closed");
+    let key = app.keymap.hint(Action::ReopenTab).expect("T is bound");
+    let hint = format!("tab closed · {key} reopens");
+    assert!(
+        app.toasts.iter().any(|t| t.text == hint),
+        "toast {hint:?}: {:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(has_reopen(&app), "listed once a tab can come back");
+
+    app.run(Action::ReopenTab);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.view, View::Term(1), "back at its old index and focused");
+    assert_eq!(app.tabs[1].panes().len(), 2, "same number of panes");
+    assert_eq!(dirs(&app), before, "same directories in the same order");
+    assert_eq!(app.tabs[1].focus, app.tabs[1].panes()[1], "the saved focus comes back");
+    assert_eq!(app.tabs[1].name.as_deref(), Some("grid"));
+    assert!(!has_reopen(&app), "history is used up");
+    let text = render(&mut app, 110, 30);
+    save("reopened-tab-110x30", &text);
+
+    app.run(Action::ReopenTab);
+    assert!(app.toasts.iter().any(|t| t.text == "no closed tab to reopen"), "empty history says so");
+
+    // A shell that exits on its own closes its tab without keeping it.
+    app.new_tab(std::env::temp_dir(), None, Some("gone".into()));
+    let id = app.tabs.last().unwrap().focus;
+    let (tabs, kept) = (app.tabs.len(), app.closed_tabs.len());
+    app.handle(AppEvent::PtyExit(id));
+    assert_eq!(app.tabs.len(), tabs - 1, "the exited shell's tab closed");
+    assert_eq!(app.closed_tabs.len(), kept, "an exit is not a close the user made");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// Closing the last pane of a tab (prefix `x`) is a close too: the tab comes back with `reopen_tab`.
+#[test]
+fn closing_the_last_pane_keeps_the_tab() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("solo".into()));
+    app.new_tab(std::env::temp_dir(), None, Some("other".into()));
+    app.view = View::Term(0);
+    app.run(Action::ClosePane);
+    assert_eq!(app.tabs.len(), 1, "the one pane closed its tab");
+    app.run(Action::ReopenTab);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.view, View::Term(0), "reopened at index 0");
+    assert_eq!(app.tabs[0].origin, "solo");
+    assert_eq!(app.tabs[0].panes().len(), 1);
+}
+
 /// Project row: quick actions on hover; a pinned project moves to the top.
 #[test]
 fn project_row_actions_and_pins() {

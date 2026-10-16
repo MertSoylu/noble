@@ -233,6 +233,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `alt+0` | Home | `v` `\|` | split right |
 | `alt+t`\* | new tab | `s` `-` | split down |
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
+| | | `T` | reopen the last closed tab |
 | `alt+m` | system monitor | `z` | zoom pane |
 | `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
@@ -354,7 +355,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 # (oh-my-pi), freebuff f, grok z (Grok Build), cursor-agent u, command-code d, cline l, kilo n.
 ```
 
-**Actions** for bindings: `bridge system settings new_tab close_tab next_tab prev_tab tab_1…tab_9 move_tab_left
+**Actions** for bindings: `bridge system settings new_tab close_tab reopen_tab next_tab prev_tab tab_1…tab_9 move_tab_left
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
