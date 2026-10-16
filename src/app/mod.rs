@@ -661,6 +661,9 @@ pub struct App {
     pub bridge: BridgeState,
     pub system: SystemState,
     pub settings_sel: usize,
+    /// The Settings filter (`/`): rows whose name contains it; `settings_filtering` while it takes typed text.
+    pub settings_filter: String,
+    pub settings_filtering: bool,
     /// First line of the Settings page on screen; `settings_follow` scrolls it to the selection.
     pub settings_scroll: usize,
     pub settings_follow: bool,
@@ -979,6 +982,8 @@ impl App {
             bridge: BridgeState::default(),
             system: SystemState::default(),
             settings_sel: 0,
+            settings_filter: String::new(),
+            settings_filtering: false,
             settings_scroll: 0,
             settings_follow: true,
             settings_back: None,

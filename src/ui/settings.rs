@@ -87,11 +87,21 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         return;
     }
     let (frame, rows) = page_frame(area);
-    let inner = hud::frame(buf, frame, "Settings", "saved automatically", true, th);
+    // While filtering (or with a kept filter) the query sits in the frame's title, with a cursor when typing.
+    let title = if app.settings_filtering || !app.settings_filter.is_empty() {
+        let cursor = if app.settings_filtering { "▏" } else { "" };
+        format!("Settings / {}{cursor}", app.settings_filter)
+    } else {
+        "Settings".to_string()
+    };
+    let inner = hud::frame(buf, frame, &title, "saved automatically", true, th);
     let x = inner.x + 2;
     let iw = inner.width.saturating_sub(4);
     let items = app.settings_items();
-    let sel = app.settings_sel.min(items.len() - 1);
+    let sel = app.settings_sel.min(items.len().saturating_sub(1));
+    if items.is_empty() {
+        hud::put(buf, x, inner.y + 1, "no settings match", th.dim(), iw);
+    }
     let lines = build_lines(app);
     let offset = app.settings_scroll.min(lines.len().saturating_sub(rows));
     let visible = &lines[offset..(offset + rows).min(lines.len())];
@@ -119,10 +129,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             Line::Buttons(list) => {
                 let mut cx = x;
                 for i in list {
-                    let label = match items[*i] {
-                        SettingItem::OpenConfig => "Edit config file",
-                        _ => "Reload config",
-                    };
+                    let label = items[*i].label();
                     let start = cx;
                     let key = if *i == sel { "▶" } else { "·" };
                     cx = hud::button(buf, cx, y, key, label, th, true);
@@ -146,7 +153,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         hud::put_right(buf, x + iw, inner.bottom() - 1, "↓ more", th.dim());
     }
     // What the selected setting does, on the bottom row (left of the "more" marker).
-    if let SettingItem::Setting(key) = items[sel] {
+    if let Some(SettingItem::Setting(key)) = items.get(sel) {
         let room = iw.saturating_sub(if more { 8 } else { 0 });
         hud::put(buf, x, inner.bottom() - 1, &util::truncate(key.description(), room as usize), th.dim(), room);
     }

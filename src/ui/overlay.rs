@@ -703,6 +703,22 @@ fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui:
     inner
 }
 
+/// Splits the drawn title into runs of plain and matched letters. `shown` is `title` as drawn (cut
+/// with "…" when it does not fit): marks past the cut are dropped and the "…" is never marked.
+fn title_runs(title: &str, shown: &str, marks: &[usize]) -> Vec<(String, bool)> {
+    let cut = shown != title;
+    let visible = shown.chars().count().saturating_sub(usize::from(cut));
+    let mut runs: Vec<(String, bool)> = Vec::new();
+    for (i, ch) in shown.chars().enumerate() {
+        let hit = i < visible && marks.contains(&i);
+        match runs.last_mut() {
+            Some((text, run_hit)) if *run_hit == hit => text.push(ch),
+            _ => runs.push((ch.to_string(), hit)),
+        }
+    }
+    runs
+}
+
 fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteState, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let w = 76.min(area.width.saturating_sub(2));
@@ -759,8 +775,16 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
         );
         let hint_w = util::width(&item.hint) as u16;
         let title_w = iw.saturating_sub(2 + group_w + hint_w + 2);
-        let title_style = if selected { th.accent_bold().bg(bgc) } else { th.text().bg(bgc) };
-        hud::put(buf, cx, y, &util::truncate(&item.title, title_w as usize), title_style, title_w);
+        // The title as drawn (cut with "…" when it does not fit); the letters the query matched in bold accent.
+        let shown = util::truncate(&item.title, title_w as usize);
+        let base = if selected { th.text().add_modifier(Modifier::BOLD).bg(bgc) } else { th.text().bg(bgc) };
+        let marks: &[usize] = st.positions.get(row).map_or(&[], |m| m.as_slice());
+        let runs = title_runs(&item.title, &shown, marks);
+        let spans: Vec<(&str, Style)> = runs
+            .iter()
+            .map(|(text, hit)| (text.as_str(), if *hit { th.accent_bold().bg(bgc) } else { base }))
+            .collect();
+        hud::put_spans(buf, cx, y, &spans, title_w);
         if !item.hint.is_empty() {
             hud::put_right(buf, x + iw, y, &item.hint, th.dim().bg(bgc));
         }

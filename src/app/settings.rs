@@ -1,6 +1,6 @@
 //! Settings tab: selectable items, value changes and persistent writes to the config.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, ToastLevel, View};
 use crate::theme::THEMES;
@@ -43,6 +43,17 @@ pub enum SettingItem {
     Setting(SettingKey),
     OpenConfig,
     ReloadConfig,
+}
+
+impl SettingItem {
+    /// The row's name; the Settings filter matches it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SettingItem::Setting(key) => key.label(),
+            SettingItem::OpenConfig => "Edit config file",
+            SettingItem::ReloadConfig => "Reload config",
+        }
+    }
 }
 
 pub const PREFIXES: [&str; 4] = ["ctrl+a", "ctrl+b", "ctrl+space", "ctrl+g"];
@@ -191,8 +202,28 @@ fn cycle<T: PartialEq + Clone>(options: &[T], current: &T, dir: i32) -> T {
 }
 
 impl App {
-    /// The page's sections and their items, in display order (the drawing uses the same list).
+    /// The page's sections and their items, in display order, narrowed by the filter (`/`); a
+    /// section with no matching row is left out. The drawing and the selection use the same list.
     pub fn settings_sections(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
+        let q = self.settings_filter.trim().to_lowercase();
+        self.settings_layout()
+            .into_iter()
+            .map(|(title, items)| {
+                let items: Vec<SettingItem> =
+                    items.into_iter().filter(|i| q.is_empty() || i.label().to_lowercase().contains(&q)).collect();
+                (title, items)
+            })
+            .filter(|(_, items)| !items.is_empty())
+            .collect()
+    }
+
+    /// Every selectable item of the page, ignoring the filter (the palette lists them all).
+    pub fn all_settings_items(&self) -> Vec<SettingItem> {
+        self.settings_layout().into_iter().flat_map(|(_, items)| items).collect()
+    }
+
+    /// The page's sections and their items before filtering, in display order.
+    fn settings_layout(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
         use SettingKey::*;
         let rows = |keys: &[SettingKey]| keys.iter().map(|k| SettingItem::Setting(*k)).collect::<Vec<_>>();
         let mut terminal = rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, Notify, QuickLaunch]);
@@ -223,7 +254,7 @@ impl App {
         ]
     }
 
-    /// Selectable items on the page, in display order.
+    /// Selectable items on the page, in display order (after the filter).
     pub fn settings_items(&self) -> Vec<SettingItem> {
         self.settings_sections().into_iter().flat_map(|(_, items)| items).collect()
     }
@@ -239,11 +270,15 @@ impl App {
         }
         self.view = View::Settings;
         self.settings_follow = true;
+        self.settings_filter.clear();
+        self.settings_filtering = false;
     }
 
     /// Leaves Settings for the page it was opened from (a tab is found again by its pane,
     /// since tabs may have moved or closed meanwhile), Home otherwise.
     pub fn close_settings(&mut self) {
+        self.settings_filter.clear();
+        self.settings_filtering = false;
         self.view = match self.settings_back.take() {
             Some((View::System, _)) => View::System,
             Some((View::Term(_), Some(pane))) => self.tab_of(pane).map_or(View::Bridge, View::Term),
@@ -899,44 +934,95 @@ impl App {
 
     pub(super) fn move_setting(&mut self, delta: i32) {
         let n = self.settings_items().len() as i32;
+        if n == 0 {
+            return;
+        }
         self.settings_sel = (self.settings_sel as i32 + delta).clamp(0, n - 1) as usize;
+    }
+
+    /// What ⏎ does on a row of the page (also the palette's "Setting:" commands): a popup opens for
+    /// the terminal colors and the theme, every other row changes one step.
+    pub fn enter_setting(&mut self, item: SettingItem) {
+        match item {
+            SettingItem::Setting(SettingKey::TermColors) => self.open_scheme_picker(),
+            SettingItem::Setting(SettingKey::Theme) => self.open_theme_picker(),
+            other => self.activate_setting(other, 1),
+        }
     }
 
     pub(super) fn settings_key(&mut self, k: KeyEvent) {
         // The page scrolls back to the selection (the wheel may have moved it away).
         self.settings_follow = true;
+        if self.settings_filtering {
+            return self.settings_filter_key(k);
+        }
         let items = self.settings_items();
-        let sel = self.settings_sel.min(items.len() - 1);
+        let sel = self.settings_sel.min(items.len().saturating_sub(1));
+        let chosen = items.get(sel).copied();
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => self.move_setting(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_setting(1),
             // ← turns a switch off and → on (pressing again changes nothing); a choice steps back/forward.
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
                 let right = matches!(k.code, KeyCode::Right | KeyCode::Char('l'));
-                if let SettingItem::Setting(key) = items[sel] {
+                if let Some(item @ SettingItem::Setting(key)) = chosen {
                     if key.opens_popup() {
                     } else if key.is_toggle() {
                         if self.setting_on(key) != right {
-                            self.activate_setting(items[sel], 1);
+                            self.activate_setting(item, 1);
                         }
                     } else {
-                        self.activate_setting(items[sel], if right { 1 } else { -1 });
+                        self.activate_setting(item, if right { 1 } else { -1 });
                     }
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::TermColors) => {
-                self.open_scheme_picker()
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(item) = chosen {
+                    self.enter_setting(item);
+                }
             }
-            KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::Theme) => {
-                self.open_theme_picker()
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate_setting(items[sel], 1),
             KeyCode::Home => self.settings_sel = 0,
-            KeyCode::End => self.settings_sel = items.len() - 1,
+            KeyCode::End => self.settings_sel = items.len().saturating_sub(1),
+            // "/" starts a filter on the row names (like Home's); esc clears a kept one, then leaves.
+            KeyCode::Char('/') => {
+                self.settings_filtering = true;
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
+            KeyCode::Esc if !self.settings_filter.is_empty() => {
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
             KeyCode::Esc | KeyCode::Char('q') => self.close_settings(),
             KeyCode::Char('?') => self.run(crate::keys::Action::Help),
             KeyCode::Char(':' | 'p') => self.run(crate::keys::Action::Palette),
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
+            _ => {}
+        }
+    }
+
+    /// Keys while the filter takes text: letters narrow the rows, ↑↓ move, ⏎ keeps the filter and
+    /// returns to the rows, esc clears it.
+    fn settings_filter_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.settings_filtering = false;
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
+            KeyCode::Enter => self.settings_filtering = false,
+            KeyCode::Up => self.move_setting(-1),
+            KeyCode::Down => self.move_setting(1),
+            KeyCode::Backspace => {
+                if self.settings_filter.pop().is_none() {
+                    self.settings_filtering = false;
+                }
+                self.settings_sel = 0;
+            }
+            KeyCode::Char(c) if !super::input::ctrl_held(&k) && !k.modifiers.contains(KeyModifiers::ALT) => {
+                self.settings_filter.push(c);
+                self.settings_sel = 0;
+            }
             _ => {}
         }
     }

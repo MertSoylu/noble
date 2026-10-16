@@ -6602,3 +6602,135 @@ fn notifications_action_lists_past_toasts() {
     assert_eq!(app.notices.back().map(|n| n.text.as_str()), Some("note 59"));
     assert_eq!(app.notices.front().map(|n| n.text.as_str()), Some("note 10"));
 }
+
+/// The frame as cells (for style checks), drawn like `render`.
+fn render_cells(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    app.size = (w, h);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| noble::ui::draw(f, app)).unwrap();
+    term.backend().buffer().clone()
+}
+
+/// The palette's matched letters are bold accent; the rest of the title keeps the text color.
+#[test]
+fn palette_marks_matched_title_letters() {
+    use noble::app::Overlay;
+    let mut app = demo_app(110, 30);
+    app.open_palette();
+    for c in "settings".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let text = render(&mut app, 110, 30);
+    save("palette-highlight-110x30", &text);
+    let buf = render_cells(&mut app, 110, 30);
+    // Find the "Open Settings" row and its cells.
+    let row = (0..30u16)
+        .find(|y| {
+            let line: String = (0..110u16).map(|x| buf[(x, *y)].symbol().to_string()).collect();
+            line.contains("Open Settings")
+        })
+        .expect("Open Settings row");
+    let line: String = (0..110u16).map(|x| buf[(x, row)].symbol().to_string()).collect();
+    // A byte offset in the line; the cell column counts chars (the palette draws multi-byte glyphs).
+    let at = line[..line.find("Open Settings").unwrap()].chars().count() as u16;
+    // "settings" matches the whole word "Settings" (the O before it is not matched).
+    let s = &buf[(at + 5, row)];
+    assert_eq!(s.symbol(), "S");
+    assert!(s.modifier.contains(ratatui::style::Modifier::BOLD), "matched letter is bold");
+    assert_eq!(s.fg, app.theme.accent, "matched letter is accent");
+    let o = &buf[(at, row)];
+    assert_ne!(o.fg, app.theme.accent, "unmatched letter keeps the text color");
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
+}
+
+/// Recently run commands come first, most recent first, once each, and the list is kept to ten.
+#[test]
+fn palette_empty_query_lists_recent_commands_first() {
+    use noble::app::{Overlay, PaletteCmd};
+    let mut app = demo_app(110, 30);
+    let (a, b) = (noble::theme::THEMES[3].name, noble::theme::THEMES[5].name);
+    app.run_palette(PaletteCmd::Theme(a));
+    app.run_palette(PaletteCmd::Theme(b));
+    app.run_palette(PaletteCmd::Theme(a));
+    assert_eq!(app.ui_state.data.palette_recent, vec![format!("theme:{a}"), format!("theme:{b}")]);
+    app.open_palette();
+    let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+    let cmds: Vec<PaletteCmd> = p.matches.iter().take(3).map(|i| p.all[*i].cmd.clone()).collect();
+    assert_eq!(cmds[..2], [PaletteCmd::Theme(a), PaletteCmd::Theme(b)]);
+    assert!(!cmds[2..].contains(&PaletteCmd::Theme(a)) && !cmds[2..].contains(&PaletteCmd::Theme(b)), "no duplicates");
+    // The memory is bounded.
+    for t in noble::theme::THEMES.iter().take(12) {
+        app.run_palette(PaletteCmd::Theme(t.name));
+    }
+    assert_eq!(app.ui_state.data.palette_recent.len(), 10);
+}
+
+/// A "Setting:" palette item toggles its setting, like ⏎ on that row; typing its name and ⏎ does it.
+#[test]
+fn palette_setting_item_toggles_a_switch() {
+    use noble::app::{Overlay, PaletteCmd, SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    let before = app.cfg.general.animations;
+    app.open_palette();
+    for c in "setting animations".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+    let first = p.current().expect("a match").clone();
+    let state = if before { "On" } else { "Off" };
+    assert_eq!(first.title, format!("Setting: Animations ({state})"));
+    assert_eq!(first.group, "SET");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.cfg.general.animations, !before, "the switch flipped");
+    assert_eq!(app.ui_state.data.palette_recent, vec!["setting:Animations".to_string()]);
+    // A choice opens its popup, as ⏎ does on its row.
+    app.run_palette(PaletteCmd::Setting(SettingItem::Setting(SettingKey::Theme)));
+    assert!(matches!(app.overlay, Some(Overlay::Themes(_))), "the theme row opens the theme picker");
+}
+
+/// Settings: "/" filters the rows by name, esc clears the filter, "no settings match" shows when none fit.
+#[test]
+fn settings_filter_narrows_rows() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let all = app.settings_items().len();
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    for c in "anim".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let items = app.settings_items();
+    assert!(items.contains(&SettingItem::Setting(SettingKey::Animations)));
+    assert!(items.len() < all && items.iter().all(|i| i.label().to_lowercase().contains("anim")));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Settings / anim▏"), "{text}");
+    assert!(!text.contains("Transparent background"), "filtered rows are hidden");
+    assert!(text.contains("type") && text.contains("filter"), "status bar shows the filter keys");
+    // Letters typed into the filter are text, not commands: q does not leave Settings.
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Settings);
+    for _ in 0..5 {
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    assert!(app.settings_filter.is_empty());
+    // A query nothing matches: the page says so, and the keys that move in the list do not panic.
+    for c in "zzz".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(app.settings_items().is_empty());
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("no settings match"), "{text}");
+    for code in [KeyCode::Down, KeyCode::End, KeyCode::Enter, KeyCode::Left, KeyCode::Up] {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        render(&mut app, 110, 30);
+    }
+    // ⏎ ends typing and keeps the filter; esc clears it, then a second esc leaves the page.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.settings_filtering && app.settings_filter == "zzz");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.settings_filter.is_empty());
+    assert_eq!(app.settings_items().len(), all);
+    assert_eq!(app.view, View::Settings);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_ne!(app.view, View::Settings);
+}

@@ -255,8 +255,9 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
   prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
   `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
   browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
-- **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
-  click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
+- **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
+  (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
+  `esc` back to the page you came from. Every row is also in the palette as `Setting: <name> (<value>)`.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
   "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.

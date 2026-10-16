@@ -494,6 +494,8 @@ pub struct UiStateData {
     pub boot_version: String,
     /// Shell keys (as "alt+t") whose first use already told the user where NOBLE's action is.
     pub shell_keys_told: Vec<String>,
+    /// Palette commands run lately, newest first (`App::palette_key`); listed first on an empty query.
+    pub palette_recent: Vec<String>,
 }
 
 impl UiStateData {

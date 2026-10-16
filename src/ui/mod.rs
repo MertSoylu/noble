@@ -682,7 +682,14 @@ fn hints(app: &App) -> Vec<(String, String)> {
             let back = if app.system.filter.is_empty() { "home" } else { "clear" };
             vec![h("↑↓", "select"), h("c m p n", "sort"), h("esc", back)]
         }
-        View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
+        View::Settings => {
+            if app.settings_filtering {
+                return vec![h("type", "filter"), h("↑↓", "move"), h("⏎", "done"), h("esc", "clear")];
+            }
+            // A kept filter is cleared by esc first (see `settings_key`), then the page is left.
+            let back = if app.settings_filter.is_empty() { "back" } else { "clear" };
+            vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("/", "search"), h("esc", back)]
+        }
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]
         }

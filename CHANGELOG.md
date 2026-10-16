@@ -7,6 +7,14 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- The command palette shows which letters of each title the query matched, in bold accent (the title is cut
+  with "…" as before).
+- The palette lists the last ten commands run from it first, most recent first, when the query is empty; the
+  list is kept in `state.json` (`palette_recent`).
+- Every Settings row is in the command palette as `Setting: <name> (<value>)` (group SET): running it does what
+  ⏎ does on that row, and a popup row (theme, terminal colors, quick launch) opens its picker.
+- Settings filter: `/` on the Settings page narrows the rows by name (the query shows in the frame's title,
+  `esc` clears it, and "no settings match" shows when nothing fits); the status bar lists "/ search".
 - Prefix `u` (Open Link on Screen, `open_link`) lists the URLs and `file:line` links on the focused pane's
   screen, newest first, and opens the chosen one: the keyboard way to ctrl+click, which iTerm2 and Terminal.app
   on macOS keep for their own menu.
