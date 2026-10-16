@@ -5,7 +5,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::hud;
-use crate::app::{App, Hit, Overlay};
+use crate::app::help::{GAP, KEY_W, Line, geometry};
+use crate::app::{App, HelpState, Hit, Overlay};
 use crate::keys::Action;
 use crate::theme::Theme;
 use crate::util;
@@ -27,7 +28,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Themes(p) => themes(buf, area, app, p, hits),
         Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
-        Overlay::Help { scroll } => help(buf, area, app, *scroll, hits),
+        Overlay::Help(st) => help(buf, area, app, st, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
             // The question wraps over as many rows as it needs: the box grows with it (within the
@@ -802,163 +803,73 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     hud::put_spans(buf, x, fy, &[("↑↓", k), (" select  ", d), ("⏎", k), (" run  ", d), ("esc", k), (" close", d)], iw);
 }
 
-fn help_lines(app: &App) -> Vec<(String, String, bool)> {
-    let mut v: Vec<(String, String, bool)> = Vec::new();
-    let section = |v: &mut Vec<(String, String, bool)>, s: &str| {
-        if !v.is_empty() {
-            v.push((String::new(), String::new(), false));
-        }
-        v.push((s.to_string(), String::new(), true));
-    };
-    let prefix = app.keymap.prefix.to_string();
-    section(&mut v, &format!("PREFIX · press {prefix}, then"));
-    let mut by_action: Vec<(Action, Vec<String>)> = Vec::new();
-    for a in Action::ALL {
-        let mut keys: Vec<String> =
-            app.keymap.prefix_map.iter().filter(|(_, x)| **x == a).map(|(k, _)| k.to_string()).collect();
-        if keys.is_empty() {
-            continue;
-        }
-        keys.sort_by_key(|k| (k.len(), k.clone()));
-        by_action.push((a, keys));
-    }
-    // Collect the tab numbers on a single line (rebound ones keep their own rows).
-    let tab_range = app.keymap.tab_range(true);
-    let mut tabs_done = false;
-    for (a, keys) in &by_action {
-        if matches!(a, Action::GoTab(_))
-            && let Some(range) = &tab_range
-        {
-            if !tabs_done {
-                v.push((range.clone(), "go to tab".into(), false));
-                tabs_done = true;
-            }
-            continue;
-        }
-        v.push((keys.join("  "), a.title(), false));
-    }
-    v.push((prefix.clone(), "send prefix to the shell".into(), false));
-
-    section(&mut v, "GLOBAL");
-    let mut direct: Vec<(String, Action)> = app.keymap.direct_map.iter().map(|(k, a)| (k.to_string(), *a)).collect();
-    direct.sort_by_key(|(k, _)| k.clone());
-    let tab_range = app.keymap.tab_range(false);
-    let mut tabs_done = false;
-    for (k, a) in direct {
-        if matches!(a, Action::GoTab(_))
-            && let Some(range) = &tab_range
-        {
-            if !tabs_done {
-                v.push((range.clone(), "go to tab".into(), false));
-                tabs_done = true;
-            }
-            continue;
-        }
-        // Shell keys reach the shell in a terminal (`keys.shell_first`).
-        let title = if app.keymap.shell_first.iter().any(|c| c.to_string() == k) {
-            format!("{} (not in terminals)", a.title())
-        } else {
-            a.title()
-        };
-        v.push((k, title, false));
-    }
-
-    section(&mut v, "HOME");
-    for (k, d) in [
-        ("↑ ↓  j k", "select project"),
-        ("⏎  double-click", "open a terminal in the project"),
-        ("→  ⏎", "pin to top ★ · more actions ⋯ (← → choose)"),
-        ("/", "search projects"),
-        ("● 3  ✓  ↑ ↓  …", "uncommitted changes · clean · commits to push / pull · checking"),
-        ("t", "terminal in home folder"),
-        ("o", "open folder in file manager"),
-        ("w", "save open tabs as a workspace"),
-        ("a  A", "add a folder to scan for projects · add one project folder"),
-        ("⋯  remove", "Remove from list: hide a project for good (A adds it back)"),
-        ("r  R", "rescan projects · refresh AI usage"),
-        ("m  s", "system · settings"),
-        ("p  ?  q", "commands · help · quit"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-    for (_, l) in app.quick_launchers() {
-        v.push((l.key.clone(), format!("run {} in the project", l.command), false));
-    }
-
-    section(&mut v, "SYSTEM");
-    for (k, d) in [
-        ("↑ ↓  pgup pgdn", "select process"),
-        ("c m p n", "sort by cpu · mem · pid · name"),
-        ("/", "filter"),
-        ("K  del", "terminate (asks first)"),
-        ("esc", "back"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-
-    section(&mut v, "MOUSE");
-    for (k, d) in [
-        ("click", "everything: tabs, rows, buttons, settings"),
-        ("◫ ⊟ ⤢ ✕", "pane buttons: split right · split down · zoom · close (focused or hovered pane)"),
-        ("double-click title", "zoom / restore the pane"),
-        ("middle-click tab", "close the tab"),
-        ("drag border", "resize panes"),
-        ("drag text", "select (copied on release)"),
-        ("right-click", "paste into terminal"),
-        ("ctrl+click", "open a link or file:line (underlined while ctrl is held)"),
-        ("wheel", "scroll history / lists"),
-        ("shift+drag", "select even when the app captures the mouse"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-    v.push((String::new(), String::new(), false));
-    v.push(("config".into(), util::tilde(&app.paths.config), false));
-    v
-}
-
-fn help(buf: &mut Buffer, area: Rect, app: &App, scroll: u16, hits: &mut Vec<(Rect, Hit)>) {
+/// The keyboard reference: one or more columns of sections, a filter in the title and a selection.
+fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
-    let w = 78.min(area.width.saturating_sub(2));
-    let h = area.height.saturating_sub(2).min(40);
-    if w < 30 || h < 6 {
+    let sections = app.help_sections(&st.query);
+    let Some(g) = geometry(area, &sections) else {
         // Too small for the key list: a note instead of nothing (as the Settings screen does).
         hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
         return;
-    }
-    let rect = centered(area, w, h);
-    hits.push((rect, Hit::Inert));
-    let inner = boxed(buf, rect, "KEYBOARD REFERENCE", th, th.accent);
-    let lines = help_lines(app);
-    let rows = inner.height.saturating_sub(1) as usize;
-    let max_scroll = lines.len().saturating_sub(rows);
-    let scroll = (scroll as usize).min(max_scroll);
-    let key_w = 18u16;
-    let x = inner.x + 1;
-    for (i, (k, d, header)) in lines.iter().skip(scroll).take(rows).enumerate() {
-        let y = inner.y + i as u16;
-        if *header {
-            let end = hud::put(buf, x, y, k, th.accent_bold().bg(th.raised), inner.width - 2);
-            // A thin rule after the section name.
-            let rule_w = (inner.right().saturating_sub(1)).saturating_sub(end + 1);
-            hud::hline(buf, end + 1, y, rule_w, "─", th.line().bg(th.raised));
-            continue;
-        }
-        hud::put(
-            buf,
-            x + 1,
-            y,
-            &util::pad_right(k, key_w as usize),
-            Style::default().fg(th.accent2).bg(th.raised),
-            key_w,
-        );
-        hud::put(buf, x + 1 + key_w, y, d, th.text().bg(th.raised), inner.width.saturating_sub(key_w + 3));
-    }
-    let footer = if max_scroll > 0 {
-        format!("↑↓ scroll {}/{} · esc close", scroll, max_scroll)
-    } else {
-        "esc close".to_string()
     };
-    hud::put_right(buf, inner.right() - 1, inner.bottom() - 1, &footer, th.dim().bg(th.raised));
+    let rect = g.rect;
+    hits.push((rect, Hit::Inert));
+    let title = if st.query.is_empty() {
+        "KEYBOARD REFERENCE".to_string()
+    } else {
+        format!("KEYBOARD REFERENCE · /{}", st.query)
+    };
+    let inner = boxed(buf, rect, &title, th, th.accent);
+    if sections.is_empty() {
+        hud::put(buf, inner.x + 1, inner.y, "no matches", th.dim(), inner.width.saturating_sub(2));
+    }
+    let scroll = st.scroll.min(g.max_scroll());
+    let key_w = KEY_W as u16;
+    for (c, col) in g.columns.iter().enumerate() {
+        let x = inner.x + 1 + c as u16 * (g.col_w + GAP);
+        for (i, line) in col.iter().skip(scroll).take(g.rows).enumerate() {
+            let y = inner.y + i as u16;
+            match line {
+                Line::Gap => {}
+                Line::Header(name) => {
+                    let end = hud::put(buf, x, y, name, th.accent_bold().bg(th.raised), g.col_w);
+                    // A thin rule after the section name.
+                    let rule_w = (x + g.col_w).saturating_sub(end + 1);
+                    hud::hline(buf, end + 1, y, rule_w, "─", th.line().bg(th.raised));
+                }
+                Line::Row { key, desc, sel } => {
+                    let selected = *sel == Some(st.selected);
+                    let bg = if selected { th.sel_bg } else { th.raised };
+                    if selected {
+                        // Same selection marker as the palette and the other lists.
+                        hud::set_bg_row(buf, x - 1, y, g.col_w + 1, bg);
+                        hud::put(buf, x - 1, y, "▌", th.accent().bg(bg), 1);
+                    }
+                    if let Some(s) = sel {
+                        hits.push((Rect::new(x, y, g.col_w, 1), Hit::HelpRow(*s)));
+                    }
+                    hud::put(
+                        buf,
+                        x + 1,
+                        y,
+                        &util::pad_right(key, KEY_W),
+                        Style::default().fg(th.accent2).bg(bg),
+                        key_w,
+                    );
+                    let desc_w = g.col_w.saturating_sub(1 + key_w);
+                    let style = if selected { th.text().add_modifier(Modifier::BOLD).bg(bg) } else { th.text().bg(bg) };
+                    hud::put(buf, x + 1 + key_w, y, &util::truncate(desc, desc_w as usize), style, desc_w);
+                }
+            }
+        }
+    }
+    hud::put_right(
+        buf,
+        inner.right() - 1,
+        inner.bottom() - 1,
+        "type to filter · ⏎ run · esc close",
+        th.dim().bg(th.raised),
+    );
 }
 
 #[cfg(test)]

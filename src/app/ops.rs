@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{App, Confirm, ConfirmAction, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
+use super::{App, Confirm, ConfirmAction, HelpState, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
 use crate::keys::Action;
 use crate::sensors::SensorRequest;
 use crate::store::{SavedTab, Workspace};
@@ -79,7 +79,7 @@ impl App {
             Action::ResizeUp => self.nudge(Dir::Col, -0.05),
             Action::ResizeDown => self.nudge(Dir::Col, 0.05),
             Action::Palette => self.open_palette(),
-            Action::Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
+            Action::Help => self.overlay = Some(Overlay::Help(HelpState::default())),
             Action::Quit => self.request_quit(),
             Action::ReloadConfig => self.reload_config(true),
             Action::OpenConfig => self.open_config(),

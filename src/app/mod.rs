@@ -3,6 +3,7 @@
 
 mod agents;
 pub mod fx;
+pub mod help;
 mod input;
 mod live;
 mod menu;
@@ -31,6 +32,7 @@ use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert};
 use crate::theme::Theme;
 
+pub use help::HelpState;
 pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
@@ -276,9 +278,8 @@ pub enum Overlay {
         selected: usize,
     },
     Menu(Menu),
-    Help {
-        scroll: u16,
-    },
+    /// The keyboard reference (`?`): its filter, selection and scroll.
+    Help(HelpState),
     Confirm(Confirm),
     Prompt(Prompt),
 }
@@ -401,6 +402,8 @@ pub enum Hit {
     Proc(u32),
     SortCol(SortKey),
     PaletteItem(usize),
+    /// Row of the keyboard reference (selectable rows, `help::HelpState::selected` order).
+    HelpRow(usize),
     ConfirmYes,
     ConfirmNo,
     /// Welcome card: a setup row (`WelcomeSetup::rows` order), its ‹ › arrows and a prefix chip.

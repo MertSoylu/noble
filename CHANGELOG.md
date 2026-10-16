@@ -7,6 +7,10 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- The keyboard reference (`?`) is interactive: typing filters its rows by key or description (the title shows
+  `/query`; sections without a match are hidden), ↑↓ select a row and ⏎ or a click runs its action and closes
+  the reference, and esc clears the filter before it closes. Wide screens lay the sections out in two columns
+  (from 120 columns) or three (from 170), each section kept whole; a narrow screen keeps one scrolling column.
 - The command palette shows which letters of each title the query matched, in bold accent (the title is cut
   with "…" as before).
 - The palette lists the last ten commands run from it first, most recent first, when the query is empty; the
@@ -33,6 +37,8 @@ All notable changes to NOBLE are documented here. The format is based on
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
 ### Changed
+- In the keyboard reference `j`, `k`, space and `q` type into the filter: ↑↓ and PgUp/PgDn move the selection
+  (the list follows it), the wheel scrolls, and `?` (with no filter typed) or esc closes it.
 - The startup animation plays on the first launch and on the first launch after an update, not on every launch.
   `general.boot_animation = true` keeps that behavior, `false` turns it off for good; `--no-boot` still skips it.
 - The status bar tips fit the screen: terminal tips in a terminal, Home's on Home, process list tips on System, none

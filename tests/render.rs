@@ -6404,6 +6404,103 @@ fn help_at_a_tiny_size_says_so() {
     assert!(render(&mut app, 110, 30).contains("KEYBOARD REFERENCE"));
 }
 
+/// The keyboard reference: two columns on a wide screen with no scrolling; one column that scrolls
+/// on a narrow one. Typed keys filter the rows, esc clears the filter before it closes, and ⏎ or a
+/// click runs the selected row's action.
+#[test]
+fn help_has_columns_a_filter_and_runs_rows() {
+    use noble::app::{Hit, Overlay};
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+
+    let mut app = demo_app(160, 45);
+    app.run(Action::Help);
+    let text = render(&mut app, 160, 45);
+    save("help-160x45", &text);
+    let geo = app.help_geometry("").expect("the reference fits at 160x45");
+    assert_eq!(geo.columns.len(), 2, "two columns from 120 columns");
+    assert!(matches!(geo.columns[1].first(), Some(noble::app::help::Line::Header(_))), "a section starts column 2");
+    // The sections are ~88 lines: two columns of 40 rows still scroll a little.
+    assert!(geo.max_scroll() > 0 && geo.max_scroll() < 20, "{geo:?}");
+    for (w, h) in [(110, 30), (60, 20), (30, 8)] {
+        save(&format!("help-{w}x{h}"), &render(&mut app, w, h));
+    }
+    // Three columns (from 170) hold the whole list at 170x45.
+    let mut wide = demo_app(170, 45);
+    wide.run(Action::Help);
+    render(&mut wide, 170, 45);
+    let geo = wide.help_geometry("").expect("fits");
+    assert_eq!(geo.columns.len(), 3);
+    assert_eq!(geo.max_scroll(), 0, "three columns need no scrolling at 170x45");
+    for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
+        assert!(text.contains(name), "{name} is drawn:\n{text}");
+    }
+    assert!(text.contains("type to filter · ⏎ run · esc close"), "{text}");
+
+    // A narrow screen keeps one column, and it scrolls with the selection.
+    let mut narrow = demo_app(110, 30);
+    narrow.run(Action::Help);
+    render(&mut narrow, 110, 30);
+    assert_eq!(narrow.help_geometry("").expect("fits").columns.len(), 1);
+    for _ in 0..6 {
+        key(&mut narrow, KeyCode::PageDown);
+    }
+    let text = render(&mut narrow, 110, 30);
+    let Some(Overlay::Help(st)) = &narrow.overlay else { panic!("help is open") };
+    assert!(st.scroll > 0 && st.selected > 40, "{st:?}");
+    assert!(text.contains("▌"), "the selected row is marked and on screen:\n{text}");
+
+    // Typing filters: only the sections with a matching row stay, and the title shows the query.
+    let mut app = demo_app(160, 45);
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    for c in "split".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    let text = render(&mut app, 160, 45);
+    save("help-filtered-160x45", &text);
+    assert!(text.contains("KEYBOARD REFERENCE · /split"), "{text}");
+    assert!(text.contains("split right"), "{text}");
+    assert!(!text.contains("HOME"), "a section without a match is not drawn:\n{text}");
+    let all = app.help_actions("").len();
+    let split = app.help_actions("split").len();
+    assert!(split > 0 && split < all);
+    // Backspace widens the filter again.
+    key(&mut app, KeyCode::Backspace);
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Backspace);
+    }
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("HOME") && text.contains("KEYBOARD REFERENCE") && !text.contains("/split"), "{text}");
+    // Esc clears the filter first; the next esc closes.
+    for c in "split".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.overlay, Some(Overlay::Help(st)) if st.query.is_empty()));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+
+    // ⏎ runs the selected row's action and closes the overlay.
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    for c in "palette".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    assert_eq!(app.help_actions("palette").first(), Some(&Action::Palette));
+    render(&mut app, 160, 45);
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))), "⏎ opens the command palette");
+
+    // A click on a row runs it too.
+    app.overlay = None;
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    let idx = app.help_actions("").iter().position(|a| *a == Action::Palette).expect("palette row");
+    let row = find_hit(&app, |h| *h == Hit::HelpRow(idx)).expect("the row is clickable");
+    click(&mut app, row.x + 1, row.y);
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))), "a click opens the command palette");
+}
+
 /// A long question wraps over several rows: the whole text and the buttons stay visible, also at 30x8.
 #[test]
 fn confirm_wraps_a_long_question() {

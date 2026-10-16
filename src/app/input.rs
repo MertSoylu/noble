@@ -381,26 +381,71 @@ impl App {
                     _ => true,
                 }
             }
-            Overlay::Help { scroll } => match k.code {
-                KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter => false,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *scroll = scroll.saturating_sub(1);
+            // Typed keys filter the rows, so the letters (and `?` once something is typed) are text.
+            // ↑↓ select a row, ⏎ runs it; esc clears the filter first, then closes.
+            Overlay::Help(st) => match k.code {
+                KeyCode::Esc if !st.query.is_empty() => {
+                    st.query.clear();
+                    st.selected = 0;
+                    st.scroll = 0;
                     true
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *scroll = scroll.saturating_add(1);
+                KeyCode::Esc | KeyCode::Char('?') if st.query.is_empty() => false,
+                KeyCode::Enter => {
+                    let query = st.query.clone();
+                    if self.help_run(&query, st.selected) {
+                        return;
+                    }
+                    true
+                }
+                KeyCode::Up => {
+                    st.selected = st.selected.saturating_sub(1);
+                    self.help_follow(st);
+                    true
+                }
+                KeyCode::Down => {
+                    let last = self.help_actions(&st.query).len().saturating_sub(1);
+                    st.selected = (st.selected + 1).min(last);
+                    self.help_follow(st);
                     true
                 }
                 KeyCode::PageUp => {
-                    *scroll = scroll.saturating_sub(10);
+                    st.selected = st.selected.saturating_sub(8);
+                    self.help_follow(st);
                     true
                 }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    *scroll = scroll.saturating_add(10);
+                KeyCode::PageDown => {
+                    let last = self.help_actions(&st.query).len().saturating_sub(1);
+                    st.selected = (st.selected + 8).min(last);
+                    self.help_follow(st);
                     true
                 }
                 KeyCode::Home => {
-                    *scroll = 0;
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::End => {
+                    st.selected = self.help_actions(&st.query).len().saturating_sub(1);
+                    self.help_follow(st);
+                    true
+                }
+                KeyCode::Backspace => {
+                    st.query.pop();
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::Char('u') if ctrl => {
+                    st.query.clear();
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    st.query.push(c);
+                    st.selected = 0;
+                    st.scroll = 0;
                     true
                 }
                 _ => true,
@@ -1065,6 +1110,12 @@ impl App {
             Hit::SystemFilter => self.start_system_filter(),
             Hit::SystemTerminate => self.terminate_selected(),
             Hit::HomeSearch => self.start_home_filter(),
+            Hit::HelpRow(i) => {
+                if let Some(Overlay::Help(st)) = &self.overlay {
+                    let query = st.query.clone();
+                    self.help_run(&query, i);
+                }
+            }
             Hit::PaletteItem(i) => {
                 if let Some(Overlay::Palette(st)) = &mut self.overlay {
                     st.selected = i;
@@ -1200,8 +1251,15 @@ impl App {
     }
 
     fn mouse_wheel(&mut self, m: &MouseEvent, dir: i32) {
-        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
-            *scroll = if dir > 0 { scroll.saturating_sub(3) } else { scroll.saturating_add(3) };
+        let query = match &self.overlay {
+            Some(Overlay::Help(st)) => Some(st.query.clone()),
+            _ => None,
+        };
+        if let Some(query) = query {
+            let max = self.help_geometry(&query).map_or(0, |g| g.max_scroll());
+            if let Some(Overlay::Help(st)) = &mut self.overlay {
+                st.scroll = if dir > 0 { st.scroll.saturating_sub(3) } else { (st.scroll + 3).min(max) };
+            }
             return;
         }
         if let Some(Overlay::Themes(p)) = &mut self.overlay {

@@ -212,7 +212,8 @@ noble [--config <path>] [--no-boot]
 ## ⌨ Keys
 
 NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
-plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference.
+plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference: type to filter it, ↑↓ pick a row and ⏎ (or a click)
+runs it.
 
 The direct shortcuts marked \* are shell keys too (last argument, transpose words, fish's sudo and pager …), so in
 a terminal they go to the shell and work everywhere else; use the prefix column there instead. `shell_first =
