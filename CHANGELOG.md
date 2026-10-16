@@ -7,6 +7,10 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Home has one add key: `a` opens the add prompt in auto mode, which decides on Enter. A git repository (or a
+  folder with no repository within two levels) is added as a project ("added project X"); a folder with git
+  repositories inside is scanned for them ("scanning X for projects"). `tab` cycles auto, folder to scan and one
+  project. `A` still opens the prompt in project mode, and the palette's "Add Project…" still works.
 - Split tabs fade the text of the panes without the focus (`terminal.dim_inactive`, Settings → Terminal → "Dim
   inactive panes", on by default): their colors are mixed 30% toward the pane background, so the focused pane
   stands out. A zoomed pane is alone and not dimmed; ANSI colors that the palette leaves to the outer terminal
@@ -41,6 +45,11 @@ All notable changes to NOBLE are documented here. The format is based on
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
 ### Changed
+- Home's "/ search" label moved from the Projects panel's bottom button row to its top border, next to the
+  count ("/ search · 6"); a click still starts the filter.
+- The add prompt replaces the separate `a` (folder to scan) and `A` (one project) choices: the status bar shows
+  "a add", the help and the empty-state texts mention only `a`, and the palette's "Add Project…" has no key hint.
+- The confirmation toasts say what was added: "added project X" or "scanning X for projects".
 - Settings on a terminal 140 columns or wider: the page widens to 130 columns, the list keeps its first 80, and a
   panel on the right shows the selected setting's label in bold with its description wrapped. Narrower screens
   show the description dimmed under the selected row (it used to sit on the bottom row, far from the selection).

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{App, Confirm, ConfirmAction, HelpState, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
+use super::{AddMode, App, Confirm, ConfirmAction, HelpState, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
 use crate::keys::Action;
 use crate::sensors::SensorRequest;
 use crate::store::{SavedTab, Workspace};
@@ -108,8 +108,8 @@ impl App {
             Action::ScrollUp => self.scroll_page(1),
             Action::ScrollDown => self.scroll_page(-1),
             Action::Search => self.open_search(),
-            Action::AddProjectFolder => self.open_add_prompt(false),
-            Action::AddProject => self.open_add_prompt(true),
+            Action::AddProjectFolder => self.open_add_prompt(AddMode::Auto),
+            Action::AddProject => self.open_add_prompt(AddMode::Project),
             Action::RemoveProject => match self.selected_project().map(|p| p.path.clone()) {
                 Some(path) if self.view == View::Bridge => self.request_remove_project(path),
                 _ => self.toast(ToastLevel::Info, "select a project on Home first"),
@@ -779,10 +779,10 @@ impl App {
         }
     }
 
-    /// The add prompt: one project folder (`project`) or a folder to scan for repos.
-    pub fn open_add_prompt(&mut self, project: bool) {
-        let mut p = Prompt::new(String::new(), String::new(), PromptPurpose::AddRoot);
-        p.set_add_mode(project);
+    /// The add prompt (`a` opens it in auto mode, `A` in project mode).
+    pub fn open_add_prompt(&mut self, mode: AddMode) {
+        let mut p = Prompt::new(String::new(), String::new(), PromptPurpose::Add(mode));
+        p.set_add_mode(mode);
         self.overlay = Some(Overlay::Prompt(p));
     }
 
@@ -790,10 +790,7 @@ impl App {
         let value = prompt.value.trim().to_string();
         // The add prompts validate first: on an error the prompt stays open with the typed text.
         let check = match prompt.purpose {
-            PromptPurpose::AddRoot => Self::resolve_folder(&value).map(|_| ()),
-            PromptPurpose::AddProject => Self::resolve_folder(&value).and_then(|p| {
-                crate::projects::project_at(&p).map(|_| ()).ok_or_else(|| format!("not a folder: {}", p.display()))
-            }),
+            PromptPurpose::Add(_) => Self::resolve_folder(&value).map(|_| ()),
             PromptPurpose::SaveWorkspace if value.is_empty() => Err("type a name first".to_string()),
             _ => Ok(()),
         };
@@ -810,8 +807,7 @@ impl App {
                     self.tabs[ti].name = (!value.is_empty()).then_some(value);
                 }
             }
-            PromptPurpose::AddRoot => self.add_project_root(&value),
-            PromptPurpose::AddProject => self.add_project(&value),
+            PromptPurpose::Add(mode) => self.add_by_mode(mode, &value),
             PromptPurpose::SaveWorkspace => {
                 // A name that is already taken is replaced only after a confirmation.
                 if self.workspaces.list.iter().any(|w| w.name.eq_ignore_ascii_case(&value)) {

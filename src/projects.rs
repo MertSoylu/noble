@@ -172,6 +172,12 @@ fn last_active(git_dir: &Path) -> Option<SystemTime> {
         .max()
 }
 
+/// Whether a git repository sits inside `dir`, at most `depth` levels down (a quick check for the
+/// add prompt: the scan stops at the first one found). `dir` itself is not checked.
+pub fn holds_repos(dir: &Path, depth: usize, exclude: &[String]) -> bool {
+    !scan(&[dir.to_path_buf()], depth, exclude, 1).is_empty()
+}
+
 /// Scans the root folders (depth limited, at most `limit` projects).
 pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usize) -> Vec<Project> {
     let mut out: Vec<Project> = Vec::new();

@@ -366,7 +366,7 @@ impl Action {
             Action::ScrollUp => "Scroll Up (page)".into(),
             Action::ScrollDown => "Scroll Down (page)".into(),
             Action::Search => "Search Scrollback".into(),
-            Action::AddProjectFolder => "Add Folder to Scan for Projects…".into(),
+            Action::AddProjectFolder => "Add Project or Folder…".into(),
             Action::AddProject => "Add Project…".into(),
             Action::RemoveProject => "Remove Selected Project from List".into(),
             Action::SendPrefix => "Send Prefix Key to Shell".into(),

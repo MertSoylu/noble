@@ -253,8 +253,9 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search (or click its label) · `t` terminal at home · `o` open folder · `w` save workspace ·
-  `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
-  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
+  `a` add a project or a folder to scan (the prompt decides: a git repository or a folder without repositories is added as a
+  project, a folder holding repositories is scanned; `tab` forces one of the modes) · ⋯ → Remove from list hides a project for good (`a` brings it back) ·
+  `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
   `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
   browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, PromptPurpose, SortKey, ToastLevel, ToastTarget, View};
+use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -469,9 +469,10 @@ impl App {
                     }
                     return;
                 }
-                KeyCode::Tab | KeyCode::BackTab if p.purpose.is_add() => {
-                    let project = !matches!(p.purpose, PromptPurpose::AddProject);
-                    p.set_add_mode(project);
+                KeyCode::Tab | KeyCode::BackTab if p.purpose.add_mode().is_some() => {
+                    if let Some(mode) = p.purpose.add_mode() {
+                        p.set_add_mode(mode.next());
+                    }
                     true
                 }
                 KeyCode::Backspace => {
@@ -947,11 +948,11 @@ impl App {
                 }
             }
             Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
-            Hit::PromptMode(project) => {
+            Hit::PromptMode(mode) => {
                 if let Some(Overlay::Prompt(p)) = &mut self.overlay
-                    && p.purpose.is_add()
+                    && p.purpose.add_mode().is_some()
                 {
-                    p.set_add_mode(project);
+                    p.set_add_mode(mode);
                 }
             }
             Hit::Update => self.start_update(),

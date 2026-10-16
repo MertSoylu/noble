@@ -109,24 +109,47 @@ pub enum PromptPurpose {
     /// that pane closes in a split tab).
     RenameTab(crate::term::TabId),
     SaveWorkspace,
-    /// New root folder to scan projects in.
-    AddRoot,
-    /// One folder added as a project by hand.
-    AddProject,
+    /// Adds a project or a folder to scan (see `AddMode`).
+    Add(AddMode),
+}
+
+/// What an add prompt does with the typed path. `Auto` decides on Enter: a git repository, or a
+/// folder with none inside (added as a project), or a folder holding repositories (scanned).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddMode {
+    Auto,
+    /// A folder whose git repositories are scanned for projects.
+    Folder,
+    /// One folder added as a project, repository or not.
+    Project,
+}
+
+impl AddMode {
+    /// The next mode in the order Tab cycles through: auto, folder to scan, one project.
+    pub fn next(self) -> Self {
+        match self {
+            AddMode::Auto => AddMode::Folder,
+            AddMode::Folder => AddMode::Project,
+            AddMode::Project => AddMode::Auto,
+        }
+    }
 }
 
 impl PromptPurpose {
     /// Maximum input length (paths can be long).
     pub fn max_len(&self) -> usize {
         match self {
-            PromptPurpose::AddRoot | PromptPurpose::AddProject => 260,
+            PromptPurpose::Add(_) => 260,
             _ => 40,
         }
     }
 
-    /// The add prompt (either mode): Tab switches between adding a project and a folder to scan.
-    pub fn is_add(&self) -> bool {
-        matches!(self, PromptPurpose::AddRoot | PromptPurpose::AddProject)
+    /// The mode of an add prompt; `None` for the other prompts.
+    pub fn add_mode(&self) -> Option<AddMode> {
+        match self {
+            PromptPurpose::Add(mode) => Some(*mode),
+            _ => None,
+        }
     }
 }
 
@@ -193,16 +216,16 @@ impl Prompt {
         self.cursor = to.min(self.value.chars().count());
     }
 
-    /// Switches the add prompt between one project (`project`) and a folder to scan; the
-    /// typed path stays (Tab or a click on the choice line).
-    pub fn set_add_mode(&mut self, project: bool) {
-        let (title, purpose) = if project {
-            ("ADD PROJECT", PromptPurpose::AddProject)
-        } else {
-            ("ADD FOLDER TO SCAN", PromptPurpose::AddRoot)
-        };
-        self.title = title.into();
-        self.purpose = purpose;
+    /// Sets the add prompt's mode (title and purpose); the typed path stays. Tab cycles the
+    /// modes and a click on the choice line picks one.
+    pub fn set_add_mode(&mut self, mode: AddMode) {
+        self.title = match mode {
+            AddMode::Auto => "ADD PROJECT OR FOLDER",
+            AddMode::Folder => "ADD FOLDER TO SCAN",
+            AddMode::Project => "ADD PROJECT",
+        }
+        .into();
+        self.purpose = PromptPurpose::Add(mode);
     }
 }
 
@@ -416,8 +439,8 @@ pub enum Hit {
     PaneTitle(PaneId),
     /// Quick-action button on a project row (row, action).
     ProjectAct(usize, ProjectAct),
-    /// Add prompt: switch to adding one project (`true`) or a folder to scan (`false`).
-    PromptMode(bool),
+    /// Add prompt: switch to this mode (the choice line).
+    PromptMode(AddMode),
     /// Update notice at the bottom right: update / dismiss.
     Update,
     UpdateDismiss,

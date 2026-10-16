@@ -88,9 +88,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             if p.value.is_empty() {
                 // Placeholder while empty.
                 let hint = match p.purpose {
-                    crate::app::PromptPurpose::AddRoot | crate::app::PromptPurpose::AddProject => {
-                        "path, e.g. ~/code/app"
-                    }
+                    crate::app::PromptPurpose::Add(_) => "path, e.g. ~/code/app",
                     crate::app::PromptPurpose::RenameTab(_) => "tab name (empty = automatic)",
                     crate::app::PromptPurpose::SaveWorkspace => "workspace name",
                 };
@@ -134,14 +132,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                     field_w,
                 );
             }
-            let add = p.purpose.is_add();
-            if add {
-                // Choice line above the input: one project or a folder to scan (tab / click).
-                let project = matches!(p.purpose, crate::app::PromptPurpose::AddProject);
+            let add = p.purpose.add_mode();
+            if let Some(current) = add {
+                // Choice line above the input: auto, a folder to scan or one project (tab / click).
                 let mut cx = x;
                 let end = inner.right().saturating_sub(1);
-                for (mode, label) in [(true, "one project"), (false, "folder of projects (scan)")] {
-                    let on = mode == project;
+                for (mode, label) in [
+                    (crate::app::AddMode::Auto, "auto"),
+                    (crate::app::AddMode::Folder, "folder to scan"),
+                    (crate::app::AddMode::Project, "one project"),
+                ] {
+                    let on = mode == current;
                     let start = cx;
                     let (dot, style) = if on { ("● ", th.accent_bold()) } else { ("○ ", th.dim()) };
                     cx = hud::put_spans(buf, cx, inner.y, &[(dot, style), (label, style)], end.saturating_sub(cx));
@@ -152,7 +153,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 }
             }
             // The longest hint that fits (a narrow window drops "tab switch" first).
-            let hints: &[&str] = if add {
+            let hints: &[&str] = if add.is_some() {
                 &["tab switch · ⏎ add · esc cancel", "⏎ add · esc cancel"]
             } else {
                 &["⏎ save · esc cancel"]
@@ -258,7 +259,7 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
         let found = if !app.projects_loaded {
             "looking for your git projects…".to_string()
         } else if app.projects.is_empty() {
-            "no git projects found yet — press a on Home to add a folder".to_string()
+            "no git projects found yet — press a on Home to add one".to_string()
         } else {
             format!("found {} git projects", app.projects.len())
         };

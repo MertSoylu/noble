@@ -105,7 +105,6 @@ fn home_key(a: Action) -> Option<&'static str> {
         Action::RescanProjects => Some("r"),
         Action::RefreshAi => Some("R"),
         Action::AddProjectFolder => Some("a"),
-        Action::AddProject => Some("A"),
         _ => None,
     }
 }

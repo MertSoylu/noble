@@ -1797,6 +1797,59 @@ fn add_project_folder_flow() {
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
 }
 
+/// With no project yet, Home says how to add one (`a`) and the welcome-free overlay line says the same.
+#[test]
+fn empty_home_says_how_to_add_a_project() {
+    let mut app = demo_app(110, 30);
+    app.projects.clear();
+    app.projects_loaded = true;
+    let text = render(&mut app, 110, 30);
+    save("bridge-empty-110x30", &text);
+    assert!(
+        text.contains("No git repositories found.") && text.contains("press a to add a project or folder"),
+        "{text}"
+    );
+    assert!(!text.contains(" A "), "no `A` hint left: {text}");
+    for (w, h) in [(60, 12), (30, 8)] {
+        save(&format!("bridge-empty-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
+/// Auto mode (`a`) decides on Enter: a git repository or a folder with no repository inside is
+/// added as a project, a folder with a repository two levels down is scanned.
+#[test]
+fn auto_add_decides_between_project_and_scan() {
+    use noble::app::AddMode;
+    let base = std::env::temp_dir().join(format!("noble-auto-add-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (repo, group, notes) = (base.join("repo"), base.join("group"), base.join("notes"));
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(group.join("inner").join(".git")).unwrap();
+    std::fs::create_dir_all(&notes).unwrap();
+    let mut app = demo_app(110, 30);
+    let defaults = noble::projects::default_roots().len();
+    app.add_by_mode(AddMode::Auto, &repo.display().to_string());
+    assert!(
+        app.toasts.iter().any(|t| t.text == "added project repo"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(app.cfg.projects.roots.is_empty(), "a repository is not a scan root");
+    app.add_by_mode(AddMode::Auto, &group.display().to_string());
+    assert!(app.toasts.iter().any(|t| t.text.starts_with("scanning ") && t.text.ends_with("group for projects")));
+    assert_eq!(app.cfg.projects.roots.len(), defaults + 1, "the folder is a scan root");
+    app.add_by_mode(AddMode::Auto, &notes.display().to_string());
+    assert!(app.toasts.iter().any(|t| t.text == "added project notes"));
+    assert!(app.projects.iter().any(|p| p.path == notes && !p.repo), "a folder with no repository is a plain project");
+    // Folder mode scans even a folder that holds no repository yet.
+    app.add_by_mode(AddMode::Folder, &notes.display().to_string());
+    assert_eq!(app.cfg.projects.roots.len(), defaults + 2);
+    // Project mode (the prompt's forced mode) adds a folder as a project even when it only holds repositories.
+    app.add_by_mode(AddMode::Project, &group.display().to_string());
+    assert!(app.projects.iter().any(|p| p.path == group && !p.repo));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The hint shows on the wide status bar and takes no space on the narrow one.
 #[test]
 fn status_bar_shows_tips_when_wide() {
@@ -2345,15 +2398,18 @@ fn remove_and_add_projects() {
     // A rescan finds it again: it stays hidden.
     app.handle(AppEvent::Projects(scanned.clone()));
     assert!(!app.projects.iter().any(|p| p.path == demo), "hidden after a rescan");
-    // `A` opens the add prompt in project mode; tab and a click switch the mode.
+    // `A` opens the add prompt in project mode; tab cycles auto, folder to scan and one project.
     key(&mut app, KeyCode::Char('A'));
     let text = render(&mut app, 110, 30);
     save("add-project-110x30", &text);
     assert!(text.contains("ADD PROJECT") && text.contains("● one project"), "{text}");
     key(&mut app, KeyCode::Tab);
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("ADD FOLDER TO SCAN") && text.contains("● folder of projects"), "{text}");
-    let project_mode = find_hit(&app, |h| *h == Hit::PromptMode(true)).expect("mode choice");
+    assert!(text.contains("ADD PROJECT OR FOLDER") && text.contains("● auto"), "{text}");
+    key(&mut app, KeyCode::Tab);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("ADD FOLDER TO SCAN") && text.contains("● folder to scan"), "{text}");
+    let project_mode = find_hit(&app, |h| *h == Hit::PromptMode(noble::app::AddMode::Project)).expect("mode choice");
     click(&mut app, project_mode.x + 1, project_mode.y);
     let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("prompt closed by the click") };
     assert_eq!(p.title, "ADD PROJECT");
@@ -5850,14 +5906,19 @@ fn system_filter_hint_says_esc_clears() {
     assert_eq!(app.view, View::Bridge);
 }
 
-/// Home's "/ search" label is a button: a click starts the project filter, as "/" does.
+/// Home's "/ search" label sits on the Projects panel's top border, left of the count, and is a
+/// button: a click starts the project filter, as "/" does.
 #[test]
 fn home_search_label_starts_the_filter() {
     use noble::app::Hit;
     let mut app = demo_app(120, 34);
     let (text, buf) = render_buf(&mut app, 120, 34);
-    assert!(text.contains("/ search"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().position(|l| l.contains("╭") && l.contains("Projects")).expect("projects title");
+    assert!(lines[top].contains("/ search ·"), "label on the top border: {text}");
+    assert_eq!(lines.iter().filter(|l| l.contains("/ search")).count(), 1, "one label: {text}");
     let label = find_hit(&app, |h| *h == Hit::HomeSearch).expect("search label");
+    assert_eq!(label.y as usize, top, "hit on the top border");
     assert_eq!(cells_text(&buf, label), "/ search");
     assert!(!app.bridge.filtering);
     click(&mut app, label.x + 2, label.y);
@@ -5996,7 +6057,7 @@ fn prompt_validates_on_enter_and_edits_at_the_cursor() {
     use noble::app::Overlay;
     let k = |app: &mut App, code: KeyCode| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
     let mut app = demo_app(110, 30);
-    app.open_add_prompt(true);
+    app.open_add_prompt(noble::app::AddMode::Project);
     let empty = render(&mut app, 110, 30);
     assert!(empty.contains("path, e.g."), "placeholder: {empty}");
     for c in "Z:/nope/here".chars() {
@@ -6218,8 +6279,9 @@ fn palette_hints_follow_the_view() {
     assert!(!home.iter().any(|t| t == "Search Scrollback" || t == "Pass Keys to the App"), "{home:?}");
     assert_eq!(hint_of(&app, "Rescan Projects"), "r");
     assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
-    assert_eq!(hint_of(&app, "Add Folder to Scan for Projects…"), "a");
-    assert_eq!(hint_of(&app, "Add Project…"), "A");
+    assert_eq!(hint_of(&app, "Add Project or Folder…"), "a");
+    // `A` still works (project mode) but is not shown anywhere.
+    assert_eq!(hint_of(&app, "Add Project…"), "");
 
     app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
     let term = titles(&app);

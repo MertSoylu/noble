@@ -250,6 +250,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
         total.to_string()
     };
     let inner = hud::frame(buf, area, "Projects", &tag, true, th);
+    search_label(buf, area, &tag, th, hits);
     if inner.height == 0 || inner.width < 10 {
         return;
     }
@@ -312,13 +313,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
             buf,
             x,
             y + 1,
-            &[
-                ("press ", th.dim()),
-                ("a", th.accent_bold()),
-                (" to add a folder where your code lives, ", th.dim()),
-                ("A", th.accent_bold()),
-                (" for one project", th.dim()),
-            ],
+            &[("press ", th.dim()), ("a", th.accent_bold()), (" to add a project or folder", th.dim())],
             w,
         );
     } else if vis.is_empty() {
@@ -526,12 +521,27 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
         button(&mut cx, &l.key, &capitalize(&l.name), Hit::Launcher(i), true);
     }
     button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
-    if cx + 12 <= end {
-        // Clicking it starts the filter, as "/" does.
-        let label = "/ search";
-        let start = hud::put_right(buf, end, by, label, th.dim());
-        hits.push((Rect::new(start, by, util::width(label) as u16, 1), Hit::HomeSearch));
+}
+
+/// "/ search" on the Projects panel's top border, just left of the count ("/ search · 6"). A click
+/// starts the filter, as "/" does. It is left out when the title and the count leave no room.
+fn search_label(buf: &mut Buffer, area: Rect, tag: &str, th: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    // The frame's title and count positions (see `hud::frame_outline`).
+    let max_title = area.width.saturating_sub(6) as usize;
+    let title_end = area.left() + 3 + util::width(&util::truncate("Projects", max_title)) as u16;
+    if area.width <= 17 {
+        return;
     }
+    let count = format!(" {} ", util::truncate(tag, area.width.saturating_sub(16) as usize));
+    let count_start = area.right().saturating_sub(2 + util::width(&count) as u16);
+    // A space on each side of the label keeps it apart from the border dashes and the count.
+    let text = " / search ·";
+    let start = count_start.saturating_sub(util::width(text) as u16);
+    if start < title_end + 2 {
+        return;
+    }
+    hud::put_right(buf, count_start, area.top(), text, th.dim());
+    hits.push((Rect::new(start + 1, area.top(), util::width("/ search") as u16, 1), Hit::HomeSearch));
 }
 
 /// Minimum height of a project card (separator + title + a few rows).

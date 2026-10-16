@@ -661,7 +661,7 @@ fn hints(app: &App) -> Vec<(String, String)> {
             // Hints are dropped from the end when the bar is narrow: "? keys" comes first so it survives longest.
             let mut v = vec![
                 h("?", "keys"),
-                h("a A", "add folder / project"),
+                h("a", "add"),
                 h("t", "terminal"),
                 h("r", "rescan"),
                 h("s", "settings"),
@@ -750,7 +750,7 @@ fn tips(app: &App) -> Vec<String> {
         }
         View::Bridge => {
             v.extend([
-                "press a on Home to add a folder with your projects".to_string(),
+                "press a on Home to add a project or a folder of projects".to_string(),
                 "right-click a tab or a project for more".to_string(),
                 "w on Home saves your open tabs as a workspace".to_string(),
             ]);

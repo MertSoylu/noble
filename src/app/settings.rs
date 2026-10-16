@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, ToastLevel, View};
+use super::{AddMode, App, ToastLevel, View};
 use crate::theme::THEMES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -749,7 +749,7 @@ impl App {
         let list = toml::Value::Array(c.projects.roots.iter().cloned().map(toml::Value::String).collect());
         self.apply_config(c);
         self.persist("projects", "roots", &list.to_string());
-        self.toast(ToastLevel::Ok, format!("added {} · scanning…", crate::util::tilde(&path)));
+        self.toast(ToastLevel::Ok, format!("scanning {} for projects", crate::util::tilde(&path)));
     }
 
     /// A folder typed into the add prompt (`~` expands to the home folder, a relative path is
@@ -776,6 +776,26 @@ impl App {
             Err(e) => {
                 self.toast(ToastLevel::Error, e);
                 None
+            }
+        }
+    }
+
+    /// The add prompt's action. Auto mode: a git repository, or a folder with no repository
+    /// within two levels (`projects::holds_repos`), is added as a project; a folder that holds
+    /// repositories is scanned for them. The toast names what happened.
+    pub fn add_by_mode(&mut self, mode: AddMode, raw: &str) {
+        match mode {
+            AddMode::Project => self.add_project(raw),
+            AddMode::Folder => self.add_project_root(raw),
+            AddMode::Auto => {
+                let Ok(path) = Self::resolve_folder(raw) else { return };
+                let scan = crate::projects::git_dir(&path).is_none()
+                    && crate::projects::holds_repos(&path, 2, &self.cfg.projects.exclude);
+                if scan {
+                    self.add_project_root(raw);
+                } else {
+                    self.add_project(raw);
+                }
             }
         }
     }
@@ -816,7 +836,7 @@ impl App {
         if listed.is_some() {
             self.toast(ToastLevel::Info, format!("{name} is already in Projects"));
         } else {
-            self.toast(ToastLevel::Ok, format!("added {name} to Projects"));
+            self.toast(ToastLevel::Ok, format!("added project {name}"));
         }
     }
 
