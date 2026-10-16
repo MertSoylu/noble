@@ -593,7 +593,7 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
 
 /// Word-wraps `text` to lines of at most `width` columns (by display width); a word wider than
 /// a line is cut into pieces. Newlines count as spaces.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if width == 0 {
         return lines;

@@ -19,6 +19,7 @@ pub enum SettingKey {
     Restore,
     CopySelect,
     TabFollowsCwd,
+    DimInactive,
     TermColors,
     Notify,
     Prefix,
@@ -87,6 +88,7 @@ impl SettingKey {
             SettingKey::Restore => "Restore tabs on launch",
             SettingKey::CopySelect => "Copy text on select",
             SettingKey::TabFollowsCwd => "Tab name follows the folder",
+            SettingKey::DimInactive => "Dim inactive panes",
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
@@ -122,6 +124,7 @@ impl SettingKey {
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
             SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
+            SettingKey::DimInactive => "Fade the text of the split panes without the focus",
             SettingKey::Notify => "Alert when a long command ends in a background tab",
             SettingKey::TermColors => "Color scheme used inside terminal panes",
             SettingKey::Prefix => "Key that starts NOBLE's command chords",
@@ -226,7 +229,8 @@ impl App {
     fn settings_layout(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
         use SettingKey::*;
         let rows = |keys: &[SettingKey]| keys.iter().map(|k| SettingItem::Setting(*k)).collect::<Vec<_>>();
-        let mut terminal = rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, Notify, QuickLaunch]);
+        let mut terminal =
+            rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, DimInactive, Notify, QuickLaunch]);
         if self.claude_hooks_available() {
             terminal.push(SettingItem::Setting(ClaudeHooks));
         }
@@ -301,6 +305,7 @@ impl App {
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
             SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
+            SettingKey::DimInactive => c.terminal.dim_inactive,
             SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
             SettingKey::ClaudeHooks => self.hooks_installed,
@@ -472,6 +477,10 @@ impl App {
                     SettingKey::TabFollowsCwd => {
                         c.terminal.tab_follows_cwd ^= true;
                         ("terminal", "tab_follows_cwd", c.terminal.tab_follows_cwd.to_string())
+                    }
+                    SettingKey::DimInactive => {
+                        c.terminal.dim_inactive ^= true;
+                        ("terminal", "dim_inactive", c.terminal.dim_inactive.to_string())
                     }
                     // Written to Claude's own settings file, not the config (handled above).
                     SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),

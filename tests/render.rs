@@ -6831,3 +6831,178 @@ fn settings_filter_narrows_rows() {
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_ne!(app.view, View::Settings);
 }
+
+/// The first place `needle` starts in the frame, at or right of column `min_x` (ASCII text).
+fn find_text(buf: &ratatui::buffer::Buffer, needle: &str, min_x: u16) -> Option<(u16, u16)> {
+    let chars: Vec<char> = needle.chars().collect();
+    for y in 0..buf.area.height {
+        for x in min_x..buf.area.width {
+            let hit = chars.iter().enumerate().all(|(i, c)| {
+                let cx = x + i as u16;
+                cx < buf.area.width && buf[(cx, y)].symbol() == c.to_string()
+            });
+            if hit {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+/// Split tabs: the panes without the focus fade their text toward the pane background
+/// (`terminal.dim_inactive`). A single pane, a zoomed pane and the setting turned off keep their
+/// colors; an ANSI color the palette cannot blend (theme mode) gets the DIM attribute instead.
+#[test]
+fn inactive_panes_dim_only_in_a_split() {
+    use ratatui::style::{Color, Modifier};
+    // The (foreground, DIM) of every cell showing `ch`.
+    let cells_of = |buf: &ratatui::buffer::Buffer, ch: &str| -> Vec<(Color, bool)> {
+        let mut v = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let c = &buf[(x, y)];
+                if c.symbol() == ch {
+                    v.push((c.fg, c.modifier.contains(Modifier::DIM)));
+                }
+            }
+        }
+        v
+    };
+    let white = Color::Rgb(255, 255, 255);
+
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("dim".into()));
+    app.run(Action::SplitRight);
+    assert_eq!(app.tabs[0].panes().len(), 2);
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert_eq!(qs.len(), 8, "four glyphs per pane");
+    let kept = qs.iter().filter(|(fg, _)| *fg == white).count();
+    assert_eq!(kept, 4, "only the focused pane keeps its colors: {qs:?}");
+    let faded: Vec<Color> = qs.iter().filter(|(fg, _)| *fg != white).map(|(fg, _)| *fg).collect();
+    assert_eq!(faded.len(), 4);
+    assert!(faded.iter().all(|c| *c == faded[0] && matches!(c, Color::Rgb(..))), "{faded:?}");
+
+    // Off: both panes keep the text color.
+    app.cfg.terminal.dim_inactive = false;
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert!(qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+    app.cfg.terminal.dim_inactive = true;
+
+    // Theme mode: ANSI red is left to the outer terminal, so the unfocused pane gets DIM.
+    app.cfg.terminal.colors = "theme".into();
+    write_panes(&mut app, "\x1b[31m", "RRRR");
+    let buf = render_cells(&mut app, 110, 30);
+    let rs = cells_of(&buf, "R");
+    assert_eq!(rs.len(), 8);
+    assert_eq!(rs.iter().filter(|(_, dim)| *dim).count(), 4, "{rs:?}");
+    app.cfg.terminal.colors = "windows-terminal".into();
+
+    // Zoomed: one pane is on screen, and it has the focus.
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    app.run(Action::Zoom);
+    assert!(app.tabs[0].zoomed);
+    // The pane is resized on the first frame, and the shell redraws its prompt then: write again.
+    render_cells(&mut app, 110, 30);
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert_eq!(qs.len(), 4);
+    assert!(qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+
+    // A single pane is never dimmed.
+    let mut single = demo_app(110, 30);
+    single.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    write_panes(&mut single, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut single, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert!(qs.len() == 4 && qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+}
+
+/// Clears every pane of the first tab and writes `glyphs` (in the `sgr` style) at its top left.
+fn write_panes(app: &mut App, sgr: &str, glyphs: &str) {
+    let bytes = format!("\x1b[2J\x1b[H{sgr}{glyphs}");
+    for id in app.tabs[0].panes() {
+        app.panes[&id].parser().process(bytes.as_bytes());
+    }
+}
+
+/// Settings on a wide terminal (140+ columns): the page is 130 columns, its list keeps the first 80
+/// and a description panel on the right shows the selected label in bold with its description wrapped.
+/// The bottom row no longer carries the description.
+#[test]
+fn settings_description_panel_at_160x45() {
+    use noble::app::{SettingItem, SettingKey};
+    use ratatui::style::Modifier;
+    let mut app = demo_app(160, 45);
+    app.run(Action::Settings);
+    let items = app.settings_items();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::Restore)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 160, 45);
+    save("settings-160x45", &text);
+    let buf = render_cells(&mut app, 160, 45);
+    let label = SettingKey::Restore.label();
+    let desc = SettingKey::Restore.description();
+
+    // The list row keeps the label within its 80 columns; the panel repeats it in bold at column 82+.
+    // The selected row's marker "▌" comes right before the list label.
+    let (lx, _) = find_text(&buf, &format!("▌ {label}"), 0).expect("the list row");
+    assert!(lx < 80, "list column: {lx}");
+    let (px, py) = find_text(&buf, label, 82).expect("the panel label");
+    assert!(buf[(px, py)].modifier.contains(Modifier::BOLD), "panel label is bold");
+    // The description wraps inside the panel.
+    let first_words: String = desc.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+    assert!(find_text(&buf, &first_words, 82).is_some(), "panel description:\n{text}");
+    assert!(desc.split_whitespace().count() > 4, "the description wraps in the panel");
+    // A rule separates the list from the panel.
+    assert!((0..45).any(|y| buf[(96, y)].symbol() == "│"), "separator:\n{text}");
+    // The description is not on the bottom row any more.
+    assert!(!text.lines().last().unwrap().contains("Reopen"), "{text}");
+    assert!(find_text(&buf, "Reopen", 0).is_some_and(|(x, _)| x >= 82), "{text}");
+
+    // Other sizes for the overflow review (dumps under target/audit).
+    for (w, h) in [(160, 45), (140, 30), (200, 60), (150, 12), (96, 20), (60, 20), (30, 8)] {
+        save(&format!("settings-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
+/// Settings on a narrow terminal: the selected setting's description sits under its row, dimmed and
+/// indented by two, and the bottom row keeps only the "more" marker. The selection scrolls with it.
+#[test]
+fn settings_description_under_selected_row_at_110x30() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.run(Action::Settings);
+    let items = app.settings_items();
+    let label = SettingKey::Restore.label();
+    let desc = SettingKey::Restore.description();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::Restore)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 110, 30);
+    save("settings-110x30", &text);
+    let lines: Vec<&str> = text.lines().collect();
+    let row = lines.iter().position(|l| l.contains(label)).expect("the selected row");
+    assert!(lines[row + 1].contains(desc), "description under its row:\n{text}");
+    assert!(!lines.last().unwrap().contains(desc), "no description on the bottom row:\n{text}");
+
+    let buf = render_cells(&mut app, 110, 30);
+    let (lx, ly) = find_text(&buf, label, 0).unwrap();
+    let (dx, dy) = find_text(&buf, desc, 0).unwrap();
+    assert_eq!((dx, dy), (lx + 2, ly + 1), "indented under the label");
+    assert_eq!(buf[(dx, dy)].fg, app.theme.dim().fg.unwrap(), "dimmed");
+
+    // The last setting's description stays on screen with its row when the page scrolls to it.
+    let last = items.iter().rev().find_map(|i| match i {
+        SettingItem::Setting(k) => Some(*k),
+        _ => None,
+    });
+    let last = last.unwrap();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(last)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains(last.description()), "the selected setting's description is visible:\n{text}");
+    assert!(text.contains(last.label()), "{text}");
+}

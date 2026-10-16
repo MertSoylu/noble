@@ -7,6 +7,10 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Split tabs fade the text of the panes without the focus (`terminal.dim_inactive`, Settings → Terminal → "Dim
+  inactive panes", on by default): their colors are mixed 30% toward the pane background, so the focused pane
+  stands out. A zoomed pane is alone and not dimmed; ANSI colors that the palette leaves to the outer terminal
+  get the terminal's dim attribute instead.
 - The keyboard reference (`?`) is interactive: typing filters its rows by key or description (the title shows
   `/query`; sections without a match are hidden), ↑↓ select a row and ⏎ or a click runs its action and closes
   the reference, and esc clears the filter before it closes. Wide screens lay the sections out in two columns
@@ -37,6 +41,9 @@ All notable changes to NOBLE are documented here. The format is based on
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
 ### Changed
+- Settings on a terminal 140 columns or wider: the page widens to 130 columns, the list keeps its first 80, and a
+  panel on the right shows the selected setting's label in bold with its description wrapped. Narrower screens
+  show the description dimmed under the selected row (it used to sit on the bottom row, far from the selection).
 - In the keyboard reference `j`, `k`, space and `q` type into the filter: ↑↓ and PgUp/PgDn move the selection
   (the list follows it), the wheel scrolls, and `?` (with no filter typed) or esc closes it.
 - The startup animation plays on the first launch and on the first launch after an update, not on every launch.

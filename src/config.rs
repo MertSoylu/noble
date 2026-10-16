@@ -59,6 +59,8 @@ pub struct TerminalCfg {
     pub notify: bool,
     /// Report the end of a background command that ran at least this many seconds (0 = off).
     pub notify_after: u64,
+    /// In a split tab, the unfocused panes are drawn toward their background (their text fades).
+    pub dim_inactive: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -140,6 +142,7 @@ impl Default for TerminalCfg {
             foreground: String::new(),
             notify: true,
             notify_after: 10,
+            dim_inactive: true,
         }
     }
 }
@@ -248,6 +251,7 @@ background = ""          # override the scheme background, e.g. '#c8c8c8' (empty
 foreground = ""          # override the scheme text color, e.g. '#2e2e2e'
 notify = true            # notify when a background tab needs attention (bell, app notification)
 notify_after = 10        # report the end of a background command that took at least this many seconds (0 = off)
+dim_inactive = true      # in a split tab, fade the text of the panes that do not have the focus
 
 [keys]
 prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell

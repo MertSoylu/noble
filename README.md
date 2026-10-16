@@ -53,6 +53,7 @@ and `file:line` paths. vim, htop and Claude Code run full-screen with mouse supp
 how the last command ended (`✓ 2.4s`, `✗ 1 · 12s`) and a live timer while one runs. Scrolled back, a pane shows a
 position bar with the search matches on it and a `↓ live · 12` chip counting the new lines below. The focused
 or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
+In a split tab the panes without the focus fade a little (`dim_inactive`), so the focused one stands out.
 
 </td>
 <td width="50%" valign="top">
@@ -258,7 +259,8 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
   browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
   (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
-  `esc` back to the page you came from. Every row is also in the palette as `Setting: <name> (<value>)`.
+  `esc` back to the page you came from. The selected setting's description shows in a panel on the right on a terminal
+  140 columns or wider, and under its row on a narrower one. Every row is also in the palette as `Setting: <name> (<value>)`.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
   "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
@@ -319,6 +321,7 @@ background = ""          # override the scheme's background, e.g. "#c8c8c8"
 foreground = ""          # override the scheme's text color
 notify = true            # toast + bell when a background tab needs attention
 notify_after = 10        # report background commands that ran at least this many seconds (0 = off)
+dim_inactive = true      # in a split tab, fade the text of the panes without the focus
 
 [keys]
 prefix = "ctrl+a"

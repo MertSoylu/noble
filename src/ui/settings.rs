@@ -6,23 +6,43 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::hud;
+use super::overlay::wrap_text;
 use crate::app::{App, Hit, SettingItem, SettingKey};
 use crate::util;
 
-/// Outer width of the settings frame.
+/// From this terminal width the page is wide enough for a description panel beside the list.
+const WIDE_FROM: u16 = 140;
+/// Columns of the list on a wide page (labels and values stay close); the panel takes the rest.
+const LIST_W: u16 = 80;
+
+/// Outer width of the settings frame: 96 columns, or up to 130 on a wide terminal.
 pub fn settings_width(term_w: u16) -> u16 {
-    term_w.saturating_sub(2).min(96)
+    let max = if term_w >= WIDE_FROM { 130 } else { 96 };
+    term_w.saturating_sub(2).min(max)
 }
 
 enum Line {
     Header(&'static str),
     Item(usize),
+    /// The description of the setting whose row (`Item`) is just above it; only on a narrow page.
+    Note(usize),
     Buttons(Vec<usize>),
     Blank,
 }
 
+/// The selected setting's index when its description goes under its row (a narrow page only).
+fn note_item(app: &App, width: u16) -> Option<usize> {
+    if width >= WIDE_FROM {
+        return None;
+    }
+    let items = app.settings_items();
+    let sel = app.settings_sel.min(items.len().saturating_sub(1));
+    matches!(items.get(sel), Some(SettingItem::Setting(_))).then_some(sel)
+}
+
 /// The page's lines: each section's header and its rows (items are indices into `settings_items`).
-fn build_lines(app: &App) -> Vec<Line> {
+/// `note` is the item whose description follows its row.
+fn build_lines(app: &App, note: Option<usize>) -> Vec<Line> {
     let mut v = Vec::new();
     let mut idx = 0;
     for (n, (title, items)) in app.settings_sections().into_iter().enumerate() {
@@ -33,7 +53,12 @@ fn build_lines(app: &App) -> Vec<Line> {
         let mut buttons = Vec::new();
         for (k, item) in items.iter().enumerate() {
             match item {
-                SettingItem::Setting(_) => v.push(Line::Item(idx + k)),
+                SettingItem::Setting(_) => {
+                    v.push(Line::Item(idx + k));
+                    if note == Some(idx + k) {
+                        v.push(Line::Note(idx + k));
+                    }
+                }
                 _ => buttons.push(idx + k),
             }
         }
@@ -64,16 +89,19 @@ fn page_frame(area: Rect) -> (Rect, usize) {
 /// Keeps the scroll position valid and, after a key press, the selected row (with its section
 /// header) on screen. Runs before drawing, which only reads the state.
 pub fn sync_scroll(app: &mut App, area: Rect) {
-    let lines = build_lines(app);
+    let note = note_item(app, area.width);
+    let lines = build_lines(app, note);
     let (_, rows) = page_frame(area);
     if app.settings_follow {
         let sel = app.settings_sel.min(app.settings_items().len().saturating_sub(1));
         let sel_line = lines.iter().position(|l| line_has(l, sel)).unwrap_or(0);
+        // The description under the selected row (narrow page) scrolls with it: the row's last line.
+        let last_line = sel_line + usize::from(note.is_some());
         let top = if sel_line > 0 && matches!(lines[sel_line - 1], Line::Header(_)) { sel_line - 1 } else { sel_line };
         if top < app.settings_scroll {
             app.settings_scroll = top;
-        } else if rows > 0 && sel_line >= app.settings_scroll + rows {
-            app.settings_scroll = sel_line + 1 - rows;
+        } else if rows > 0 && last_line >= app.settings_scroll + rows {
+            app.settings_scroll = last_line + 1 - rows;
         }
         app.settings_follow = false;
     }
@@ -95,14 +123,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         "Settings".to_string()
     };
     let inner = hud::frame(buf, frame, &title, "saved automatically", true, th);
-    let x = inner.x + 2;
-    let iw = inner.width.saturating_sub(4);
     let items = app.settings_items();
     let sel = app.settings_sel.min(items.len().saturating_sub(1));
+    // A wide page keeps the list in its first columns; the description panel takes the rest.
+    let wide = area.width >= WIDE_FROM;
+    let list = if wide { Rect::new(inner.x, inner.y, LIST_W.min(inner.width), inner.height) } else { inner };
+    let x = list.x + 2;
+    let iw = list.width.saturating_sub(4);
     if items.is_empty() {
         hud::put(buf, x, inner.y + 1, "no settings match", th.dim(), iw);
     }
-    let lines = build_lines(app);
+    let lines = build_lines(app, note_item(app, area.width));
     let offset = app.settings_scroll.min(lines.len().saturating_sub(rows));
     let visible = &lines[offset..(offset + rows).min(lines.len())];
     let glide = app.fx.glide("settings", sel);
@@ -113,7 +144,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // A header cut off from its first row stays hidden.
             Line::Header(_) if n + 1 == visible.len() => {}
             Line::Header(h) => {
-                // Section title followed by a faint rule to the edge of the page.
+                // Section title followed by a faint rule to the edge of the list.
                 let tx = hud::put(buf, x, y, h, th.accent_bold(), iw);
                 let rule = (x + iw).saturating_sub(tx + 1);
                 if rule > 0 {
@@ -123,12 +154,25 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             Line::Item(i) => {
                 let SettingItem::Setting(key) = items[*i] else { continue };
                 let bg = glide.bg(*i, th.bg, th.sel_bg);
-                setting_row(buf, Rect::new(inner.x, y, inner.width, 1), app, key, *i == sel, bg);
-                hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::Setting(*i)));
+                let row = Rect::new(list.x, y, list.width, 1);
+                setting_row(buf, row, app, key, *i == sel, bg);
+                hits.push((row, Hit::Setting(*i)));
             }
-            Line::Buttons(list) => {
+            // The description of a narrow page's selected setting: dimmed and indented under its row,
+            // on the row's background so the two read as one block.
+            Line::Note(i) => {
+                let bg = glide.bg(*i, th.bg, th.sel_bg);
+                if bg != th.bg {
+                    hud::set_bg_row(buf, list.x, y, list.width, bg);
+                }
+                if let Some(SettingItem::Setting(key)) = items.get(*i) {
+                    let room = iw.saturating_sub(2);
+                    hud::put(buf, x + 2, y, &util::truncate(key.description(), room as usize), th.dim().bg(bg), room);
+                }
+            }
+            Line::Buttons(group) => {
                 let mut cx = x;
-                for i in list {
+                for i in group {
                     let label = items[*i].label();
                     let start = cx;
                     let key = if *i == sel { "▶" } else { "·" };
@@ -152,10 +196,38 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
     if more {
         hud::put_right(buf, x + iw, inner.bottom() - 1, "↓ more", th.dim());
     }
-    // What the selected setting does, on the bottom row (left of the "more" marker).
-    if let Some(SettingItem::Setting(key)) = items.get(sel) {
-        let room = iw.saturating_sub(if more { 8 } else { 0 });
-        hud::put(buf, x, inner.bottom() - 1, &util::truncate(key.description(), room as usize), th.dim(), room);
+    if wide {
+        let key = match items.get(sel) {
+            Some(SettingItem::Setting(key)) => Some(*key),
+            _ => None,
+        };
+        description_panel(buf, inner, list, app, key);
+    }
+}
+
+/// The description panel of a wide page: a rule separates it from the list, then the selected
+/// setting's label in bold and its description wrapped to the panel's width.
+fn description_panel(buf: &mut Buffer, inner: Rect, list: Rect, app: &App, key: Option<SettingKey>) {
+    let th = &app.theme;
+    let rule = list.right();
+    for y in inner.y..inner.bottom() {
+        hud::put(buf, rule, y, "│", th.line(), 1);
+    }
+    let x = rule + 2;
+    let w = inner.right().saturating_sub(x + 2);
+    let Some(key) = key else { return };
+    if w == 0 {
+        return;
+    }
+    let label = util::truncate(key.label(), w as usize);
+    hud::put(buf, x, inner.y + 1, &label, th.text().add_modifier(Modifier::BOLD), w);
+    let last = inner.bottom().saturating_sub(1);
+    for (n, line) in wrap_text(key.description(), w as usize).iter().enumerate() {
+        let y = inner.y + 3 + n as u16;
+        if y >= last {
+            break;
+        }
+        hud::put(buf, x, y, line, th.dim(), w);
     }
 }
 
