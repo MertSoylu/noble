@@ -77,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &mut hits);
     }
     update_notice(buf, area, app, &mut hits);
-    toasts(buf, area, app);
+    toasts(buf, area, app, &mut hits);
     app.fx.observe_overlay(app.overlay.is_some());
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
@@ -933,10 +933,10 @@ pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
     util::width(&toast_text(text, screen_w)) as u16
 }
 
-fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
+fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let mut y = area.bottom().saturating_sub(3);
-    for t in app.toasts.iter().rev() {
+    for (i, t) in app.toasts.iter().enumerate().rev() {
         if y <= area.y + 1 {
             break;
         }
@@ -949,12 +949,11 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
         let text = toast_text(&t.text, area.width);
         let w = util::width(&text) as u16 + 1;
         // Slides in from the right edge, and out the same way once its time is up.
+        let now = std::time::Instant::now();
         let shift = if app.fx.enabled() {
-            let now = std::time::Instant::now();
-            let away = if now >= t.until {
-                crate::app::fx::linear(t.until, crate::app::fx::TOAST_OUT).powi(2)
-            } else {
-                1.0 - crate::app::fx::ease_out(crate::app::fx::linear(t.born, crate::app::fx::TOAST_IN))
+            let away = match t.expires_at() {
+                Some(until) if now >= until => crate::app::fx::linear(until, crate::app::fx::TOAST_OUT).powi(2),
+                _ => 1.0 - crate::app::fx::ease_out(crate::app::fx::linear(t.born, crate::app::fx::TOAST_IN)),
             };
             ((w + 1) as f64 * away).round() as u16
         } else {
@@ -964,10 +963,13 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
         let room = area.right().saturating_sub(x);
         hud::put(buf, x, y, "▌", Style::default().fg(color).bg(th.raised), room.min(1));
         hud::put(buf, x + 1, y, &text, Style::default().fg(th.fg).bg(th.raised), w.min(room.saturating_sub(1)));
-        // Countdown: the time already spent darkens the toast from its right end.
-        if app.fx.enabled() {
-            let life = t.until.saturating_duration_since(t.born).as_secs_f64().max(0.001);
-            let spent = (t.born.elapsed().as_secs_f64() / life).clamp(0.0, 1.0);
+        if room > 0 {
+            hits.push((Rect::new(x, y, w.min(room), 1), Hit::Toast(i)));
+        }
+        // Countdown: the time already spent darkens the toast from its right end (a sticky one has none).
+        if let Some(life) = t.life.filter(|_| app.fx.enabled()) {
+            let life = life.as_secs_f64().max(0.001);
+            let spent = (t.active(now).as_secs_f64() / life).clamp(0.0, 1.0);
             let cells = ((w - 1) as f64 * spent).round() as u16;
             let dark = crate::theme::Theme::mix(th.raised, th.bg, 0.65);
             for cx in (x + w).saturating_sub(cells)..x + w {

@@ -364,15 +364,38 @@ impl Paths {
     }
 }
 
-/// Load result: the config and (optionally) an error message. The error is not fatal.
+/// Load result: the config and (optionally) an error. The error is not fatal.
 pub struct Loaded {
     pub config: Config,
-    pub error: Option<String>,
+    pub error: Option<ConfigError>,
     pub mtime: Option<SystemTime>,
 }
 
-pub fn parse(text: &str) -> Result<Config, String> {
-    let mut cfg: Config = toml::from_str(text).map_err(|e| e.message().to_string())?;
+/// A config that does not load: the message (one line, shown as a toast) and the 1-based line of the
+/// mistake, which lets the toast open the file there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigError {
+    pub text: String,
+    pub line: Option<u32>,
+}
+
+/// The error for a TOML parse failure: `config line 5, column 3: <message>` (the position is
+/// computed from the byte offset of the error, so it also works for text that is not one line).
+fn parse_error(text: &str, e: &toml::de::Error) -> ConfigError {
+    let message = e.message().split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(span) = e.span() else {
+        return ConfigError { text: format!("config: {message}"), line: None };
+    };
+    let bytes = text.as_bytes();
+    let before = &bytes[..span.start.min(bytes.len())];
+    let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
+    let line_start = before.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    let column = String::from_utf8_lossy(&before[line_start..]).chars().count() + 1;
+    ConfigError { text: format!("config line {line}, column {column}: {message}"), line: Some(line as u32) }
+}
+
+pub fn parse(text: &str) -> Result<Config, ConfigError> {
+    let mut cfg: Config = toml::from_str(text).map_err(|e| parse_error(text, &e))?;
     // Removed providers are dropped silently.
     cfg.ai.providers.retain(|p| {
         matches!(
@@ -419,12 +442,15 @@ pub fn load(path: &Path) -> Loaded {
     match std::fs::read_to_string(path) {
         Ok(text) => match parse(&text) {
             Ok(config) => Loaded { config, error: None, mtime },
-            Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
+            Err(error) => Loaded { config: Config::default(), error: Some(error), mtime },
         },
         // No file (and none could be written, e.g. a read-only home): the defaults, silently.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
         // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.
-        Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
+        Err(e) => {
+            let error = ConfigError { text: format!("config: {e}"), line: None };
+            Loaded { config: Config::default(), error: Some(error), mtime }
+        }
     }
 }
 
@@ -751,6 +777,15 @@ providers = [\"claude\", \"gemini\"]
             let loaded = load(&path);
             assert_eq!(loaded.error.is_some(), broken, "{:?}: {:?}", String::from_utf8_lossy(bytes), loaded.error);
         }
+        // The line (and column) of a TOML mistake stay in the message, so the toast can open the file there.
+        let at = |text: &str| parse(text).err().map(|e| (e.line, e.text));
+        assert_eq!(
+            at("[general]\ntheme = \"ice\"\n\n[ai]\nenabled = \"yes\"\n"),
+            Some((Some(5), "config line 5, column 11: invalid type: string \"yes\", expected a boolean".into()))
+        );
+        let (line, text) = at("[general\ntheme=").unwrap();
+        assert_eq!(line, Some(1));
+        assert!(text.starts_with("config line 1, column ") && !text.contains('\n'), "{text}");
         std::fs::remove_file(&path).unwrap();
         let loaded = load(&path);
         assert!(loaded.error.is_none() && path.is_file());

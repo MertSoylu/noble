@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, PromptPurpose, SortKey, ToastLevel, View};
+use super::{App, Drag, Hit, Overlay, ProjectAct, PromptPurpose, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -735,8 +735,38 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// The pointer on a notification pauses its countdown; off it, the countdown goes on.
+    fn hold_toasts(&mut self, x: u16, y: u16) {
+        let over = match self.hit_at(x, y) {
+            Some(Hit::Toast(i)) => Some(i),
+            _ => None,
+        };
+        let now = Instant::now();
+        for (i, t) in self.toasts.iter_mut().enumerate() {
+            t.set_hovered(over == Some(i), now);
+        }
+    }
+
+    /// A click dismisses a notification; a config error also opens the config file at its line.
+    fn toast_clicked(&mut self, i: usize) {
+        if i >= self.toasts.len() {
+            return;
+        }
+        let toast = self.toasts.remove(i);
+        self.dirty = true;
+        match toast.target {
+            Some(ToastTarget::Config { line: Some(line) }) => {
+                let path = self.paths.config.clone();
+                self.open_link(crate::term::link::Link::File { path, line: Some(line), col: None });
+            }
+            Some(ToastTarget::Config { line: None }) => self.run(Action::OpenConfig),
+            None => {}
+        }
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
         self.hover = Some((m.column, m.row));
+        self.hold_toasts(m.column, m.row);
         if self.boot.is_some() {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.boot = None;
@@ -871,6 +901,7 @@ impl App {
                     self.open_link(crate::term::link::Link::Url(url));
                 }
             }
+            Hit::Toast(i) => self.toast_clicked(i),
             Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),

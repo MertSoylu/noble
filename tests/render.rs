@@ -9,7 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
-use noble::app::{App, View};
+use noble::app::{App, ToastLevel, View};
 use noble::config::Config;
 use noble::event::AppEvent;
 use noble::keys::Action;
@@ -6393,4 +6393,113 @@ fn wrapped_confirm_text_keeps_whole_words() {
     let text = render(&mut app, 110, 30);
     // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there.
     assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
+}
+
+/// Moves the toasts' start back, as if they had been on screen for `secs` seconds.
+fn age_toasts(app: &mut App, secs: u64) {
+    for t in &mut app.toasts {
+        t.born = t.born.checked_sub(Duration::from_secs(secs)).expect("clock far enough along");
+    }
+}
+
+/// A config error keeps its line and column, and stays on screen until it is clicked away.
+#[test]
+fn config_error_toast_stays_until_dismissed() {
+    use noble::app::ToastTarget;
+    let mut app = demo_app(110, 30);
+    let dir = std::env::temp_dir().join(format!("noble-config-toast-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[general]\ntheme = \"ice\"\n\n[ai]\nenabled = \"yes\"\n").unwrap();
+    app.paths.config = path;
+    app.toasts.clear();
+    app.reload_config(false);
+    let toast = app.toasts.last().expect("config error toast");
+    assert!(toast.text.starts_with("config line 5, column 11: "), "{}", toast.text);
+    assert!(!toast.text.contains('\n'));
+    assert_eq!(toast.target, Some(ToastTarget::Config { line: Some(5) }));
+    assert!(toast.expires_at().is_none(), "an error does not expire");
+    age_toasts(&mut app, 600);
+    app.tick();
+    assert_eq!(toast_texts(&app).len(), 1, "still on screen after ten minutes");
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("config line 5, column 11"), "{text}");
+    // The history keeps the whole message.
+    assert!(app.notices.back().is_some_and(|n| n.text.starts_with("config line 5")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Errors stay until dismissed; the other notifications leave once their time is up.
+#[test]
+fn error_toast_does_not_expire() {
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Error, "an error that must stay");
+    app.toast(ToastLevel::Info, "a note that leaves");
+    age_toasts(&mut app, 60);
+    app.tick();
+    assert_eq!(toast_texts(&app), vec!["an error that must stay"]);
+}
+
+/// A click on a notification dismisses it and leaves the others alone.
+#[test]
+fn clicking_a_toast_removes_it() {
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Error, "first, an error");
+    app.toast(ToastLevel::Info, "second note");
+    render(&mut app, 110, 30);
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(0))).expect("toast hit");
+    click(&mut app, rect.x + 1, rect.y);
+    assert_eq!(toast_texts(&app), vec!["second note"]);
+}
+
+/// The pointer on a notification pauses its countdown; once it leaves, the countdown goes on.
+#[test]
+fn hovered_toast_waits_for_the_pointer_to_leave() {
+    use crossterm::event::MouseEventKind;
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "hover me");
+    render(&mut app, 110, 30);
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(0))).expect("toast hit");
+    age_toasts(&mut app, 60);
+    mouse(&mut app, MouseEventKind::Moved, rect.x + 1, rect.y);
+    app.tick();
+    assert_eq!(toast_texts(&app).len(), 1, "a toast under the pointer stays");
+    mouse(&mut app, MouseEventKind::Moved, 0, 0);
+    app.tick();
+    assert!(app.toasts.is_empty(), "its time is up once the pointer has left");
+}
+
+/// The `notifications` action lists the past notifications newest first; running one copies its text.
+#[test]
+fn notifications_action_lists_past_toasts() {
+    use noble::app::{Overlay, PaletteCmd};
+    let mut app = demo_app(110, 30);
+    app.toast(ToastLevel::Info, "first note");
+    app.toast(ToastLevel::Error, "second, an error");
+    app.toast(ToastLevel::Ok, "third note");
+    app.run(Action::Notifications);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no palette") };
+    let titles: Vec<&str> = st.all.iter().map(|i| i.title.as_str()).collect();
+    assert!(titles.len() >= 3, "{titles:?}");
+    assert!(titles[0].ends_with("third note"), "{titles:?}");
+    assert!(titles[1].ends_with("second, an error"), "{titles:?}");
+    assert!(titles[2].ends_with("first note"), "{titles:?}");
+    assert_eq!(titles[0].as_bytes()[2], b':', "title starts with the time: {}", titles[0]);
+    assert_eq!(st.all[0].cmd, PaletteCmd::CopyNotice("third note".into()));
+    let cmd = st.all[0].cmd.clone();
+    app.overlay = None;
+    app.run_palette(cmd);
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+
+    // The history keeps the last 50 notifications only.
+    for i in 0..60 {
+        app.toast(ToastLevel::Info, format!("note {i}"));
+    }
+    assert_eq!(app.notices.len(), noble::app::NOTICE_HISTORY);
+    assert_eq!(app.notices.back().map(|n| n.text.as_str()), Some("note 59"));
+    assert_eq!(app.notices.front().map(|n| n.text.as_str()), Some("note 10"));
 }

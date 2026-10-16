@@ -291,12 +291,64 @@ pub enum ToastLevel {
     Error,
 }
 
+/// Where a notification leads when it is clicked (besides being dismissed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastTarget {
+    /// A config error: opens the config file at this line (the Edit Config File action without one).
+    Config { line: Option<u32> },
+}
+
 pub struct Toast {
     pub text: String,
     pub level: ToastLevel,
     pub born: Instant,
-    pub until: Instant,
+    /// How long it stays on screen; `None` until it is dismissed (errors).
+    pub life: Option<Duration>,
+    /// Time the pointer has rested on it so far: not counted against `life`.
+    pub held: Duration,
+    /// Since when the pointer rests on it (the countdown is paused meanwhile).
+    pub hover_from: Option<Instant>,
+    pub target: Option<ToastTarget>,
 }
+
+impl Toast {
+    /// Time on screen that counts against `life` (the pointer on the toast does not).
+    pub fn active(&self, now: Instant) -> Duration {
+        let end = self.hover_from.unwrap_or(now).min(now);
+        end.saturating_duration_since(self.born).saturating_sub(self.held)
+    }
+
+    /// When the toast leaves on its own; `None` while it is paused or sticky.
+    pub fn expires_at(&self) -> Option<Instant> {
+        if self.hover_from.is_some() {
+            return None;
+        }
+        Some(self.born + self.held + self.life?)
+    }
+
+    /// The pointer rests on the toast (`on`) or has left it: the countdown pauses meanwhile.
+    fn set_hovered(&mut self, on: bool, now: Instant) {
+        match (on, self.hover_from) {
+            (true, None) => self.hover_from = Some(now),
+            (false, Some(from)) => {
+                self.held += now.saturating_duration_since(from);
+                self.hover_from = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A notification kept in the history (the `notifications` action): its full text and when it came.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub text: String,
+    pub level: ToastLevel,
+    pub at: chrono::DateTime<chrono::Local>,
+}
+
+/// How many notifications the history keeps (newest last).
+pub const NOTICE_HISTORY: usize = 50;
 
 /// Mouse hit targets; rebuilt on every frame while drawing.
 #[derive(Clone, Debug, PartialEq)]
@@ -381,6 +433,8 @@ pub enum Hit {
     ProjectPr,
     /// A listening port on Home's project card (opens `http://localhost:<port>`).
     Port(u16),
+    /// A notification (index into `App::toasts`): a click dismisses it, and runs its `ToastTarget`.
+    Toast(usize),
 }
 
 pub(crate) enum Drag {
@@ -606,6 +660,8 @@ pub struct App {
     pub settings_back: Option<(View, Option<crate::term::layout::PaneId>)>,
     pub overlay: Option<Overlay>,
     pub toasts: Vec<Toast>,
+    /// The last `NOTICE_HISTORY` notifications, oldest first.
+    pub notices: std::collections::VecDeque<Notice>,
     pub boot: Option<Boot>,
     pub hits: Vec<(Rect, Hit)>,
     /// Mouse cursor position (for hover effects).
@@ -830,7 +886,7 @@ impl App {
             app.ai = ai::initial_states(&app.cfg.ai, &cache);
         }
         if let Some(err) = loaded.error {
-            app.toast(ToastLevel::Error, err);
+            app.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
         }
         for w in app.keymap.warnings.clone() {
             app.toast(ToastLevel::Warn, w);
@@ -912,6 +968,7 @@ impl App {
             settings_back: None,
             overlay: None,
             toasts: Vec::new(),
+            notices: std::collections::VecDeque::new(),
             boot,
             hits: Vec::new(),
             hover: None,
@@ -975,19 +1032,39 @@ impl App {
     }
 
     pub fn toast(&mut self, level: ToastLevel, text: impl Into<String>) {
+        self.toast_target(level, text, None);
+    }
+
+    /// A notification whose click does more than dismiss it (see `ToastTarget`).
+    pub fn toast_target(&mut self, level: ToastLevel, text: impl Into<String>, target: Option<ToastTarget>) {
         let text = text.into();
         self.toast_serial += 1;
         self.dirty = true;
-        let secs = match level {
-            ToastLevel::Error => 6,
-            ToastLevel::Warn => 4,
-            _ => 3,
+        // Errors stay until they are clicked away; the others leave after a few seconds.
+        let life = match level {
+            ToastLevel::Error => None,
+            ToastLevel::Warn => Some(Duration::from_secs(4)),
+            _ => Some(Duration::from_secs(3)),
         };
+        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now() });
+        while self.notices.len() > NOTICE_HISTORY {
+            self.notices.pop_front();
+        }
         self.toasts.retain(|t| t.text != text);
-        let born = Instant::now();
-        self.toasts.push(Toast { text, level, born, until: born + Duration::from_secs(secs) });
+        self.toasts.push(Toast {
+            text,
+            level,
+            born: Instant::now(),
+            life,
+            held: Duration::ZERO,
+            hover_from: None,
+            target,
+        });
+        // At most four on screen: the oldest one that leaves by itself goes first (a sticky error only
+        // when nothing else is left).
         if self.toasts.len() > 4 {
-            self.toasts.remove(0);
+            let oldest = self.toasts.iter().position(|t| t.life.is_some()).unwrap_or(0);
+            self.toasts.remove(oldest);
         }
     }
 
@@ -1015,7 +1092,9 @@ impl App {
     /// A notification sliding in or out.
     fn toast_moving(&self) -> bool {
         self.anim_on()
-            && self.toasts.iter().any(|t| t.born.elapsed() < fx::TOAST_IN + fx::GRACE || Instant::now() >= t.until)
+            && self.toasts.iter().any(|t| {
+                t.born.elapsed() < fx::TOAST_IN + fx::GRACE || t.expires_at().is_some_and(|u| Instant::now() >= u)
+            })
     }
 
     /// How long notifications stay on screen after their time is up (they slide out meanwhile).
@@ -1177,20 +1256,22 @@ impl App {
         if loading {
             want(Duration::from_millis(120));
         }
-        if let Some(t) = self.toasts.iter().map(|t| t.until).min() {
+        if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
         }
         // A notification's countdown darkens one cell at a time: wake for the next cell only.
         if self.anim_on() {
+            let now = Instant::now();
             for t in &self.toasts {
+                let (Some(life), None) = (t.life, t.hover_from) else { continue };
                 let cells = crate::ui::toast_cells(&t.text, self.size.0).max(1) as f64;
-                let life = t.until.saturating_duration_since(t.born).as_secs_f64();
-                let step = life / cells;
+                let step = life.as_secs_f64() / cells;
                 if step > 0.0 {
                     // The drawing rounds: the next cell turns half a step past a whole one.
-                    let k = (t.born.elapsed().as_secs_f64() / step + 0.5).floor() + 0.5;
+                    let elapsed = t.active(now).as_secs_f64();
+                    let k = (elapsed / step + 0.5).floor() + 0.5;
                     let at = Duration::from_secs_f64(k * step);
-                    want(at.saturating_sub(t.born.elapsed()).max(Duration::from_millis(16)));
+                    want(at.saturating_sub(Duration::from_secs_f64(elapsed)).max(Duration::from_millis(16)));
                 }
             }
         }
@@ -1645,7 +1726,7 @@ impl App {
         }
         let now = Instant::now();
         let linger = self.toast_linger();
-        self.toasts.retain(|t| t.until + linger > now);
+        self.toasts.retain(|t| t.expires_at().is_none_or(|u| u + linger > now));
         self.request_visible_git();
         self.sync_power_state();
         self.request_home_live_data();
@@ -1695,7 +1776,7 @@ impl App {
         let loaded = config::load(&self.paths.config);
         self.cfg_mtime = loaded.mtime;
         if let Some(err) = loaded.error {
-            self.toast(ToastLevel::Error, err);
+            self.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
             return;
         }
         self.apply_config(loaded.config);

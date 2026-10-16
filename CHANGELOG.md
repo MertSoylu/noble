@@ -17,8 +17,14 @@ All notable changes to NOBLE are documented here. The format is based on
 - The tab bar's "+N" chip opens the command palette listing only the tabs, for the tabs the bar has no room for.
 - Actions `enable_hooks` and `dismiss_hooks_offer`: the one-time Claude status offer can be accepted or
   dismissed from the palette while it shows.
+- Action `notifications` (Show Notifications) lists the last 50 notifications in the command palette, newest
+  first, with their time; choosing one copies its full text.
 
 ### Changed
+- Error notifications stay until they are clicked away; the others leave after 3 s (4 s for warnings). The pointer
+  on a notification pauses its countdown, and a click dismisses it.
+- A config error gives its line and column (`config line 5, column 11: …`), and clicking that notification opens
+  the config file at the line.
 - Closing a tab with several panes asks first, even when they are idle.
 - The amber theme's `warn` color is a red-orange instead of a second orange, so git's "changed" state stands out
   from the accent. Everforest's `warn` moved from yellow to its orange for the same reason.

@@ -350,7 +350,7 @@ move_tab_right split_right split_down close_pane zoom focus_left focus_right foc
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
-dismiss_hooks_offer`.
+dismiss_hooks_offer notifications`.
 
 </details>
 

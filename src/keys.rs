@@ -200,10 +200,11 @@ pub enum Action {
     OpenLink,
     EnableHooks,
     DismissHooksOffer,
+    Notifications,
 }
 
 impl Action {
-    pub const ALL: [Action; 56] = [
+    pub const ALL: [Action; 57] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -260,6 +261,7 @@ impl Action {
         Action::OpenLink,
         Action::EnableHooks,
         Action::DismissHooksOffer,
+        Action::Notifications,
     ];
 
     pub fn id(&self) -> String {
@@ -314,6 +316,7 @@ impl Action {
                     Action::OpenLink => "open_link",
                     Action::EnableHooks => "enable_hooks",
                     Action::DismissHooksOffer => "dismiss_hooks_offer",
+                    Action::Notifications => "notifications",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -377,6 +380,7 @@ impl Action {
             Action::OpenLink => "Open Link on Screen".into(),
             Action::EnableHooks => "Enable Claude Status Hooks".into(),
             Action::DismissHooksOffer => "Dismiss Claude Status Offer".into(),
+            Action::Notifications => "Show Notifications".into(),
         }
     }
 

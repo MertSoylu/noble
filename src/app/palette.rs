@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{App, Overlay, View};
+use super::{App, Overlay, ToastLevel, View};
 use crate::keys::Action;
 use crate::util;
 
@@ -21,6 +21,8 @@ pub enum PaletteCmd {
     Workspace(usize),
     DeleteWorkspace(String),
     OpenDir(PathBuf),
+    /// A past notification: copies its full text.
+    CopyNotice(String),
 }
 
 #[derive(Clone, Debug)]
@@ -218,6 +220,32 @@ impl App {
         items
     }
 
+    /// The notification history, newest first (the `notifications` action); title = time + text.
+    pub fn open_notifications(&mut self) {
+        if self.notices.is_empty() {
+            self.toast(ToastLevel::Info, "no notifications yet");
+            return;
+        }
+        let items = self
+            .notices
+            .iter()
+            .rev()
+            .map(|n| PaletteItem {
+                title: format!("{}  {}", n.at.format("%H:%M:%S"), n.text),
+                group: "NOTE",
+                hint: match n.level {
+                    ToastLevel::Info => "info",
+                    ToastLevel::Ok => "ok",
+                    ToastLevel::Warn => "warn",
+                    ToastLevel::Error => "error",
+                }
+                .into(),
+                cmd: PaletteCmd::CopyNotice(n.text.clone()),
+            })
+            .collect();
+        self.open_palette_on(items);
+    }
+
     pub fn open_palette(&mut self) {
         let all = self.palette_items();
         self.open_palette_on(all);
@@ -245,6 +273,13 @@ impl App {
             PaletteCmd::Theme(name) => self.set_theme(name),
             PaletteCmd::Workspace(i) => self.restore_workspace(i),
             PaletteCmd::DeleteWorkspace(name) => self.request_delete_workspace(name),
+            PaletteCmd::CopyNotice(text) => {
+                if self.clipboard.set(&text).is_some() {
+                    self.toast(ToastLevel::Ok, "copied");
+                } else {
+                    self.toast(ToastLevel::Warn, "clipboard unavailable");
+                }
+            }
             PaletteCmd::OpenDir(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.new_tab(p, None, Some(name));
