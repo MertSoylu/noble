@@ -412,6 +412,8 @@ pub enum Hit {
     Project(usize),
     OpenSelected,
     Launcher(usize),
+    /// A quick task chip on the selected project's card (`Project::tasks` index).
+    ProjectTask(usize),
     AiRefresh,
     Setting(usize),
     /// Row in the scheme selector (`scheme_options` order).

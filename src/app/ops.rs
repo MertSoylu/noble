@@ -663,6 +663,27 @@ impl App {
         self.note_agent_offer(&launcher.command);
     }
 
+    /// Home's `T` (tasks) is free unless a shown launcher uses that key: launchers are checked first.
+    pub fn tasks_key_free(&self) -> bool {
+        !self.quick_launchers().any(|(_, l)| l.key.starts_with('T'))
+    }
+
+    /// Runs a quick task of the selected project (a card chip) in a new tab there.
+    pub fn run_project_task(&mut self, idx: usize) {
+        let Some(p) = self.selected_project() else { return };
+        let Some(command) = p.tasks.get(idx).cloned() else { return };
+        let path = p.path.clone();
+        self.run_task(path, &command);
+    }
+
+    /// Runs a task command in a new tab in `path`, named like a launcher tab ("project · npm run dev").
+    /// Unlike a launcher it is not remembered for the session: a restore does not start it again.
+    pub fn run_task(&mut self, path: PathBuf, command: &str) {
+        let origin = format!("{} · {command}", dir_name(&path));
+        let invocation = self.shell.invocation(command);
+        self.new_tab(path, Some(&invocation), Some(origin));
+    }
+
     pub fn open_project_shell(&mut self, path: PathBuf) {
         let name = dir_name(&path);
         self.new_tab(path, None, Some(name));

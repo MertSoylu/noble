@@ -237,6 +237,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
         repo: true,
+        tasks: Vec::new(),
     };
     app.handle(AppEvent::Projects(vec![
         mk(

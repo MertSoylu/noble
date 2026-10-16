@@ -667,6 +667,9 @@ fn hints(app: &App) -> Vec<(String, String)> {
                 h("s", "settings"),
                 h("→", "pin / more"),
             ];
+            if app.selected_project().is_some_and(|p| !p.tasks.is_empty()) && app.tasks_key_free() {
+                v.insert(2, h("T", "run task"));
+            }
             // A kept filter (after Enter, with no match) has no other way out: "esc clear" comes first.
             if !app.bridge.filter.is_empty() {
                 v.insert(0, h("esc", "clear"));

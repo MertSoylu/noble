@@ -64,7 +64,10 @@ files. The status refreshes as soon as a command finishes in that repository. Ad
 remove one you do not want (⋯ → Remove from list). The selected project's card also shows its branch's pull
 request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) signed in via
 `gh auth login`) and the ports that processes running inside the project listen on (`⇄ :3000 :5173`), on
-Windows, Linux and macOS; click either one to open it.
+Windows, Linux and macOS; click either one to open it. The card also lists the project's quick tasks as a
+TASKS row of chips (`▸ npm run dev`, `▸ cargo test`): the `package.json` scripts (npm, pnpm, yarn or bun by its
+lockfile), the Cargo build, test and run commands, and the plain Makefile targets and justfile recipes. Click a
+chip, or press `T` (shift+t) for the list, to run it in a new tab in the project folder.
 
 </td>
 </tr>
@@ -257,8 +260,9 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
   `a` add a project or a folder to scan (the prompt decides: a git repository or a folder without repositories is added as a
   project, a folder holding repositories is scanned; `tab` forces one of the modes) · ⋯ → Remove from list hides a project for good (`a` brings it back) ·
   `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
-  `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
-  browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
+  `m` system · `s` settings · `q` quit · `T` run a task of the selected project (only when it has tasks; the
+  palette lists them; a launcher on `T` keeps the key). The selected project's card: click `PR #…` to open its pull request in the
+  browser, or a port (`⇄ :3000`) to open http://localhost:<port>; click a task chip to run it.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
   (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
   `esc` back to the page you came from. The selected setting's description shows in a panel on the right on a terminal

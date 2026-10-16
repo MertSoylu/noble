@@ -560,12 +560,15 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     hud::put(buf, x + 1, y, &title, th.accent_bold(), w);
     y += 1;
     // The spacer row under the title carries the pull request and the ports.
-    live_row(buf, x, area.y + 1, w, app, p, hits);
-    let rows = area.bottom().saturating_sub(y);
+    live_row(buf, x, y, w, app, p, hits);
+    // The TASKS section comes under the spacer row when there is room; the rest of the card follows it.
+    let tasks_used = task_section(buf, x, y + 1, w, area.bottom().saturating_sub(y + 1), app, p, hits);
+    let rows = area.bottom().saturating_sub(y).saturating_sub(tasks_used);
+    y += 1 + tasks_used;
     let Some(g) = p.git.as_ref() else {
         let text = if p.repo { "checking git status…" } else { "not a git repository" };
-        hud::put(buf, x, y + 1, text, th.dim(), w);
-        return y + 1;
+        hud::put(buf, x, y, text, th.dim(), w);
+        return y;
     };
     // Files in columns; the column width follows the longest path.
     let longest = g.changes.iter().map(|(_, f)| util::width(f)).max().unwrap_or(0) as u16;
@@ -578,7 +581,6 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     let commit_rows = (g.commits.len() as u16).min(rows.saturating_sub(4 + change_want.min(3)));
     let change_rows = rows.saturating_sub(if commit_rows > 0 { commit_rows + 2 } else { 0 } + 2).min(change_want);
 
-    y += 1;
     if commit_rows > 0 {
         section_header(buf, x, y, w, "RECENT COMMITS", "", th);
         y += 1;
@@ -623,6 +625,60 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
         hud::put(buf, x + col as u16 * col_w, y + row as u16, &more, th.dim(), col_w);
     }
     y + change_rows
+}
+
+/// Most rows the TASKS chips take (they wrap onto a second row).
+const TASK_ROWS: u16 = 2;
+
+/// The TASKS section of the selected project's card: a header and the quick tasks as clickable chips
+/// (`▸ npm run dev`), wrapped to at most `TASK_ROWS` rows. It is drawn only when three rows stay free for
+/// the card below it. Returns the rows it used (0 when not drawn).
+#[allow(clippy::too_many_arguments)]
+fn task_section(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    w: u16,
+    room: u16,
+    app: &App,
+    p: &Project,
+    hits: &mut Vec<(Rect, Hit)>,
+) -> u16 {
+    let chip_rows = room.saturating_sub(4).min(TASK_ROWS);
+    if p.tasks.is_empty() || chip_rows == 0 || w < 12 {
+        return 0;
+    }
+    let th = &app.theme;
+    section_header(buf, x, y, w, "TASKS", "", th);
+    let right = x + w;
+    let (mut cx, mut row) = (x, 0u16);
+    let mut shown = 0;
+    for (i, command) in p.tasks.iter().enumerate() {
+        // A chip is " ▸ command ": the command is cut to the width, and a chip that does not fit wraps.
+        let label = util::truncate(command, w.saturating_sub(4) as usize);
+        let need = util::width(&label) as u16 + 4;
+        if cx + need > right {
+            if row + 1 >= chip_rows {
+                break;
+            }
+            row += 1;
+            cx = x;
+        }
+        let ry = y + 1 + row;
+        let start = cx;
+        cx = hud::button(buf, cx, ry, "▸", &label, th, true);
+        hits.push((Rect::new(start, ry, cx - start, 1), Hit::ProjectTask(i)));
+        cx += 1;
+        shown += 1;
+    }
+    let hidden = p.tasks.len() - shown;
+    if hidden > 0 {
+        let more = format!("+{hidden} more");
+        if cx + util::width(&more) as u16 <= right {
+            hud::put(buf, cx, y + 1 + row, &more, th.dim(), right - cx);
+        }
+    }
+    row + 2
 }
 
 /// The spacer row under a card's title: the selected project's pull request with its CI (`PR #42 open ·

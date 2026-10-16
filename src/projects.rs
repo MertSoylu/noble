@@ -17,6 +17,8 @@ pub struct Project {
     pub git: Option<GitInfo>,
     /// A git repository. Folders added by hand may be plain folders: they are listed without git status.
     pub repo: bool,
+    /// Quick tasks as shell commands (`cargo test`, `npm run dev`, `make build`), see `detect_tasks`.
+    pub tasks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,6 +49,8 @@ pub struct Commit {
 /// How many commits and files are kept for the project card.
 pub const MAX_COMMITS: usize = 8;
 pub const MAX_CHANGES: usize = 40;
+/// How many quick tasks are kept per project.
+pub const MAX_TASKS: usize = 12;
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -201,6 +205,7 @@ pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usiz
                     .unwrap_or_else(|| dir.display().to_string()),
                 branch: read_branch(&gd),
                 last_active: last_active(&gd),
+                tasks: detect_tasks(&dir),
                 path: dir,
                 git: None,
                 repo: true,
@@ -233,6 +238,7 @@ pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usiz
 pub fn project_at(dir: &Path) -> Option<Project> {
     let meta = std::fs::metadata(dir).ok().filter(|m| m.is_dir())?;
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string());
+    let tasks = detect_tasks(dir);
     Some(match git_dir(dir) {
         Some(gd) => Project {
             name,
@@ -241,6 +247,7 @@ pub fn project_at(dir: &Path) -> Option<Project> {
             path: dir.to_path_buf(),
             git: None,
             repo: true,
+            tasks,
         },
         None => Project {
             name,
@@ -249,8 +256,128 @@ pub fn project_at(dir: &Path) -> Option<Project> {
             path: dir.to_path_buf(),
             git: None,
             repo: false,
+            tasks,
         },
     })
+}
+
+/// The quick tasks of a project folder, as the shell commands that run them: the Cargo commands for a
+/// `Cargo.toml`, `<npm|pnpm|yarn|bun> run <script>` for each `package.json` script (the manager is the one
+/// whose lockfile exists), `make <target>` for a Makefile and `just <recipe>` for a justfile. Only small
+/// files are read and nothing runs. Duplicates are dropped and the list stops at `MAX_TASKS`.
+pub fn detect_tasks(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if dir.join("Cargo.toml").is_file() {
+        for cmd in ["cargo build", "cargo test", "cargo run"] {
+            push_task(&mut out, cmd.into());
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
+        let manager = node_package_manager(dir);
+        for name in package_scripts(&text) {
+            push_task(&mut out, format!("{manager} run {name}"));
+        }
+    }
+    if let Some(text) = read_first(dir, &["Makefile", "makefile"]) {
+        for name in makefile_targets(&text) {
+            push_task(&mut out, format!("make {name}"));
+        }
+    }
+    if let Some(text) = read_first(dir, &["justfile", "Justfile"]) {
+        for name in just_recipes(&text) {
+            push_task(&mut out, format!("just {name}"));
+        }
+    }
+    out
+}
+
+fn push_task(out: &mut Vec<String>, cmd: String) {
+    if out.len() < MAX_TASKS && !out.contains(&cmd) {
+        out.push(cmd);
+    }
+}
+
+/// The package manager a Node project uses, by its lockfile (npm when none is found).
+fn node_package_manager(dir: &Path) -> &'static str {
+    if dir.join("pnpm-lock.yaml").is_file() {
+        "pnpm"
+    } else if dir.join("yarn.lock").is_file() {
+        "yarn"
+    } else if dir.join("bun.lockb").is_file() || dir.join("bun.lock").is_file() {
+        "bun"
+    } else {
+        "npm"
+    }
+}
+
+/// The first of `names` that exists in `dir`, read as text.
+fn read_first(dir: &Path, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        let path = dir.join(name);
+        path.is_file().then(|| std::fs::read_to_string(path).ok()).flatten()
+    })
+}
+
+/// A name that is safe to type into a shell as it is: letters, digits and `_-.:/@`.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "_-.:/@".contains(c))
+}
+
+/// The script names of a `package.json` (in file order), without the ones a shell could not take as they are.
+pub fn package_scripts(text: &str) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) else { return Vec::new() };
+    scripts.keys().filter(|name| is_plain_name(name)).cloned().collect()
+}
+
+/// The plain targets of a Makefile: `name:` lines at column 0. Recipe lines (tab or space indented),
+/// comments, variables (`X := a`, `X ?= a`), special targets (`.PHONY`) and pattern or multi-name rules
+/// are skipped.
+pub fn makefile_targets(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(|c: char| c.is_whitespace() || c == '#') {
+            continue;
+        }
+        let Some((head, rest)) = line.split_once(':') else { continue };
+        // `X = a`, `X := a`, `X ::= a`: an assignment, not a rule.
+        if rest.starts_with('=') || rest.starts_with(":=") {
+            continue;
+        }
+        let name = head.trim_end();
+        if name.starts_with('.') || !is_plain_name(name) || name.contains('%') {
+            continue;
+        }
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// The recipes of a justfile: column-0 lines `name [params]:` (private `_` recipes and the
+/// `set`/`alias`/`export` settings are skipped).
+pub fn just_recipes(text: &str) -> Vec<String> {
+    const KEYWORDS: [&str; 6] = ["set", "alias", "export", "import", "mod", "unexport"];
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(|c: char| c.is_whitespace() || c == '#') {
+            continue;
+        }
+        let Some((head, rest)) = line.split_once(':') else { continue };
+        if rest.starts_with('=') {
+            continue;
+        }
+        let Some(name) = head.split_whitespace().next() else { continue };
+        let plain = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if name.starts_with('_') || KEYWORDS.contains(&name) || !plain {
+            continue;
+        }
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 /// Hidden and manually added projects (`state.json`), shared with the scan thread.
@@ -623,6 +750,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Node projects run their scripts with the manager whose lockfile exists; a script name a shell
+    /// could not take as it is stays out.
+    #[test]
+    fn package_json_scripts_become_tasks() {
+        let base = std::env::temp_dir().join(format!("noble-tasks-node-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let scripts = r#"{"name": "app", "scripts": {"dev": "vite", "build": "vite build", "lint:fix": "eslint .", "bad name": "x"}}"#;
+        let pnpm = base.join("pnpm");
+        std::fs::create_dir_all(&pnpm).unwrap();
+        std::fs::write(pnpm.join("package.json"), scripts).unwrap();
+        std::fs::write(pnpm.join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_tasks(&pnpm), ["pnpm run dev", "pnpm run build", "pnpm run lint:fix"]);
+        let yarn = base.join("yarn");
+        std::fs::create_dir_all(&yarn).unwrap();
+        std::fs::write(yarn.join("package.json"), scripts).unwrap();
+        std::fs::write(yarn.join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_tasks(&yarn)[0], "yarn run dev");
+        let bun = base.join("bun");
+        std::fs::create_dir_all(&bun).unwrap();
+        std::fs::write(bun.join("package.json"), scripts).unwrap();
+        std::fs::write(bun.join("bun.lock"), "").unwrap();
+        assert_eq!(detect_tasks(&bun)[0], "bun run dev");
+        let npm = base.join("npm");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("package.json"), scripts).unwrap();
+        assert_eq!(detect_tasks(&npm)[0], "npm run dev");
+        // Not JSON, or no scripts object: no tasks.
+        assert!(package_scripts("{ not json").is_empty());
+        assert!(package_scripts(r#"{"name": "lib"}"#).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cargo_project_has_build_test_run() {
+        let base = std::env::temp_dir().join(format!("noble-tasks-cargo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(detect_tasks(&base).is_empty());
+        std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(detect_tasks(&base), ["cargo build", "cargo test", "cargo run"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn makefile_plain_targets_only() {
+        let text = "# build file\nCC := gcc\nFLAGS = -O2\nexport PATH := /bin\n.PHONY: all build clean\n\
+                    all: build\n\tcc -o app\nbuild: main.o\n\t$(CC) -o app main.o\n%.o: %.c\n\t$(CC) -c $<\n\
+                    clean:\n\trm -f app\nbuild:\ntest lint:\ninstall dir:\nVAR ::= x\n# clean: no\n";
+        assert_eq!(makefile_targets(text), ["all", "build", "clean"]);
+    }
+
+    #[test]
+    fn justfile_public_recipes_only() {
+        let text = "set shell := [\"bash\"]\nalias t := test\n# comment\nbuild:\n    cargo build\n\
+                    test-all target=\"x\": build\n    echo\n_helper:\n    echo\n[private]\nfmt:\n";
+        assert_eq!(just_recipes(text), ["build", "test-all", "fmt"]);
+    }
+
+    /// Tasks are deduplicated and the list stops at `MAX_TASKS`.
+    #[test]
+    fn make_tasks_are_capped() {
+        let base = std::env::temp_dir().join(format!("noble-tasks-make-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let text: String = (0..20).map(|i| format!("t{i}:\n\techo {i}\n")).collect();
+        std::fs::write(base.join("Makefile"), text).unwrap();
+        let tasks = detect_tasks(&base);
+        assert_eq!(tasks.len(), MAX_TASKS);
+        assert_eq!(tasks[0], "make t0");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn containing_project_is_deepest_match() {
         let mk = |p: &str| Project {
@@ -632,6 +831,7 @@ mod tests {
             last_active: None,
             git: None,
             repo: true,
+            tasks: Vec::new(),
         };
         let list = vec![mk("/code/app"), mk("/code/app/vendor/lib"), mk("/code/apple")];
         let find = |c: &str| project_containing(&list, Path::new(c)).map(|p| p.name.as_str());

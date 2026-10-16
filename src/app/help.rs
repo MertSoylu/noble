@@ -154,6 +154,7 @@ pub fn sections(app: &App) -> Vec<Section> {
                 ("● 3  ✓  ↑ ↓  …", "uncommitted changes · clean · commits to push / pull · checking"),
                 ("t", "terminal in home folder"),
                 ("o", "open folder in file manager"),
+                ("T", "run a task of the project (npm scripts, cargo, make, just)"),
                 ("w", "save open tabs as a workspace"),
                 ("a", "add a project or a folder to scan (tab picks the mode)"),
                 ("⋯  remove", "Remove from list: hide a project for good (a adds it back)"),

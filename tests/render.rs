@@ -113,6 +113,7 @@ fn demo_app(w: u16, h: u16) -> App {
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
         repo: true,
+        tasks: Vec::new(),
     };
     app.handle(AppEvent::Projects(vec![
         mk(
@@ -207,6 +208,61 @@ fn demo_app(w: u16, h: u16) -> App {
 }
 
 const SIZES: [(u16, u16); 7] = [(160, 45), (120, 34), (110, 30), (90, 28), (76, 24), (56, 18), (30, 8)];
+
+/// The selected project's card shows its quick tasks as TASKS chips at 160x45, the hint bar gets `g run
+/// task`, and a project without tasks shows neither.
+#[test]
+fn bridge_card_shows_task_chips() {
+    let tasks = ["npm run dev", "npm run build", "cargo test"];
+    let mut app = demo_app(160, 45);
+    let mut projects = app.projects.clone();
+    for p in &mut projects {
+        p.tasks = tasks.iter().map(|t| t.to_string()).collect();
+    }
+    app.handle(AppEvent::Projects(projects));
+    let text = render(&mut app, 160, 45);
+    save("bridge-tasks-160x45", &text);
+    assert!(text.contains("TASKS") && text.contains("▸ npm run dev"), "{text}");
+    // Narrower and shorter screens: the chips wrap or are left out, never drawn past the card.
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-tasks-{w}x{h}"), &text);
+    }
+    assert!(text.contains("▸ cargo test") && text.contains("T run task"), "{text}");
+    // Home's `T` lists the same tasks in the palette, in the TASK group.
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    let Some(noble::app::Overlay::Palette(st)) = &app.overlay else { panic!("g opens the task list") };
+    let titles: Vec<&str> = st.matches.iter().map(|i| st.all[*i].title.as_str()).collect();
+    assert_eq!(titles, ["Run: npm run dev", "Run: npm run build", "Run: cargo test"]);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    // Without tasks: no section, no hint.
+    let mut app = demo_app(160, 45);
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("TASKS") && !text.contains("T run task"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(app.overlay.is_none(), "T does nothing without tasks");
+}
+
+/// A launcher on `T` keeps the key: it runs, the task list does not open and the hint is left out.
+#[test]
+fn launcher_on_t_keeps_the_key() {
+    let mut app = demo_app(160, 45);
+    let mut projects = app.projects.clone();
+    for p in &mut projects {
+        p.tasks = vec!["cargo test".to_string()];
+    }
+    app.handle(AppEvent::Projects(projects));
+    app.launchers = vec![(
+        noble::config::Launcher { key: "T".into(), name: "tool".into(), command: "echo tool".into(), show: true },
+        true,
+    )];
+    let tabs = app.tabs.len();
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("T run task"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(app.overlay.is_none(), "the launcher runs instead of the task list");
+    assert_eq!(app.tabs.len(), tabs + 1, "the launcher opened its tab");
+}
 
 #[test]
 fn bridge_shows_the_version() {
@@ -1394,6 +1450,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
         last_active: Some(SystemTime::now()),
         git: None,
         repo: true,
+        tasks: Vec::new(),
     });
     app.handle(AppEvent::Projects(projects));
     let probe = if cfg!(windows) { "cmd /c echo claude-probe" } else { "echo claude-probe" };
@@ -2454,6 +2511,7 @@ fn remove_and_add_projects() {
         last_active: Some(SystemTime::now()),
         git: None,
         repo: true,
+        tasks: Vec::new(),
     });
     app.handle(AppEvent::Projects(scanned.clone()));
     // Pin it, then remove it with → → ⏎ and the last menu item.

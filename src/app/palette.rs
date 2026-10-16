@@ -20,6 +20,11 @@ pub enum PaletteCmd {
     },
     /// A launcher in a new split of the focused pane.
     LaunchSplit(usize),
+    /// A quick task of a project (`Project::tasks`) in a new tab in its folder.
+    RunTask {
+        path: PathBuf,
+        command: String,
+    },
     Theme(&'static str),
     Workspace(usize),
     DeleteWorkspace(String),
@@ -107,6 +112,19 @@ fn home_key(a: Action) -> Option<&'static str> {
         Action::AddProjectFolder => Some("a"),
         _ => None,
     }
+}
+
+/// The quick tasks of a project as palette commands: "Run: npm run dev" in the TASK group.
+fn task_items(p: &crate::projects::Project) -> Vec<PaletteItem> {
+    p.tasks
+        .iter()
+        .map(|command| PaletteItem {
+            title: format!("Run: {command}"),
+            group: "TASK",
+            hint: String::new(),
+            cmd: PaletteCmd::RunTask { path: p.path.clone(), command: command.clone() },
+        })
+        .collect()
 }
 
 impl App {
@@ -206,6 +224,7 @@ impl App {
                     cmd: PaletteCmd::Launch { launcher: i, path: p.path.clone() },
                 });
             }
+            items.extend(task_items(p));
         }
         for p in self.projects.iter().take(120) {
             items.push(PaletteItem {
@@ -295,6 +314,15 @@ impl App {
     }
 
     /// The palette listing only the tabs: the tab bar's "+N" chip, for the tabs the bar has no room for.
+    /// The palette listing only the selected project's tasks: Home's `T`. Nothing opens without tasks.
+    pub fn open_task_list(&mut self) {
+        let Some(p) = self.selected_project() else { return };
+        let tasks = task_items(p);
+        if !tasks.is_empty() {
+            self.open_palette_on(tasks);
+        }
+    }
+
     pub fn open_tab_list(&mut self) {
         let tabs = self.palette_items().into_iter().filter(|i| matches!(i.cmd, PaletteCmd::GoTab(_))).collect();
         self.open_palette_on(tabs);
@@ -332,6 +360,7 @@ impl App {
                 let name = self.launchers.get(*i).map_or(i.to_string(), |(l, _)| l.name.clone());
                 format!("launch_split:{name}")
             }
+            PaletteCmd::RunTask { path, command } => format!("task:{}:{command}", path.display()),
             PaletteCmd::Theme(name) => format!("theme:{name}"),
             PaletteCmd::Workspace(i) => format!("workspace:{}", self.workspaces.list.get(*i)?.name),
             PaletteCmd::DeleteWorkspace(name) => format!("delete_workspace:{name}"),
@@ -360,6 +389,7 @@ impl App {
             PaletteCmd::OpenProject(p) => self.open_project_shell(p),
             PaletteCmd::Launch { launcher, path } => self.launch(launcher, Some(path)),
             PaletteCmd::LaunchSplit(i) => self.launch_in_split(i),
+            PaletteCmd::RunTask { path, command } => self.run_task(path, &command),
             PaletteCmd::Theme(name) => self.set_theme(name),
             PaletteCmd::Workspace(i) => self.restore_workspace(i),
             PaletteCmd::DeleteWorkspace(name) => self.request_delete_workspace(name),

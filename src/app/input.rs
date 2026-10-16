@@ -627,6 +627,13 @@ impl App {
             self.launch(i, dir);
             return;
         }
+        // `T` lists the selected project's tasks, when it has any. A launcher on `T` keeps the key
+        // (launchers are checked first) and the hint is left out while one holds it.
+        let has_tasks = self.selected_project().is_some_and(|p| !p.tasks.is_empty());
+        if k.code == KeyCode::Char('T') && has_tasks && !ctrl && !k.modifiers.contains(KeyModifiers::ALT) {
+            self.open_task_list();
+            return;
+        }
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => self.move_project(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_project(1),
@@ -1105,6 +1112,7 @@ impl App {
                 let dir = self.bridge_target_dir();
                 self.launch(i, dir);
             }
+            Hit::ProjectTask(i) => self.run_project_task(i),
             Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),

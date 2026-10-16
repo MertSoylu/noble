@@ -7,6 +7,14 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Home's project card lists the selected project's quick tasks as a TASKS row of clickable chips (`▸ npm run dev`)
+  when there is room. Tasks are read from the project folder: the `package.json` scripts (run with npm, pnpm, yarn
+  or bun, by the lockfile that exists), `cargo build`, `cargo test` and `cargo run` for a Cargo project, the plain
+  Makefile targets and the justfile recipes (at most 12 per project). A chip runs its command in a new tab in the
+  project folder, named "project · command". Home's `T` (shift+t) opens the palette with the project's tasks ("Run: npm run
+  dev", group TASK), shown only when the project has tasks; the hint bar shows `T run task` then too, unless a
+  launcher uses `T` (launchers are checked first and keep the key). The tasks are
+  detected by the project scan, so a new script shows up on the next rescan.
 - Closing a terminal tab (close tab, its last pane, middle-click or ×) can be undone: prefix `T` (Reopen Closed
   Tab, `reopen_tab`) brings back the last ten closed tabs, most recent first, with their split layout, each
   pane's directory, launcher and name, at their old index and focused. The tab-closed notice names the key; the
