@@ -490,6 +490,10 @@ pub struct UiStateData {
     pub update_skipped: String,
     /// The Claude status hooks were offered once (after the first Claude launch): never offered again.
     pub hooks_offered: bool,
+    /// The NOBLE version that last played the startup animation ("" before the first launch).
+    pub boot_version: String,
+    /// Shell keys (as "alt+t") whose first use already told the user where NOBLE's action is.
+    pub shell_keys_told: Vec<String>,
 }
 
 impl UiStateData {

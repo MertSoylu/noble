@@ -216,7 +216,9 @@ plus a few direct shortcuts. Everything can be rebound, and `?` shows the live r
 
 The direct shortcuts marked \* are shell keys too (last argument, transpose words, fish's sudo and pager …), so in
 a terminal they go to the shell and work everywhere else; use the prefix column there instead. `shell_first =
-false` (Settings → Leave shell keys to the shell) gives them back to NOBLE everywhere.
+false` (Settings → Leave shell keys to the shell) gives them back to NOBLE everywhere. The first time each such
+key goes to the shell, the status bar says once which chord NOBLE uses for that action (e.g. `alt+t went to the
+shell · NOBLE: ctrl+a t`).
 
 When an app in a pane needs one of NOBLE's other shortcuts (e.g. `alt+m`, `alt+z`), **prefix `i`** locks the
 pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
@@ -294,13 +296,14 @@ Errors show up as a toast and never crash the app. Most options can also be chan
 [general]
 theme = "amber"          # any of the 22 themes in Settings
 transparent = false      # let the terminal's own background (blur/opacity) show
-boot_animation = true
+boot_animation = true    # startup animation on the first launch and the first launch after an update (false: never)
 animations = true        # page transitions, zoom, fades, tab and toast animations
 animations_on_battery = true  # false: no animations while a laptop runs on battery
 clock_24h = true
 show_seconds = true
 operator = ""            # name in the greeting; empty = your user name
 check_updates = true     # look for a new release once a day and show it at the bottom right
+show_tips = true         # hints in the status bar about the current screen (terminal, Home, System; none on Settings)
 
 [terminal]
 shell = ""               # empty = pwsh → powershell → cmd on Windows, $SHELL elsewhere

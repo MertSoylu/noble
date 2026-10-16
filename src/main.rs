@@ -183,10 +183,7 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
     // Terminal.app before macOS 26 has no truecolor: every color is sent from the 256-color palette there.
     let colors_256 = noble::util::lacks_truecolor();
     let size = terminal.size()?;
-    let mut app = App::start(paths, tx, (size.width, size.height));
-    if no_boot {
-        app.boot = None;
-    }
+    let mut app = App::start(paths, tx, (size.width, size.height), !no_boot);
     if let Some(dir) = start_dir {
         // After the session restore, so the requested folder ends up focused.
         app.open_project_shell(dir);

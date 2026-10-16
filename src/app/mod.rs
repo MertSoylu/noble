@@ -491,6 +491,14 @@ impl Boot {
 }
 
 pub const BOOT_DURATION: Duration = Duration::from_millis(3000);
+
+/// Does the startup animation play on this launch? With `general.boot_animation` on it plays on the
+/// first launch and on the first one after the version changed: `last_version` is the version that
+/// last played it (`UiStateData::boot_version`). Off, it never plays.
+pub fn boot_due(enabled: bool, last_version: &str, version: &str) -> bool {
+    enabled && last_version != version
+}
+
 pub const SLIDE_DURATION: Duration = Duration::from_millis(240);
 pub const ZOOM_DURATION: Duration = Duration::from_millis(200);
 
@@ -672,6 +680,8 @@ pub struct App {
     pub fx: fx::Effects,
     /// Last drawn page and body image (to start a transition).
     pub drawn_view: Option<View>,
+    /// Counts the screen changes: the status bar tip moves to the next one of the new screen.
+    pub tip_turn: usize,
     pub last_body: Option<ratatui::buffer::Buffer>,
     pub(crate) drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
@@ -831,7 +841,9 @@ impl App {
     }
 
     /// The real app: loads config, reads history, starts the services.
-    pub fn start(paths: Paths, tx: Tx, size: (u16, u16)) -> App {
+    /// `boot`: false when the launch skipped the startup animation (`--no-boot`); the animation then
+    /// counts as not shown and plays on a later launch.
+    pub fn start(paths: Paths, tx: Tx, size: (u16, u16), boot: bool) -> App {
         let loaded = config::load(&paths.config);
         let cfg = loaded.config;
         let recent = Recent::load(paths.data_file("recent.json"));
@@ -870,6 +882,11 @@ impl App {
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
         app.ui_state = ui_state;
+        let version = env!("CARGO_PKG_VERSION");
+        if boot && boot_due(app.cfg.general.boot_animation, &app.ui_state.data.boot_version, version) {
+            app.boot = Some(Boot::now());
+            app.edit_ui_state(|d| d.boot_version = version.to_string());
+        }
         crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
             // Hooks from an older NOBLE get the events added since (e.g. the subagent ones).
@@ -936,7 +953,6 @@ impl App {
             cfg.general.operator.trim().to_string()
         };
         let launchers = launcher_availability(&cfg.launchers);
-        let boot = cfg.general.boot_animation.then(Boot::now);
         App {
             paths,
             cfg_mtime: None,
@@ -969,13 +985,14 @@ impl App {
             overlay: None,
             toasts: Vec::new(),
             notices: std::collections::VecDeque::new(),
-            boot,
+            boot: None,
             hits: Vec::new(),
             hover: None,
             slide: None,
             zoom_anim: None,
             fx: fx::Effects::default(),
             drawn_view: None,
+            tip_turn: 0,
             last_body: None,
             drag: None,
             last_click: None,
@@ -1894,6 +1911,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The startup animation: first launch, then once per version; off means never.
+    #[test]
+    fn boot_plays_on_the_first_launch_and_after_an_update() {
+        assert!(boot_due(true, "", "1.2.0"), "first launch");
+        assert!(!boot_due(true, "1.2.0", "1.2.0"), "same version again");
+        assert!(boot_due(true, "1.1.0", "1.2.0"), "after an update");
+        assert!(!boot_due(false, "", "1.2.0") && !boot_due(false, "1.1.0", "1.2.0"), "off: never");
+    }
 
     /// "Jump to waiting agent": a pane that needs you wins over one whose agent finished, the
     /// search starts after the focused pane and wraps around (the focused pane comes last), and

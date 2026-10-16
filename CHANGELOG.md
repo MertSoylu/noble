@@ -19,8 +19,17 @@ All notable changes to NOBLE are documented here. The format is based on
   dismissed from the palette while it shows.
 - Action `notifications` (Show Notifications) lists the last 50 notifications in the command palette, newest
   first, with their time; choosing one copies its full text.
+- Setting `general.show_tips` (Settings → Show tips, Display) turns the status bar tips off.
+- The first time a shell key (`alt+t`, `alt+p` …) goes to the shell in a terminal although NOBLE has a shortcut
+  for it, the status bar says once which chord reaches that action (`alt+t went to the shell · NOBLE: ctrl+a t`;
+  when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
 ### Changed
+- The startup animation plays on the first launch and on the first launch after an update, not on every launch.
+  `general.boot_animation = true` keeps that behavior, `false` turns it off for good; `--no-boot` still skips it.
+- The status bar tips fit the screen: terminal tips in a terminal, Home's on Home, process list tips on System, none
+  on Settings. A tip changes when the screen changes instead of every 20 seconds.
+- The terminal hint "drag border resize" appears only on a tab with more than one pane.
 - Error notifications stay until they are clicked away; the others leave after 3 s (4 s for warnings). The pointer
   on a notification pauses its countdown, and a click dismisses it.
 - A config error gives its line and column (`config line 5, column 11: …`), and clicking that notification opens

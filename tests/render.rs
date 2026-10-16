@@ -1826,6 +1826,105 @@ fn status_bar_points_out_the_prefix_until_used() {
     assert!(last.contains("tip: ") && !last.contains(&want), "{text}");
 }
 
+/// The tip follows the screen: terminal tips in a terminal, Home's on Home, none on Settings. It
+/// moves with screen changes only: renders of the same screen show the same tip.
+#[test]
+fn tips_follow_the_screen() {
+    let mut app = demo_app(200, 40);
+    app.ui_state.data.prefix_used = true;
+    app.new_tab(std::env::temp_dir(), None, Some("tips".into()));
+    let term = app.view;
+    let tip_of = |text: &str| text.lines().last().unwrap().split_once("tip: ").map(|(_, t)| t.trim().to_string());
+    let (mut home, mut in_term) = (Vec::new(), Vec::new());
+    for _ in 0..10 {
+        app.view = View::Bridge;
+        home.push(tip_of(&render(&mut app, 200, 40)).expect("a tip on Home"));
+        app.view = term;
+        in_term.push(tip_of(&render(&mut app, 200, 40)).expect("a tip in a terminal"));
+    }
+    let term_only = ["ctrl+click", "zooms", "searches", "pane title"];
+    let home_only = ["on Home", "Settings →", "project"];
+    assert!(home.iter().all(|t| !term_only.iter().any(|w| t.contains(w))), "{home:?}");
+    assert!(in_term.iter().all(|t| !home_only.iter().any(|w| t.contains(w))), "{in_term:?}");
+    assert!(std::collections::HashSet::<&String>::from_iter(&home).len() > 1, "{home:?}");
+    app.view = View::System;
+    assert!(tip_of(&render(&mut app, 200, 40)).is_some(), "System has tips too");
+    app.view = View::Settings;
+    let text = render(&mut app, 200, 40);
+    assert!(!text.lines().last().unwrap().contains("tip: "), "no tip on Settings\n{text}");
+    // Same screen, later renders: the same tip.
+    app.view = View::Bridge;
+    let first = tip_of(&render(&mut app, 200, 40));
+    for _ in 0..3 {
+        assert_eq!(tip_of(&render(&mut app, 200, 40)), first);
+    }
+}
+
+/// `general.show_tips` off (Settings, "Show tips"): no tip on any screen, the prefix tip included.
+#[test]
+fn show_tips_off_hides_every_tip() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(200, 40);
+    app.new_tab(std::env::temp_dir(), None, Some("tips".into()));
+    let term = app.view;
+    assert!(render(&mut app, 200, 40).lines().last().unwrap().contains("tip: "));
+    app.activate_setting(SettingItem::Setting(SettingKey::Tips), 1);
+    assert!(!app.cfg.general.show_tips);
+    for view in [View::Bridge, View::System, term] {
+        app.view = view;
+        let text = render(&mut app, 200, 40);
+        assert!(!text.lines().last().unwrap().contains("tip: "), "{view:?}\n{text}");
+    }
+    app.activate_setting(SettingItem::Setting(SettingKey::Tips), 1);
+    app.view = View::Bridge;
+    assert!(render(&mut app, 200, 40).lines().last().unwrap().contains("tip: "));
+}
+
+/// In a terminal, "drag border resize" is offered only for a tab with more than one pane.
+#[test]
+fn terminal_hints_offer_drag_only_with_a_split() {
+    let mut app = demo_app(200, 40);
+    app.new_tab(std::env::temp_dir(), None, Some("split".into()));
+    let text = render(&mut app, 200, 40);
+    let bar = text.lines().last().unwrap();
+    assert!(bar.contains("right-click") && !bar.contains("drag border"), "{text}");
+    app.run(Action::SplitRight);
+    let text = render(&mut app, 200, 40);
+    assert!(text.lines().last().unwrap().contains("drag border resize"), "{text}");
+}
+
+/// A shell key with a NOBLE shortcut goes to the shell; the first time each one does, a notice
+/// names the prefix chord (or the setting when the action has none), and it is never shown again.
+#[test]
+fn shell_key_notice_shows_once_per_key() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
+    let term = app.view;
+    let alt = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+    app.on_key(alt('t'));
+    assert_eq!(app.view, term, "still in the terminal");
+    assert!(
+        app.toasts.iter().any(|t| t.text.contains("alt+t went to the shell · NOBLE: ctrl+a t")),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    let shown = app.toasts.len();
+    app.on_key(alt('t'));
+    assert_eq!(app.toasts.len(), shown, "once per key");
+    assert!(app.ui_state.data.shell_keys_told.contains(&"alt+t".to_string()));
+    // Another shell key gets its own notice.
+    app.on_key(alt('p'));
+    assert!(app.toasts.iter().any(|t| t.text.contains("alt+p went to the shell · NOBLE: ctrl+a")));
+    // An action without a prefix binding points at the setting.
+    app.keymap.prefix_map.retain(|_, a| *a != Action::Settings);
+    app.on_key(alt('s'));
+    assert!(
+        app.toasts.iter().any(|t| t.text == "alt+s went to the shell · Settings → Leave shell keys to the shell"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+}
+
 /// Cached quota numbers ("~") carry their age on the provider's name row; fresh ones do not.
 #[test]
 fn stale_quota_shows_its_age() {

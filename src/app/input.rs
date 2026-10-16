@@ -129,11 +129,14 @@ impl App {
             }
             return;
         }
-        if let Some(a) = self.keymap.direct_map.get(&chord).copied()
-            && !(in_term && (self.focused_locked() || self.keymap.shell_first.contains(&chord)))
-        {
-            self.run(a);
-            return;
+        if let Some(a) = self.keymap.direct_map.get(&chord).copied() {
+            if !(in_term && (self.focused_locked() || self.keymap.shell_first.contains(&chord))) {
+                self.run(a);
+                return;
+            }
+            if in_term && !self.focused_locked() {
+                self.tell_shell_key(&chord, a);
+            }
         }
         match self.view {
             View::Bridge => self.bridge_key(k),
@@ -141,6 +144,21 @@ impl App {
             View::Settings => self.settings_key(k),
             View::Term(_) => self.term_key(k),
         }
+    }
+
+    /// A shell key with a NOBLE shortcut goes to the shell. The first time each one does, a notice
+    /// says how to reach NOBLE's action instead (once ever: `UiStateData::shell_keys_told`).
+    fn tell_shell_key(&mut self, chord: &Chord, action: Action) {
+        let key = chord.to_string();
+        if self.ui_state.data.shell_keys_told.contains(&key) {
+            return;
+        }
+        self.edit_ui_state(|d| d.shell_keys_told.push(key.clone()));
+        let text = match self.keymap.prefix_key(action) {
+            Some(k) => format!("{key} went to the shell · NOBLE: {} {k}", self.keymap.prefix),
+            None => format!("{key} went to the shell · Settings → Leave shell keys to the shell"),
+        };
+        self.toast(ToastLevel::Info, text);
     }
 
     fn term_key(&mut self, k: KeyEvent) {

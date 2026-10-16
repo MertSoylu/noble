@@ -22,6 +22,7 @@ pub struct Config {
 pub struct General {
     pub theme: String,
     pub transparent: bool,
+    /// The startup animation: on the first launch and the first launch after an update (false: never).
     pub boot_animation: bool,
     /// Page transitions, pane zoom, fades and other small animations.
     pub animations: bool,
@@ -33,6 +34,8 @@ pub struct General {
     pub operator: String,
     /// Check GitHub once a day for a new release.
     pub check_updates: bool,
+    /// Hints in the status bar, about the current screen (a new one with every screen change).
+    pub show_tips: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -118,6 +121,7 @@ impl Default for General {
             show_seconds: true,
             operator: String::new(),
             check_updates: true,
+            show_tips: true,
         }
     }
 }
@@ -223,13 +227,14 @@ pub const DEFAULT_CONFIG: &str = r#"# NOBLE configuration — the app reloads it
 [general]
 theme = "amber"          # pickable from the Settings tab (22 themes)
 transparent = false      # true: the terminal's own background (transparency) shows
-boot_animation = true
+boot_animation = true    # first launch and first launch after an update (false: never)
 animations = true        # page transitions, zoom, fades and other small animations
 animations_on_battery = true  # keep them while a laptop runs on battery (false: off on battery)
 clock_24h = true
 show_seconds = true
 operator = ""            # greeting name; empty = user name
 check_updates = true     # check once a day for a new release; notice appears bottom right
+show_tips = true         # status bar tips about the current screen (changes with the screen)
 
 [terminal]
 shell = ""               # empty = automatic (pwsh → powershell → cmd | $SHELL)

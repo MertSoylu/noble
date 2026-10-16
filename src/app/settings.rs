@@ -14,6 +14,7 @@ pub enum SettingKey {
     AnimBattery,
     Clock24,
     Seconds,
+    Tips,
     Shell,
     Restore,
     CopySelect,
@@ -69,6 +70,7 @@ impl SettingKey {
             SettingKey::Animations => "Animations",
             SettingKey::AnimBattery => "Animations on battery",
             SettingKey::Clock24 => "24-hour clock",
+            SettingKey::Tips => "Show tips",
             SettingKey::Seconds => "Show seconds",
             SettingKey::Shell => "Shell",
             SettingKey::Restore => "Restore tabs on launch",
@@ -99,11 +101,12 @@ impl SettingKey {
         match self {
             SettingKey::Theme => "Color theme of the whole interface",
             SettingKey::Transparent => "Let the terminal's own background show through",
-            SettingKey::Boot => "Play the startup animation on launch",
+            SettingKey::Boot => "Startup animation on the first launch and after an update",
             SettingKey::Animations => "Slide, zoom, fade and pulse effects",
             SettingKey::AnimBattery => "Keep animations while running on battery",
             SettingKey::Clock24 => "24-hour instead of AM/PM clock on Home",
             SettingKey::Seconds => "Show seconds on the Home clock (off on battery)",
+            SettingKey::Tips => "Hints about the current screen in the status bar",
             SettingKey::Shell => "Program that new terminal panes start",
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
@@ -210,7 +213,7 @@ impl App {
         if self.sensors.battery().is_some() {
             display.push(SettingItem::Setting(AnimBattery));
         }
-        display.extend(rows(&[Clock24, Seconds]));
+        display.extend(rows(&[Clock24, Seconds, Tips]));
         vec![
             ("Display", display),
             ("Terminal", terminal),
@@ -258,6 +261,7 @@ impl App {
             SettingKey::AnimBattery => c.general.animations_on_battery,
             SettingKey::Clock24 => c.general.clock_24h,
             SettingKey::Seconds => c.general.show_seconds,
+            SettingKey::Tips => c.general.show_tips,
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
@@ -405,6 +409,10 @@ impl App {
                     SettingKey::AnimBattery => {
                         c.general.animations_on_battery ^= true;
                         ("general", "animations_on_battery", c.general.animations_on_battery.to_string())
+                    }
+                    SettingKey::Tips => {
+                        c.general.show_tips ^= true;
+                        ("general", "show_tips", c.general.show_tips.to_string())
                     }
                     SettingKey::Clock24 => {
                         c.general.clock_24h ^= true;
