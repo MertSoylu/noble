@@ -20,6 +20,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ### Changed
 - Closing a tab with several panes asks first, even when they are idle.
+- The amber theme's `warn` color is a red-orange instead of a second orange, so git's "changed" state stands out
+  from the accent. Everforest's `warn` moved from yellow to its orange for the same reason.
 - Removing a project from the list asks first (`A` on Home adds it back).
 - Saving a workspace under a name that is already taken asks before replacing it; a blank name keeps the prompt
   open with an error.
@@ -33,6 +35,8 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- The README terminal screenshot shows the full pane path (`D:\dev\noble`); the screenshot generator wrote only as
+  many characters as the text it replaced, which cut the path short.
 - The active terminal tab no longer hides inside the "+N" chip when there are more tabs than fit in the top bar.
 - Key hints follow the keymap: the help's tab rows, the welcome screen's palette key, the terminal status bar's
   home key and the status-bar tips show rebound keys and leave out unbound ones instead of the defaults.

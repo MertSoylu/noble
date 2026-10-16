@@ -42,7 +42,7 @@ pub const THEMES: [Theme; 22] = [
         accent_dim: rgb(0x7a5412),
         accent2: rgb(0x5fd7d0),
         ok: rgb(0x9bd67a),
-        warn: rgb(0xff8a1f),
+        warn: rgb(0xff6a3d),
         crit: rgb(0xff4f4f),
         sel_bg: rgb(0x2b2113),
         on_accent: rgb(0x0c0a07),
@@ -229,7 +229,7 @@ pub const THEMES: [Theme; 22] = [
         accent_dim: rgb(0x5a6b45),
         accent2: rgb(0x7fbbb3),
         ok: rgb(0xa7c080),
-        warn: rgb(0xdbbc7f),
+        warn: rgb(0xe69875),
         crit: rgb(0xe67e80),
         sel_bg: rgb(0x3d484d),
         on_accent: rgb(0x2d353b),
@@ -848,5 +848,41 @@ mod contrast_tests {
         }
         assert!(failures.is_empty(), "contrast below threshold:\n{}", failures.join("\n"));
         assert!(stale.is_empty(), "allow-list entries that now pass (remove them):\n{}", stale.join("\n"));
+    }
+
+    /// CIE L*a*b* (D65) of an sRGB color.
+    fn lab(c: Color) -> [f64; 3] {
+        let Color::Rgb(r, g, b) = c else { panic!("theme colors must be RGB: {c:?}") };
+        let lin = |v: u8| {
+            let s = v as f64 / 255.0;
+            if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        };
+        let (r, g, b) = (lin(r), lin(g), lin(b));
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+        let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+        let (fx, fy, fz) = (f(x), f(y), f(z));
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    }
+
+    /// CIE76 color difference (Euclidean distance in L*a*b*).
+    fn delta_e76(a: Color, b: Color) -> f64 {
+        let (la, lb) = (lab(a), lab(b));
+        ((la[0] - lb[0]).powi(2) + (la[1] - lb[1]).powi(2) + (la[2] - lb[2]).powi(2)).sqrt()
+    }
+
+    /// `accent` (the active choice, e.g. the current branch) and `warn` (changed files, near-full bars) must
+    /// look different: git's "changed" state would otherwise blend into the accent color.
+    #[test]
+    fn accent_and_warn_are_distinct() {
+        let mut failures = Vec::new();
+        for t in THEMES.iter() {
+            let de = delta_e76(t.accent, t.warn);
+            if de < 25.0 {
+                failures.push(format!("{} accent/warn ΔE76 {de:.1} < 25", t.name));
+            }
+        }
+        assert!(failures.is_empty(), "accent and warn too similar:\n{}", failures.join("\n"));
     }
 }
