@@ -4788,7 +4788,12 @@ fn tab_markers_are_typed() {
     for (w, h) in [(80, 24), (60, 20), (40, 12), (30, 8)] {
         let text = render(&mut app, w, h);
         save(&format!("tabs-markers-{w}x{h}"), &text);
-        assert!(text.lines().next().unwrap().chars().count() <= w as usize);
+        let top = text.lines().next().unwrap().to_string();
+        assert!(top.chars().count() <= w as usize);
+        // The active tab is never summarized into a chip: the window slides to include it.
+        if (w, h) == (80, 24) || (w, h) == (60, 20) {
+            assert!(top.contains("▌active ×▐"), "{w}x{h}: {top}");
+        }
         for (r, _) in app.hits.iter().filter(|(r, h)| r.y == 0 && matches!(h, noble::app::Hit::Tab(_))) {
             assert!(r.right() <= w, "{w}x{h}: {r:?}");
         }
@@ -4801,6 +4806,84 @@ fn tab_markers_are_typed() {
     assert!(!top.contains("notice ◆"), "{top}");
     for _ in 0..5 {
         app.run(Action::CloseTab);
+    }
+}
+
+/// Whether a top strip row shows the small clock ("HH:MM").
+fn has_small_clock(row: &str) -> bool {
+    row.chars().collect::<Vec<_>>().windows(5).any(|w| {
+        w[0].is_ascii_digit() && w[1].is_ascii_digit() && w[2] == ':' && w[3].is_ascii_digit() && w[4].is_ascii_digit()
+    })
+}
+
+/// The window of terminal tabs always contains the active one: tabs before it are summarized as "‹N"
+/// (a palette button like "+N"), tabs after it as "+N", and the hit rects stay on the screen.
+#[test]
+fn active_tab_stays_in_the_strip() {
+    use noble::app::Hit;
+    let mut app = demo_app(80, 24);
+    for i in 0..9 {
+        named_tab(&mut app, &format!("t{i}"));
+    }
+    for (w, h) in [(80, 24), (60, 20)] {
+        for active in [8, 4, 0] {
+            app.view = View::Term(active);
+            let text = render(&mut app, w, h);
+            let top = text.lines().next().unwrap().to_string();
+            let name = format!("▌t{active} ×▐");
+            assert!(top.contains(&name), "{w}x{h} tab {active}: {top}");
+            for (r, _) in app.hits.iter().filter(|(r, _)| r.y == 0) {
+                assert!(r.right() <= w, "{w}x{h}: {r:?}");
+            }
+            let tab = find_hit(&app, |h| *h == Hit::Tab(active)).expect("active tab hit");
+            assert!(tab.right() <= w);
+            if active == 8 {
+                // Tabs before the window: a left chip that opens the palette.
+                // (The " + " new-tab button is not a count: no "+N" chip after the window.)
+                assert!(top.contains("‹5") && !top.contains("+1"), "{top}");
+                let (_, buf) = render_buf(&mut app, w, h);
+                let chip = find_hit(&app, |h| *h == Hit::HiddenTabs).expect("‹N chip");
+                assert!(cells_text(&buf, chip).trim_start().starts_with('‹'), "{top}");
+                click(&mut app, chip.x, chip.y);
+                assert!(matches!(app.overlay, Some(noble::app::Overlay::Palette(_))));
+                app.overlay = None;
+            }
+        }
+    }
+    // A tab in the middle shows both chips.
+    app.view = View::Term(4);
+    let top = render(&mut app, 80, 24).lines().next().unwrap().to_string();
+    assert!(top.contains("‹") && top.contains("+") && top.contains("▌t4 ×▐"), "{top}");
+    for _ in 0..9 {
+        app.run(Action::CloseTab);
+    }
+}
+
+/// Home has the big clock, so the top strip shows no small one there (the tabs get the room); the
+/// other screens keep it. Compact widths draw the fixed Home and System tabs as one glyph each.
+#[test]
+fn top_strip_clock_and_compact_fixed_tabs() {
+    use noble::app::Hit;
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "work");
+    app.view = View::Bridge;
+    let home = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(!has_small_clock(&home) && home.contains(" Home ") && home.contains("Settings"), "{home}");
+    app.view = View::Term(0);
+    let term = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(has_small_clock(&term), "{term}");
+    // Wide: the words. Compact (under 80 columns): one glyph each, hit rects over the glyph.
+    app.view = View::Bridge;
+    let wide = render(&mut app, 80, 24).lines().next().unwrap().to_string();
+    assert!(wide.contains(" Home ") && wide.contains(" System "), "{wide}");
+    let (text, buf) = render_buf(&mut app, 60, 20);
+    let compact = text.lines().next().unwrap().to_string();
+    assert!(compact.contains(" ⌂ ") && compact.contains(" ▤ "), "{compact}");
+    assert!(!compact.contains("Home") && !compact.contains("System"), "{compact}");
+    for (hit, glyph) in [(Hit::TabBridge, "⌂"), (Hit::TabSystem, "▤")] {
+        let r = find_hit(&app, |h| *h == hit).expect("fixed tab hit");
+        assert_eq!(r.width, 3, "{r:?}");
+        assert_eq!(cells_text(&buf, r).trim(), glyph, "{compact}");
     }
 }
 

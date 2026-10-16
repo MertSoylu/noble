@@ -28,8 +28,12 @@ All notable changes to NOBLE are documented here. The format is based on
 - Home's "/ search" label starts the project filter when clicked.
 - One name per feature: "Pass Keys to the App" in the palette and "? keys" in the hints.
 - Search Scrollback and Pass Keys to the App are listed in the palette only in a terminal, where they apply.
+- The top bar's tab strip slides to keep the active terminal tab visible: tabs hidden before it are summarized
+  as a "‹N" chip (carrying the most urgent marker, like "+N"). Home drops the small clock (the big one is
+  there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- The active terminal tab no longer hides inside the "+N" chip when there are more tabs than fit in the top bar.
 - Key hints follow the keymap: the help's tab rows, the welcome screen's palette key, the terminal status bar's
   home key and the status-bar tips show rebound keys and leave out unbound ones instead of the defaults.
 - Platform text: the terminal scheme preview shows a Unix prompt on Linux/macOS instead of `PS C:\>`, and the

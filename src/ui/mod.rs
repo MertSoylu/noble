@@ -365,6 +365,26 @@ fn tab_cell(app: &App, i: usize, compact: bool, working: &'static str) -> TabCel
     }
 }
 
+/// A count chip of the tab strip ("+N" after the window, "‹N" before it): the label, the most urgent
+/// marker of the tabs it hides, and a space. Returns the x after it.
+fn tab_chip(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    label: &str,
+    mark: Option<(u8, &'static str, Style)>,
+    limit: u16,
+    th: &crate::theme::Theme,
+) -> u16 {
+    let mut spans = vec![(label, th.dim().bg(th.raised))];
+    if let Some((_, glyph, style)) = mark {
+        spans.push((" ", th.dim().bg(th.raised)));
+        spans.push((glyph, style.bg(th.raised)));
+    }
+    spans.push((" ", th.dim().bg(th.raised)));
+    hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x))
+}
+
 /// The marker of a tab that had something happen in the background, with its rank: a notice or a
 /// bell (◆), a failed command (✗), a long command that finished (✓), plain output (•).
 fn tab_marker(tab: &crate::term::Tab, th: &crate::theme::Theme) -> Option<(u8, &'static str, Style)> {
@@ -385,7 +405,8 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     let th = &app.theme;
     hud::fill(buf, area, Style::default().bg(th.raised));
     let y = area.y;
-    let clock = format!(" {} ", clock_text(app, false));
+    // Home shows the big clock already, so the top strip leaves its space to the tabs.
+    let clock = if app.view == View::Bridge { String::new() } else { format!(" {} ", clock_text(app, false)) };
     let compact = area.width < 80;
     let settings_label = if compact { " ⚙ " } else { " ⚙ Settings " };
     let right_w = util::width(&clock) as u16 + util::width(settings_label) as u16 + 1;
@@ -401,50 +422,60 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     let brand = if app.dev { " NOBLE dev " } else { " NOBLE " };
     let mut x = hud::put(buf, area.x, y, brand, th.chip(), limit);
     x += 1;
-    let fixed = [(View::Bridge, "Home", Hit::TabBridge), (View::System, "System", Hit::TabSystem)];
+    // Compact: one glyph per fixed tab, so the terminal tabs get the room.
+    let fixed = [
+        (View::Bridge, if compact { "⌂" } else { "Home" }, Hit::TabBridge),
+        (View::System, if compact { "▤" } else { "System" }, Hit::TabSystem),
+    ];
     for (view, label, hit) in fixed {
         let start = x;
         x = hud::put(buf, x, y, &format!(" {label} "), tab_style(app.view == view), limit.saturating_sub(x));
         hits.push((Rect::new(start, y, x - start, 1), hit));
     }
     x = hud::put(buf, x, y, " │", th.line().bg(th.raised), limit.saturating_sub(x));
-    // Terminal tabs: those that do not fit are summarized as "+N".
+    // Terminal tabs: a window of tabs that always includes the active one. Tabs before the window
+    // are summarized as "‹N", tabs after it as "+N".
     let mut cells: Vec<TabCell> = (0..app.tabs.len())
         .map(|i| tab_cell(app, i, compact, terminal::working_glyph(app, &app.tabs[i].panes())))
         .collect();
-    let mut widths: Vec<u16> = Vec::new();
-    let mut used = x;
-    for c in &cells {
-        let w = c.width();
-        if used + w + 4 > limit {
-            break;
-        }
-        used += w;
-        widths.push(w);
-    }
-    let mut shown = widths.len();
-    // The "+N" summary carries the most urgent marker of the tabs it hides; a tab gives way
-    // when that does not fit next to the count.
-    let hidden_mark = |from: usize| {
-        (from..app.tabs.len())
-            .filter(|i| app.view != View::Term(*i))
-            .filter_map(|i| tab_marker(&app.tabs[i], th))
-            .max_by_key(|m| m.0)
+    let widths: Vec<u16> = cells.iter().map(TabCell::width).collect();
+    let n = cells.len();
+    // A chip's marker is the most urgent one among the tabs it hides, which may not be the active tab.
+    let hidden_mark = |range: std::ops::Range<usize>| {
+        range.filter(|i| app.view != View::Term(*i)).filter_map(|i| tab_marker(&app.tabs[i], th)).max_by_key(|m| m.0)
     };
-    while shown > 0 && shown < cells.len() {
-        let count = util::width(&format!(" +{} ", cells.len() - shown)) as u16;
-        let need = count + if hidden_mark(shown).is_some() { 2 } else { 0 };
-        if used + need <= limit {
+    // Chip width: its label, the marker (a space and the glyph) and a closing space.
+    let chip_width = |label: &str, mark: bool| util::width(label) as u16 + if mark { 2 } else { 0 } + 1;
+    let chips = |lo: usize, hi: usize| {
+        let left = if lo > 0 { chip_width(&format!(" ‹{lo}"), hidden_mark(0..lo).is_some()) } else { 0 };
+        let right = if hi < n { chip_width(&format!(" +{}", n - hi), hidden_mark(hi..n).is_some()) } else { 0 };
+        left + right
+    };
+    // The new-tab button and a space after the strip.
+    let tail = 4;
+    let fits = |lo: usize, hi: usize| x + widths[lo..hi].iter().sum::<u16>() + chips(lo, hi) + tail <= limit;
+    // Start with the active tab (it must show even when it is alone), then grow the window one tab at a
+    // time, right and left in turn, while the tabs and their chips still fit.
+    let (mut lo, mut hi) = cells.iter().position(|c| c.active).map_or((0, 0), |a| (a, a + 1));
+    loop {
+        let mut grew = false;
+        if hi < n && fits(lo, hi + 1) {
+            hi += 1;
+            grew = true;
+        }
+        if lo > 0 && fits(lo - 1, hi) {
+            lo -= 1;
+            grew = true;
+        }
+        if !grew {
             break;
         }
-        shown -= 1;
-        used -= widths[shown];
     }
-    let hidden = cells.len() - shown;
-    if hidden == 0 {
+    let used = x + widths[lo..hi].iter().sum::<u16>();
+    if lo == 0 && hi == n {
         // Split counts are the first thing to go: they only appear in what the tabs leave free,
         // the active tab's first (and only that one in compact mode).
-        let mut slack = limit.saturating_sub(used + 4);
+        let mut slack = limit.saturating_sub(used + tail);
         let mut order: Vec<usize> = (0..cells.len()).collect();
         order.sort_by_key(|i| !cells[*i].active);
         for i in order {
@@ -472,7 +503,15 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
         }
         _ => x,
     };
-    for (i, c) in cells.iter().enumerate().take(shown) {
+    if lo > 0 {
+        let start = x;
+        x = tab_chip(buf, x, y, &format!(" ‹{lo}"), hidden_mark(0..lo), limit, th);
+        // The chip lists the hidden tabs in the command palette, like the "+N" chip.
+        if x > start {
+            hits.push((Rect::new(start, y, x - start, 1), Hit::HiddenTabs));
+        }
+    }
+    for (i, c) in cells.iter().enumerate().take(hi).skip(lo) {
         x = put_gap(buf, x, i);
         let id = app.tabs[i].id;
         // A new tab grows open: everything past its current width is cut off.
@@ -518,20 +557,12 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             x = hud::put(buf, x, y, " ", Style::default().bg(th.raised), room(x).min(1));
         }
     }
-    if gap.is_some_and(|(i, _)| i >= shown) {
+    if gap.is_some_and(|(i, _)| i >= hi) {
         x = put_gap(buf, x, gap.map_or(0, |g| g.0));
     }
-    if hidden > 0 {
-        let mark = hidden_mark(shown);
-        let count = format!(" +{hidden}");
-        let mut spans = vec![(count.as_str(), th.dim().bg(th.raised))];
-        if let Some((_, glyph, style)) = mark {
-            spans.push((" ", th.dim().bg(th.raised)));
-            spans.push((glyph, style.bg(th.raised)));
-        }
-        spans.push((" ", th.dim().bg(th.raised)));
+    if hi < n {
         let start = x;
-        x = hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x));
+        x = tab_chip(buf, x, y, &format!(" +{}", n - hi), hidden_mark(hi..n), limit, th);
         // The chip lists the hidden tabs in the command palette.
         if x > start {
             hits.push((Rect::new(start, y, x - start, 1), Hit::HiddenTabs));

@@ -432,8 +432,9 @@ reports long-running commands. A background tab gets a marker in the top bar, af
 urgent thing that happened there: `◆` for an OSC 9 / OSC 777 notification, the bell or an agent that needs you, `✗`
 for a command that ended with a non-zero exit code, `✓` for a long command that finished, `•` for plain output. It
 clears when you open the tab. A split tab shows its pane count (`⊞2`) when the strip has room (in a narrow window
-only on the active tab), and the active tab is framed by accent bars (`▌work ×▐`). When tabs do not fit, `+N`
-keeps the most urgent marker of the hidden ones (`+3 ✗`).
+only on the active tab), and the active tab is framed by accent bars (`▌work ×▐`). When tabs do not fit, the strip
+slides to keep the active tab in view: `‹N` and `+N` count the hidden tabs before and after it, and each keeps
+the most urgent marker of the hidden ones (`+3 ✗`).
 
 The pane title shows the result of the last command typed at the prompt: `✓ 2.4s` when it worked,
 `✗ 1 · 12s` with its exit code when it failed, `· 12s` in cmd.exe. It stays until the next command starts. A
