@@ -216,8 +216,10 @@ noble [--config <path>] [--no-boot]
 ## ⌨ Keys
 
 NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
-plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference: type to filter it, ↑↓ pick a row and ⏎ (or a click)
-runs it.
+plus a few direct shortcuts. Everything can be rebound: **Settings → Key bindings** lists every action with its prefix and
+direct keys (↑↓ select, `/` filter, `⏎` rebinds the prefix key, `d` the direct chord, `x` unbinds, `r` restores the default;
+a key another action has is asked about first), and each change is saved to `config.toml` at once. `?` shows the live
+reference: type to filter it, ↑↓ pick a row and ⏎ (or a click) runs it.
 
 The direct shortcuts marked \* are shell keys too (last argument, transpose words, fish's sudo and pager …), so in
 a terminal they go to the shell and work everywhere else; use the prefix column there instead. `shell_first =

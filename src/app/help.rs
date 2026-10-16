@@ -195,8 +195,12 @@ pub fn sections(app: &App) -> Vec<Section> {
             ("shift+drag", "select even when the app captures the mouse"),
         ]),
     });
-    // The config file's location: a row of its own, below the groups.
-    out.push(Section { title: String::new(), rows: plain(&[("config", &util::tilde(&app.paths.config))]) });
+    // The config file's location and where the keys are changed: rows of their own, below the groups.
+    let config = util::tilde(&app.paths.config);
+    out.push(Section {
+        title: String::new(),
+        rows: plain(&[("config", &config), ("change keys", "Settings → Key bindings")]),
+    });
     out
 }
 

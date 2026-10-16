@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::hud;
+use crate::app::bindings::{self, BindingsState, Slot};
 use crate::app::help::{GAP, KEY_W, Line, geometry};
 use crate::app::{App, HelpState, Hit, Overlay};
 use crate::keys::Action;
@@ -29,6 +30,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
         Overlay::Help(st) => help(buf, area, app, st, hits),
+        Overlay::Bindings(st) => key_bindings(buf, area, app, st, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
             // The question wraps over as many rows as it needs: the box grows with it (within the
@@ -871,6 +873,106 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
         "type to filter · ⏎ run · esc close",
         th.dim().bg(th.raised),
     );
+}
+
+/// The key bindings editor: every action with its prefix and direct keys, a filter, the status line
+/// (the key being awaited, the question about a taken key, a refusal) and the key hints.
+fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hits: &mut Vec<(Rect, Hit)>) {
+    let th = &app.theme;
+    let Some(g) = bindings::geometry(area) else {
+        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        return;
+    };
+    hits.push((g.rect, Hit::Inert));
+    let inner = boxed(buf, g.rect, "KEY BINDINGS", th, th.accent);
+    let x = inner.x + 1;
+    let iw = g.width;
+    let rows = app.binding_rows(&st.query);
+    // The filter line ("/ text", the cursor while typing) and how many of the actions are listed.
+    let count = format!("{}/{}", rows.len(), Action::ALL.len());
+    let filter_on = st.filtering || !st.query.is_empty();
+    let cursor = if st.filtering && app.cursor_lit() { "▏" } else { "" };
+    let filter = if filter_on { format!("/ {}{cursor}", st.query) } else { "/ filter".into() };
+    let counter_w = util::width(&count) as u16 + 1;
+    let filter_style = if filter_on { th.accent_bold().bg(th.raised) } else { th.dim().bg(th.raised) };
+    hud::put(buf, x, inner.y, &filter, filter_style, iw.saturating_sub(counter_w));
+    hud::put_right(buf, x + iw, inner.y, &count, th.dim().bg(th.raised));
+    // The column titles.
+    let head = th.dim().bg(th.raised);
+    let hy = inner.y + 1;
+    if g.group_w > 0 {
+        hud::put(buf, x, hy, "GROUP", head, g.group_w);
+    }
+    hud::put(buf, x + g.title_at, hy, "ACTION", head, g.title_w);
+    hud::put(buf, x + g.prefix_at, hy, "PREFIX", head, g.key_w);
+    hud::put(buf, x + g.direct_at, hy, "DIRECT", head, g.key_w);
+    // The list, scrolled so that the selected row is on screen.
+    let list_y = inner.y + 2;
+    if rows.is_empty() {
+        hud::put(buf, x, list_y, "no matches", th.dim().bg(th.raised), iw);
+    }
+    let offset = if st.selected >= g.rows { st.selected + 1 - g.rows } else { 0 };
+    for (row, action) in rows.iter().enumerate().skip(offset).take(g.rows) {
+        let y = list_y + (row - offset) as u16;
+        let selected = row == st.selected;
+        let bg = if selected { th.sel_bg } else { th.raised };
+        hud::set_bg_row(buf, inner.x, y, inner.width, bg);
+        if selected {
+            hud::put(buf, inner.x, y, "▌", th.accent().bg(bg), 1);
+        }
+        if g.group_w > 0 {
+            hud::put(buf, x, y, action.group(), th.accent2().bg(bg), g.group_w);
+        }
+        let title_style = if selected { th.text().add_modifier(Modifier::BOLD).bg(bg) } else { th.text().bg(bg) };
+        hud::put(buf, x + g.title_at, y, &util::truncate(&action.title(), g.title_w as usize), title_style, g.title_w);
+        for (at, slot) in [(g.prefix_at, Slot::Prefix), (g.direct_at, Slot::Direct)] {
+            let label = app.binding_label(*action, slot);
+            let style = if label == "—" { th.dim().bg(bg) } else { th.accent2().bg(bg) };
+            hud::put(buf, x + at, y, &util::truncate(&label, g.key_w as usize), style, g.key_w);
+        }
+        hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::BindingsRow(row)));
+    }
+    // The status line: why a key was refused, the question about a taken key, the change just saved, or
+    // what is awaited.
+    let warn = Style::default().fg(th.warn).bg(th.raised);
+    let (status, style) = if let Some(note) = &st.note {
+        // A refused key: the editor keeps waiting, the prompt returns with the next key.
+        (note.clone(), warn)
+    } else if let Some(r) = st.replace {
+        (format!("{} is {} — replace? y/n", app.key_label(r.slot, r.chord), r.other.title()), warn)
+    } else if let Some(done) = &st.done {
+        (done.clone(), Style::default().fg(th.ok).bg(th.raised))
+    } else if let Some((action, slot)) = st.capture {
+        let text = match slot {
+            Slot::Prefix => format!("press a key for {} after {} · esc cancel", action.title(), app.keymap.prefix),
+            Slot::Direct => format!("press a key chord for {} · esc cancel", action.title()),
+        };
+        (text, th.accent_bold().bg(th.raised))
+    } else {
+        (String::new(), th.dim().bg(th.raised))
+    };
+    hud::put(buf, x, inner.bottom() - 2, &util::truncate(&status, iw as usize), style, iw);
+    // The key hints: the longest of them that fits.
+    const BROWSE: [&str; 4] = [
+        "⏎ prefix key · d direct key · x unbind · r reset · / filter · esc close",
+        "⏎ prefix key · d direct key · x unbind · r reset · esc",
+        "⏎ prefix · d direct · x unbind · r reset · esc",
+        "⏎ prefix · d direct · esc",
+    ];
+    const WAITING: [&str; 1] = ["esc cancel"];
+    const REPLACE: [&str; 1] = ["y replace · n cancel"];
+    const FILTER: [&str; 2] = ["type to filter · ⏎ done · esc clear", "⏎ done · esc clear"];
+    let hints: &[&str] = if st.replace.is_some() {
+        &REPLACE
+    } else if st.capture.is_some() {
+        &WAITING
+    } else if st.filtering {
+        &FILTER
+    } else {
+        &BROWSE
+    };
+    let hint = hints.iter().find(|h| util::width(h) <= iw as usize).copied().unwrap_or("esc");
+    hud::put(buf, x, inner.bottom() - 1, hint, th.dim().bg(th.raised), iw);
 }
 
 #[cfg(test)]

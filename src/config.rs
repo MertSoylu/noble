@@ -655,6 +655,110 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     s
 }
 
+/// The key of a `key = value` line, `None` for comments, headers, blank lines and anything that is not
+/// one single-line pair. Parsed as TOML, so quoted keys such as `"="` or `"\""` come out right.
+fn line_key(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let table: toml::Table = toml::from_str(t).ok()?;
+    let mut keys = table.keys();
+    let key = keys.next()?.clone();
+    keys.next().is_none().then_some(key)
+}
+
+/// Two spellings of one key chord (`ctrl+a` and `Ctrl+A`) are the same entry.
+fn same_chord(a: &str, b: &str) -> bool {
+    match (crate::keys::Chord::parse(a), crate::keys::Chord::parse(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// A TOML string literal (quoted and escaped).
+fn quoted(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
+/// Adds `entry` at the end of the table in `out` (before its trailing blank lines).
+fn push_at_table_end(out: &mut Vec<String>, entry: &str) {
+    let mut tail = Vec::new();
+    while let Some(l) = out.pop_if(|l| l.trim().is_empty()) {
+        tail.push(l);
+    }
+    out.push(entry.to_string());
+    out.extend(tail);
+}
+
+/// The one edit behind `set_binding` and `remove_binding`: `Some(value)` writes `"chord" = "value"` in
+/// `[table]` (in place of the line of that chord, its comment kept; else at the end of the table; the
+/// table is created at the end of the file when missing), `None` deletes the chord's line. Everything
+/// else stays as it is; a file without a change is returned untouched.
+fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> String {
+    let header = format!("[{table}]");
+    let entry = value.map(|v| format!("{} = {}", quoted(chord), quoted(v)));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_table = false;
+    let mut seen_table = false;
+    let mut done = false;
+    let mut changed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if in_table && !done {
+                if let Some(e) = &entry {
+                    push_at_table_end(&mut out, e);
+                    changed = true;
+                }
+                done = true;
+            }
+            in_table = strip_comment(trimmed).trim_end() == header;
+            seen_table |= in_table;
+        } else if in_table && line_key(line).is_some_and(|k| same_chord(&k, chord)) {
+            // The first line of the chord is replaced (or dropped); any later duplicate is dropped.
+            if !done {
+                if let Some(e) = &entry {
+                    let comment = comment_start(line).map(|i| format!("  {}", &line[i..])).unwrap_or_default();
+                    out.push(format!("{e}{comment}"));
+                }
+                done = true;
+            }
+            changed = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !done && let Some(e) = &entry {
+        if in_table {
+            push_at_table_end(&mut out, e);
+            changed = true;
+        } else if !seen_table {
+            out.push(String::new());
+            out.push(header);
+            out.push(e.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return text.to_string();
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
+/// Sets `"chord" = "value"` in the `[table]` of the config text (`value` "none" unbinds the chord),
+/// preserving the comments and every other line.
+pub fn set_binding(text: &str, table: &str, chord: &str, value: &str) -> String {
+    edit_binding(text, table, chord, Some(value))
+}
+
+/// Removes the `chord` line from the `[table]` of the config text, so the default binding applies again.
+pub fn remove_binding(text: &str, table: &str, chord: &str) -> String {
+    edit_binding(text, table, chord, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +1010,46 @@ theme = \"ice\"
         assert!(out.contains("roots = [\"~/x\"]") && out.contains("max_depth = 3"), "{out}");
         assert_eq!(parse(&out).map(|c| c.projects.max_depth), Ok(3), "{out}");
         assert_eq!(strip_value("roots = [\"a=b\"]"), " [\"a=b\"]");
+    }
+
+    #[test]
+    fn set_binding_writes_into_its_table_and_keeps_the_rest() {
+        let text = "[keys]\nprefix = \"ctrl+a\"   # the prefix\n\n[keys.prefix_bindings]\n# \"%\" = \"zoom\"\n\"v\" = \"split_right\"  # old\n\n[terminal]\nscrollback = 5000\n";
+        // A chord with a line is rewritten in place, its comment kept.
+        let out = set_binding(text, "keys.prefix_bindings", "v", "none");
+        assert!(out.contains("\"v\" = \"none\"  # old\n"), "{out}");
+        assert!(out.contains("prefix = \"ctrl+a\"   # the prefix\n"), "{out}");
+        assert!(out.contains("# \"%\" = \"zoom\"\n"), "a commented example stays: {out}");
+        assert!(out.contains("scrollback = 5000\n"), "{out}");
+        // A new chord goes to the end of its table, before the blank line that separates the next one.
+        let out = set_binding(&out, "keys.prefix_bindings", "%", "split_right");
+        assert!(out.contains("\"v\" = \"none\"  # old\n\"%\" = \"split_right\"\n\n[terminal]"), "{out}");
+        // Another spelling of a line's chord ("Ctrl+A" for "ctrl+a") replaces that line.
+        let with_line = "[keys.prefix_bindings]\n\"ctrl+a\" = \"zoom\"\n";
+        let out2 = set_binding(with_line, "keys.prefix_bindings", "Ctrl+A", "help");
+        assert_eq!(out2, "[keys.prefix_bindings]\n\"Ctrl+A\" = \"help\"\n", "{out2}");
+        // A missing table is created at the end of the file.
+        let out = set_binding("[general]\ntheme = \"amber\"\n", "keys.direct_bindings", "alt+t", "new_tab");
+        assert_eq!(out, "[general]\ntheme = \"amber\"\n\n[keys.direct_bindings]\n\"alt+t\" = \"new_tab\"\n");
+        // Keys that TOML would read as syntax are quoted properly and read back.
+        let out = set_binding("", "keys.prefix_bindings", "=", "zoom");
+        let out = set_binding(&out, "keys.prefix_bindings", "\"", "help");
+        let parsed = parse(&out).expect("valid config");
+        assert_eq!(parsed.keys.prefix_bindings.get("="), Some(&"zoom".to_string()));
+        assert_eq!(parsed.keys.prefix_bindings.get("\""), Some(&"help".to_string()));
+        // Writing the value a line already has changes nothing.
+        assert_eq!(set_binding(text, "keys.prefix_bindings", "v", "split_right"), text);
+    }
+
+    #[test]
+    fn remove_binding_restores_the_default_line_away() {
+        let text = "[keys.direct_bindings]\n\"alt+t\" = \"zoom\"\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n";
+        let out = remove_binding(text, "keys.direct_bindings", "alt+t");
+        assert_eq!(out, "[keys.direct_bindings]\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n");
+        // Nothing to remove: the text is returned as it was (line endings included).
+        let crlf = "[keys.direct_bindings]\r\n\"alt+x\" = \"none\"\r\n";
+        assert_eq!(remove_binding(crlf, "keys.direct_bindings", "alt+t"), crlf);
+        assert_eq!(remove_binding(crlf, "keys.prefix_bindings", "alt+t"), crlf);
     }
 
     #[test]

@@ -325,3 +325,56 @@ fn termination_signals_save_the_session() {
         let _ = std::fs::remove_dir_all(&home);
     }
 }
+
+/// Settings → Key bindings in the real app: a new prefix key is written to `config.toml` under its table
+/// (the rest of the file, its comments included, stays), the old key stops working at once, and the
+/// editor's "saved" confirmation shows.
+#[test]
+fn key_bindings_are_saved_to_the_config() {
+    let home = std::env::temp_dir().join(format!("noble-e2e-keys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+
+    let h = Harness::start(&home, 34, 120);
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.screen().contains("WELCOME TO NOBLE") {
+        assert!(Instant::now() < deadline, "welcome did not close");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let type_text = |text: &str| {
+        for c in text.chars() {
+            h.send(c.to_string().as_bytes());
+        }
+    };
+    // ctrl+a S opens Settings; "/" filters its rows to Key bindings; ⏎ selects it and opens the editor.
+    h.send(b"\x01S");
+    h.send(b"/");
+    type_text("key bindings");
+    h.send(b"\r");
+    h.send(b"\r");
+    h.wait_for("KEY BINDINGS", 10);
+    // The same filter idea picks Split Pane Right; ⏎ waits for its prefix key, and "%" is taken.
+    h.send(b"/");
+    type_text("split pane right");
+    h.send(b"\r");
+    h.send(b"\r");
+    h.send(b"%");
+    h.wait_for("saved · ctrl+a % is Split Pane Right", 10);
+
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(config.contains("\"%\" = \"split_right\""), "{config}");
+    assert!(config.contains("\"v\" = \"none\"") && config.contains("\"|\" = \"none\""), "{config}");
+    assert!(config.contains("prefix = \"ctrl+a\""), "the rest of the file is kept: {config}");
+    assert!(config.contains("# \"%\" = \"split_right\""), "the template's example comment is kept: {config}");
+
+    // Back out: esc clears the filter, closes the editor, clears the settings filter, leaves Settings.
+    for _ in 0..4 {
+        h.send(b"\x1b");
+    }
+    // The old key is unbound now; the new one is what Split Pane Right answers to.
+    h.send(b"\x01v");
+    h.wait_for("ctrl+a v is not bound", 10);
+    let _ = std::fs::remove_dir_all(&home);
+}

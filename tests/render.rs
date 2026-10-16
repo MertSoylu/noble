@@ -7211,3 +7211,81 @@ fn settings_description_under_selected_row_at_110x30() {
     assert!(text.contains(last.description()), "the selected setting's description is visible:\n{text}");
     assert!(text.contains(last.label()), "{text}");
 }
+
+/// Settings → Key bindings: the row opens the editor, which lists every action with its keys. A double
+/// click starts a rebinding, a key another action has is asked about first, a key NOBLE cannot bind says
+/// why, and the filter (`/`) takes letters as text. The `?` reference names the editor.
+#[test]
+fn key_bindings_editor_renders_and_asks_before_taking_keys() {
+    use noble::app::{Hit, Overlay, SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let row = app
+        .settings_items()
+        .iter()
+        .position(|i| *i == SettingItem::Setting(SettingKey::KeyBindings))
+        .expect("the row is in the Keys section");
+    app.settings_sel = row;
+    render(&mut app, 110, 30);
+    let hit = find_hit(&app, |h| *h == Hit::Setting(row)).expect("the row is drawn");
+    click(&mut app, hit.x + 3, hit.y);
+    assert!(matches!(app.overlay, Some(Overlay::Bindings(_))), "the row opens the editor");
+    let text = render(&mut app, 110, 30);
+    save("bindings-110x30", &text);
+    assert!(text.contains("KEY BINDINGS") && text.contains("Split Pane Right") && text.contains("PREFIX"), "{text}");
+    assert!(text.contains("⏎ prefix key"), "{text}");
+    for (w, h) in SIZES {
+        save(&format!("bindings-{w}x{h}"), &render(&mut app, w, h));
+    }
+    assert_no_doubled_frame(&render(&mut app, 110, 30));
+
+    // A double click on the row starts its prefix key; the editor says what it waits for.
+    let split = app.binding_rows("").iter().position(|a| *a == Action::SplitRight).unwrap();
+    render(&mut app, 110, 30);
+    let target = find_hit(&app, |h| *h == Hit::BindingsRow(split)).expect("the row is drawn");
+    click(&mut app, target.x + 2, target.y);
+    click(&mut app, target.x + 2, target.y);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("press a key for Split Pane Right after ctrl+a · esc cancel"), "{text}");
+
+    // ctrl+alt with a symbol is AltGr on Windows: refused, and the editor keeps waiting.
+    app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("AltGr"), "{text}");
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.capture.is_some()), "still waiting");
+
+    // "n" is Next Tab's prefix key: the question comes first, and "n" keeps its owner until yes.
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    let text = render(&mut app, 110, 30);
+    save("bindings-replace-110x30", &text);
+    assert!(text.contains("ctrl+a n is Next Tab — replace? y/n"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.replace.is_none()), "no keeps the keys");
+
+    // A yes saves at once: the status line says so, and the Settings row shows the keys are custom.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('%'), KeyModifiers::NONE));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("saved · ctrl+a % is Split Pane Right"), "{text}");
+    assert_eq!(app.setting_value(SettingKey::KeyBindings), "custom");
+
+    // The filter takes letters as text: "/" then "split" lists only the matching actions.
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    for c in "split".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("/ split") && text.contains("Split Pane Down") && !text.contains("Next Tab"), "{text}");
+    // esc clears the filter, then the second esc closes the editor.
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.overlay.is_none(), "esc closes the editor");
+    assert!(matches!(app.view, View::Settings), "back on the Settings page");
+
+    // The keyboard reference names the editor, so it is found from the `?` screen.
+    app.run(Action::Help);
+    for c in "key bindings".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(render(&mut app, 110, 30).contains("Settings → Key bindings"));
+}

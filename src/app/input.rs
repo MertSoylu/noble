@@ -450,6 +450,7 @@ impl App {
                 }
                 _ => true,
             },
+            Overlay::Bindings(st) => self.bindings_key(st, k),
             Overlay::Confirm(_) => match k.code {
                 // Enter is deliberately not "yes": these dialogs guard destructive actions, so only y confirms.
                 KeyCode::Char('y' | 'Y') => {
@@ -1119,6 +1120,7 @@ impl App {
             Hit::SystemFilter => self.start_system_filter(),
             Hit::SystemTerminate => self.terminate_selected(),
             Hit::HomeSearch => self.start_home_filter(),
+            Hit::BindingsRow(i) => self.bindings_click(i, double),
             Hit::HelpRow(i) => {
                 if let Some(Overlay::Help(st)) = &self.overlay {
                     let query = st.query.clone();
@@ -1269,6 +1271,10 @@ impl App {
             if let Some(Overlay::Help(st)) = &mut self.overlay {
                 st.scroll = if dir > 0 { st.scroll.saturating_sub(3) } else { (st.scroll + 3).min(max) };
             }
+            return;
+        }
+        if matches!(self.overlay, Some(Overlay::Bindings(_))) {
+            self.bindings_wheel(dir);
             return;
         }
         if let Some(Overlay::Themes(p)) = &mut self.overlay {

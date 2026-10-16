@@ -2,6 +2,7 @@
 //! everything here mutates state and nothing writes to the screen directly.
 
 mod agents;
+pub mod bindings;
 pub mod fx;
 pub mod help;
 mod input;
@@ -32,6 +33,7 @@ use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert};
 use crate::theme::Theme;
 
+pub use bindings::BindingsState;
 pub use help::HelpState;
 pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
@@ -303,6 +305,8 @@ pub enum Overlay {
     Menu(Menu),
     /// The keyboard reference (`?`): its filter, selection and scroll.
     Help(HelpState),
+    /// The key bindings editor (Settings → Key bindings).
+    Bindings(BindingsState),
     Confirm(Confirm),
     Prompt(Prompt),
 }
@@ -429,6 +433,8 @@ pub enum Hit {
     PaletteItem(usize),
     /// Row of the keyboard reference (selectable rows, `help::HelpState::selected` order).
     HelpRow(usize),
+    /// Row of the key bindings editor (`App::binding_rows` order).
+    BindingsRow(usize),
     ConfirmYes,
     ConfirmNo,
     /// Welcome card: a setup row (`WelcomeSetup::rows` order), its ‹ › arrows and a prefix chip.

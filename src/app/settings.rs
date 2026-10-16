@@ -25,6 +25,7 @@ pub enum SettingKey {
     Prefix,
     Passthrough,
     ShellFirst,
+    KeyBindings,
     AiEnabled,
     Claude,
     Codex,
@@ -94,6 +95,7 @@ impl SettingKey {
             SettingKey::Prefix => "Prefix key",
             SettingKey::Passthrough => "Pass keys to the app",
             SettingKey::ShellFirst => "Leave shell keys to the shell",
+            SettingKey::KeyBindings => "Key bindings",
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
             SettingKey::Codex => "Codex",
@@ -130,6 +132,7 @@ impl SettingKey {
             SettingKey::Prefix => "Key that starts NOBLE's command chords",
             SettingKey::Passthrough => "Which shortcuts full-screen apps receive",
             SettingKey::ShellFirst => "Keep editing keys such as ctrl+w for the shell",
+            SettingKey::KeyBindings => "Change the prefix and direct keys of every action",
             SettingKey::AiEnabled => "Show AI quota cards on Home",
             SettingKey::Claude | SettingKey::Codex | SettingKey::Antigravity => "Show this provider's usage on Home",
             SettingKey::OpenCodeGo | SettingKey::Kilo | SettingKey::CommandCode => "Show this provider's usage on Home",
@@ -165,7 +168,7 @@ impl SettingKey {
 
     /// Set in a popup window (⏎); ←→ do not change it.
     pub fn opens_popup(&self) -> bool {
-        matches!(self, SettingKey::QuickLaunch)
+        matches!(self, SettingKey::QuickLaunch | SettingKey::KeyBindings)
     }
 
     pub fn is_toggle(&self) -> bool {
@@ -177,6 +180,7 @@ impl SettingKey {
                 | SettingKey::Passthrough
                 | SettingKey::TermColors
                 | SettingKey::QuickLaunch
+                | SettingKey::KeyBindings
                 | SettingKey::AiRefresh
                 | SettingKey::AiWarn
         )
@@ -252,7 +256,7 @@ impl App {
         vec![
             ("Display", display),
             ("Terminal", terminal),
-            ("Keys", rows(&[Prefix, Passthrough, ShellFirst])),
+            ("Keys", rows(&[Prefix, Passthrough, ShellFirst, KeyBindings])),
             ("AI usage", ai),
             ("General", general),
         ]
@@ -336,6 +340,10 @@ impl App {
             }
             SettingKey::Theme => self.theme.label.to_string(),
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
+            SettingKey::KeyBindings => {
+                let custom = !self.cfg.keys.prefix_bindings.is_empty() || !self.cfg.keys.direct_bindings.is_empty();
+                if custom { "custom".into() } else { "defaults".into() }
+            }
             SettingKey::Passthrough => {
                 let key = self.keymap.hint(crate::keys::Action::Passthrough).unwrap_or_default();
                 if self.pass_once() { format!("once ({} + key)", self.keymap.prefix) } else { format!("lock ({key})") }
@@ -373,12 +381,17 @@ impl App {
     }
 
     /// Writes the edited config; a failure is reported (the change then only lasts this session).
-    fn write_config(&mut self, text: String) {
+    /// `false` when the file could not be written (the error is shown as a toast).
+    pub(super) fn write_config(&mut self, text: String) -> bool {
         match crate::store::write_text(&self.paths.config, &text) {
-            Ok(()) => self.cfg_mtime = crate::config::mtime_of(&self.paths.config),
+            Ok(()) => {
+                self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
+                true
+            }
             Err(e) => {
                 let path = crate::util::tilde(&self.paths.config);
                 self.toast(ToastLevel::Error, format!("could not save {path}: {e}"));
+                false
             }
         }
     }
@@ -421,6 +434,7 @@ impl App {
     pub fn activate_setting(&mut self, item: SettingItem, dir: i32) {
         match item {
             SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
+            SettingItem::Setting(SettingKey::KeyBindings) => self.open_bindings(),
             SettingItem::Setting(SettingKey::ClaudeHooks) => self.toggle_claude_hooks(),
             SettingItem::OpenConfig => self.run(crate::keys::Action::OpenConfig),
             SettingItem::ReloadConfig => self.reload_config(true),
@@ -429,6 +443,7 @@ impl App {
                 let (section, name, value) = match key {
                     // Set from the popup (handled above).
                     SettingKey::QuickLaunch => return self.open_launcher_picker(),
+                    SettingKey::KeyBindings => return self.open_bindings(),
                     // ←→ step through the themes; `set_theme` saves it.
                     SettingKey::Theme => {
                         let names: Vec<&str> = THEMES.iter().map(|t| t.name).collect();

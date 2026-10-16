@@ -149,6 +149,55 @@ impl fmt::Display for Chord {
     }
 }
 
+impl Chord {
+    /// The spelling `Chord::parse` reads back, as written to `config.toml` (the display uses arrows
+    /// and "bksp", which the parser does not know).
+    pub fn config_name(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.mods.contains(KeyModifiers::CONTROL) {
+            parts.push("ctrl");
+        }
+        if self.mods.contains(KeyModifiers::ALT) {
+            parts.push("alt");
+        }
+        if self.mods.contains(KeyModifiers::SHIFT) || self.code == KeyCode::BackTab {
+            parts.push("shift");
+        }
+        let key = match self.code {
+            KeyCode::Char(' ') => "space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "enter".into(),
+            KeyCode::Esc => "esc".into(),
+            KeyCode::Tab | KeyCode::BackTab => "tab".into(),
+            KeyCode::Backspace => "backspace".into(),
+            KeyCode::Delete => "delete".into(),
+            KeyCode::Insert => "insert".into(),
+            KeyCode::Up => "up".into(),
+            KeyCode::Down => "down".into(),
+            KeyCode::Left => "left".into(),
+            KeyCode::Right => "right".into(),
+            KeyCode::Home => "home".into(),
+            KeyCode::End => "end".into(),
+            KeyCode::PageUp => "pageup".into(),
+            KeyCode::PageDown => "pagedown".into(),
+            KeyCode::F(n) => format!("f{n}"),
+            _ => "?".into(),
+        };
+        parts.push(&key);
+        parts.join("+")
+    }
+}
+
+/// The chords bound to `action` in `map`, the shortest spelling first.
+pub fn chords_of(map: &HashMap<Chord, Action>, action: Action) -> Vec<Chord> {
+    let mut v: Vec<Chord> = map.iter().filter(|(_, a)| **a == action).map(|(k, _)| *k).collect();
+    v.sort_by_key(|k| {
+        let s = k.to_string();
+        (s.chars().count(), s)
+    });
+    v
+}
+
 /// All actions of the app. Known in the config by their snake_case names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -648,6 +697,20 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_names_parse_back() {
+        for (chord, _) in default_prefix_bindings().into_iter().chain(default_direct_bindings()) {
+            assert_eq!(Chord::parse(&chord.config_name()), Some(chord), "{}", chord.config_name());
+        }
+        for text in ["ctrl+space", "alt+enter", "shift+tab", "backspace", "shift+up", "ctrl++", "alt+f12", "pgdn", "|"]
+        {
+            let chord = Chord::parse(text).unwrap();
+            assert_eq!(Chord::parse(&chord.config_name()), Some(chord), "{text}");
+        }
+        assert_eq!(Chord::new(KeyCode::BackTab, KeyModifiers::NONE).config_name(), "shift+tab");
+        assert_eq!(c("alt+x").config_name(), "alt+x");
+    }
 
     #[test]
     fn parse_chords() {

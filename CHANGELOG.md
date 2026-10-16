@@ -7,6 +7,13 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Settings → Key bindings (in the Keys section) edits every shortcut from the screen: a list of all actions with
+  their prefix and direct keys, ↑↓ to select, `/` to filter, `⏎` to rebind the prefix key, `d` for the direct chord,
+  `x` (or del) to unbind and `r` to restore the default. A key another action already has is asked about first
+  ("ctrl+a n is Next Tab — replace? y/n"); keys NOBLE cannot bind (the prefix itself, ctrl+alt with a symbol, a plain
+  letter as a direct key) are refused with the reason. Each change is written to `config.toml` under its table, the
+  rest of the file and its comments are kept, and the keys reload at once. Clicking a row selects it; double-clicking
+  starts the rebinding. The `?` reference points to it.
 - Home's project card lists the selected project's quick tasks as a TASKS row of clickable chips (`▸ npm run dev`)
   when there is room. Tasks are read from the project folder: the `package.json` scripts (run with npm, pnpm, yarn
   or bun, by the lockfile that exists), `cargo build`, `cargo test` and `cargo run` for a Cargo project, the plain
