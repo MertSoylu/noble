@@ -7137,9 +7137,9 @@ fn inactive_panes_dim_only_in_a_split() {
 
     // Theme mode: ANSI red is left to the outer terminal, so the unfocused pane gets DIM.
     app.cfg.terminal.colors = "theme".into();
-    write_panes(&mut app, "\x1b[31m", "RRRR");
+    write_panes(&mut app, "\x1b[31m", "¤¤¤¤");
     let buf = render_cells(&mut app, 110, 30);
-    let rs = cells_of(&buf, "R");
+    let rs = cells_of(&buf, "¤");
     assert_eq!(rs.len(), 8);
     assert_eq!(rs.iter().filter(|(_, dim)| *dim).count(), 4, "{rs:?}");
     app.cfg.terminal.colors = "windows-terminal".into();
