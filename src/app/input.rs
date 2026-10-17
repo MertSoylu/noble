@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, PromptPurpose, SortKey, ToastLevel, View};
+use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -129,11 +129,14 @@ impl App {
             }
             return;
         }
-        if let Some(a) = self.keymap.direct_map.get(&chord).copied()
-            && !(in_term && (self.focused_locked() || self.keymap.shell_first.contains(&chord)))
-        {
-            self.run(a);
-            return;
+        if let Some(a) = self.keymap.direct_map.get(&chord).copied() {
+            if !(in_term && (self.focused_locked() || self.keymap.shell_first.contains(&chord))) {
+                self.run(a);
+                return;
+            }
+            if in_term && !self.focused_locked() {
+                self.tell_shell_key(&chord, a);
+            }
         }
         match self.view {
             View::Bridge => self.bridge_key(k),
@@ -141,6 +144,21 @@ impl App {
             View::Settings => self.settings_key(k),
             View::Term(_) => self.term_key(k),
         }
+    }
+
+    /// A shell key with a NOBLE shortcut goes to the shell. The first time each one does, a notice
+    /// says how to reach NOBLE's action instead (once ever: `UiStateData::shell_keys_told`).
+    fn tell_shell_key(&mut self, chord: &Chord, action: Action) {
+        let key = chord.to_string();
+        if self.ui_state.data.shell_keys_told.contains(&key) {
+            return;
+        }
+        self.edit_ui_state(|d| d.shell_keys_told.push(key.clone()));
+        let text = match self.keymap.prefix_key(action) {
+            Some(k) => format!("{key} went to the shell · NOBLE: {} {k}", self.keymap.prefix),
+            None => format!("{key} went to the shell · Settings → Leave shell keys to the shell"),
+        };
+        self.toast(ToastLevel::Info, text);
     }
 
     fn term_key(&mut self, k: KeyEvent) {
@@ -363,30 +381,76 @@ impl App {
                     _ => true,
                 }
             }
-            Overlay::Help { scroll } => match k.code {
-                KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter => false,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *scroll = scroll.saturating_sub(1);
+            // Typed keys filter the rows, so the letters (and `?` once something is typed) are text.
+            // ↑↓ select a row, ⏎ runs it; esc clears the filter first, then closes.
+            Overlay::Help(st) => match k.code {
+                KeyCode::Esc if !st.query.is_empty() => {
+                    st.query.clear();
+                    st.selected = 0;
+                    st.scroll = 0;
                     true
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *scroll = scroll.saturating_add(1);
+                KeyCode::Esc | KeyCode::Char('?') if st.query.is_empty() => false,
+                KeyCode::Enter => {
+                    let query = st.query.clone();
+                    if self.help_run(&query, st.selected) {
+                        return;
+                    }
+                    true
+                }
+                KeyCode::Up => {
+                    st.selected = st.selected.saturating_sub(1);
+                    self.help_follow(st);
+                    true
+                }
+                KeyCode::Down => {
+                    let last = self.help_actions(&st.query).len().saturating_sub(1);
+                    st.selected = (st.selected + 1).min(last);
+                    self.help_follow(st);
                     true
                 }
                 KeyCode::PageUp => {
-                    *scroll = scroll.saturating_sub(10);
+                    st.selected = st.selected.saturating_sub(8);
+                    self.help_follow(st);
                     true
                 }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    *scroll = scroll.saturating_add(10);
+                KeyCode::PageDown => {
+                    let last = self.help_actions(&st.query).len().saturating_sub(1);
+                    st.selected = (st.selected + 8).min(last);
+                    self.help_follow(st);
                     true
                 }
                 KeyCode::Home => {
-                    *scroll = 0;
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::End => {
+                    st.selected = self.help_actions(&st.query).len().saturating_sub(1);
+                    self.help_follow(st);
+                    true
+                }
+                KeyCode::Backspace => {
+                    st.query.pop();
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::Char('u') if ctrl => {
+                    st.query.clear();
+                    st.selected = 0;
+                    st.scroll = 0;
+                    true
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    st.query.push(c);
+                    st.selected = 0;
+                    st.scroll = 0;
                     true
                 }
                 _ => true,
             },
+            Overlay::Bindings(st) => self.bindings_key(st, k),
             Overlay::Confirm(_) => match k.code {
                 // Enter is deliberately not "yes": these dialogs guard destructive actions, so only y confirms.
                 KeyCode::Char('y' | 'Y') => {
@@ -406,9 +470,10 @@ impl App {
                     }
                     return;
                 }
-                KeyCode::Tab | KeyCode::BackTab if p.purpose.is_add() => {
-                    let project = !matches!(p.purpose, PromptPurpose::AddProject);
-                    p.set_add_mode(project);
+                KeyCode::Tab | KeyCode::BackTab if p.purpose.add_mode().is_some() => {
+                    if let Some(mode) = p.purpose.add_mode() {
+                        p.set_add_mode(mode.next());
+                    }
                     true
                 }
                 KeyCode::Backspace => {
@@ -561,6 +626,13 @@ impl App {
         if let Some(i) = launcher {
             let dir = self.bridge_target_dir();
             self.launch(i, dir);
+            return;
+        }
+        // `T` lists the selected project's tasks, when it has any. A launcher on `T` keeps the key
+        // (launchers are checked first) and the hint is left out while one holds it.
+        let has_tasks = self.selected_project().is_some_and(|p| !p.tasks.is_empty());
+        if k.code == KeyCode::Char('T') && has_tasks && !ctrl && !k.modifiers.contains(KeyModifiers::ALT) {
+            self.open_task_list();
             return;
         }
         match k.code {
@@ -735,8 +807,37 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// The pointer on a notification pauses its countdown; off it, the countdown goes on.
+    fn hold_toasts(&mut self, x: u16, y: u16) {
+        let over = match self.hit_at(x, y) {
+            Some(Hit::Toast(id)) => Some(id),
+            _ => None,
+        };
+        let now = Instant::now();
+        for t in self.toasts.iter_mut() {
+            t.set_hovered(over == Some(t.id), now);
+        }
+    }
+
+    /// A click dismisses a notification (by its id: the list may have changed since the last frame);
+    /// a config error also opens the config file at its line.
+    fn toast_clicked(&mut self, id: u64) {
+        let Some(i) = self.toasts.iter().position(|t| t.id == id) else { return };
+        let toast = self.toasts.remove(i);
+        self.dirty = true;
+        match toast.target {
+            Some(ToastTarget::Config { line: Some(line) }) => {
+                let path = self.paths.config.clone();
+                self.open_link(crate::term::link::Link::File { path, line: Some(line), col: None });
+            }
+            Some(ToastTarget::Config { line: None }) => self.run(Action::OpenConfig),
+            None => {}
+        }
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
         self.hover = Some((m.column, m.row));
+        self.hold_toasts(m.column, m.row);
         if self.boot.is_some() {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.boot = None;
@@ -854,11 +955,11 @@ impl App {
                 }
             }
             Hit::ProjectAct(row, act) => self.project_action(row, act, x, y + 1),
-            Hit::PromptMode(project) => {
+            Hit::PromptMode(mode) => {
                 if let Some(Overlay::Prompt(p)) = &mut self.overlay
-                    && p.purpose.is_add()
+                    && p.purpose.add_mode().is_some()
                 {
-                    p.set_add_mode(project);
+                    p.set_add_mode(mode);
                 }
             }
             Hit::Update => self.start_update(),
@@ -871,6 +972,7 @@ impl App {
                     self.open_link(crate::term::link::Link::Url(url));
                 }
             }
+            Hit::Toast(id) => self.toast_clicked(id),
             Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
@@ -1010,12 +1112,20 @@ impl App {
                 let dir = self.bridge_target_dir();
                 self.launch(i, dir);
             }
+            Hit::ProjectTask(i) => self.run_project_task(i),
             Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),
             Hit::SystemFilter => self.start_system_filter(),
             Hit::SystemTerminate => self.terminate_selected(),
             Hit::HomeSearch => self.start_home_filter(),
+            Hit::BindingsRow(i) => self.bindings_click(i, double),
+            Hit::HelpRow(i) => {
+                if let Some(Overlay::Help(st)) = &self.overlay {
+                    let query = st.query.clone();
+                    self.help_run(&query, i);
+                }
+            }
             Hit::PaletteItem(i) => {
                 if let Some(Overlay::Palette(st)) = &mut self.overlay {
                     st.selected = i;
@@ -1151,8 +1261,19 @@ impl App {
     }
 
     fn mouse_wheel(&mut self, m: &MouseEvent, dir: i32) {
-        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
-            *scroll = if dir > 0 { scroll.saturating_sub(3) } else { scroll.saturating_add(3) };
+        let query = match &self.overlay {
+            Some(Overlay::Help(st)) => Some(st.query.clone()),
+            _ => None,
+        };
+        if let Some(query) = query {
+            let max = self.help_geometry(&query).map_or(0, |g| g.max_scroll());
+            if let Some(Overlay::Help(st)) = &mut self.overlay {
+                st.scroll = if dir > 0 { st.scroll.saturating_sub(3) } else { (st.scroll + 3).min(max) };
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(Overlay::Bindings(_))) {
+            self.bindings_wheel(dir);
             return;
         }
         if let Some(Overlay::Themes(p)) = &mut self.overlay {

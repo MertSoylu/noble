@@ -57,7 +57,9 @@ pub fn draw(
             search: app.search.as_ref().filter(|s| s.pane == *id),
             link: app.link_hover.filter(|l| l.pane == *id),
         };
-        let c = pane_content(buf, inner, pane, th, &pal, focused, &marks);
+        // Only a split tab has other panes to tell apart from the focused one (a zoomed pane is alone).
+        let shown = Shown { focused, dim: app.cfg.terminal.dim_inactive && multi && !focused };
+        let c = pane_content(buf, inner, pane, th, &pal, shown, &marks);
         if let Some(s) = marks.search {
             search_bar(buf, inner, s, th);
         }
@@ -93,7 +95,7 @@ pub fn draw(
             let inner = pane_frame(buf, o, pane, true, ctx, agent, th, &mut Vec::new(), &mut buttons);
             cluster_brackets(buf, &buttons);
             if inner.width > 0 && inner.height > 0 {
-                pane_content(buf, inner, pane, th, &pal, false, &Marks::default());
+                pane_content(buf, inner, pane, th, &pal, Shown::default(), &Marks::default());
             }
         }
         return None;
@@ -551,13 +553,33 @@ struct Marks<'a> {
     link: Option<LinkHover>,
 }
 
+/// How a pane is drawn: whether it has the focus (it shows the cursor) and whether its text fades
+/// (`terminal.dim_inactive`: a pane of a split tab that does not have the focus).
+#[derive(Clone, Copy, Default)]
+struct Shown {
+    focused: bool,
+    dim: bool,
+}
+
+/// Share of a cell's color an unfocused pane keeps; the rest is mixed toward the pane background.
+const DIM_KEEP: f64 = 0.7;
+
+/// A cell color faded toward the pane background `toward`. Only RGB colors can be blended: the palette
+/// leaves ANSI colors to the outer terminal (theme mode), so those return None.
+fn fade_toward(c: Color, toward: Color) -> Option<Color> {
+    match (c, toward) {
+        (Color::Rgb(..), Color::Rgb(..)) => Some(Theme::mix(c, toward, 1.0 - DIM_KEEP)),
+        _ => None,
+    }
+}
+
 fn pane_content(
     buf: &mut Buffer,
     inner: Rect,
     pane: &Pane,
     th: &Theme,
     pal: &TermPalette,
-    focused: bool,
+    shown: Shown,
     marks: &Marks<'_>,
 ) -> Option<(u16, u16)> {
     // The themed background also shows in the edge cells the screen does not cover.
@@ -628,6 +650,17 @@ fn pane_content(
                 m |= Modifier::UNDERLINED;
                 fg = th.accent2;
             }
+            if shown.dim {
+                // A default background is already the pane color, so blending it changes nothing. An ANSI
+                // text color that cannot be blended gets the terminal's own DIM attribute instead.
+                match fade_toward(fg, pal.bg) {
+                    Some(faded) => fg = faded,
+                    None => m |= Modifier::DIM,
+                }
+                if let Some(faded) = fade_toward(bg, pal.bg) {
+                    bg = faded;
+                }
+            }
             let x = inner.x + c;
             let y = inner.y + r;
             if let Some(out) = buf.cell_mut((x, y)) {
@@ -637,7 +670,7 @@ fn pane_content(
             }
         }
     }
-    if !focused || screen.hide_cursor() || screen.scrollback() > 0 {
+    if !shown.focused || screen.hide_cursor() || screen.scrollback() > 0 {
         return None;
     }
     let (cr, cc) = screen.cursor_position();

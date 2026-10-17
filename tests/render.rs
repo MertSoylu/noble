@@ -9,7 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
-use noble::app::{App, View};
+use noble::app::{App, ToastLevel, View};
 use noble::config::Config;
 use noble::event::AppEvent;
 use noble::keys::Action;
@@ -113,6 +113,7 @@ fn demo_app(w: u16, h: u16) -> App {
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
         repo: true,
+        tasks: Vec::new(),
     };
     app.handle(AppEvent::Projects(vec![
         mk(
@@ -207,6 +208,61 @@ fn demo_app(w: u16, h: u16) -> App {
 }
 
 const SIZES: [(u16, u16); 7] = [(160, 45), (120, 34), (110, 30), (90, 28), (76, 24), (56, 18), (30, 8)];
+
+/// The selected project's card shows its quick tasks as TASKS chips at 160x45, the hint bar gets `g run
+/// task`, and a project without tasks shows neither.
+#[test]
+fn bridge_card_shows_task_chips() {
+    let tasks = ["npm run dev", "npm run build", "cargo test"];
+    let mut app = demo_app(160, 45);
+    let mut projects = app.projects.clone();
+    for p in &mut projects {
+        p.tasks = tasks.iter().map(|t| t.to_string()).collect();
+    }
+    app.handle(AppEvent::Projects(projects));
+    let text = render(&mut app, 160, 45);
+    save("bridge-tasks-160x45", &text);
+    assert!(text.contains("TASKS") && text.contains("▸ npm run dev"), "{text}");
+    // Narrower and shorter screens: the chips wrap or are left out, never drawn past the card.
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-tasks-{w}x{h}"), &text);
+    }
+    assert!(text.contains("▸ cargo test") && text.contains("T run task"), "{text}");
+    // Home's `T` lists the same tasks in the palette, in the TASK group.
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    let Some(noble::app::Overlay::Palette(st)) = &app.overlay else { panic!("g opens the task list") };
+    let titles: Vec<&str> = st.matches.iter().map(|i| st.all[*i].title.as_str()).collect();
+    assert_eq!(titles, ["Run: npm run dev", "Run: npm run build", "Run: cargo test"]);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    // Without tasks: no section, no hint.
+    let mut app = demo_app(160, 45);
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("TASKS") && !text.contains("T run task"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(app.overlay.is_none(), "T does nothing without tasks");
+}
+
+/// A launcher on `T` keeps the key: it runs, the task list does not open and the hint is left out.
+#[test]
+fn launcher_on_t_keeps_the_key() {
+    let mut app = demo_app(160, 45);
+    let mut projects = app.projects.clone();
+    for p in &mut projects {
+        p.tasks = vec!["cargo test".to_string()];
+    }
+    app.handle(AppEvent::Projects(projects));
+    app.launchers = vec![(
+        noble::config::Launcher { key: "T".into(), name: "tool".into(), command: "echo tool".into(), show: true },
+        true,
+    )];
+    let tabs = app.tabs.len();
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("T run task"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(app.overlay.is_none(), "the launcher runs instead of the task list");
+    assert_eq!(app.tabs.len(), tabs + 1, "the launcher opened its tab");
+}
 
 #[test]
 fn bridge_shows_the_version() {
@@ -1394,6 +1450,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
         last_active: Some(SystemTime::now()),
         git: None,
         repo: true,
+        tasks: Vec::new(),
     });
     app.handle(AppEvent::Projects(projects));
     let probe = if cfg!(windows) { "cmd /c echo claude-probe" } else { "echo claude-probe" };
@@ -1797,6 +1854,90 @@ fn add_project_folder_flow() {
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
 }
 
+/// With no project yet, Home says how to add one (`a`) and the welcome-free overlay line says the same.
+#[test]
+fn empty_home_says_how_to_add_a_project() {
+    let mut app = demo_app(110, 30);
+    app.projects.clear();
+    app.projects_loaded = true;
+    let text = render(&mut app, 110, 30);
+    save("bridge-empty-110x30", &text);
+    assert!(
+        text.contains("No git repositories found.") && text.contains("press a to add a project or folder"),
+        "{text}"
+    );
+    assert!(!text.contains(" A "), "no `A` hint left: {text}");
+    for (w, h) in [(60, 12), (30, 8)] {
+        save(&format!("bridge-empty-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
+/// Auto mode (`a`) decides on Enter: a git repository or a folder with no repository inside is
+/// added as a project, a folder with a repository two levels down is scanned.
+#[test]
+fn auto_add_decides_between_project_and_scan() {
+    use noble::app::AddMode;
+    let base = std::env::temp_dir().join(format!("noble-auto-add-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (repo, group, notes) = (base.join("repo"), base.join("group"), base.join("notes"));
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(group.join("inner").join(".git")).unwrap();
+    std::fs::create_dir_all(&notes).unwrap();
+    let mut app = demo_app(110, 30);
+    let defaults = noble::projects::default_roots().len();
+    app.add_by_mode(AddMode::Auto, &repo.display().to_string());
+    // Even the git check runs on the helper thread now (a stalled share must not freeze the UI).
+    pump_until(&mut app, "repo answer", |a| a.toasts.iter().any(|t| t.text == "added project repo"));
+    assert!(
+        app.toasts.iter().any(|t| t.text == "added project repo"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(app.cfg.projects.roots.is_empty(), "a repository is not a scan root");
+    // The folder walk answers on a helper thread: the toast comes once it is pumped.
+    app.add_by_mode(AddMode::Auto, &group.display().to_string());
+    pump_until(&mut app, "scan answer", |a| a.toasts.iter().any(|t| t.text.starts_with("scanning ")));
+    assert!(app.toasts.iter().any(|t| t.text.starts_with("scanning ") && t.text.ends_with("group for projects")));
+    assert_eq!(app.cfg.projects.roots.len(), defaults + 1, "the folder is a scan root");
+    app.add_by_mode(AddMode::Auto, &notes.display().to_string());
+    pump_until(&mut app, "notes answer", |a| a.toasts.iter().any(|t| t.text == "added project notes"));
+    assert!(app.toasts.iter().any(|t| t.text == "added project notes"));
+    assert!(app.projects.iter().any(|p| p.path == notes && !p.repo), "a folder with no repository is a plain project");
+    // Folder mode scans even a folder that holds no repository yet.
+    app.add_by_mode(AddMode::Folder, &notes.display().to_string());
+    assert_eq!(app.cfg.projects.roots.len(), defaults + 2);
+    // Project mode (the prompt's forced mode) adds a folder as a project even when it only holds repositories.
+    app.add_by_mode(AddMode::Project, &group.display().to_string());
+    assert!(app.projects.iter().any(|p| p.path == group && !p.repo));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A folder whose repository check does not answer in time is added as a project, not scanned.
+#[test]
+fn auto_add_treats_a_silent_folder_as_a_project() {
+    use noble::app::AddMode;
+    let base = std::env::temp_dir().join(format!("noble-auto-add-slow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let folder = base.join("share");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut app = demo_app(110, 30);
+    app.repo_probe = |_, _| {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        true
+    };
+    let started = std::time::Instant::now();
+    app.add_by_mode(AddMode::Auto, &folder.display().to_string());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1), "the prompt does not wait for the check");
+    pump_until(&mut app, "share answer", |a| a.toasts.iter().any(|t| t.text == "added project share"));
+    assert!(
+        app.toasts.iter().any(|t| t.text == "added project share"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(app.cfg.projects.roots.is_empty(), "not scanned");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The hint shows on the wide status bar and takes no space on the narrow one.
 #[test]
 fn status_bar_shows_tips_when_wide() {
@@ -1824,6 +1965,105 @@ fn status_bar_points_out_the_prefix_until_used() {
     let text = render(&mut app, 200, 40);
     let last = text.lines().last().unwrap();
     assert!(last.contains("tip: ") && !last.contains(&want), "{text}");
+}
+
+/// The tip follows the screen: terminal tips in a terminal, Home's on Home, none on Settings. It
+/// moves with screen changes only: renders of the same screen show the same tip.
+#[test]
+fn tips_follow_the_screen() {
+    let mut app = demo_app(200, 40);
+    app.ui_state.data.prefix_used = true;
+    app.new_tab(std::env::temp_dir(), None, Some("tips".into()));
+    let term = app.view;
+    let tip_of = |text: &str| text.lines().last().unwrap().split_once("tip: ").map(|(_, t)| t.trim().to_string());
+    let (mut home, mut in_term) = (Vec::new(), Vec::new());
+    for _ in 0..10 {
+        app.view = View::Bridge;
+        home.push(tip_of(&render(&mut app, 200, 40)).expect("a tip on Home"));
+        app.view = term;
+        in_term.push(tip_of(&render(&mut app, 200, 40)).expect("a tip in a terminal"));
+    }
+    let term_only = ["ctrl+click", "zooms", "searches", "pane title"];
+    let home_only = ["on Home", "Settings →", "project"];
+    assert!(home.iter().all(|t| !term_only.iter().any(|w| t.contains(w))), "{home:?}");
+    assert!(in_term.iter().all(|t| !home_only.iter().any(|w| t.contains(w))), "{in_term:?}");
+    assert!(std::collections::HashSet::<&String>::from_iter(&home).len() > 1, "{home:?}");
+    app.view = View::System;
+    assert!(tip_of(&render(&mut app, 200, 40)).is_some(), "System has tips too");
+    app.view = View::Settings;
+    let text = render(&mut app, 200, 40);
+    assert!(!text.lines().last().unwrap().contains("tip: "), "no tip on Settings\n{text}");
+    // Same screen, later renders: the same tip.
+    app.view = View::Bridge;
+    let first = tip_of(&render(&mut app, 200, 40));
+    for _ in 0..3 {
+        assert_eq!(tip_of(&render(&mut app, 200, 40)), first);
+    }
+}
+
+/// `general.show_tips` off (Settings, "Show tips"): no tip on any screen, the prefix tip included.
+#[test]
+fn show_tips_off_hides_every_tip() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(200, 40);
+    app.new_tab(std::env::temp_dir(), None, Some("tips".into()));
+    let term = app.view;
+    assert!(render(&mut app, 200, 40).lines().last().unwrap().contains("tip: "));
+    app.activate_setting(SettingItem::Setting(SettingKey::Tips), 1);
+    assert!(!app.cfg.general.show_tips);
+    for view in [View::Bridge, View::System, term] {
+        app.view = view;
+        let text = render(&mut app, 200, 40);
+        assert!(!text.lines().last().unwrap().contains("tip: "), "{view:?}\n{text}");
+    }
+    app.activate_setting(SettingItem::Setting(SettingKey::Tips), 1);
+    app.view = View::Bridge;
+    assert!(render(&mut app, 200, 40).lines().last().unwrap().contains("tip: "));
+}
+
+/// In a terminal, "drag border resize" is offered only for a tab with more than one pane.
+#[test]
+fn terminal_hints_offer_drag_only_with_a_split() {
+    let mut app = demo_app(200, 40);
+    app.new_tab(std::env::temp_dir(), None, Some("split".into()));
+    let text = render(&mut app, 200, 40);
+    let bar = text.lines().last().unwrap();
+    assert!(bar.contains("right-click") && !bar.contains("drag border"), "{text}");
+    app.run(Action::SplitRight);
+    let text = render(&mut app, 200, 40);
+    assert!(text.lines().last().unwrap().contains("drag border resize"), "{text}");
+}
+
+/// A shell key with a NOBLE shortcut goes to the shell; the first time each one does, a notice
+/// names the prefix chord (or the setting when the action has none), and it is never shown again.
+#[test]
+fn shell_key_notice_shows_once_per_key() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
+    let term = app.view;
+    let alt = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+    app.on_key(alt('t'));
+    assert_eq!(app.view, term, "still in the terminal");
+    assert!(
+        app.toasts.iter().any(|t| t.text.contains("alt+t went to the shell · NOBLE: ctrl+a t")),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    let shown = app.toasts.len();
+    app.on_key(alt('t'));
+    assert_eq!(app.toasts.len(), shown, "once per key");
+    assert!(app.ui_state.data.shell_keys_told.contains(&"alt+t".to_string()));
+    // Another shell key gets its own notice.
+    app.on_key(alt('p'));
+    assert!(app.toasts.iter().any(|t| t.text.contains("alt+p went to the shell · NOBLE: ctrl+a")));
+    // An action without a prefix binding points at the setting.
+    app.keymap.prefix_map.retain(|_, a| *a != Action::Settings);
+    app.on_key(alt('s'));
+    assert!(
+        app.toasts.iter().any(|t| t.text == "alt+s went to the shell · Settings → Leave shell keys to the shell"),
+        "{:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
 }
 
 /// Cached quota numbers ("~") carry their age on the provider's name row; fresh ones do not.
@@ -2127,6 +2367,91 @@ fn tabs_drag_and_rename() {
     app.run(Action::CloseTab);
 }
 
+/// Closing a split tab keeps it: `reopen_tab` brings its panes back in their directories, at the old
+/// index and focused, and the palette lists the action only while there is something to reopen. With
+/// nothing to reopen it says so; a shell that exits on its own is not kept.
+#[test]
+fn closed_tab_reopens_with_its_panes() {
+    use noble::term::layout::Dir;
+    let has_reopen = |app: &App| app.palette_items().iter().any(|i| i.title == "Reopen Closed Tab");
+    let base = std::env::temp_dir().join(format!("noble-reopen-{}", std::process::id()));
+    let (alpha, beta) = (base.join("alpha"), base.join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+
+    let mut app = demo_app(110, 30);
+    assert_eq!(app.keymap.prefix_key(Action::ReopenTab).as_deref(), Some("T"), "prefix T is free");
+    app.new_tab(std::env::temp_dir(), None, Some("first".into()));
+    let layout = SavedNode::Split {
+        dir: Dir::Row,
+        ratio: 0.5,
+        a: Box::new(SavedNode::Leaf { cwd: alpha.display().to_string(), launch: None }),
+        b: Box::new(SavedNode::Leaf { cwd: beta.display().to_string(), launch: None }),
+    };
+    let ws = Workspace {
+        name: "split".into(),
+        saved_at: 0,
+        tabs: vec![SavedTab { name: Some("grid".into()), origin: "grid".into(), layout, focus: 1 }],
+    };
+    assert_eq!(app.open_workspace(&ws), 1);
+    app.view = View::Term(1);
+    let dirs = |app: &App| -> Vec<PathBuf> { app.tabs[1].panes().iter().map(|id| app.panes[id].cwd()).collect() };
+    let before = dirs(&app);
+    assert_eq!(before, vec![alpha.clone(), beta.clone()]);
+    assert!(!has_reopen(&app), "nothing closed yet");
+
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.tabs.len(), 1, "the split tab closed");
+    let key = app.keymap.hint(Action::ReopenTab).expect("T is bound");
+    let hint = format!("tab closed · {key} reopens it (launch commands run again)");
+    assert!(
+        app.toasts.iter().any(|t| t.text == hint),
+        "toast {hint:?}: {:?}",
+        app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(has_reopen(&app), "listed once a tab can come back");
+
+    app.run(Action::ReopenTab);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.view, View::Term(1), "back at its old index and focused");
+    assert_eq!(app.tabs[1].panes().len(), 2, "same number of panes");
+    assert_eq!(dirs(&app), before, "same directories in the same order");
+    assert_eq!(app.tabs[1].focus, app.tabs[1].panes()[1], "the saved focus comes back");
+    assert_eq!(app.tabs[1].name.as_deref(), Some("grid"));
+    assert!(!has_reopen(&app), "history is used up");
+    let text = render(&mut app, 110, 30);
+    save("reopened-tab-110x30", &text);
+
+    app.run(Action::ReopenTab);
+    assert!(app.toasts.iter().any(|t| t.text == "no closed tab to reopen"), "empty history says so");
+
+    // A shell that exits on its own closes its tab without keeping it.
+    app.new_tab(std::env::temp_dir(), None, Some("gone".into()));
+    let id = app.tabs.last().unwrap().focus;
+    let (tabs, kept) = (app.tabs.len(), app.closed_tabs.len());
+    app.handle(AppEvent::PtyExit(id));
+    assert_eq!(app.tabs.len(), tabs - 1, "the exited shell's tab closed");
+    assert_eq!(app.closed_tabs.len(), kept, "an exit is not a close the user made");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// Closing the last pane of a tab (prefix `x`) is a close too: the tab comes back with `reopen_tab`.
+#[test]
+fn closing_the_last_pane_keeps_the_tab() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("solo".into()));
+    app.new_tab(std::env::temp_dir(), None, Some("other".into()));
+    app.view = View::Term(0);
+    app.run(Action::ClosePane);
+    assert_eq!(app.tabs.len(), 1, "the one pane closed its tab");
+    app.run(Action::ReopenTab);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.view, View::Term(0), "reopened at index 0");
+    assert_eq!(app.tabs[0].origin, "solo");
+    assert_eq!(app.tabs[0].panes().len(), 1);
+}
+
 /// Project row: quick actions on hover; a pinned project moves to the top.
 #[test]
 fn project_row_actions_and_pins() {
@@ -2217,6 +2542,7 @@ fn remove_and_add_projects() {
         last_active: Some(SystemTime::now()),
         git: None,
         repo: true,
+        tasks: Vec::new(),
     });
     app.handle(AppEvent::Projects(scanned.clone()));
     // Pin it, then remove it with → → ⏎ and the last menu item.
@@ -2246,15 +2572,18 @@ fn remove_and_add_projects() {
     // A rescan finds it again: it stays hidden.
     app.handle(AppEvent::Projects(scanned.clone()));
     assert!(!app.projects.iter().any(|p| p.path == demo), "hidden after a rescan");
-    // `A` opens the add prompt in project mode; tab and a click switch the mode.
+    // `A` opens the add prompt in project mode; tab cycles auto, folder to scan and one project.
     key(&mut app, KeyCode::Char('A'));
     let text = render(&mut app, 110, 30);
     save("add-project-110x30", &text);
     assert!(text.contains("ADD PROJECT") && text.contains("● one project"), "{text}");
     key(&mut app, KeyCode::Tab);
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("ADD FOLDER TO SCAN") && text.contains("● folder of projects"), "{text}");
-    let project_mode = find_hit(&app, |h| *h == Hit::PromptMode(true)).expect("mode choice");
+    assert!(text.contains("ADD PROJECT OR FOLDER") && text.contains("● auto"), "{text}");
+    key(&mut app, KeyCode::Tab);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("ADD FOLDER TO SCAN") && text.contains("● folder to scan"), "{text}");
+    let project_mode = find_hit(&app, |h| *h == Hit::PromptMode(noble::app::AddMode::Project)).expect("mode choice");
     click(&mut app, project_mode.x + 1, project_mode.y);
     let Some(Overlay::Prompt(p)) = &app.overlay else { panic!("prompt closed by the click") };
     assert_eq!(p.title, "ADD PROJECT");
@@ -4788,7 +5117,12 @@ fn tab_markers_are_typed() {
     for (w, h) in [(80, 24), (60, 20), (40, 12), (30, 8)] {
         let text = render(&mut app, w, h);
         save(&format!("tabs-markers-{w}x{h}"), &text);
-        assert!(text.lines().next().unwrap().chars().count() <= w as usize);
+        let top = text.lines().next().unwrap().to_string();
+        assert!(top.chars().count() <= w as usize);
+        // The active tab is never summarized into a chip: the window slides to include it.
+        if (w, h) == (80, 24) || (w, h) == (60, 20) {
+            assert!(top.contains("▌active ×▐"), "{w}x{h}: {top}");
+        }
         for (r, _) in app.hits.iter().filter(|(r, h)| r.y == 0 && matches!(h, noble::app::Hit::Tab(_))) {
             assert!(r.right() <= w, "{w}x{h}: {r:?}");
         }
@@ -4801,6 +5135,84 @@ fn tab_markers_are_typed() {
     assert!(!top.contains("notice ◆"), "{top}");
     for _ in 0..5 {
         app.run(Action::CloseTab);
+    }
+}
+
+/// Whether a top strip row shows the small clock ("HH:MM").
+fn has_small_clock(row: &str) -> bool {
+    row.chars().collect::<Vec<_>>().windows(5).any(|w| {
+        w[0].is_ascii_digit() && w[1].is_ascii_digit() && w[2] == ':' && w[3].is_ascii_digit() && w[4].is_ascii_digit()
+    })
+}
+
+/// The window of terminal tabs always contains the active one: tabs before it are summarized as "‹N"
+/// (a palette button like "+N"), tabs after it as "+N", and the hit rects stay on the screen.
+#[test]
+fn active_tab_stays_in_the_strip() {
+    use noble::app::Hit;
+    let mut app = demo_app(80, 24);
+    for i in 0..9 {
+        named_tab(&mut app, &format!("t{i}"));
+    }
+    for (w, h) in [(80, 24), (60, 20)] {
+        for active in [8, 4, 0] {
+            app.view = View::Term(active);
+            let text = render(&mut app, w, h);
+            let top = text.lines().next().unwrap().to_string();
+            let name = format!("▌t{active} ×▐");
+            assert!(top.contains(&name), "{w}x{h} tab {active}: {top}");
+            for (r, _) in app.hits.iter().filter(|(r, _)| r.y == 0) {
+                assert!(r.right() <= w, "{w}x{h}: {r:?}");
+            }
+            let tab = find_hit(&app, |h| *h == Hit::Tab(active)).expect("active tab hit");
+            assert!(tab.right() <= w);
+            if active == 8 {
+                // Tabs before the window: a left chip that opens the palette.
+                // (The " + " new-tab button is not a count: no "+N" chip after the window.)
+                assert!(top.contains("‹5") && !top.contains("+1"), "{top}");
+                let (_, buf) = render_buf(&mut app, w, h);
+                let chip = find_hit(&app, |h| *h == Hit::HiddenTabs).expect("‹N chip");
+                assert!(cells_text(&buf, chip).trim_start().starts_with('‹'), "{top}");
+                click(&mut app, chip.x, chip.y);
+                assert!(matches!(app.overlay, Some(noble::app::Overlay::Palette(_))));
+                app.overlay = None;
+            }
+        }
+    }
+    // A tab in the middle shows both chips.
+    app.view = View::Term(4);
+    let top = render(&mut app, 80, 24).lines().next().unwrap().to_string();
+    assert!(top.contains("‹") && top.contains("+") && top.contains("▌t4 ×▐"), "{top}");
+    for _ in 0..9 {
+        app.run(Action::CloseTab);
+    }
+}
+
+/// Home has the big clock, so the top strip shows no small one there (the tabs get the room); the
+/// other screens keep it. Compact widths draw the fixed Home and System tabs as one glyph each.
+#[test]
+fn top_strip_clock_and_compact_fixed_tabs() {
+    use noble::app::Hit;
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "work");
+    app.view = View::Bridge;
+    let home = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(!has_small_clock(&home) && home.contains(" Home ") && home.contains("Settings"), "{home}");
+    app.view = View::Term(0);
+    let term = render(&mut app, 120, 30).lines().next().unwrap().to_string();
+    assert!(has_small_clock(&term), "{term}");
+    // Wide: the words. Compact (under 80 columns): one glyph each, hit rects over the glyph.
+    app.view = View::Bridge;
+    let wide = render(&mut app, 80, 24).lines().next().unwrap().to_string();
+    assert!(wide.contains(" Home ") && wide.contains(" System "), "{wide}");
+    let (text, buf) = render_buf(&mut app, 60, 20);
+    let compact = text.lines().next().unwrap().to_string();
+    assert!(compact.contains(" ⌂ ") && compact.contains(" ▤ "), "{compact}");
+    assert!(!compact.contains("Home") && !compact.contains("System"), "{compact}");
+    for (hit, glyph) in [(Hit::TabBridge, "⌂"), (Hit::TabSystem, "▤")] {
+        let r = find_hit(&app, |h| *h == hit).expect("fixed tab hit");
+        assert_eq!(r.width, 3, "{r:?}");
+        assert_eq!(cells_text(&buf, r).trim(), glyph, "{compact}");
     }
 }
 
@@ -5668,14 +6080,19 @@ fn system_filter_hint_says_esc_clears() {
     assert_eq!(app.view, View::Bridge);
 }
 
-/// Home's "/ search" label is a button: a click starts the project filter, as "/" does.
+/// Home's "/ search" label sits on the Projects panel's top border, left of the count, and is a
+/// button: a click starts the project filter, as "/" does.
 #[test]
 fn home_search_label_starts_the_filter() {
     use noble::app::Hit;
     let mut app = demo_app(120, 34);
     let (text, buf) = render_buf(&mut app, 120, 34);
-    assert!(text.contains("/ search"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().position(|l| l.contains("╭") && l.contains("Projects")).expect("projects title");
+    assert!(lines[top].contains("/ search ·"), "label on the top border: {text}");
+    assert_eq!(lines.iter().filter(|l| l.contains("/ search")).count(), 1, "one label: {text}");
     let label = find_hit(&app, |h| *h == Hit::HomeSearch).expect("search label");
+    assert_eq!(label.y as usize, top, "hit on the top border");
     assert_eq!(cells_text(&buf, label), "/ search");
     assert!(!app.bridge.filtering);
     click(&mut app, label.x + 2, label.y);
@@ -5814,7 +6231,7 @@ fn prompt_validates_on_enter_and_edits_at_the_cursor() {
     use noble::app::Overlay;
     let k = |app: &mut App, code: KeyCode| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
     let mut app = demo_app(110, 30);
-    app.open_add_prompt(true);
+    app.open_add_prompt(noble::app::AddMode::Project);
     let empty = render(&mut app, 110, 30);
     assert!(empty.contains("path, e.g."), "placeholder: {empty}");
     for c in "Z:/nope/here".chars() {
@@ -6036,8 +6453,9 @@ fn palette_hints_follow_the_view() {
     assert!(!home.iter().any(|t| t == "Search Scrollback" || t == "Pass Keys to the App"), "{home:?}");
     assert_eq!(hint_of(&app, "Rescan Projects"), "r");
     assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
-    assert_eq!(hint_of(&app, "Add Folder to Scan for Projects…"), "a");
-    assert_eq!(hint_of(&app, "Add Project…"), "A");
+    assert_eq!(hint_of(&app, "Add Project or Folder…"), "a");
+    // `A` still works (project mode) but is not shown anywhere.
+    assert_eq!(hint_of(&app, "Add Project…"), "");
 
     app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
     let term = titles(&app);
@@ -6222,6 +6640,103 @@ fn help_at_a_tiny_size_says_so() {
     assert!(render(&mut app, 110, 30).contains("KEYBOARD REFERENCE"));
 }
 
+/// The keyboard reference: two columns on a wide screen with no scrolling; one column that scrolls
+/// on a narrow one. Typed keys filter the rows, esc clears the filter before it closes, and ⏎ or a
+/// click runs the selected row's action.
+#[test]
+fn help_has_columns_a_filter_and_runs_rows() {
+    use noble::app::{Hit, Overlay};
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+
+    let mut app = demo_app(160, 45);
+    app.run(Action::Help);
+    let text = render(&mut app, 160, 45);
+    save("help-160x45", &text);
+    let geo = app.help_geometry("").expect("the reference fits at 160x45");
+    assert_eq!(geo.columns.len(), 2, "two columns from 120 columns");
+    assert!(matches!(geo.columns[1].first(), Some(noble::app::help::Line::Header(_))), "a section starts column 2");
+    // The sections are ~88 lines: two columns of 40 rows still scroll a little.
+    assert!(geo.max_scroll() > 0 && geo.max_scroll() < 20, "{geo:?}");
+    for (w, h) in [(110, 30), (60, 20), (30, 8)] {
+        save(&format!("help-{w}x{h}"), &render(&mut app, w, h));
+    }
+    // Three columns (from 170) hold the whole list at 170x45.
+    let mut wide = demo_app(170, 45);
+    wide.run(Action::Help);
+    render(&mut wide, 170, 45);
+    let geo = wide.help_geometry("").expect("fits");
+    assert_eq!(geo.columns.len(), 3);
+    assert_eq!(geo.max_scroll(), 0, "three columns need no scrolling at 170x45");
+    for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
+        assert!(text.contains(name), "{name} is drawn:\n{text}");
+    }
+    assert!(text.contains("type to filter · ⏎ run · esc close"), "{text}");
+
+    // A narrow screen keeps one column, and it scrolls with the selection.
+    let mut narrow = demo_app(110, 30);
+    narrow.run(Action::Help);
+    render(&mut narrow, 110, 30);
+    assert_eq!(narrow.help_geometry("").expect("fits").columns.len(), 1);
+    for _ in 0..6 {
+        key(&mut narrow, KeyCode::PageDown);
+    }
+    let text = render(&mut narrow, 110, 30);
+    let Some(Overlay::Help(st)) = &narrow.overlay else { panic!("help is open") };
+    assert!(st.scroll > 0 && st.selected > 40, "{st:?}");
+    assert!(text.contains("▌"), "the selected row is marked and on screen:\n{text}");
+
+    // Typing filters: only the sections with a matching row stay, and the title shows the query.
+    let mut app = demo_app(160, 45);
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    for c in "split".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    let text = render(&mut app, 160, 45);
+    save("help-filtered-160x45", &text);
+    assert!(text.contains("KEYBOARD REFERENCE · /split"), "{text}");
+    assert!(text.contains("split right"), "{text}");
+    assert!(!text.contains("HOME"), "a section without a match is not drawn:\n{text}");
+    let all = app.help_actions("").len();
+    let split = app.help_actions("split").len();
+    assert!(split > 0 && split < all);
+    // Backspace widens the filter again.
+    key(&mut app, KeyCode::Backspace);
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Backspace);
+    }
+    let text = render(&mut app, 160, 45);
+    assert!(text.contains("HOME") && text.contains("KEYBOARD REFERENCE") && !text.contains("/split"), "{text}");
+    // Esc clears the filter first; the next esc closes.
+    for c in "split".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.overlay, Some(Overlay::Help(st)) if st.query.is_empty()));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+
+    // ⏎ runs the selected row's action and closes the overlay.
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    for c in "palette".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    assert_eq!(app.help_actions("palette").first(), Some(&Action::Palette));
+    render(&mut app, 160, 45);
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))), "⏎ opens the command palette");
+
+    // A click on a row runs it too.
+    app.overlay = None;
+    app.run(Action::Help);
+    render(&mut app, 160, 45);
+    let idx = app.help_actions("").iter().position(|a| *a == Action::Palette).expect("palette row");
+    let row = find_hit(&app, |h| *h == Hit::HelpRow(idx)).expect("the row is clickable");
+    click(&mut app, row.x + 1, row.y);
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))), "a click opens the command palette");
+}
+
 /// A long question wraps over several rows: the whole text and the buttons stay visible, also at 30x8.
 #[test]
 fn confirm_wraps_a_long_question() {
@@ -6310,4 +6825,508 @@ fn wrapped_confirm_text_keeps_whole_words() {
     let text = render(&mut app, 110, 30);
     // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there.
     assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
+}
+
+/// Moves the toasts' start back, as if they had been on screen for `secs` seconds.
+fn age_toasts(app: &mut App, secs: u64) {
+    for t in &mut app.toasts {
+        t.born = t.born.checked_sub(Duration::from_secs(secs)).expect("clock far enough along");
+    }
+}
+
+/// A config error keeps its line and column, and stays on screen until it is clicked away.
+#[test]
+fn config_error_toast_stays_until_dismissed() {
+    use noble::app::ToastTarget;
+    let mut app = demo_app(110, 30);
+    let dir = std::env::temp_dir().join(format!("noble-config-toast-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[general]\ntheme = \"ice\"\n\n[ai]\nenabled = \"yes\"\n").unwrap();
+    app.paths.config = path;
+    app.toasts.clear();
+    app.reload_config(false);
+    let toast = app.toasts.last().expect("config error toast");
+    assert!(toast.text.starts_with("config line 5, column 11: "), "{}", toast.text);
+    assert!(!toast.text.contains('\n'));
+    assert_eq!(toast.target, Some(ToastTarget::Config { line: Some(5) }));
+    assert!(toast.expires_at().is_none(), "an error does not expire");
+    age_toasts(&mut app, 600);
+    app.tick();
+    assert_eq!(toast_texts(&app).len(), 1, "still on screen after ten minutes");
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("config line 5, column 11"), "{text}");
+    // The history keeps the whole message.
+    assert!(app.notices.back().is_some_and(|n| n.text.starts_with("config line 5")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Errors stay until dismissed; the other notifications leave once their time is up.
+#[test]
+fn error_toast_does_not_expire() {
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Error, "an error that must stay");
+    app.toast(ToastLevel::Info, "a note that leaves");
+    age_toasts(&mut app, 60);
+    app.tick();
+    assert_eq!(toast_texts(&app), vec!["an error that must stay"]);
+}
+
+/// A click on a notification dismisses it and leaves the others alone.
+#[test]
+fn clicking_a_toast_removes_it() {
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Error, "first, an error");
+    app.toast(ToastLevel::Info, "second note");
+    render(&mut app, 110, 30);
+    let id = app.toasts[0].id;
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
+    click(&mut app, rect.x + 1, rect.y);
+    assert_eq!(toast_texts(&app), vec!["second note"]);
+    // Adding a toast does not change the ids of the ones before it.
+    render(&mut app, 110, 30);
+    let id = app.toasts[0].id;
+    app.toast(ToastLevel::Info, "third note");
+    render(&mut app, 110, 30);
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
+    click(&mut app, rect.x + 1, rect.y);
+    assert_eq!(toast_texts(&app), vec!["third note"]);
+}
+
+/// The pointer on a notification pauses its countdown; once it leaves, the countdown goes on.
+#[test]
+fn hovered_toast_waits_for_the_pointer_to_leave() {
+    use crossterm::event::MouseEventKind;
+    let mut app = demo_app(110, 30);
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "hover me");
+    render(&mut app, 110, 30);
+    let id = app.toasts[0].id;
+    let rect = find_hit(&app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
+    age_toasts(&mut app, 60);
+    mouse(&mut app, MouseEventKind::Moved, rect.x + 1, rect.y);
+    app.tick();
+    assert_eq!(toast_texts(&app).len(), 1, "a toast under the pointer stays");
+    mouse(&mut app, MouseEventKind::Moved, 0, 0);
+    app.tick();
+    assert!(app.toasts.is_empty(), "its time is up once the pointer has left");
+}
+
+/// The `notifications` action lists the past notifications newest first; running one copies its text.
+#[test]
+fn notifications_action_lists_past_toasts() {
+    use noble::app::{Overlay, PaletteCmd};
+    let mut app = demo_app(110, 30);
+    app.toast(ToastLevel::Info, "first note");
+    app.toast(ToastLevel::Error, "second, an error");
+    app.toast(ToastLevel::Ok, "third note");
+    app.run(Action::Notifications);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no palette") };
+    let titles: Vec<&str> = st.all.iter().map(|i| i.title.as_str()).collect();
+    assert!(titles.len() >= 3, "{titles:?}");
+    assert!(titles[0].ends_with("third note"), "{titles:?}");
+    assert!(titles[1].ends_with("second, an error"), "{titles:?}");
+    assert!(titles[2].ends_with("first note"), "{titles:?}");
+    assert_eq!(titles[0].as_bytes()[2], b':', "title starts with the time: {}", titles[0]);
+    assert_eq!(st.all[0].cmd, PaletteCmd::CopyNotice("third note".into()));
+    let cmd = st.all[0].cmd.clone();
+    app.overlay = None;
+    app.run_palette(cmd);
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+
+    // The history keeps the last 50 notifications only.
+    for i in 0..60 {
+        app.toast(ToastLevel::Info, format!("note {i}"));
+    }
+    assert_eq!(app.notices.len(), noble::app::NOTICE_HISTORY);
+    assert_eq!(app.notices.back().map(|n| n.text.as_str()), Some("note 59"));
+    assert_eq!(app.notices.front().map(|n| n.text.as_str()), Some("note 10"));
+}
+
+/// The frame as cells (for style checks), drawn like `render`.
+fn render_cells(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    app.size = (w, h);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| noble::ui::draw(f, app)).unwrap();
+    term.backend().buffer().clone()
+}
+
+/// The palette's matched letters are bold accent; the rest of the title keeps the text color.
+#[test]
+fn palette_marks_matched_title_letters() {
+    use noble::app::Overlay;
+    let mut app = demo_app(110, 30);
+    app.open_palette();
+    for c in "settings".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let text = render(&mut app, 110, 30);
+    save("palette-highlight-110x30", &text);
+    let buf = render_cells(&mut app, 110, 30);
+    // Find the "Open Settings" row and its cells.
+    let row = (0..30u16)
+        .find(|y| {
+            let line: String = (0..110u16).map(|x| buf[(x, *y)].symbol().to_string()).collect();
+            line.contains("Open Settings")
+        })
+        .expect("Open Settings row");
+    let line: String = (0..110u16).map(|x| buf[(x, row)].symbol().to_string()).collect();
+    // A byte offset in the line; the cell column counts chars (the palette draws multi-byte glyphs).
+    let at = line[..line.find("Open Settings").unwrap()].chars().count() as u16;
+    // "settings" matches the whole word "Settings" (the O before it is not matched).
+    let s = &buf[(at + 5, row)];
+    assert_eq!(s.symbol(), "S");
+    assert!(s.modifier.contains(ratatui::style::Modifier::BOLD), "matched letter is bold");
+    assert_eq!(s.fg, app.theme.accent, "matched letter is accent");
+    let o = &buf[(at, row)];
+    assert_ne!(o.fg, app.theme.accent, "unmatched letter keeps the text color");
+    assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
+}
+
+/// Recently run commands come first, most recent first, once each, and the list is kept to ten.
+#[test]
+fn palette_empty_query_lists_recent_commands_first() {
+    use noble::app::{Overlay, PaletteCmd};
+    let mut app = demo_app(110, 30);
+    let (a, b) = (noble::theme::THEMES[3].name, noble::theme::THEMES[5].name);
+    app.run_palette(PaletteCmd::Theme(a));
+    app.run_palette(PaletteCmd::Theme(b));
+    app.run_palette(PaletteCmd::Theme(a));
+    assert_eq!(app.ui_state.data.palette_recent, vec![format!("theme:{a}"), format!("theme:{b}")]);
+    app.open_palette();
+    let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+    let cmds: Vec<PaletteCmd> = p.matches.iter().take(3).map(|i| p.all[*i].cmd.clone()).collect();
+    assert_eq!(cmds[..2], [PaletteCmd::Theme(a), PaletteCmd::Theme(b)]);
+    assert!(!cmds[2..].contains(&PaletteCmd::Theme(a)) && !cmds[2..].contains(&PaletteCmd::Theme(b)), "no duplicates");
+    // The memory is bounded.
+    for t in noble::theme::THEMES.iter().take(12) {
+        app.run_palette(PaletteCmd::Theme(t.name));
+    }
+    assert_eq!(app.ui_state.data.palette_recent.len(), 10);
+}
+
+/// A "Setting:" palette item toggles its setting, like ⏎ on that row; typing its name and ⏎ does it.
+#[test]
+fn palette_setting_item_toggles_a_switch() {
+    use noble::app::{Overlay, PaletteCmd, SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    let before = app.cfg.general.animations;
+    app.open_palette();
+    for c in "setting animations".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let Some(Overlay::Palette(p)) = &app.overlay else { panic!("no palette") };
+    let first = p.current().expect("a match").clone();
+    let state = if before { "On" } else { "Off" };
+    assert_eq!(first.title, format!("Setting: Animations ({state})"));
+    assert_eq!(first.group, "SET");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.cfg.general.animations, !before, "the switch flipped");
+    assert_eq!(app.ui_state.data.palette_recent, vec!["setting:Animations".to_string()]);
+    // A choice opens its popup, as ⏎ does on its row.
+    app.run_palette(PaletteCmd::Setting(SettingItem::Setting(SettingKey::Theme)));
+    assert!(matches!(app.overlay, Some(Overlay::Themes(_))), "the theme row opens the theme picker");
+}
+
+/// Settings: "/" filters the rows by name, esc clears the filter, "no settings match" shows when none fit.
+#[test]
+fn settings_filter_narrows_rows() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let all = app.settings_items().len();
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    for c in "anim".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let items = app.settings_items();
+    assert!(items.contains(&SettingItem::Setting(SettingKey::Animations)));
+    assert!(items.len() < all && items.iter().all(|i| i.label().to_lowercase().contains("anim")));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Settings / anim▏"), "{text}");
+    assert!(!text.contains("Transparent background"), "filtered rows are hidden");
+    assert!(text.contains("type") && text.contains("filter"), "status bar shows the filter keys");
+    // Letters typed into the filter are text, not commands: q does not leave Settings.
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Settings);
+    for _ in 0..5 {
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    assert!(app.settings_filter.is_empty());
+    // A query nothing matches: the page says so, and the keys that move in the list do not panic.
+    for c in "zzz".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(app.settings_items().is_empty());
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("no settings match"), "{text}");
+    for code in [KeyCode::Down, KeyCode::End, KeyCode::Enter, KeyCode::Left, KeyCode::Up] {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        render(&mut app, 110, 30);
+    }
+    // ⏎ ends typing and keeps the filter; esc clears it, then a second esc leaves the page.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.settings_filtering && app.settings_filter == "zzz");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.settings_filter.is_empty());
+    assert_eq!(app.settings_items().len(), all);
+    assert_eq!(app.view, View::Settings);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_ne!(app.view, View::Settings);
+}
+
+/// The first place `needle` starts in the frame, at or right of column `min_x` (ASCII text).
+fn find_text(buf: &ratatui::buffer::Buffer, needle: &str, min_x: u16) -> Option<(u16, u16)> {
+    let chars: Vec<char> = needle.chars().collect();
+    for y in 0..buf.area.height {
+        for x in min_x..buf.area.width {
+            let hit = chars.iter().enumerate().all(|(i, c)| {
+                let cx = x + i as u16;
+                cx < buf.area.width && buf[(cx, y)].symbol() == c.to_string()
+            });
+            if hit {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+/// Split tabs: the panes without the focus fade their text toward the pane background
+/// (`terminal.dim_inactive`). A single pane, a zoomed pane and the setting turned off keep their
+/// colors; an ANSI color the palette cannot blend (theme mode) gets the DIM attribute instead.
+#[test]
+fn inactive_panes_dim_only_in_a_split() {
+    use ratatui::style::{Color, Modifier};
+    // The (foreground, DIM) of every cell showing `ch`.
+    let cells_of = |buf: &ratatui::buffer::Buffer, ch: &str| -> Vec<(Color, bool)> {
+        let mut v = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let c = &buf[(x, y)];
+                if c.symbol() == ch {
+                    v.push((c.fg, c.modifier.contains(Modifier::DIM)));
+                }
+            }
+        }
+        v
+    };
+    let white = Color::Rgb(255, 255, 255);
+
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("dim".into()));
+    app.run(Action::SplitRight);
+    assert_eq!(app.tabs[0].panes().len(), 2);
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert_eq!(qs.len(), 8, "four glyphs per pane");
+    let kept = qs.iter().filter(|(fg, _)| *fg == white).count();
+    assert_eq!(kept, 4, "only the focused pane keeps its colors: {qs:?}");
+    let faded: Vec<Color> = qs.iter().filter(|(fg, _)| *fg != white).map(|(fg, _)| *fg).collect();
+    assert_eq!(faded.len(), 4);
+    assert!(faded.iter().all(|c| *c == faded[0] && matches!(c, Color::Rgb(..))), "{faded:?}");
+
+    // Off: both panes keep the text color.
+    app.cfg.terminal.dim_inactive = false;
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert!(qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+    app.cfg.terminal.dim_inactive = true;
+
+    // Theme mode: ANSI red is left to the outer terminal, so the unfocused pane gets DIM.
+    app.cfg.terminal.colors = "theme".into();
+    write_panes(&mut app, "\x1b[31m", "¤¤¤¤");
+    let buf = render_cells(&mut app, 110, 30);
+    let rs = cells_of(&buf, "¤");
+    assert_eq!(rs.len(), 8);
+    assert_eq!(rs.iter().filter(|(_, dim)| *dim).count(), 4, "{rs:?}");
+    app.cfg.terminal.colors = "windows-terminal".into();
+
+    // Zoomed: one pane is on screen, and it has the focus.
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    app.run(Action::Zoom);
+    assert!(app.tabs[0].zoomed);
+    // The pane is resized on the first frame, and the shell redraws its prompt then: write again.
+    render_cells(&mut app, 110, 30);
+    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut app, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert_eq!(qs.len(), 4);
+    assert!(qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+
+    // A single pane is never dimmed.
+    let mut single = demo_app(110, 30);
+    single.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    write_panes(&mut single, "\x1b[38;2;255;255;255m", "QQQQ");
+    let buf = render_cells(&mut single, 110, 30);
+    let qs = cells_of(&buf, "Q");
+    assert!(qs.len() == 4 && qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+}
+
+/// Clears every pane of the first tab and writes `glyphs` (in the `sgr` style) at its top left.
+fn write_panes(app: &mut App, sgr: &str, glyphs: &str) {
+    let bytes = format!("\x1b[2J\x1b[H{sgr}{glyphs}");
+    for id in app.tabs[0].panes() {
+        app.panes[&id].parser().process(bytes.as_bytes());
+    }
+}
+
+/// Settings on a wide terminal (140+ columns): the page is 130 columns, its list keeps the first 80
+/// and a description panel on the right shows the selected label in bold with its description wrapped.
+/// The bottom row no longer carries the description.
+#[test]
+fn settings_description_panel_at_160x45() {
+    use noble::app::{SettingItem, SettingKey};
+    use ratatui::style::Modifier;
+    let mut app = demo_app(160, 45);
+    app.run(Action::Settings);
+    let items = app.settings_items();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::Restore)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 160, 45);
+    save("settings-160x45", &text);
+    let buf = render_cells(&mut app, 160, 45);
+    let label = SettingKey::Restore.label();
+    let desc = SettingKey::Restore.description();
+
+    // The list row keeps the label within its 80 columns; the panel repeats it in bold at column 82+.
+    // The selected row's marker "▌" comes right before the list label.
+    let (lx, _) = find_text(&buf, &format!("▌ {label}"), 0).expect("the list row");
+    assert!(lx < 80, "list column: {lx}");
+    let (px, py) = find_text(&buf, label, 82).expect("the panel label");
+    assert!(buf[(px, py)].modifier.contains(Modifier::BOLD), "panel label is bold");
+    // The description wraps inside the panel.
+    let first_words: String = desc.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+    assert!(find_text(&buf, &first_words, 82).is_some(), "panel description:\n{text}");
+    assert!(desc.split_whitespace().count() > 4, "the description wraps in the panel");
+    // A rule separates the list from the panel.
+    assert!((0..45).any(|y| buf[(96, y)].symbol() == "│"), "separator:\n{text}");
+    // The description is not on the bottom row any more.
+    assert!(!text.lines().last().unwrap().contains("Reopen"), "{text}");
+    assert!(find_text(&buf, "Reopen", 0).is_some_and(|(x, _)| x >= 82), "{text}");
+
+    // Other sizes for the overflow review (dumps under target/audit).
+    for (w, h) in [(160, 45), (140, 30), (200, 60), (150, 12), (96, 20), (60, 20), (30, 8)] {
+        save(&format!("settings-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
+/// Settings on a narrow terminal: the selected setting's description sits under its row, dimmed and
+/// indented by two, and the bottom row keeps only the "more" marker. The selection scrolls with it.
+#[test]
+fn settings_description_under_selected_row_at_110x30() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.run(Action::Settings);
+    let items = app.settings_items();
+    let label = SettingKey::Restore.label();
+    let desc = SettingKey::Restore.description();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::Restore)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 110, 30);
+    save("settings-110x30", &text);
+    let lines: Vec<&str> = text.lines().collect();
+    let row = lines.iter().position(|l| l.contains(label)).expect("the selected row");
+    assert!(lines[row + 1].contains(desc), "description under its row:\n{text}");
+    assert!(!lines.last().unwrap().contains(desc), "no description on the bottom row:\n{text}");
+
+    let buf = render_cells(&mut app, 110, 30);
+    let (lx, ly) = find_text(&buf, label, 0).unwrap();
+    let (dx, dy) = find_text(&buf, desc, 0).unwrap();
+    assert_eq!((dx, dy), (lx + 2, ly + 1), "indented under the label");
+    assert_eq!(buf[(dx, dy)].fg, app.theme.dim().fg.unwrap(), "dimmed");
+
+    // The last setting's description stays on screen with its row when the page scrolls to it.
+    let last = items.iter().rev().find_map(|i| match i {
+        SettingItem::Setting(k) => Some(*k),
+        _ => None,
+    });
+    let last = last.unwrap();
+    app.settings_sel = items.iter().position(|i| *i == SettingItem::Setting(last)).unwrap();
+    app.settings_follow = true;
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains(last.description()), "the selected setting's description is visible:\n{text}");
+    assert!(text.contains(last.label()), "{text}");
+}
+
+/// Settings → Key bindings: the row opens the editor, which lists every action with its keys. A double
+/// click starts a rebinding, a key another action has is asked about first, a key NOBLE cannot bind says
+/// why, and the filter (`/`) takes letters as text. The `?` reference names the editor.
+#[test]
+fn key_bindings_editor_renders_and_asks_before_taking_keys() {
+    use noble::app::{Hit, Overlay, SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let row = app
+        .settings_items()
+        .iter()
+        .position(|i| *i == SettingItem::Setting(SettingKey::KeyBindings))
+        .expect("the row is in the Keys section");
+    app.settings_sel = row;
+    render(&mut app, 110, 30);
+    let hit = find_hit(&app, |h| *h == Hit::Setting(row)).expect("the row is drawn");
+    click(&mut app, hit.x + 3, hit.y);
+    assert!(matches!(app.overlay, Some(Overlay::Bindings(_))), "the row opens the editor");
+    let text = render(&mut app, 110, 30);
+    save("bindings-110x30", &text);
+    assert!(text.contains("KEY BINDINGS") && text.contains("Split Pane Right") && text.contains("PREFIX"), "{text}");
+    assert!(text.contains("⏎ prefix key"), "{text}");
+    for (w, h) in SIZES {
+        save(&format!("bindings-{w}x{h}"), &render(&mut app, w, h));
+    }
+    assert_no_doubled_frame(&render(&mut app, 110, 30));
+
+    // A double click on the row starts its prefix key; the editor says what it waits for.
+    let split = app.binding_rows("").iter().position(|a| *a == Action::SplitRight).unwrap();
+    render(&mut app, 110, 30);
+    let target = find_hit(&app, |h| *h == Hit::BindingsRow(split)).expect("the row is drawn");
+    click(&mut app, target.x + 2, target.y);
+    click(&mut app, target.x + 2, target.y);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("press a key for Split Pane Right after ctrl+a · esc cancel"), "{text}");
+
+    // ctrl+alt with a symbol is AltGr on Windows: refused, and the editor keeps waiting.
+    app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("AltGr"), "{text}");
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.capture.is_some()), "still waiting");
+
+    // "n" is Next Tab's prefix key: the question comes first, and "n" keeps its owner until yes.
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    let text = render(&mut app, 110, 30);
+    save("bindings-replace-110x30", &text);
+    assert!(text.contains("ctrl+a n is Next Tab — replace? y/n"), "{text}");
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.replace.is_none()), "no keeps the keys");
+
+    // A yes saves at once: the status line says so, and the Settings row shows the keys are custom.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('%'), KeyModifiers::NONE));
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("saved · ctrl+a % is Split Pane Right"), "{text}");
+    assert_eq!(app.setting_value(SettingKey::KeyBindings), "custom");
+
+    // The filter takes letters as text: "/" then "split" lists only the matching actions.
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    for c in "split".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("/ split") && text.contains("Split Pane Down") && !text.contains("Next Tab"), "{text}");
+    // esc clears the filter, then the second esc closes the editor.
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.overlay.is_none(), "esc closes the editor");
+    assert!(matches!(app.view, View::Settings), "back on the Settings page");
+
+    // The keyboard reference names the editor, so it is found from the `?` screen.
+    app.run(Action::Help);
+    for c in "key bindings".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(render(&mut app, 110, 30).contains("Settings → Key bindings"));
 }

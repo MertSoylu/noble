@@ -130,6 +130,7 @@ mod tests {
             last_active: None,
             git: None,
             repo: true,
+            tasks: Vec::new(),
         }
     }
 

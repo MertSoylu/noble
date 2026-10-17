@@ -1,8 +1,12 @@
 //! Settings tab: selectable items, value changes and persistent writes to the config.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, ToastLevel, View};
+use std::path::{Path, PathBuf};
+
+use super::ops::DIR_PROBE_TIMEOUT;
+use super::{AddMode, App, ToastLevel, View};
+use crate::event::AppEvent;
 use crate::theme::THEMES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,15 +18,18 @@ pub enum SettingKey {
     AnimBattery,
     Clock24,
     Seconds,
+    Tips,
     Shell,
     Restore,
     CopySelect,
     TabFollowsCwd,
+    DimInactive,
     TermColors,
     Notify,
     Prefix,
     Passthrough,
     ShellFirst,
+    KeyBindings,
     AiEnabled,
     Claude,
     Codex,
@@ -42,6 +49,17 @@ pub enum SettingItem {
     Setting(SettingKey),
     OpenConfig,
     ReloadConfig,
+}
+
+impl SettingItem {
+    /// The row's name; the Settings filter matches it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SettingItem::Setting(key) => key.label(),
+            SettingItem::OpenConfig => "Edit config file",
+            SettingItem::ReloadConfig => "Reload config",
+        }
+    }
 }
 
 pub const PREFIXES: [&str; 4] = ["ctrl+a", "ctrl+b", "ctrl+space", "ctrl+g"];
@@ -69,16 +87,19 @@ impl SettingKey {
             SettingKey::Animations => "Animations",
             SettingKey::AnimBattery => "Animations on battery",
             SettingKey::Clock24 => "24-hour clock",
+            SettingKey::Tips => "Show tips",
             SettingKey::Seconds => "Show seconds",
             SettingKey::Shell => "Shell",
             SettingKey::Restore => "Restore tabs on launch",
             SettingKey::CopySelect => "Copy text on select",
             SettingKey::TabFollowsCwd => "Tab name follows the folder",
+            SettingKey::DimInactive => "Dim inactive panes",
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
             SettingKey::Passthrough => "Pass keys to the app",
             SettingKey::ShellFirst => "Leave shell keys to the shell",
+            SettingKey::KeyBindings => "Key bindings",
             SettingKey::AiEnabled => "Show AI usage",
             SettingKey::Claude => "Claude Code",
             SettingKey::Codex => "Codex",
@@ -99,20 +120,23 @@ impl SettingKey {
         match self {
             SettingKey::Theme => "Color theme of the whole interface",
             SettingKey::Transparent => "Let the terminal's own background show through",
-            SettingKey::Boot => "Play the startup animation on launch",
+            SettingKey::Boot => "Startup animation on the first launch and after an update",
             SettingKey::Animations => "Slide, zoom, fade and pulse effects",
             SettingKey::AnimBattery => "Keep animations while running on battery",
             SettingKey::Clock24 => "24-hour instead of AM/PM clock on Home",
             SettingKey::Seconds => "Show seconds on the Home clock (off on battery)",
+            SettingKey::Tips => "Hints about the current screen in the status bar",
             SettingKey::Shell => "Program that new terminal panes start",
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
             SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
+            SettingKey::DimInactive => "Fade the text of the split panes without the focus",
             SettingKey::Notify => "Alert when a long command ends in a background tab",
             SettingKey::TermColors => "Color scheme used inside terminal panes",
             SettingKey::Prefix => "Key that starts NOBLE's command chords",
             SettingKey::Passthrough => "Which shortcuts full-screen apps receive",
             SettingKey::ShellFirst => "Keep editing keys such as ctrl+w for the shell",
+            SettingKey::KeyBindings => "Change the prefix and direct keys of every action",
             SettingKey::AiEnabled => "Show AI quota cards on Home",
             SettingKey::Claude | SettingKey::Codex | SettingKey::Antigravity => "Show this provider's usage on Home",
             SettingKey::OpenCodeGo | SettingKey::Kilo | SettingKey::CommandCode => "Show this provider's usage on Home",
@@ -148,7 +172,7 @@ impl SettingKey {
 
     /// Set in a popup window (⏎); ←→ do not change it.
     pub fn opens_popup(&self) -> bool {
-        matches!(self, SettingKey::QuickLaunch)
+        matches!(self, SettingKey::QuickLaunch | SettingKey::KeyBindings)
     }
 
     pub fn is_toggle(&self) -> bool {
@@ -160,6 +184,7 @@ impl SettingKey {
                 | SettingKey::Passthrough
                 | SettingKey::TermColors
                 | SettingKey::QuickLaunch
+                | SettingKey::KeyBindings
                 | SettingKey::AiRefresh
                 | SettingKey::AiWarn
         )
@@ -187,12 +212,45 @@ fn cycle<T: PartialEq + Clone>(options: &[T], current: &T, dir: i32) -> T {
     options[(i + dir).rem_euclid(options.len() as i32) as usize].clone()
 }
 
+/// Whether `path` holds repositories (`probe`), answered within `DIR_PROBE_TIMEOUT`: a folder that does
+/// not answer in time (a network share that stopped responding) counts as holding none, so it is added
+/// as a project. The probe runs on its own thread, which is left to finish when the answer comes late
+/// (as `util::usable_dirs` does).
+fn holds_repos_in_time(path: PathBuf, probe: fn(&Path, &[String]) -> bool, exclude: Vec<String>) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("add-probe".into()).spawn(move || {
+        let _ = tx.send(probe(&path, &exclude));
+    });
+    spawned.is_ok() && rx.recv_timeout(DIR_PROBE_TIMEOUT).unwrap_or(false)
+}
+
 impl App {
-    /// The page's sections and their items, in display order (the drawing uses the same list).
+    /// The page's sections and their items, in display order, narrowed by the filter (`/`); a
+    /// section with no matching row is left out. The drawing and the selection use the same list.
     pub fn settings_sections(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
+        let q = self.settings_filter.trim().to_lowercase();
+        self.settings_layout()
+            .into_iter()
+            .map(|(title, items)| {
+                let items: Vec<SettingItem> =
+                    items.into_iter().filter(|i| q.is_empty() || i.label().to_lowercase().contains(&q)).collect();
+                (title, items)
+            })
+            .filter(|(_, items)| !items.is_empty())
+            .collect()
+    }
+
+    /// Every selectable item of the page, ignoring the filter (the palette lists them all).
+    pub fn all_settings_items(&self) -> Vec<SettingItem> {
+        self.settings_layout().into_iter().flat_map(|(_, items)| items).collect()
+    }
+
+    /// The page's sections and their items before filtering, in display order.
+    fn settings_layout(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
         use SettingKey::*;
         let rows = |keys: &[SettingKey]| keys.iter().map(|k| SettingItem::Setting(*k)).collect::<Vec<_>>();
-        let mut terminal = rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, Notify, QuickLaunch]);
+        let mut terminal =
+            rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, DimInactive, Notify, QuickLaunch]);
         if self.claude_hooks_available() {
             terminal.push(SettingItem::Setting(ClaudeHooks));
         }
@@ -210,17 +268,17 @@ impl App {
         if self.sensors.battery().is_some() {
             display.push(SettingItem::Setting(AnimBattery));
         }
-        display.extend(rows(&[Clock24, Seconds]));
+        display.extend(rows(&[Clock24, Seconds, Tips]));
         vec![
             ("Display", display),
             ("Terminal", terminal),
-            ("Keys", rows(&[Prefix, Passthrough, ShellFirst])),
+            ("Keys", rows(&[Prefix, Passthrough, ShellFirst, KeyBindings])),
             ("AI usage", ai),
             ("General", general),
         ]
     }
 
-    /// Selectable items on the page, in display order.
+    /// Selectable items on the page, in display order (after the filter).
     pub fn settings_items(&self) -> Vec<SettingItem> {
         self.settings_sections().into_iter().flat_map(|(_, items)| items).collect()
     }
@@ -236,11 +294,15 @@ impl App {
         }
         self.view = View::Settings;
         self.settings_follow = true;
+        self.settings_filter.clear();
+        self.settings_filtering = false;
     }
 
     /// Leaves Settings for the page it was opened from (a tab is found again by its pane,
     /// since tabs may have moved or closed meanwhile), Home otherwise.
     pub fn close_settings(&mut self) {
+        self.settings_filter.clear();
+        self.settings_filtering = false;
         self.view = match self.settings_back.take() {
             Some((View::System, _)) => View::System,
             Some((View::Term(_), Some(pane))) => self.tab_of(pane).map_or(View::Bridge, View::Term),
@@ -258,10 +320,12 @@ impl App {
             SettingKey::AnimBattery => c.general.animations_on_battery,
             SettingKey::Clock24 => c.general.clock_24h,
             SettingKey::Seconds => c.general.show_seconds,
+            SettingKey::Tips => c.general.show_tips,
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
             SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
+            SettingKey::DimInactive => c.terminal.dim_inactive,
             SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
             SettingKey::ClaudeHooks => self.hooks_installed,
@@ -292,6 +356,10 @@ impl App {
             }
             SettingKey::Theme => self.theme.label.to_string(),
             SettingKey::Prefix => self.cfg.keys.prefix.clone(),
+            SettingKey::KeyBindings => {
+                let custom = !self.cfg.keys.prefix_bindings.is_empty() || !self.cfg.keys.direct_bindings.is_empty();
+                if custom { "custom".into() } else { "defaults".into() }
+            }
             SettingKey::Passthrough => {
                 let key = self.keymap.hint(crate::keys::Action::Passthrough).unwrap_or_default();
                 if self.pass_once() { format!("once ({} + key)", self.keymap.prefix) } else { format!("lock ({key})") }
@@ -329,12 +397,17 @@ impl App {
     }
 
     /// Writes the edited config; a failure is reported (the change then only lasts this session).
-    fn write_config(&mut self, text: String) {
+    /// `false` when the file could not be written (the error is shown as a toast).
+    pub(super) fn write_config(&mut self, text: String) -> bool {
         match crate::store::write_text(&self.paths.config, &text) {
-            Ok(()) => self.cfg_mtime = crate::config::mtime_of(&self.paths.config),
+            Ok(()) => {
+                self.cfg_mtime = crate::config::mtime_of(&self.paths.config);
+                true
+            }
             Err(e) => {
                 let path = crate::util::tilde(&self.paths.config);
                 self.toast(ToastLevel::Error, format!("could not save {path}: {e}"));
+                false
             }
         }
     }
@@ -377,6 +450,7 @@ impl App {
     pub fn activate_setting(&mut self, item: SettingItem, dir: i32) {
         match item {
             SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
+            SettingItem::Setting(SettingKey::KeyBindings) => self.open_bindings(),
             SettingItem::Setting(SettingKey::ClaudeHooks) => self.toggle_claude_hooks(),
             SettingItem::OpenConfig => self.run(crate::keys::Action::OpenConfig),
             SettingItem::ReloadConfig => self.reload_config(true),
@@ -385,6 +459,7 @@ impl App {
                 let (section, name, value) = match key {
                     // Set from the popup (handled above).
                     SettingKey::QuickLaunch => return self.open_launcher_picker(),
+                    SettingKey::KeyBindings => return self.open_bindings(),
                     // ←→ step through the themes; `set_theme` saves it.
                     SettingKey::Theme => {
                         let names: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
@@ -405,6 +480,10 @@ impl App {
                     SettingKey::AnimBattery => {
                         c.general.animations_on_battery ^= true;
                         ("general", "animations_on_battery", c.general.animations_on_battery.to_string())
+                    }
+                    SettingKey::Tips => {
+                        c.general.show_tips ^= true;
+                        ("general", "show_tips", c.general.show_tips.to_string())
                     }
                     SettingKey::Clock24 => {
                         c.general.clock_24h ^= true;
@@ -429,6 +508,10 @@ impl App {
                     SettingKey::TabFollowsCwd => {
                         c.terminal.tab_follows_cwd ^= true;
                         ("terminal", "tab_follows_cwd", c.terminal.tab_follows_cwd.to_string())
+                    }
+                    SettingKey::DimInactive => {
+                        c.terminal.dim_inactive ^= true;
+                        ("terminal", "dim_inactive", c.terminal.dim_inactive.to_string())
                     }
                     // Written to Claude's own settings file, not the config (handled above).
                     SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),
@@ -697,7 +780,7 @@ impl App {
         let list = toml::Value::Array(c.projects.roots.iter().cloned().map(toml::Value::String).collect());
         self.apply_config(c);
         self.persist("projects", "roots", &list.to_string());
-        self.toast(ToastLevel::Ok, format!("added {} · scanning…", crate::util::tilde(&path)));
+        self.toast(ToastLevel::Ok, format!("scanning {} for projects", crate::util::tilde(&path)));
     }
 
     /// A folder typed into the add prompt (`~` expands to the home folder, a relative path is
@@ -724,6 +807,37 @@ impl App {
             Err(e) => {
                 self.toast(ToastLevel::Error, e);
                 None
+            }
+        }
+    }
+
+    /// The add prompt's action. Auto mode: a git repository, or a folder with no repository
+    /// within two levels (`projects::holds_repos`), is added as a project; a folder that holds
+    /// repositories is scanned for them. The toast names what happened. The folder walk runs on a
+    /// helper thread: its answer arrives as `AppEvent::AddDecided`, so the UI keeps running meanwhile.
+    pub fn add_by_mode(&mut self, mode: AddMode, raw: &str) {
+        match mode {
+            AddMode::Project => self.add_project(raw),
+            AddMode::Folder => self.add_project_root(raw),
+            AddMode::Auto => {
+                let (tx, probe, exclude) = (self.tx.clone(), self.repo_probe, self.cfg.projects.exclude.clone());
+                let raw_owned = raw.to_string();
+                // The folder checks (is it a folder, is it a repository) touch the disk too, so they run
+                // here as well: a stalled network share must not freeze the UI. A path that is no folder
+                // is answered "project" and `add_project` reports it.
+                let spawned = std::thread::Builder::new().name("add-decide".into()).spawn(move || {
+                    let scan = match Self::resolve_folder(&raw_owned) {
+                        Ok(path) if crate::projects::git_dir(&path).is_none() => {
+                            holds_repos_in_time(path, probe, exclude)
+                        }
+                        _ => false,
+                    };
+                    let _ = tx.send(AppEvent::AddDecided { raw: raw_owned, scan });
+                });
+                // No thread to spare: the folder is added as a project, the answer that cannot be checked.
+                if spawned.is_err() {
+                    self.add_project(raw);
+                }
             }
         }
     }
@@ -764,7 +878,7 @@ impl App {
         if listed.is_some() {
             self.toast(ToastLevel::Info, format!("{name} is already in Projects"));
         } else {
-            self.toast(ToastLevel::Ok, format!("added {name} to Projects"));
+            self.toast(ToastLevel::Ok, format!("added project {name}"));
         }
     }
 
@@ -891,44 +1005,95 @@ impl App {
 
     pub(super) fn move_setting(&mut self, delta: i32) {
         let n = self.settings_items().len() as i32;
+        if n == 0 {
+            return;
+        }
         self.settings_sel = (self.settings_sel as i32 + delta).clamp(0, n - 1) as usize;
+    }
+
+    /// What ⏎ does on a row of the page (also the palette's "Setting:" commands): a popup opens for
+    /// the terminal colors and the theme, every other row changes one step.
+    pub fn enter_setting(&mut self, item: SettingItem) {
+        match item {
+            SettingItem::Setting(SettingKey::TermColors) => self.open_scheme_picker(),
+            SettingItem::Setting(SettingKey::Theme) => self.open_theme_picker(),
+            other => self.activate_setting(other, 1),
+        }
     }
 
     pub(super) fn settings_key(&mut self, k: KeyEvent) {
         // The page scrolls back to the selection (the wheel may have moved it away).
         self.settings_follow = true;
+        if self.settings_filtering {
+            return self.settings_filter_key(k);
+        }
         let items = self.settings_items();
-        let sel = self.settings_sel.min(items.len() - 1);
+        let sel = self.settings_sel.min(items.len().saturating_sub(1));
+        let chosen = items.get(sel).copied();
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => self.move_setting(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_setting(1),
             // ← turns a switch off and → on (pressing again changes nothing); a choice steps back/forward.
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
                 let right = matches!(k.code, KeyCode::Right | KeyCode::Char('l'));
-                if let SettingItem::Setting(key) = items[sel] {
+                if let Some(item @ SettingItem::Setting(key)) = chosen {
                     if key.opens_popup() {
                     } else if key.is_toggle() {
                         if self.setting_on(key) != right {
-                            self.activate_setting(items[sel], 1);
+                            self.activate_setting(item, 1);
                         }
                     } else {
-                        self.activate_setting(items[sel], if right { 1 } else { -1 });
+                        self.activate_setting(item, if right { 1 } else { -1 });
                     }
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::TermColors) => {
-                self.open_scheme_picker()
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(item) = chosen {
+                    self.enter_setting(item);
+                }
             }
-            KeyCode::Enter | KeyCode::Char(' ') if items[sel] == SettingItem::Setting(SettingKey::Theme) => {
-                self.open_theme_picker()
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate_setting(items[sel], 1),
             KeyCode::Home => self.settings_sel = 0,
-            KeyCode::End => self.settings_sel = items.len() - 1,
+            KeyCode::End => self.settings_sel = items.len().saturating_sub(1),
+            // "/" starts a filter on the row names (like Home's); esc clears a kept one, then leaves.
+            KeyCode::Char('/') => {
+                self.settings_filtering = true;
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
+            KeyCode::Esc if !self.settings_filter.is_empty() => {
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
             KeyCode::Esc | KeyCode::Char('q') => self.close_settings(),
             KeyCode::Char('?') => self.run(crate::keys::Action::Help),
             KeyCode::Char(':' | 'p') => self.run(crate::keys::Action::Palette),
             KeyCode::Char(c @ '1'..='9') => self.go_tab(c as usize - '0' as usize),
+            _ => {}
+        }
+    }
+
+    /// Keys while the filter takes text: letters narrow the rows, ↑↓ move, ⏎ keeps the filter and
+    /// returns to the rows, esc clears it.
+    fn settings_filter_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.settings_filtering = false;
+                self.settings_filter.clear();
+                self.settings_sel = 0;
+            }
+            KeyCode::Enter => self.settings_filtering = false,
+            KeyCode::Up => self.move_setting(-1),
+            KeyCode::Down => self.move_setting(1),
+            KeyCode::Backspace => {
+                if self.settings_filter.pop().is_none() {
+                    self.settings_filtering = false;
+                }
+                self.settings_sel = 0;
+            }
+            KeyCode::Char(c) if !super::input::ctrl_held(&k) && !k.modifiers.contains(KeyModifiers::ALT) => {
+                self.settings_filter.push(c);
+                self.settings_sel = 0;
+            }
             _ => {}
         }
     }

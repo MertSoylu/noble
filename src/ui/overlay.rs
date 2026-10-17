@@ -5,7 +5,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::hud;
-use crate::app::{App, Hit, Overlay};
+use crate::app::bindings::{self, BindingsState, Slot};
+use crate::app::help::{GAP, KEY_W, Line, geometry};
+use crate::app::{App, HelpState, Hit, Overlay};
 use crate::keys::Action;
 use crate::theme::Theme;
 use crate::util;
@@ -27,7 +29,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Themes(p) => themes(buf, area, app, p, hits),
         Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
-        Overlay::Help { scroll } => help(buf, area, app, *scroll, hits),
+        Overlay::Help(st) => help(buf, area, app, st, hits),
+        Overlay::Bindings(st) => key_bindings(buf, area, app, st, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
             // The question wraps over as many rows as it needs: the box grows with it (within the
@@ -87,9 +90,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             if p.value.is_empty() {
                 // Placeholder while empty.
                 let hint = match p.purpose {
-                    crate::app::PromptPurpose::AddRoot | crate::app::PromptPurpose::AddProject => {
-                        "path, e.g. ~/code/app"
-                    }
+                    crate::app::PromptPurpose::Add(_) => "path, e.g. ~/code/app",
                     crate::app::PromptPurpose::RenameTab(_) => "tab name (empty = automatic)",
                     crate::app::PromptPurpose::SaveWorkspace => "workspace name",
                 };
@@ -133,14 +134,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                     field_w,
                 );
             }
-            let add = p.purpose.is_add();
-            if add {
-                // Choice line above the input: one project or a folder to scan (tab / click).
-                let project = matches!(p.purpose, crate::app::PromptPurpose::AddProject);
+            let add = p.purpose.add_mode();
+            if let Some(current) = add {
+                // Choice line above the input: auto, a folder to scan or one project (tab / click).
                 let mut cx = x;
                 let end = inner.right().saturating_sub(1);
-                for (mode, label) in [(true, "one project"), (false, "folder of projects (scan)")] {
-                    let on = mode == project;
+                for (mode, label) in [
+                    (crate::app::AddMode::Auto, "auto"),
+                    (crate::app::AddMode::Folder, "folder to scan"),
+                    (crate::app::AddMode::Project, "one project"),
+                ] {
+                    let on = mode == current;
                     let start = cx;
                     let (dot, style) = if on { ("● ", th.accent_bold()) } else { ("○ ", th.dim()) };
                     cx = hud::put_spans(buf, cx, inner.y, &[(dot, style), (label, style)], end.saturating_sub(cx));
@@ -151,7 +155,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                 }
             }
             // The longest hint that fits (a narrow window drops "tab switch" first).
-            let hints: &[&str] = if add {
+            let hints: &[&str] = if add.is_some() {
                 &["tab switch · ⏎ add · esc cancel", "⏎ add · esc cancel"]
             } else {
                 &["⏎ save · esc cancel"]
@@ -257,7 +261,7 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
         let found = if !app.projects_loaded {
             "looking for your git projects…".to_string()
         } else if app.projects.is_empty() {
-            "no git projects found yet — press a on Home to add a folder".to_string()
+            "no git projects found yet — press a on Home to add one".to_string()
         } else {
             format!("found {} git projects", app.projects.len())
         };
@@ -592,7 +596,7 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
 
 /// Word-wraps `text` to lines of at most `width` columns (by display width); a word wider than
 /// a line is cut into pieces. Newlines count as spaces.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if width == 0 {
         return lines;
@@ -703,6 +707,22 @@ fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui:
     inner
 }
 
+/// Splits the drawn title into runs of plain and matched letters. `shown` is `title` as drawn (cut
+/// with "…" when it does not fit): marks past the cut are dropped and the "…" is never marked.
+fn title_runs(title: &str, shown: &str, marks: &[usize]) -> Vec<(String, bool)> {
+    let cut = shown != title;
+    let visible = shown.chars().count().saturating_sub(usize::from(cut));
+    let mut runs: Vec<(String, bool)> = Vec::new();
+    for (i, ch) in shown.chars().enumerate() {
+        let hit = i < visible && marks.contains(&i);
+        match runs.last_mut() {
+            Some((text, run_hit)) if *run_hit == hit => text.push(ch),
+            _ => runs.push((ch.to_string(), hit)),
+        }
+    }
+    runs
+}
+
 fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteState, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let w = 76.min(area.width.saturating_sub(2));
@@ -759,8 +779,16 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
         );
         let hint_w = util::width(&item.hint) as u16;
         let title_w = iw.saturating_sub(2 + group_w + hint_w + 2);
-        let title_style = if selected { th.accent_bold().bg(bgc) } else { th.text().bg(bgc) };
-        hud::put(buf, cx, y, &util::truncate(&item.title, title_w as usize), title_style, title_w);
+        // The title as drawn (cut with "…" when it does not fit); the letters the query matched in bold accent.
+        let shown = util::truncate(&item.title, title_w as usize);
+        let base = if selected { th.text().add_modifier(Modifier::BOLD).bg(bgc) } else { th.text().bg(bgc) };
+        let marks: &[usize] = st.positions.get(row).map_or(&[], |m| m.as_slice());
+        let runs = title_runs(&item.title, &shown, marks);
+        let spans: Vec<(&str, Style)> = runs
+            .iter()
+            .map(|(text, hit)| (text.as_str(), if *hit { th.accent_bold().bg(bgc) } else { base }))
+            .collect();
+        hud::put_spans(buf, cx, y, &spans, title_w);
         if !item.hint.is_empty() {
             hud::put_right(buf, x + iw, y, &item.hint, th.dim().bg(bgc));
         }
@@ -778,163 +806,173 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     hud::put_spans(buf, x, fy, &[("↑↓", k), (" select  ", d), ("⏎", k), (" run  ", d), ("esc", k), (" close", d)], iw);
 }
 
-fn help_lines(app: &App) -> Vec<(String, String, bool)> {
-    let mut v: Vec<(String, String, bool)> = Vec::new();
-    let section = |v: &mut Vec<(String, String, bool)>, s: &str| {
-        if !v.is_empty() {
-            v.push((String::new(), String::new(), false));
-        }
-        v.push((s.to_string(), String::new(), true));
-    };
-    let prefix = app.keymap.prefix.to_string();
-    section(&mut v, &format!("PREFIX · press {prefix}, then"));
-    let mut by_action: Vec<(Action, Vec<String>)> = Vec::new();
-    for a in Action::ALL {
-        let mut keys: Vec<String> =
-            app.keymap.prefix_map.iter().filter(|(_, x)| **x == a).map(|(k, _)| k.to_string()).collect();
-        if keys.is_empty() {
-            continue;
-        }
-        keys.sort_by_key(|k| (k.len(), k.clone()));
-        by_action.push((a, keys));
-    }
-    // Collect the tab numbers on a single line (rebound ones keep their own rows).
-    let tab_range = app.keymap.tab_range(true);
-    let mut tabs_done = false;
-    for (a, keys) in &by_action {
-        if matches!(a, Action::GoTab(_))
-            && let Some(range) = &tab_range
-        {
-            if !tabs_done {
-                v.push((range.clone(), "go to tab".into(), false));
-                tabs_done = true;
-            }
-            continue;
-        }
-        v.push((keys.join("  "), a.title(), false));
-    }
-    v.push((prefix.clone(), "send prefix to the shell".into(), false));
-
-    section(&mut v, "GLOBAL");
-    let mut direct: Vec<(String, Action)> = app.keymap.direct_map.iter().map(|(k, a)| (k.to_string(), *a)).collect();
-    direct.sort_by_key(|(k, _)| k.clone());
-    let tab_range = app.keymap.tab_range(false);
-    let mut tabs_done = false;
-    for (k, a) in direct {
-        if matches!(a, Action::GoTab(_))
-            && let Some(range) = &tab_range
-        {
-            if !tabs_done {
-                v.push((range.clone(), "go to tab".into(), false));
-                tabs_done = true;
-            }
-            continue;
-        }
-        // Shell keys reach the shell in a terminal (`keys.shell_first`).
-        let title = if app.keymap.shell_first.iter().any(|c| c.to_string() == k) {
-            format!("{} (not in terminals)", a.title())
-        } else {
-            a.title()
-        };
-        v.push((k, title, false));
-    }
-
-    section(&mut v, "HOME");
-    for (k, d) in [
-        ("↑ ↓  j k", "select project"),
-        ("⏎  double-click", "open a terminal in the project"),
-        ("→  ⏎", "pin to top ★ · more actions ⋯ (← → choose)"),
-        ("/", "search projects"),
-        ("● 3  ✓  ↑ ↓  …", "uncommitted changes · clean · commits to push / pull · checking"),
-        ("t", "terminal in home folder"),
-        ("o", "open folder in file manager"),
-        ("w", "save open tabs as a workspace"),
-        ("a  A", "add a folder to scan for projects · add one project folder"),
-        ("⋯  remove", "Remove from list: hide a project for good (A adds it back)"),
-        ("r  R", "rescan projects · refresh AI usage"),
-        ("m  s", "system · settings"),
-        ("p  ?  q", "commands · help · quit"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-    for (_, l) in app.quick_launchers() {
-        v.push((l.key.clone(), format!("run {} in the project", l.command), false));
-    }
-
-    section(&mut v, "SYSTEM");
-    for (k, d) in [
-        ("↑ ↓  pgup pgdn", "select process"),
-        ("c m p n", "sort by cpu · mem · pid · name"),
-        ("/", "filter"),
-        ("K  del", "terminate (asks first)"),
-        ("esc", "back"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-
-    section(&mut v, "MOUSE");
-    for (k, d) in [
-        ("click", "everything: tabs, rows, buttons, settings"),
-        ("◫ ⊟ ⤢ ✕", "pane buttons: split right · split down · zoom · close (focused or hovered pane)"),
-        ("double-click title", "zoom / restore the pane"),
-        ("middle-click tab", "close the tab"),
-        ("drag border", "resize panes"),
-        ("drag text", "select (copied on release)"),
-        ("right-click", "paste into terminal"),
-        ("ctrl+click", "open a link or file:line (underlined while ctrl is held)"),
-        ("wheel", "scroll history / lists"),
-        ("shift+drag", "select even when the app captures the mouse"),
-    ] {
-        v.push((k.into(), d.into(), false));
-    }
-    v.push((String::new(), String::new(), false));
-    v.push(("config".into(), util::tilde(&app.paths.config), false));
-    v
-}
-
-fn help(buf: &mut Buffer, area: Rect, app: &App, scroll: u16, hits: &mut Vec<(Rect, Hit)>) {
+/// The keyboard reference: one or more columns of sections, a filter in the title and a selection.
+fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
-    let w = 78.min(area.width.saturating_sub(2));
-    let h = area.height.saturating_sub(2).min(40);
-    if w < 30 || h < 6 {
+    let sections = app.help_sections(&st.query);
+    let Some(g) = geometry(area, &sections) else {
         // Too small for the key list: a note instead of nothing (as the Settings screen does).
         hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
         return;
-    }
-    let rect = centered(area, w, h);
-    hits.push((rect, Hit::Inert));
-    let inner = boxed(buf, rect, "KEYBOARD REFERENCE", th, th.accent);
-    let lines = help_lines(app);
-    let rows = inner.height.saturating_sub(1) as usize;
-    let max_scroll = lines.len().saturating_sub(rows);
-    let scroll = (scroll as usize).min(max_scroll);
-    let key_w = 18u16;
-    let x = inner.x + 1;
-    for (i, (k, d, header)) in lines.iter().skip(scroll).take(rows).enumerate() {
-        let y = inner.y + i as u16;
-        if *header {
-            let end = hud::put(buf, x, y, k, th.accent_bold().bg(th.raised), inner.width - 2);
-            // A thin rule after the section name.
-            let rule_w = (inner.right().saturating_sub(1)).saturating_sub(end + 1);
-            hud::hline(buf, end + 1, y, rule_w, "─", th.line().bg(th.raised));
-            continue;
-        }
-        hud::put(
-            buf,
-            x + 1,
-            y,
-            &util::pad_right(k, key_w as usize),
-            Style::default().fg(th.accent2).bg(th.raised),
-            key_w,
-        );
-        hud::put(buf, x + 1 + key_w, y, d, th.text().bg(th.raised), inner.width.saturating_sub(key_w + 3));
-    }
-    let footer = if max_scroll > 0 {
-        format!("↑↓ scroll {}/{} · esc close", scroll, max_scroll)
-    } else {
-        "esc close".to_string()
     };
-    hud::put_right(buf, inner.right() - 1, inner.bottom() - 1, &footer, th.dim().bg(th.raised));
+    let rect = g.rect;
+    hits.push((rect, Hit::Inert));
+    let title = if st.query.is_empty() {
+        "KEYBOARD REFERENCE".to_string()
+    } else {
+        format!("KEYBOARD REFERENCE · /{}", st.query)
+    };
+    let inner = boxed(buf, rect, &title, th, th.accent);
+    if sections.is_empty() {
+        hud::put(buf, inner.x + 1, inner.y, "no matches", th.dim(), inner.width.saturating_sub(2));
+    }
+    let scroll = st.scroll.min(g.max_scroll());
+    let key_w = KEY_W as u16;
+    for (c, col) in g.columns.iter().enumerate() {
+        let x = inner.x + 1 + c as u16 * (g.col_w + GAP);
+        for (i, line) in col.iter().skip(scroll).take(g.rows).enumerate() {
+            let y = inner.y + i as u16;
+            match line {
+                Line::Gap => {}
+                Line::Header(name) => {
+                    let end = hud::put(buf, x, y, name, th.accent_bold().bg(th.raised), g.col_w);
+                    // A thin rule after the section name.
+                    let rule_w = (x + g.col_w).saturating_sub(end + 1);
+                    hud::hline(buf, end + 1, y, rule_w, "─", th.line().bg(th.raised));
+                }
+                Line::Row { key, desc, sel } => {
+                    let selected = *sel == Some(st.selected);
+                    let bg = if selected { th.sel_bg } else { th.raised };
+                    if selected {
+                        // Same selection marker as the palette and the other lists.
+                        hud::set_bg_row(buf, x - 1, y, g.col_w + 1, bg);
+                        hud::put(buf, x - 1, y, "▌", th.accent().bg(bg), 1);
+                    }
+                    if let Some(s) = sel {
+                        hits.push((Rect::new(x, y, g.col_w, 1), Hit::HelpRow(*s)));
+                    }
+                    hud::put(
+                        buf,
+                        x + 1,
+                        y,
+                        &util::pad_right(key, KEY_W),
+                        Style::default().fg(th.accent2).bg(bg),
+                        key_w,
+                    );
+                    let desc_w = g.col_w.saturating_sub(1 + key_w);
+                    let style = if selected { th.text().add_modifier(Modifier::BOLD).bg(bg) } else { th.text().bg(bg) };
+                    hud::put(buf, x + 1 + key_w, y, &util::truncate(desc, desc_w as usize), style, desc_w);
+                }
+            }
+        }
+    }
+    hud::put_right(
+        buf,
+        inner.right() - 1,
+        inner.bottom() - 1,
+        "type to filter · ⏎ run · esc close",
+        th.dim().bg(th.raised),
+    );
+}
+
+/// The key bindings editor: every action with its prefix and direct keys, a filter, the status line
+/// (the key being awaited, the question about a taken key, a refusal) and the key hints.
+fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hits: &mut Vec<(Rect, Hit)>) {
+    let th = &app.theme;
+    let Some(g) = bindings::geometry(area) else {
+        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        return;
+    };
+    hits.push((g.rect, Hit::Inert));
+    let inner = boxed(buf, g.rect, "KEY BINDINGS", th, th.accent);
+    let x = inner.x + 1;
+    let iw = g.width;
+    let rows = app.binding_rows(&st.query);
+    // The filter line ("/ text", the cursor while typing) and how many of the actions are listed.
+    let count = format!("{}/{}", rows.len(), Action::ALL.len());
+    let filter_on = st.filtering || !st.query.is_empty();
+    let cursor = if st.filtering && app.cursor_lit() { "▏" } else { "" };
+    let filter = if filter_on { format!("/ {}{cursor}", st.query) } else { "/ filter".into() };
+    let counter_w = util::width(&count) as u16 + 1;
+    let filter_style = if filter_on { th.accent_bold().bg(th.raised) } else { th.dim().bg(th.raised) };
+    hud::put(buf, x, inner.y, &filter, filter_style, iw.saturating_sub(counter_w));
+    hud::put_right(buf, x + iw, inner.y, &count, th.dim().bg(th.raised));
+    // The column titles.
+    let head = th.dim().bg(th.raised);
+    let hy = inner.y + 1;
+    if g.group_w > 0 {
+        hud::put(buf, x, hy, "GROUP", head, g.group_w);
+    }
+    hud::put(buf, x + g.title_at, hy, "ACTION", head, g.title_w);
+    hud::put(buf, x + g.prefix_at, hy, "PREFIX", head, g.key_w);
+    hud::put(buf, x + g.direct_at, hy, "DIRECT", head, g.key_w);
+    // The list, scrolled so that the selected row is on screen.
+    let list_y = inner.y + 2;
+    if rows.is_empty() {
+        hud::put(buf, x, list_y, "no matches", th.dim().bg(th.raised), iw);
+    }
+    let offset = if st.selected >= g.rows { st.selected + 1 - g.rows } else { 0 };
+    for (row, action) in rows.iter().enumerate().skip(offset).take(g.rows) {
+        let y = list_y + (row - offset) as u16;
+        let selected = row == st.selected;
+        let bg = if selected { th.sel_bg } else { th.raised };
+        hud::set_bg_row(buf, inner.x, y, inner.width, bg);
+        if selected {
+            hud::put(buf, inner.x, y, "▌", th.accent().bg(bg), 1);
+        }
+        if g.group_w > 0 {
+            hud::put(buf, x, y, action.group(), th.accent2().bg(bg), g.group_w);
+        }
+        let title_style = if selected { th.text().add_modifier(Modifier::BOLD).bg(bg) } else { th.text().bg(bg) };
+        hud::put(buf, x + g.title_at, y, &util::truncate(&action.title(), g.title_w as usize), title_style, g.title_w);
+        for (at, slot) in [(g.prefix_at, Slot::Prefix), (g.direct_at, Slot::Direct)] {
+            let label = app.binding_label(*action, slot);
+            let style = if label == "—" { th.dim().bg(bg) } else { th.accent2().bg(bg) };
+            hud::put(buf, x + at, y, &util::truncate(&label, g.key_w as usize), style, g.key_w);
+        }
+        hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::BindingsRow(row)));
+    }
+    // The status line: why a key was refused, the question about a taken key, the change just saved, or
+    // what is awaited.
+    let warn = Style::default().fg(th.warn).bg(th.raised);
+    let (status, style) = if let Some(note) = &st.note {
+        // A refused key: the editor keeps waiting, the prompt returns with the next key.
+        (note.clone(), warn)
+    } else if let Some(r) = st.replace {
+        (format!("{} is {} — replace? y/n", app.key_label(r.slot, r.chord), r.other.title()), warn)
+    } else if let Some(done) = &st.done {
+        (done.clone(), Style::default().fg(th.ok).bg(th.raised))
+    } else if let Some((action, slot)) = st.capture {
+        let text = match slot {
+            Slot::Prefix => format!("press a key for {} after {} · esc cancel", action.title(), app.keymap.prefix),
+            Slot::Direct => format!("press a key chord for {} · esc cancel", action.title()),
+        };
+        (text, th.accent_bold().bg(th.raised))
+    } else {
+        (String::new(), th.dim().bg(th.raised))
+    };
+    hud::put(buf, x, inner.bottom() - 2, &util::truncate(&status, iw as usize), style, iw);
+    // The key hints: the longest of them that fits.
+    const BROWSE: [&str; 4] = [
+        "⏎ prefix key · d direct key · x unbind · r reset · / filter · esc close",
+        "⏎ prefix key · d direct key · x unbind · r reset · esc",
+        "⏎ prefix · d direct · x unbind · r reset · esc",
+        "⏎ prefix · d direct · esc",
+    ];
+    const WAITING: [&str; 1] = ["esc cancel"];
+    const REPLACE: [&str; 1] = ["y replace · n cancel"];
+    const FILTER: [&str; 2] = ["type to filter · ⏎ done · esc clear", "⏎ done · esc clear"];
+    let hints: &[&str] = if st.replace.is_some() {
+        &REPLACE
+    } else if st.capture.is_some() {
+        &WAITING
+    } else if st.filtering {
+        &FILTER
+    } else {
+        &BROWSE
+    };
+    let hint = hints.iter().find(|h| util::width(h) <= iw as usize).copied().unwrap_or("esc");
+    hud::put(buf, x, inner.bottom() - 1, hint, th.dim().bg(th.raised), iw);
 }
 
 #[cfg(test)]

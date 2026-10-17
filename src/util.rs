@@ -186,13 +186,21 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 /// Fuzzy substring match. `None` when there is no match; otherwise a score
 /// (higher is better). Consecutive letters, word starts and an exact prefix are rewarded.
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
-    let q: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    fuzzy_match(query, text).map(|(score, _)| score)
+}
+
+/// `fuzzy_score` plus the positions (char indices into `text`) of the matched letters, in order.
+pub fn fuzzy_match(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
+    // One lowercase char per char, so that positions index `text` as it is written.
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let q: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).map(lower).collect();
     if q.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
-    let t: Vec<char> = text.to_lowercase().chars().collect();
     let orig: Vec<char> = text.chars().collect();
+    let t: Vec<char> = orig.iter().map(|c| lower(*c)).collect();
     let mut score = 0i32;
+    let mut positions = Vec::with_capacity(q.len());
     let mut qi = 0;
     let mut prev_match: Option<usize> = None;
     for (i, ch) in t.iter().enumerate() {
@@ -205,7 +213,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
             }
             let boundary = i == 0
                 || matches!(t[i - 1], ' ' | '-' | '_' | ':' | '/' | '\\' | '.')
-                || (orig.get(i).is_some_and(|c| c.is_uppercase()) && orig.get(i - 1).is_some_and(|c| c.is_lowercase()));
+                || (orig[i].is_uppercase() && orig[i - 1].is_lowercase());
             if boundary {
                 s += 8;
             }
@@ -213,6 +221,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
                 s += 6;
             }
             score += s;
+            positions.push(i);
             prev_match = Some(i);
             qi += 1;
         }
@@ -222,7 +231,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     }
     // Short texts get a slight edge.
     score -= (t.len() as i32) / 8;
-    Some(score)
+    Some((score, positions))
 }
 
 /// When the process `pid` started (seconds since the epoch), or `None` if it is not running.
@@ -615,6 +624,20 @@ mod tests {
         let a = fuzzy_score("new", "New Tab").unwrap();
         let b = fuzzy_score("new", "Go to Next Window").unwrap_or(-100);
         assert!(a > b);
+    }
+
+    #[test]
+    fn fuzzy_match_positions() {
+        // "spr" in "Split Pane Right": the first s, the first p after it, then the r of "Right" (char indices).
+        let (score, at) = fuzzy_match("spr", "Split Pane Right").unwrap();
+        assert_eq!(at, vec![0, 1, 11]);
+        assert_eq!(Some(score), fuzzy_score("spr", "Split Pane Right"));
+        assert_eq!(fuzzy_match("xyz", "Split Pane Right"), None);
+        // Case-insensitive, and the positions index the text as written (not its lowercase form).
+        assert_eq!(fuzzy_match("NEW", "New Tab").unwrap().1, vec![0, 1, 2]);
+        assert_eq!(fuzzy_match("ta", "Tät Alpha").unwrap().1, vec![0, 4]);
+        // An empty query matches with no positions.
+        assert_eq!(fuzzy_match("  ", "anything"), Some((0, Vec::new())));
     }
 
     #[test]

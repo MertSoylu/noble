@@ -2,7 +2,9 @@
 //! everything here mutates state and nothing writes to the screen directly.
 
 mod agents;
+pub mod bindings;
 pub mod fx;
+pub mod help;
 mod input;
 mod live;
 mod menu;
@@ -25,12 +27,14 @@ use crate::event::{AppEvent, Tx};
 use crate::keys::Keymap;
 use crate::projects::{Project, ProjectReq};
 use crate::sensors::{self, SensorMode, SensorRequest, Sensors};
-use crate::store::{Recent, UsageHistory, Workspaces};
+use crate::store::{Recent, SavedTab, UsageHistory, Workspaces};
 use crate::term::layout::{Divider, PaneId};
 use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert};
 use crate::theme::Theme;
 
+pub use bindings::BindingsState;
+pub use help::HelpState;
 pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
@@ -107,24 +111,47 @@ pub enum PromptPurpose {
     /// that pane closes in a split tab).
     RenameTab(crate::term::TabId),
     SaveWorkspace,
-    /// New root folder to scan projects in.
-    AddRoot,
-    /// One folder added as a project by hand.
-    AddProject,
+    /// Adds a project or a folder to scan (see `AddMode`).
+    Add(AddMode),
+}
+
+/// What an add prompt does with the typed path. `Auto` decides on Enter: a git repository, or a
+/// folder with none inside (added as a project), or a folder holding repositories (scanned).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddMode {
+    Auto,
+    /// A folder whose git repositories are scanned for projects.
+    Folder,
+    /// One folder added as a project, repository or not.
+    Project,
+}
+
+impl AddMode {
+    /// The next mode in the order Tab cycles through: auto, folder to scan, one project.
+    pub fn next(self) -> Self {
+        match self {
+            AddMode::Auto => AddMode::Folder,
+            AddMode::Folder => AddMode::Project,
+            AddMode::Project => AddMode::Auto,
+        }
+    }
 }
 
 impl PromptPurpose {
     /// Maximum input length (paths can be long).
     pub fn max_len(&self) -> usize {
         match self {
-            PromptPurpose::AddRoot | PromptPurpose::AddProject => 260,
+            PromptPurpose::Add(_) => 260,
             _ => 40,
         }
     }
 
-    /// The add prompt (either mode): Tab switches between adding a project and a folder to scan.
-    pub fn is_add(&self) -> bool {
-        matches!(self, PromptPurpose::AddRoot | PromptPurpose::AddProject)
+    /// The mode of an add prompt; `None` for the other prompts.
+    pub fn add_mode(&self) -> Option<AddMode> {
+        match self {
+            PromptPurpose::Add(mode) => Some(*mode),
+            _ => None,
+        }
     }
 }
 
@@ -191,16 +218,16 @@ impl Prompt {
         self.cursor = to.min(self.value.chars().count());
     }
 
-    /// Switches the add prompt between one project (`project`) and a folder to scan; the
-    /// typed path stays (Tab or a click on the choice line).
-    pub fn set_add_mode(&mut self, project: bool) {
-        let (title, purpose) = if project {
-            ("ADD PROJECT", PromptPurpose::AddProject)
-        } else {
-            ("ADD FOLDER TO SCAN", PromptPurpose::AddRoot)
-        };
-        self.title = title.into();
-        self.purpose = purpose;
+    /// Sets the add prompt's mode (title and purpose); the typed path stays. Tab cycles the
+    /// modes and a click on the choice line picks one.
+    pub fn set_add_mode(&mut self, mode: AddMode) {
+        self.title = match mode {
+            AddMode::Auto => "ADD PROJECT OR FOLDER",
+            AddMode::Folder => "ADD FOLDER TO SCAN",
+            AddMode::Project => "ADD PROJECT",
+        }
+        .into();
+        self.purpose = PromptPurpose::Add(mode);
     }
 }
 
@@ -276,9 +303,10 @@ pub enum Overlay {
         selected: usize,
     },
     Menu(Menu),
-    Help {
-        scroll: u16,
-    },
+    /// The keyboard reference (`?`): its filter, selection and scroll.
+    Help(HelpState),
+    /// The key bindings editor (Settings → Key bindings).
+    Bindings(BindingsState),
     Confirm(Confirm),
     Prompt(Prompt),
 }
@@ -291,12 +319,66 @@ pub enum ToastLevel {
     Error,
 }
 
+/// Where a notification leads when it is clicked (besides being dismissed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastTarget {
+    /// A config error: opens the config file at this line (the Edit Config File action without one).
+    Config { line: Option<u32> },
+}
+
 pub struct Toast {
+    /// Stable for the toast's life (the index in `App::toasts` shifts when another one leaves).
+    pub id: u64,
     pub text: String,
     pub level: ToastLevel,
     pub born: Instant,
-    pub until: Instant,
+    /// How long it stays on screen; `None` until it is dismissed (errors).
+    pub life: Option<Duration>,
+    /// Time the pointer has rested on it so far: not counted against `life`.
+    pub held: Duration,
+    /// Since when the pointer rests on it (the countdown is paused meanwhile).
+    pub hover_from: Option<Instant>,
+    pub target: Option<ToastTarget>,
 }
+
+impl Toast {
+    /// Time on screen that counts against `life` (the pointer on the toast does not).
+    pub fn active(&self, now: Instant) -> Duration {
+        let end = self.hover_from.unwrap_or(now).min(now);
+        end.saturating_duration_since(self.born).saturating_sub(self.held)
+    }
+
+    /// When the toast leaves on its own; `None` while it is paused or sticky.
+    pub fn expires_at(&self) -> Option<Instant> {
+        if self.hover_from.is_some() {
+            return None;
+        }
+        Some(self.born + self.held + self.life?)
+    }
+
+    /// The pointer rests on the toast (`on`) or has left it: the countdown pauses meanwhile.
+    fn set_hovered(&mut self, on: bool, now: Instant) {
+        match (on, self.hover_from) {
+            (true, None) => self.hover_from = Some(now),
+            (false, Some(from)) => {
+                self.held += now.saturating_duration_since(from);
+                self.hover_from = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A notification kept in the history (the `notifications` action): its full text and when it came.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub text: String,
+    pub level: ToastLevel,
+    pub at: chrono::DateTime<chrono::Local>,
+}
+
+/// How many notifications the history keeps (newest last).
+pub const NOTICE_HISTORY: usize = 50;
 
 /// Mouse hit targets; rebuilt on every frame while drawing.
 #[derive(Clone, Debug, PartialEq)]
@@ -336,6 +418,8 @@ pub enum Hit {
     Project(usize),
     OpenSelected,
     Launcher(usize),
+    /// A quick task chip on the selected project's card (`Project::tasks` index).
+    ProjectTask(usize),
     AiRefresh,
     Setting(usize),
     /// Row in the scheme selector (`scheme_options` order).
@@ -349,6 +433,10 @@ pub enum Hit {
     Proc(u32),
     SortCol(SortKey),
     PaletteItem(usize),
+    /// Row of the keyboard reference (selectable rows, `help::HelpState::selected` order).
+    HelpRow(usize),
+    /// Row of the key bindings editor (`App::binding_rows` order).
+    BindingsRow(usize),
     ConfirmYes,
     ConfirmNo,
     /// Welcome card: a setup row (`WelcomeSetup::rows` order), its ‹ › arrows and a prefix chip.
@@ -361,8 +449,8 @@ pub enum Hit {
     PaneTitle(PaneId),
     /// Quick-action button on a project row (row, action).
     ProjectAct(usize, ProjectAct),
-    /// Add prompt: switch to adding one project (`true`) or a folder to scan (`false`).
-    PromptMode(bool),
+    /// Add prompt: switch to this mode (the choice line).
+    PromptMode(AddMode),
     /// Update notice at the bottom right: update / dismiss.
     Update,
     UpdateDismiss,
@@ -381,6 +469,8 @@ pub enum Hit {
     ProjectPr,
     /// A listening port on Home's project card (opens `http://localhost:<port>`).
     Port(u16),
+    /// A notification (by its `Toast::id`): a click dismisses it, and runs its `ToastTarget`.
+    Toast(u64),
 }
 
 pub(crate) enum Drag {
@@ -437,6 +527,14 @@ impl Boot {
 }
 
 pub const BOOT_DURATION: Duration = Duration::from_millis(3000);
+
+/// Does the startup animation play on this launch? With `general.boot_animation` on it plays on the
+/// first launch and on the first one after the version changed: `last_version` is the version that
+/// last played it (`UiStateData::boot_version`). Off, it never plays.
+pub fn boot_due(enabled: bool, last_version: &str, version: &str) -> bool {
+    enabled && last_version != version
+}
+
 pub const SLIDE_DURATION: Duration = Duration::from_millis(240);
 pub const ZOOM_DURATION: Duration = Duration::from_millis(200);
 
@@ -599,6 +697,9 @@ pub struct App {
     pub bridge: BridgeState,
     pub system: SystemState,
     pub settings_sel: usize,
+    /// The Settings filter (`/`): rows whose name contains it; `settings_filtering` while it takes typed text.
+    pub settings_filter: String,
+    pub settings_filtering: bool,
     /// First line of the Settings page on screen; `settings_follow` scrolls it to the selection.
     pub settings_scroll: usize,
     pub settings_follow: bool,
@@ -606,6 +707,8 @@ pub struct App {
     pub settings_back: Option<(View, Option<crate::term::layout::PaneId>)>,
     pub overlay: Option<Overlay>,
     pub toasts: Vec<Toast>,
+    /// The last `NOTICE_HISTORY` notifications, oldest first.
+    pub notices: std::collections::VecDeque<Notice>,
     pub boot: Option<Boot>,
     pub hits: Vec<(Rect, Hit)>,
     /// Mouse cursor position (for hover effects).
@@ -616,6 +719,8 @@ pub struct App {
     pub fx: fx::Effects,
     /// Last drawn page and body image (to start a transition).
     pub drawn_view: Option<View>,
+    /// Counts the screen changes: the status bar tip moves to the next one of the new screen.
+    pub tip_turn: usize,
     pub last_body: Option<ratatui::buffer::Buffer>,
     pub(crate) drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
@@ -633,6 +738,8 @@ pub struct App {
     pub quit: bool,
     pub started: Instant,
     pub restored_tabs: usize,
+    /// Tabs the user closed, most recent last, with their index at the time (`reopen_tab`). In memory only.
+    pub closed_tabs: Vec<(usize, SavedTab)>,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
     pub dev: bool,
     /// This window's id in the shared session file (`store::instance_id`).
@@ -641,6 +748,10 @@ pub struct App {
     /// (`ops::DIR_PROBE_TIMEOUT`). Replaceable so tests can simulate a hanging network share.
     #[doc(hidden)]
     pub dir_probe: fn(&Path) -> bool,
+    /// Whether a folder holds repositories two levels down (the add prompt's auto mode), probed on a
+    /// helper thread with the same timeout. Replaceable so tests can simulate a hanging folder.
+    #[doc(hidden)]
+    pub repo_probe: fn(&Path, &[String]) -> bool,
     pub operator: String,
     /// The time the clocks show instead of now (the README screenshots); `None` in the app.
     #[doc(hidden)]
@@ -775,7 +886,9 @@ impl App {
     }
 
     /// The real app: loads config, reads history, starts the services.
-    pub fn start(paths: Paths, tx: Tx, size: (u16, u16)) -> App {
+    /// `boot`: false when the launch skipped the startup animation (`--no-boot`); the animation then
+    /// counts as not shown and plays on a later launch.
+    pub fn start(paths: Paths, tx: Tx, size: (u16, u16), boot: bool) -> App {
         let loaded = config::load(&paths.config);
         let cfg = loaded.config;
         let recent = Recent::load(paths.data_file("recent.json"));
@@ -814,6 +927,17 @@ impl App {
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
         app.ui_state = ui_state;
+        let version = env!("CARGO_PKG_VERSION");
+        // `noble` and `noble-dev` keep their own record, so alternating between them does not replay it.
+        let dev = app.dev;
+        let last = if dev { &app.ui_state.data.boot_version_dev } else { &app.ui_state.data.boot_version };
+        if boot && boot_due(app.cfg.general.boot_animation, last, version) {
+            app.boot = Some(Boot::now());
+            app.edit_ui_state(|d| {
+                let slot = if dev { &mut d.boot_version_dev } else { &mut d.boot_version };
+                *slot = version.to_string();
+            });
+        }
         crate::hooks::prune(&app.paths.data, std::process::id());
         app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
             // Hooks from an older NOBLE get the events added since (e.g. the subagent ones).
@@ -830,7 +954,7 @@ impl App {
             app.ai = ai::initial_states(&app.cfg.ai, &cache);
         }
         if let Some(err) = loaded.error {
-            app.toast(ToastLevel::Error, err);
+            app.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
         }
         for w in app.keymap.warnings.clone() {
             app.toast(ToastLevel::Warn, w);
@@ -880,7 +1004,6 @@ impl App {
             cfg.general.operator.trim().to_string()
         };
         let launchers = launcher_availability(&cfg.launchers);
-        let boot = cfg.general.boot_animation.then(Boot::now);
         App {
             paths,
             cfg_mtime: None,
@@ -907,18 +1030,22 @@ impl App {
             bridge: BridgeState::default(),
             system: SystemState::default(),
             settings_sel: 0,
+            settings_filter: String::new(),
+            settings_filtering: false,
             settings_scroll: 0,
             settings_follow: true,
             settings_back: None,
             overlay: None,
             toasts: Vec::new(),
-            boot,
+            notices: std::collections::VecDeque::new(),
+            boot: None,
             hits: Vec::new(),
             hover: None,
             slide: None,
             zoom_anim: None,
             fx: fx::Effects::default(),
             drawn_view: None,
+            tip_turn: 0,
             last_body: None,
             drag: None,
             last_click: None,
@@ -932,9 +1059,11 @@ impl App {
             quit: false,
             started: Instant::now(),
             restored_tabs: 0,
+            closed_tabs: Vec::new(),
             dev: false,
             instance: crate::store::instance_id(),
             dir_probe: |p| p.is_dir(),
+            repo_probe: |p, exclude| crate::projects::holds_repos(p, 2, exclude),
             operator,
             clock: None,
             git_requested: HashMap::new(),
@@ -975,19 +1104,40 @@ impl App {
     }
 
     pub fn toast(&mut self, level: ToastLevel, text: impl Into<String>) {
+        self.toast_target(level, text, None);
+    }
+
+    /// A notification whose click does more than dismiss it (see `ToastTarget`).
+    pub fn toast_target(&mut self, level: ToastLevel, text: impl Into<String>, target: Option<ToastTarget>) {
         let text = text.into();
         self.toast_serial += 1;
         self.dirty = true;
-        let secs = match level {
-            ToastLevel::Error => 6,
-            ToastLevel::Warn => 4,
-            _ => 3,
+        // Errors stay until they are clicked away; the others leave after a few seconds.
+        let life = match level {
+            ToastLevel::Error => None,
+            ToastLevel::Warn => Some(Duration::from_secs(4)),
+            _ => Some(Duration::from_secs(3)),
         };
+        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now() });
+        while self.notices.len() > NOTICE_HISTORY {
+            self.notices.pop_front();
+        }
         self.toasts.retain(|t| t.text != text);
-        let born = Instant::now();
-        self.toasts.push(Toast { text, level, born, until: born + Duration::from_secs(secs) });
+        self.toasts.push(Toast {
+            id: self.toast_serial,
+            text,
+            level,
+            born: Instant::now(),
+            life,
+            held: Duration::ZERO,
+            hover_from: None,
+            target,
+        });
+        // At most four on screen: the oldest one that leaves by itself goes first (a sticky error only
+        // when nothing else is left).
         if self.toasts.len() > 4 {
-            self.toasts.remove(0);
+            let oldest = self.toasts.iter().position(|t| t.life.is_some()).unwrap_or(0);
+            self.toasts.remove(oldest);
         }
     }
 
@@ -1015,7 +1165,9 @@ impl App {
     /// A notification sliding in or out.
     fn toast_moving(&self) -> bool {
         self.anim_on()
-            && self.toasts.iter().any(|t| t.born.elapsed() < fx::TOAST_IN + fx::GRACE || Instant::now() >= t.until)
+            && self.toasts.iter().any(|t| {
+                t.born.elapsed() < fx::TOAST_IN + fx::GRACE || t.expires_at().is_some_and(|u| Instant::now() >= u)
+            })
     }
 
     /// How long notifications stay on screen after their time is up (they slide out meanwhile).
@@ -1040,7 +1192,7 @@ impl App {
                 self.view == View::Bridge || self.overlay.is_some()
             }
             // Decided by `apply`: only a value that Home shows counts.
-            AppEvent::Ports(_) | AppEvent::Pr(..) => false,
+            AppEvent::Ports(_) | AppEvent::Pr(..) | AppEvent::AddDecided { .. } => false,
         };
         let before = self.ui_fingerprint();
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
@@ -1071,7 +1223,8 @@ impl App {
                 }
                 if self.panes.contains_key(&id) {
                     let label = self.panes.get(&id).map(|p| p.label()).unwrap_or_default();
-                    self.close_pane(id);
+                    // The shell exited on its own: not a close the user made, so nothing is kept for reopening.
+                    self.close_pane_as(id, false);
                     self.toast(ToastLevel::Info, format!("{label} exited"));
                 }
             }
@@ -1111,6 +1264,13 @@ impl App {
                 self.ai.sort_by_key(|s| order(s.id));
             }
             AppEvent::Ports(list) => return self.set_ports(list),
+            AppEvent::AddDecided { raw, scan } => {
+                if scan {
+                    self.add_project_root(&raw);
+                } else {
+                    self.add_project(&raw);
+                }
+            }
             AppEvent::Pr(path, info) => return self.set_pr(path, info),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();
@@ -1177,20 +1337,22 @@ impl App {
         if loading {
             want(Duration::from_millis(120));
         }
-        if let Some(t) = self.toasts.iter().map(|t| t.until).min() {
+        if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
         }
         // A notification's countdown darkens one cell at a time: wake for the next cell only.
         if self.anim_on() {
+            let now = Instant::now();
             for t in &self.toasts {
+                let (Some(life), None) = (t.life, t.hover_from) else { continue };
                 let cells = crate::ui::toast_cells(&t.text, self.size.0).max(1) as f64;
-                let life = t.until.saturating_duration_since(t.born).as_secs_f64();
-                let step = life / cells;
+                let step = life.as_secs_f64() / cells;
                 if step > 0.0 {
                     // The drawing rounds: the next cell turns half a step past a whole one.
-                    let k = (t.born.elapsed().as_secs_f64() / step + 0.5).floor() + 0.5;
+                    let elapsed = t.active(now).as_secs_f64();
+                    let k = (elapsed / step + 0.5).floor() + 0.5;
                     let at = Duration::from_secs_f64(k * step);
-                    want(at.saturating_sub(t.born.elapsed()).max(Duration::from_millis(16)));
+                    want(at.saturating_sub(Duration::from_secs_f64(elapsed)).max(Duration::from_millis(16)));
                 }
             }
         }
@@ -1645,7 +1807,7 @@ impl App {
         }
         let now = Instant::now();
         let linger = self.toast_linger();
-        self.toasts.retain(|t| t.until + linger > now);
+        self.toasts.retain(|t| t.expires_at().is_none_or(|u| u + linger > now));
         self.request_visible_git();
         self.sync_power_state();
         self.request_home_live_data();
@@ -1695,9 +1857,11 @@ impl App {
         let loaded = config::load(&self.paths.config);
         self.cfg_mtime = loaded.mtime;
         if let Some(err) = loaded.error {
-            self.toast(ToastLevel::Error, err);
+            self.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
             return;
         }
+        // The file loads now: an error toast about it is out of date (and errors never expire by themselves).
+        self.toasts.retain(|t| !matches!(t.target, Some(ToastTarget::Config { .. })));
         self.apply_config(loaded.config);
         // An open welcome card or theme/scheme selector previews on top of the old values: it starts
         // over from the file, so esc cannot put the stale values back.
@@ -1813,6 +1977,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The startup animation: first launch, then once per version; off means never.
+    #[test]
+    fn boot_plays_on_the_first_launch_and_after_an_update() {
+        assert!(boot_due(true, "", "1.2.0"), "first launch");
+        assert!(!boot_due(true, "1.2.0", "1.2.0"), "same version again");
+        assert!(boot_due(true, "1.1.0", "1.2.0"), "after an update");
+        assert!(!boot_due(false, "", "1.2.0") && !boot_due(false, "1.1.0", "1.2.0"), "off: never");
+    }
 
     /// "Jump to waiting agent": a pane that needs you wins over one whose agent finished, the
     /// search starts after the focused pane and wraps around (the focused pane comes last), and

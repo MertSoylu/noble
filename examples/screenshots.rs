@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::style::{Color, Modifier};
 
 use chrono::TimeZone;
@@ -88,32 +88,49 @@ fn write(dir: &Path, name: &str, svg: &str) {
     println!("  {} ({} KB)", path.display(), svg.len() / 1024);
 }
 
-/// Replaces text in the buffer with a shorter one; the freed cells are
-/// filled from the cell right after the old text (the frame line).
+/// Replaces text in the buffer, writing the whole replacement. A longer text takes the frame line
+/// (`─`) that follows it, a shorter one is followed by frame cells, so the rest of the row keeps its place.
+/// Written characters take the style of the first replaced cell.
 fn replace_in(buf: &mut Buffer, from: &str, to: &str) {
-    let (w, h) = (buf.area.width, buf.area.height);
+    let (w, h) = (buf.area.width as usize, buf.area.height);
     let from: Vec<char> = from.chars().collect();
     let to: Vec<char> = to.chars().collect();
     for y in 0..h {
+        let mut row: Vec<Cell> = (0..w as u16).map(|x| buf[(x, y)].clone()).collect();
         let mut x = 0;
-        while x + from.len() as u16 <= w {
-            let hit = from.iter().enumerate().all(|(i, c)| buf[(x + i as u16, y)].symbol().starts_with(*c));
+        while x + from.len() <= row.len() {
+            let hit = from.iter().enumerate().all(|(i, c)| row[x + i].symbol().starts_with(*c));
             if !hit {
                 x += 1;
                 continue;
             }
-            let end = x + from.len() as u16;
-            let filler = if end < w { buf[(end, y)].clone() } else { buf[(x, y)].clone() };
-            for i in 0..from.len() as u16 {
-                let cell = &mut buf[(x + i, y)];
-                match to.get(i as usize) {
-                    Some(c) => {
-                        cell.set_char(*c);
-                    }
-                    None => *cell = filler.clone(),
-                }
+            let end = x + from.len();
+            let filler = if end < row.len() { row[end].clone() } else { row[x].clone() };
+            let written: Vec<Cell> = to
+                .iter()
+                .map(|c| {
+                    let mut cell = row[x].clone();
+                    cell.set_char(*c);
+                    cell
+                })
+                .collect();
+            let mut tail: Vec<Cell> = row[end..].to_vec();
+            if to.len() > from.len() {
+                // Take the frame cells after the old text; what is missing shifts the rest of the row right.
+                let extra = to.len() - from.len();
+                let eat = tail.iter().take_while(|c| c.symbol() == filler.symbol()).count().min(extra);
+                tail.drain(..eat);
+            } else {
+                tail.splice(0..0, std::iter::repeat_n(filler, from.len() - to.len()));
             }
-            x = end;
+            row.truncate(x);
+            row.extend(written.iter().cloned());
+            row.extend(tail);
+            row.truncate(w);
+            x += to.len();
+        }
+        for (x, cell) in row.into_iter().enumerate() {
+            buf[(x as u16, y)] = cell;
         }
     }
 }
@@ -135,7 +152,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     app.operator = "ada".into();
     // A fixed time, so the images change only when the screens do.
     app.clock = chrono::Local.with_ymd_and_hms(2026, 9, 30, 18, 20, 0).single();
-    // Show the rotating tips, not the first-run prefix hint.
+    // Show the screen tips, not the first-run prefix hint.
     app.ui_state.data.prefix_used = true;
     // The image must not depend on which CLIs are installed on this machine.
     for (l, ok) in app.launchers.iter_mut() {
@@ -220,6 +237,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         last_active: Some(now - Duration::from_secs(mins * 60)),
         git,
         repo: true,
+        tasks: Vec::new(),
     };
     app.handle(AppEvent::Projects(vec![
         mk(

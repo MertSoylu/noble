@@ -7,6 +7,46 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Settings → Key bindings (in the Keys section) edits every shortcut from the screen: a list of all actions with
+  their prefix and direct keys, ↑↓ to select, `/` to filter, `⏎` to rebind the prefix key, `d` for the direct chord,
+  `x` (or del) to unbind and `r` to restore the default. A key another action already has is asked about first
+  ("ctrl+a n is Next Tab — replace? y/n"); keys NOBLE cannot bind (the prefix itself, ctrl+alt with a symbol, a direct key
+  without ctrl or alt such as a letter, Enter or an arrow, except F1–F12) are refused with the reason. Each change is written to `config.toml` under its table, the
+  rest of the file and its comments are kept, and the keys reload at once. Clicking a row selects it; double-clicking
+  starts the rebinding. The `?` reference points to it.
+- Home's project card lists the selected project's quick tasks as a TASKS row of clickable chips (`▸ npm run dev`)
+  when there is room. Tasks are read from the project folder: the `package.json` scripts (run with npm, pnpm, yarn
+  or bun, by the lockfile that exists), `cargo build`, `cargo test` and `cargo run` for a Cargo project, the plain
+  Makefile targets and the justfile recipes (at most 12 per project). A chip runs its command in a new tab in the
+  project folder, named "project · command". Home's `T` (shift+t) opens the palette with the project's tasks ("Run: npm run
+  dev", group TASK), shown only when the project has tasks; the hint bar shows `T run task` then too, unless a
+  launcher uses `T` (launchers are checked first and keep the key). The tasks are
+  detected by the project scan, so a new script shows up on the next rescan.
+- Closing a terminal tab (close tab, its last pane, middle-click or ×) can be undone: prefix `T` (Reopen Closed
+  Tab, `reopen_tab`) brings back the last ten closed tabs, most recent first, with their split layout, each
+  pane's directory, launcher and name, at their old index and focused. The tab-closed notice names the key; the
+  palette lists the action only when there is something to reopen. The history is kept in memory, not saved,
+  and a shell that exits on its own is not kept.
+- Home has one add key: `a` opens the add prompt in auto mode, which decides on Enter. A git repository (or a
+  folder with no repository within two levels) is added as a project ("added project X"); a folder with git
+  repositories inside is scanned for them ("scanning X for projects"). `tab` cycles auto, folder to scan and one
+  project. `A` still opens the prompt in project mode, and the palette's "Add Project…" still works.
+- Split tabs fade the text of the panes without the focus (`terminal.dim_inactive`, Settings → Terminal → "Dim
+  inactive panes", on by default): their colors are mixed 30% toward the pane background, so the focused pane
+  stands out. A zoomed pane is alone and not dimmed; ANSI colors that the palette leaves to the outer terminal
+  get the terminal's dim attribute instead.
+- The keyboard reference (`?`) is interactive: typing filters its rows by key or description (the title shows
+  `/query`; sections without a match are hidden), ↑↓ select a row and ⏎ or a click runs its action and closes
+  the reference, and esc clears the filter before it closes. Wide screens lay the sections out in two columns
+  (from 120 columns) or three (from 170), each section kept whole; a narrow screen keeps one scrolling column.
+- The command palette shows which letters of each title the query matched, in bold accent (the title is cut
+  with "…" as before).
+- The palette lists the last ten commands run from it first, most recent first, when the query is empty; the
+  list is kept in `state.json` (`palette_recent`).
+- Every Settings row is in the command palette as `Setting: <name> (<value>)` (group SET): running it does what
+  ⏎ does on that row, and a popup row (theme, terminal colors, quick launch) opens its picker.
+- Settings filter: `/` on the Settings page narrows the rows by name (the query shows in the frame's title,
+  `esc` clears it, and "no settings match" shows when nothing fits); the status bar lists "/ search".
 - Prefix `u` (Open Link on Screen, `open_link`) lists the URLs and `file:line` links on the focused pane's
   screen, newest first, and opens the chosen one: the keyboard way to ctrl+click, which iTerm2 and Terminal.app
   on macOS keep for their own menu.
@@ -17,9 +57,36 @@ All notable changes to NOBLE are documented here. The format is based on
 - The tab bar's "+N" chip opens the command palette listing only the tabs, for the tabs the bar has no room for.
 - Actions `enable_hooks` and `dismiss_hooks_offer`: the one-time Claude status offer can be accepted or
   dismissed from the palette while it shows.
+- Action `notifications` (Show Notifications) lists the last 50 notifications in the command palette, newest
+  first, with their time; choosing one copies its full text.
+- Setting `general.show_tips` (Settings → Show tips, Display) turns the status bar tips off.
+- The first time a shell key (`alt+t`, `alt+p` …) goes to the shell in a terminal although NOBLE has a shortcut
+  for it, the status bar says once which chord reaches that action (`alt+t went to the shell · NOBLE: ctrl+a t`;
+  when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
 ### Changed
+- Home's "/ search" label moved from the Projects panel's bottom button row to its top border, next to the
+  count ("/ search · 6"); a click still starts the filter.
+- The add prompt replaces the separate `a` (folder to scan) and `A` (one project) choices: the status bar shows
+  "a add", the help and the empty-state texts mention only `a`, and the palette's "Add Project…" has no key hint.
+- The confirmation toasts say what was added: "added project X" or "scanning X for projects".
+- Settings on a terminal 140 columns or wider: the page widens to 130 columns, the list keeps its first 80, and a
+  panel on the right shows the selected setting's label in bold with its description wrapped. Narrower screens
+  show the description dimmed under the selected row (it used to sit on the bottom row, far from the selection).
+- In the keyboard reference `j`, `k`, space and `q` type into the filter: ↑↓ and PgUp/PgDn move the selection
+  (the list follows it), the wheel scrolls, and `?` (with no filter typed) or esc closes it.
+- The startup animation plays on the first launch and on the first launch after an update, not on every launch.
+  `general.boot_animation = true` keeps that behavior, `false` turns it off for good; `--no-boot` still skips it.
+- The status bar tips fit the screen: terminal tips in a terminal, Home's on Home, process list tips on System, none
+  on Settings. A tip changes when the screen changes instead of every 20 seconds.
+- The terminal hint "drag border resize" appears only on a tab with more than one pane.
+- Error notifications stay until they are clicked away; the others leave after 3 s (4 s for warnings). The pointer
+  on a notification pauses its countdown, and a click dismisses it.
+- A config error gives its line and column (`config line 5, column 11: …`), and clicking that notification opens
+  the config file at the line.
 - Closing a tab with several panes asks first, even when they are idle.
+- The amber theme's `warn` color is a red-orange instead of a second orange, so git's "changed" state stands out
+  from the accent. Everforest's `warn` moved from yellow to its orange for the same reason.
 - Removing a project from the list asks first (`A` on Home adds it back).
 - Saving a workspace under a name that is already taken asks before replacing it; a blank name keeps the prompt
   open with an error.
@@ -28,8 +95,26 @@ All notable changes to NOBLE are documented here. The format is based on
 - Home's "/ search" label starts the project filter when clicked.
 - One name per feature: "Pass Keys to the App" in the palette and "? keys" in the hints.
 - Search Scrollback and Pass Keys to the App are listed in the palette only in a terminal, where they apply.
+- The top bar's tab strip slides to keep the active terminal tab visible: tabs hidden before it are summarized
+  as a "‹N" chip (carrying the most urgent marker, like "+N"). Home drops the small clock (the big one is
+  there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- A config error toast goes away when the file loads again, and opening the notification list clears the toasts on screen.
+- The key editor refuses direct ctrl+letter shortcuts (ctrl+c, ctrl+d, ctrl+r … belong to the shell), keeps CRLF line endings
+  in `config.toml`, and adds a key before a comment that titles the next table. Reopening a tab says its launch commands run again.
+- Adding a folder on Home checks the folder on a helper thread, and project files read for quick tasks are capped at 256 KiB.
+- Resetting a shortcut (`r`) keeps a key that another action has taken since, and says so ("ctrl+a t stays on
+  Zoom"). Clicking a notification dismisses that notification even when another one left the screen first.
+- The key editor refuses to write while `config.toml` does not parse (the error names the line), and refuses a
+  bindings table written inline or as dotted keys rather than adding a second one. Spaces inside table headers are
+  accepted.
+- The startup animation plays once for `noble` and once for `noble-dev`: alternating between them no longer replays it.
+- Adding a folder in auto mode no longer freezes the screen while its subfolders are checked: a folder that does
+  not answer within two seconds is added as a project.
+- The README terminal screenshot shows the full pane path (`D:\dev\noble`); the screenshot generator wrote only as
+  many characters as the text it replaced, which cut the path short.
+- The active terminal tab no longer hides inside the "+N" chip when there are more tabs than fit in the top bar.
 - Key hints follow the keymap: the help's tab rows, the welcome screen's palette key, the terminal status bar's
   home key and the status-bar tips show rebound keys and leave out unbound ones instead of the defaults.
 - Platform text: the terminal scheme preview shows a Unix prompt on Linux/macOS instead of `PS C:\>`, and the

@@ -22,6 +22,7 @@ pub struct Config {
 pub struct General {
     pub theme: String,
     pub transparent: bool,
+    /// The startup animation: on the first launch and the first launch after an update (false: never).
     pub boot_animation: bool,
     /// Page transitions, pane zoom, fades and other small animations.
     pub animations: bool,
@@ -33,6 +34,8 @@ pub struct General {
     pub operator: String,
     /// Check GitHub once a day for a new release.
     pub check_updates: bool,
+    /// Hints in the status bar, about the current screen (a new one with every screen change).
+    pub show_tips: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -56,6 +59,8 @@ pub struct TerminalCfg {
     pub notify: bool,
     /// Report the end of a background command that ran at least this many seconds (0 = off).
     pub notify_after: u64,
+    /// In a split tab, the unfocused panes are drawn toward their background (their text fades).
+    pub dim_inactive: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -118,6 +123,7 @@ impl Default for General {
             show_seconds: true,
             operator: String::new(),
             check_updates: true,
+            show_tips: true,
         }
     }
 }
@@ -136,6 +142,7 @@ impl Default for TerminalCfg {
             foreground: String::new(),
             notify: true,
             notify_after: 10,
+            dim_inactive: true,
         }
     }
 }
@@ -223,13 +230,14 @@ pub const DEFAULT_CONFIG: &str = r#"# NOBLE configuration — the app reloads it
 [general]
 theme = "amber"          # pickable from the Settings tab (22 themes)
 transparent = false      # true: the terminal's own background (transparency) shows
-boot_animation = true
+boot_animation = true    # first launch and first launch after an update (false: never)
 animations = true        # page transitions, zoom, fades and other small animations
 animations_on_battery = true  # keep them while a laptop runs on battery (false: off on battery)
 clock_24h = true
 show_seconds = true
 operator = ""            # greeting name; empty = user name
 check_updates = true     # check once a day for a new release; notice appears bottom right
+show_tips = true         # status bar tips about the current screen (changes with the screen)
 
 [terminal]
 shell = ""               # empty = automatic (pwsh → powershell → cmd | $SHELL)
@@ -243,6 +251,7 @@ background = ""          # override the scheme background, e.g. '#c8c8c8' (empty
 foreground = ""          # override the scheme text color, e.g. '#2e2e2e'
 notify = true            # notify when a background tab needs attention (bell, app notification)
 notify_after = 10        # report the end of a background command that took at least this many seconds (0 = off)
+dim_inactive = true      # in a split tab, fade the text of the panes that do not have the focus
 
 [keys]
 prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell
@@ -364,15 +373,38 @@ impl Paths {
     }
 }
 
-/// Load result: the config and (optionally) an error message. The error is not fatal.
+/// Load result: the config and (optionally) an error. The error is not fatal.
 pub struct Loaded {
     pub config: Config,
-    pub error: Option<String>,
+    pub error: Option<ConfigError>,
     pub mtime: Option<SystemTime>,
 }
 
-pub fn parse(text: &str) -> Result<Config, String> {
-    let mut cfg: Config = toml::from_str(text).map_err(|e| e.message().to_string())?;
+/// A config that does not load: the message (one line, shown as a toast) and the 1-based line of the
+/// mistake, which lets the toast open the file there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigError {
+    pub text: String,
+    pub line: Option<u32>,
+}
+
+/// The error for a TOML parse failure: `config line 5, column 3: <message>` (the position is
+/// computed from the byte offset of the error, so it also works for text that is not one line).
+fn parse_error(text: &str, e: &toml::de::Error) -> ConfigError {
+    let message = e.message().split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(span) = e.span() else {
+        return ConfigError { text: format!("config: {message}"), line: None };
+    };
+    let bytes = text.as_bytes();
+    let before = &bytes[..span.start.min(bytes.len())];
+    let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
+    let line_start = before.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    let column = String::from_utf8_lossy(&before[line_start..]).chars().count() + 1;
+    ConfigError { text: format!("config line {line}, column {column}: {message}"), line: Some(line as u32) }
+}
+
+pub fn parse(text: &str) -> Result<Config, ConfigError> {
+    let mut cfg: Config = toml::from_str(text).map_err(|e| parse_error(text, &e))?;
     // Removed providers are dropped silently.
     cfg.ai.providers.retain(|p| {
         matches!(
@@ -419,12 +451,15 @@ pub fn load(path: &Path) -> Loaded {
     match std::fs::read_to_string(path) {
         Ok(text) => match parse(&text) {
             Ok(config) => Loaded { config, error: None, mtime },
-            Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
+            Err(error) => Loaded { config: Config::default(), error: Some(error), mtime },
         },
         // No file (and none could be written, e.g. a read-only home): the defaults, silently.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
         // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.
-        Err(e) => Loaded { config: Config::default(), error: Some(format!("config: {e}")), mtime },
+        Err(e) => {
+            let error = ConfigError { text: format!("config: {e}"), line: None };
+            Loaded { config: Config::default(), error: Some(error), mtime }
+        }
     }
 }
 
@@ -620,6 +655,154 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     s
 }
 
+/// The key of a `key = value` line, `None` for comments, headers, blank lines and anything that is not
+/// one single-line pair. Parsed as TOML, so quoted keys such as `"="` or `"\""` come out right.
+fn line_key(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let table: toml::Table = toml::from_str(t).ok()?;
+    let mut keys = table.keys();
+    let key = keys.next()?.clone();
+    keys.next().is_none().then_some(key)
+}
+
+/// Two spellings of one key chord (`ctrl+a` and `Ctrl+A`) are the same entry.
+fn same_chord(a: &str, b: &str) -> bool {
+    match (crate::keys::Chord::parse(a), crate::keys::Chord::parse(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// A TOML string literal (quoted and escaped).
+fn quoted(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
+/// Adds `entry` at the end of the table in `out`: before its trailing blank lines, and before a comment
+/// that sits right above the next header (with no blank line in between) because that comment titles the
+/// next table.
+fn push_at_table_end(out: &mut Vec<String>, entry: &str) {
+    let mut tail = Vec::new();
+    while let Some(l) = out.pop_if(|l| l.trim().is_empty() || l.trim().starts_with('#')) {
+        tail.push(l);
+    }
+    tail.reverse();
+    // With a blank line in the run, the entry goes before the first one (comments above it belong to the
+    // table); without one, before the whole run.
+    let at = tail.iter().position(|l| l.trim().is_empty()).unwrap_or(0);
+    out.extend(tail.drain(..at));
+    out.push(entry.to_string());
+    out.extend(tail);
+}
+
+/// The dotted name of the table a header line opens (`[keys.prefix_bindings]`, also spelled
+/// `[ keys . "prefix_bindings" ]`); `None` for other lines and for arrays of tables (`[[launchers]]`).
+fn header_name(line: &str) -> Option<String> {
+    let inner = strip_comment(line.trim()).trim().strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('[') || inner.ends_with(']') {
+        return None;
+    }
+    let parts: Vec<&str> = inner.split('.').map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'')).collect();
+    Some(parts.join("."))
+}
+
+/// Whether `table` exists in the text without a header line for it: an inline table
+/// (`prefix_bindings = { … }`) or dotted keys (`prefix_bindings."x" = …`). Adding a header for it
+/// would then make a duplicate table, so the edit is refused instead.
+fn defined_without_header(text: &str, table: &str) -> bool {
+    let Ok(doc) = text.parse::<toml::Table>() else { return false };
+    let mut node: Option<&toml::Table> = Some(&doc);
+    for part in table.split('.') {
+        node = node.and_then(|t| t.get(part)).and_then(toml::Value::as_table);
+    }
+    node.is_some() && !text.lines().any(|l| header_name(l).as_deref() == Some(table))
+}
+
+/// The one edit behind `set_binding` and `remove_binding`: `Some(value)` writes `"chord" = "value"` in
+/// `[table]` (in place of the line of that chord, its comment kept; else at the end of the table; the
+/// table is created at the end of the file when missing), `None` deletes the chord's line. Everything
+/// else stays as it is; a file without a change is returned untouched. The result must parse as a
+/// config: otherwise nothing is written and the error says why. A table written in another form
+/// (see `defined_without_header`) is refused rather than duplicated.
+fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> Result<String, String> {
+    if defined_without_header(text, table) {
+        return Err(format!(
+            "{table} is written in another form in config.toml (inline or dotted keys): edit it by hand"
+        ));
+    }
+    let header = format!("[{table}]");
+    let entry = value.map(|v| format!("{} = {}", quoted(chord), quoted(v)));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_table = false;
+    let mut seen_table = false;
+    let mut done = false;
+    let mut changed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if in_table && !done {
+                if let Some(e) = &entry {
+                    push_at_table_end(&mut out, e);
+                    changed = true;
+                }
+                done = true;
+            }
+            in_table = header_name(line).as_deref() == Some(table);
+            seen_table |= in_table;
+        } else if in_table && line_key(line).is_some_and(|k| same_chord(&k, chord)) {
+            // The first line of the chord is replaced (or dropped); any later duplicate is dropped.
+            if !done {
+                if let Some(e) = &entry {
+                    let comment = comment_start(line).map(|i| format!("  {}", &line[i..])).unwrap_or_default();
+                    out.push(format!("{e}{comment}"));
+                }
+                done = true;
+            }
+            changed = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !done && let Some(e) = &entry {
+        if in_table {
+            push_at_table_end(&mut out, e);
+            changed = true;
+        } else if !seen_table {
+            out.push(String::new());
+            out.push(header);
+            out.push(e.clone());
+            changed = true;
+        }
+    }
+    let updated = if changed {
+        // `lines()` dropped the `\r` of a CRLF file (Notepad on Windows): the file keeps its line endings.
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut s = out.join(eol);
+        s.push_str(eol);
+        s
+    } else {
+        text.to_string()
+    };
+    match parse(&updated) {
+        Ok(_) => Ok(updated),
+        Err(e) => Err(format!("not saved, the edit would break config.toml: {}", e.text)),
+    }
+}
+
+/// Sets `"chord" = "value"` in the `[table]` of the config text (`value` "none" unbinds the chord),
+/// preserving the comments and every other line.
+pub fn set_binding(text: &str, table: &str, chord: &str, value: &str) -> Result<String, String> {
+    edit_binding(text, table, chord, Some(value))
+}
+
+/// Removes the `chord` line from the `[table]` of the config text, so the default binding applies again.
+pub fn remove_binding(text: &str, table: &str, chord: &str) -> Result<String, String> {
+    edit_binding(text, table, chord, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +934,15 @@ providers = [\"claude\", \"gemini\"]
             let loaded = load(&path);
             assert_eq!(loaded.error.is_some(), broken, "{:?}: {:?}", String::from_utf8_lossy(bytes), loaded.error);
         }
+        // The line (and column) of a TOML mistake stay in the message, so the toast can open the file there.
+        let at = |text: &str| parse(text).err().map(|e| (e.line, e.text));
+        assert_eq!(
+            at("[general]\ntheme = \"ice\"\n\n[ai]\nenabled = \"yes\"\n"),
+            Some((Some(5), "config line 5, column 11: invalid type: string \"yes\", expected a boolean".into()))
+        );
+        let (line, text) = at("[general\ntheme=").unwrap();
+        assert_eq!(line, Some(1));
+        assert!(text.starts_with("config line 1, column ") && !text.contains('\n'), "{text}");
         std::fs::remove_file(&path).unwrap();
         let loaded = load(&path);
         assert!(loaded.error.is_none() && path.is_file());
@@ -862,6 +1054,80 @@ theme = \"ice\"
         assert!(out.contains("roots = [\"~/x\"]") && out.contains("max_depth = 3"), "{out}");
         assert_eq!(parse(&out).map(|c| c.projects.max_depth), Ok(3), "{out}");
         assert_eq!(strip_value("roots = [\"a=b\"]"), " [\"a=b\"]");
+    }
+
+    /// A CRLF file stays CRLF, and a comment titling the next table stays with that table.
+    #[test]
+    fn set_binding_keeps_line_endings_and_next_section_comment() {
+        let crlf = "[keys.prefix_bindings]\r\n\"v\" = \"zoom\"\r\n\r\n[terminal]\r\n";
+        let out = set_binding(crlf, "keys.prefix_bindings", "%", "help").unwrap();
+        assert_eq!(out.matches('\n').count(), out.matches("\r\n").count(), "{out:?}");
+        assert!(out.contains("\"%\" = \"help\"\r\n\r\n[terminal]"), "{out:?}");
+        let text = "[keys.prefix_bindings]\n\"v\" = \"zoom\"\n# --- terminal ---\n[terminal]\n";
+        let out = set_binding(text, "keys.prefix_bindings", "%", "help").unwrap();
+        assert!(out.contains("\"%\" = \"help\"\n# --- terminal ---\n[terminal]"), "{out}");
+    }
+
+    #[test]
+    fn set_binding_writes_into_its_table_and_keeps_the_rest() {
+        let text = "[keys]\nprefix = \"ctrl+a\"   # the prefix\n\n[keys.prefix_bindings]\n# \"%\" = \"zoom\"\n\"v\" = \"split_right\"  # old\n\n[terminal]\nscrollback = 5000\n";
+        // A chord with a line is rewritten in place, its comment kept.
+        let out = set_binding(text, "keys.prefix_bindings", "v", "none").unwrap();
+        assert!(out.contains("\"v\" = \"none\"  # old\n"), "{out}");
+        assert!(out.contains("prefix = \"ctrl+a\"   # the prefix\n"), "{out}");
+        assert!(out.contains("# \"%\" = \"zoom\"\n"), "a commented example stays: {out}");
+        assert!(out.contains("scrollback = 5000\n"), "{out}");
+        // A new chord goes to the end of its table, before the blank line that separates the next one.
+        let out = set_binding(&out, "keys.prefix_bindings", "%", "split_right").unwrap();
+        assert!(out.contains("\"v\" = \"none\"  # old\n\"%\" = \"split_right\"\n\n[terminal]"), "{out}");
+        // Another spelling of a line's chord ("Ctrl+A" for "ctrl+a") replaces that line.
+        let with_line = "[keys.prefix_bindings]\n\"ctrl+a\" = \"zoom\"\n";
+        let out2 = set_binding(with_line, "keys.prefix_bindings", "Ctrl+A", "help").unwrap();
+        assert_eq!(out2, "[keys.prefix_bindings]\n\"Ctrl+A\" = \"help\"\n", "{out2}");
+        // A missing table is created at the end of the file.
+        let out = set_binding("[general]\ntheme = \"amber\"\n", "keys.direct_bindings", "alt+t", "new_tab").unwrap();
+        assert_eq!(out, "[general]\ntheme = \"amber\"\n\n[keys.direct_bindings]\n\"alt+t\" = \"new_tab\"\n");
+        // Keys that TOML would read as syntax are quoted properly and read back.
+        let out = set_binding("", "keys.prefix_bindings", "=", "zoom").unwrap();
+        let out = set_binding(&out, "keys.prefix_bindings", "\"", "help").unwrap();
+        let parsed = parse(&out).expect("valid config");
+        assert_eq!(parsed.keys.prefix_bindings.get("="), Some(&"zoom".to_string()));
+        assert_eq!(parsed.keys.prefix_bindings.get("\""), Some(&"help".to_string()));
+        // Writing the value a line already has changes nothing.
+        assert_eq!(set_binding(text, "keys.prefix_bindings", "v", "split_right").unwrap(), text);
+    }
+
+    #[test]
+    fn remove_binding_restores_the_default_line_away() {
+        let text = "[keys.direct_bindings]\n\"alt+t\" = \"zoom\"\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n";
+        let out = remove_binding(text, "keys.direct_bindings", "alt+t").unwrap();
+        assert_eq!(out, "[keys.direct_bindings]\n\"alt+x\" = \"none\"\n\n[ai]\nenabled = true\n");
+        // Nothing to remove: the text is returned as it was (line endings included).
+        let crlf = "[keys.direct_bindings]\r\n\"alt+x\" = \"none\"\r\n";
+        assert_eq!(remove_binding(crlf, "keys.direct_bindings", "alt+t").unwrap(), crlf);
+        assert_eq!(remove_binding(crlf, "keys.prefix_bindings", "alt+t").unwrap(), crlf);
+    }
+
+    #[test]
+    fn binding_edits_accept_spaced_headers_and_refuse_other_forms() {
+        // Whitespace around the brackets and the dots names the same table.
+        let spaced = "[ keys . prefix_bindings ]\n\"v\" = \"zoom\"\n";
+        assert_eq!(
+            set_binding(spaced, "keys.prefix_bindings", "v", "none").unwrap(),
+            "[ keys . prefix_bindings ]\n\"v\" = \"none\"\n"
+        );
+        // An inline table or dotted keys already hold the table: a second header would duplicate it.
+        let inline = "[keys]\nprefix_bindings = { v = \"zoom\" }\n";
+        assert!(set_binding(inline, "keys.prefix_bindings", "x", "zoom").is_err());
+        let dotted = "[keys]\nprefix_bindings.\"v\" = \"zoom\"\n";
+        assert!(remove_binding(dotted, "keys.prefix_bindings", "v").is_err());
+        let root_dotted = "keys.direct_bindings.\"alt+t\" = \"zoom\"\n";
+        assert!(set_binding(root_dotted, "keys.direct_bindings", "alt+x", "zoom").is_err());
+        // An edit that leaves an invalid config is not returned: `keys` is an inline table here.
+        let inline_keys = "keys = { prefix = \"ctrl+a\" }\n";
+        assert!(set_binding(inline_keys, "keys.prefix_bindings", "v", "zoom").is_err());
+        // A file that does not parse is refused too.
+        assert!(set_binding("[keys\n", "keys.prefix_bindings", "v", "zoom").is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{App, Confirm, ConfirmAction, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
+use super::{AddMode, App, Confirm, ConfirmAction, HelpState, Hit, Overlay, Prompt, PromptPurpose, ToastLevel, View};
 use crate::keys::Action;
 use crate::sensors::SensorRequest;
 use crate::store::{SavedTab, Workspace};
@@ -16,6 +16,9 @@ use crate::theme;
 /// How long restoring a session or workspace waits for the saved directories to answer; a
 /// network share that stopped responding would otherwise hold up startup.
 pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many closed tabs `reopen_tab` can bring back.
+const CLOSED_TABS_KEPT: usize = 10;
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -50,6 +53,7 @@ impl App {
                 View::Term(i) => self.request_close_tab(i),
                 _ => self.no_op("no tab here — open a terminal tab first"),
             },
+            Action::ReopenTab => self.reopen_tab(),
             Action::NextTab => self.cycle_tab(1),
             Action::PrevTab => self.cycle_tab(-1),
             Action::GoTab(n) => self.go_tab(n as usize),
@@ -79,7 +83,7 @@ impl App {
             Action::ResizeUp => self.nudge(Dir::Col, -0.05),
             Action::ResizeDown => self.nudge(Dir::Col, 0.05),
             Action::Palette => self.open_palette(),
-            Action::Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
+            Action::Help => self.overlay = Some(Overlay::Help(HelpState::default())),
             Action::Quit => self.request_quit(),
             Action::ReloadConfig => self.reload_config(true),
             Action::OpenConfig => self.open_config(),
@@ -108,8 +112,8 @@ impl App {
             Action::ScrollUp => self.scroll_page(1),
             Action::ScrollDown => self.scroll_page(-1),
             Action::Search => self.open_search(),
-            Action::AddProjectFolder => self.open_add_prompt(false),
-            Action::AddProject => self.open_add_prompt(true),
+            Action::AddProjectFolder => self.open_add_prompt(AddMode::Auto),
+            Action::AddProject => self.open_add_prompt(AddMode::Project),
             Action::RemoveProject => match self.selected_project().map(|p| p.path.clone()) {
                 Some(path) if self.view == View::Bridge => self.request_remove_project(path),
                 _ => self.toast(ToastLevel::Info, "select a project on Home first"),
@@ -154,6 +158,7 @@ impl App {
             Action::DismissUpdate => self.dismiss_update(),
             Action::EnableHooks => self.accept_hooks_offer(),
             Action::DismissHooksOffer => self.dismiss_hooks_offer(),
+            Action::Notifications => self.open_notifications(),
         }
     }
 
@@ -357,9 +362,23 @@ impl App {
         }
     }
 
+    /// Closes tab `i` the user asked for: it is kept for `reopen_tab`, and a toast names the key.
     pub fn remove_tab(&mut self, i: usize) {
+        self.remove_tab_as(i, true);
+    }
+
+    /// `user` is false when the tab's last shell exited on its own: that is not kept and not announced.
+    fn remove_tab_as(&mut self, i: usize, user: bool) {
         if i >= self.tabs.len() {
             return;
+        }
+        // Snapshot first: the panes' directories and launchers are read from `self.panes`.
+        if user {
+            let saved = self.saved_tab(&self.tabs[i]);
+            self.closed_tabs.push((i, saved));
+            if self.closed_tabs.len() > CLOSED_TABS_KEPT {
+                self.closed_tabs.remove(0);
+            }
         }
         let tab = self.tabs.remove(i);
         for id in tab.panes() {
@@ -379,6 +398,35 @@ impl App {
         };
         if let View::Term(v) = self.view {
             self.tabs[v].activity = false;
+        }
+        if user {
+            let text = match self.keymap.hint(Action::ReopenTab) {
+                Some(key) => format!("tab closed · {key} reopens it (launch commands run again)"),
+                None => "tab closed".into(),
+            };
+            self.toast(ToastLevel::Info, text);
+        }
+    }
+
+    /// Reopens the most recently closed tab through the restore path, at its old index (or the end),
+    /// and focuses it. Nothing to reopen: a toast says so.
+    pub fn reopen_tab(&mut self) {
+        let Some((index, tab)) = self.closed_tabs.last().cloned() else {
+            return self.no_op("no closed tab to reopen");
+        };
+        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab] };
+        let before = self.tabs.len();
+        if self.open_workspace(&ws) == 0 {
+            // Every pane failed to start (already reported): the tab stays in the list for another try.
+            return;
+        }
+        self.closed_tabs.pop();
+        if self.tabs.len() == before + 1
+            && let Some(opened) = self.tabs.pop()
+        {
+            let at = index.min(self.tabs.len());
+            self.tabs.insert(at, opened);
+            self.view = View::Term(at);
         }
     }
 
@@ -489,14 +537,24 @@ impl App {
         }));
     }
 
+    /// Closes a pane the user asked to close (a closed last pane closes its tab, kept for `reopen_tab`).
     pub fn close_pane(&mut self, id: PaneId) {
-        self.panes.remove(&id);
-        self.forget_agent(id);
-        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
+        self.close_pane_as(id, true);
+    }
+
+    /// `user` is false when the pane's shell exited on its own (see `remove_tab_as`).
+    pub(super) fn close_pane_as(&mut self, id: PaneId, user: bool) {
+        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else {
+            self.panes.remove(&id);
+            self.forget_agent(id);
+            return;
+        };
         if self.tabs[ti].panes().len() <= 1 {
-            self.remove_tab(ti);
+            self.remove_tab_as(ti, user);
             return;
         }
+        self.panes.remove(&id);
+        self.forget_agent(id);
         let body = self.body();
         let tab = &mut self.tabs[ti];
         let (rects, _) = tab.root.layout(body);
@@ -603,6 +661,27 @@ impl App {
             p.launcher = Some(launcher.command.clone());
         }
         self.note_agent_offer(&launcher.command);
+    }
+
+    /// Home's `T` (tasks) is free unless a shown launcher uses that key: launchers are checked first.
+    pub fn tasks_key_free(&self) -> bool {
+        !self.quick_launchers().any(|(_, l)| l.key.starts_with('T'))
+    }
+
+    /// Runs a quick task of the selected project (a card chip) in a new tab there.
+    pub fn run_project_task(&mut self, idx: usize) {
+        let Some(p) = self.selected_project() else { return };
+        let Some(command) = p.tasks.get(idx).cloned() else { return };
+        let path = p.path.clone();
+        self.run_task(path, &command);
+    }
+
+    /// Runs a task command in a new tab in `path`, named like a launcher tab ("project · npm run dev").
+    /// Unlike a launcher it is not remembered for the session: a restore does not start it again.
+    pub fn run_task(&mut self, path: PathBuf, command: &str) {
+        let origin = format!("{} · {command}", dir_name(&path));
+        let invocation = self.shell.invocation(command);
+        self.new_tab(path, Some(&invocation), Some(origin));
     }
 
     pub fn open_project_shell(&mut self, path: PathBuf) {
@@ -778,10 +857,10 @@ impl App {
         }
     }
 
-    /// The add prompt: one project folder (`project`) or a folder to scan for repos.
-    pub fn open_add_prompt(&mut self, project: bool) {
-        let mut p = Prompt::new(String::new(), String::new(), PromptPurpose::AddRoot);
-        p.set_add_mode(project);
+    /// The add prompt (`a` opens it in auto mode, `A` in project mode).
+    pub fn open_add_prompt(&mut self, mode: AddMode) {
+        let mut p = Prompt::new(String::new(), String::new(), PromptPurpose::Add(mode));
+        p.set_add_mode(mode);
         self.overlay = Some(Overlay::Prompt(p));
     }
 
@@ -789,10 +868,7 @@ impl App {
         let value = prompt.value.trim().to_string();
         // The add prompts validate first: on an error the prompt stays open with the typed text.
         let check = match prompt.purpose {
-            PromptPurpose::AddRoot => Self::resolve_folder(&value).map(|_| ()),
-            PromptPurpose::AddProject => Self::resolve_folder(&value).and_then(|p| {
-                crate::projects::project_at(&p).map(|_| ()).ok_or_else(|| format!("not a folder: {}", p.display()))
-            }),
+            PromptPurpose::Add(_) => Self::resolve_folder(&value).map(|_| ()),
             PromptPurpose::SaveWorkspace if value.is_empty() => Err("type a name first".to_string()),
             _ => Ok(()),
         };
@@ -809,8 +885,7 @@ impl App {
                     self.tabs[ti].name = (!value.is_empty()).then_some(value);
                 }
             }
-            PromptPurpose::AddRoot => self.add_project_root(&value),
-            PromptPurpose::AddProject => self.add_project(&value),
+            PromptPurpose::Add(mode) => self.add_by_mode(mode, &value),
             PromptPurpose::SaveWorkspace => {
                 // A name that is already taken is replaced only after a confirmation.
                 if self.workspaces.list.iter().any(|w| w.name.eq_ignore_ascii_case(&value)) {
@@ -859,29 +934,28 @@ impl App {
         }
     }
 
+    /// One tab as the session file and the workspaces store it.
+    fn saved_tab(&self, t: &Tab) -> SavedTab {
+        let layout = self.save_node(&t.root);
+        // A launcher tab whose launcher pane is gone restores as a plain tab, so it is
+        // saved under the project name alone (`open_workspace` marks it by its panes).
+        let origin = match t.origin.rsplit_once(" · ") {
+            Some((base, _)) if t.launched && !has_launch(&layout) => base.to_string(),
+            _ => t.origin.clone(),
+        };
+        SavedTab {
+            name: t.name.clone(),
+            origin,
+            layout,
+            focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
+        }
+    }
+
     pub fn snapshot(&self, name: &str) -> Workspace {
         Workspace {
             name: name.to_string(),
             saved_at: chrono::Utc::now().timestamp(),
-            tabs: self
-                .tabs
-                .iter()
-                .map(|t| {
-                    let layout = self.save_node(&t.root);
-                    // A launcher tab whose launcher pane is gone restores as a plain tab, so it is
-                    // saved under the project name alone (`open_workspace` marks it by its panes).
-                    let origin = match t.origin.rsplit_once(" · ") {
-                        Some((base, _)) if t.launched && !has_launch(&layout) => base.to_string(),
-                        _ => t.origin.clone(),
-                    };
-                    SavedTab {
-                        name: t.name.clone(),
-                        origin,
-                        layout,
-                        focus: t.panes().iter().position(|p| *p == t.focus).unwrap_or(0),
-                    }
-                })
-                .collect(),
+            tabs: self.tabs.iter().map(|t| self.saved_tab(t)).collect(),
         }
     }
 

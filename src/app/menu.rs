@@ -141,7 +141,7 @@ impl App {
         items.push(item("Copy path", "", MenuCmd::CopyText(path.display().to_string())));
         let pin = if self.ui_state.is_pinned(&path) { "Unpin" } else { "Pin to top" };
         items.push(item(pin, "", MenuCmd::TogglePin(path.clone())));
-        // Hides it from the list for good (the folder is not touched); A adds it back.
+        // Hides it from the list for good (the folder is not touched); a adds it back.
         items.push(item("Remove from list", "", MenuCmd::RemoveProject(path)));
         self.open_menu(name, x, y, items);
     }

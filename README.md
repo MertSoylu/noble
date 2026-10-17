@@ -53,6 +53,7 @@ and `file:line` paths. vim, htop and Claude Code run full-screen with mouse supp
 how the last command ended (`✓ 2.4s`, `✗ 1 · 12s`) and a live timer while one runs. Scrolled back, a pane shows a
 position bar with the search matches on it and a `↓ live · 12` chip counting the new lines below. The focused
 or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
+In a split tab the panes without the focus fade a little (`dim_inactive`), so the focused one stands out.
 
 </td>
 <td width="50%" valign="top">
@@ -63,7 +64,10 @@ files. The status refreshes as soon as a command finishes in that repository. Ad
 remove one you do not want (⋯ → Remove from list). The selected project's card also shows its branch's pull
 request and CI state (`PR #42 open · ✓ CI 12/12`, with the [GitHub CLI](https://cli.github.com) signed in via
 `gh auth login`) and the ports that processes running inside the project listen on (`⇄ :3000 :5173`), on
-Windows, Linux and macOS; click either one to open it.
+Windows, Linux and macOS; click either one to open it. The card also lists the project's quick tasks as a
+TASKS row of chips (`▸ npm run dev`, `▸ cargo test`): the `package.json` scripts (npm, pnpm, yarn or bun by its
+lockfile), the Cargo build, test and run commands, and the plain Makefile targets and justfile recipes. Click a
+chip, or press `T` (shift+t) for the list, to run it in a new tab in the project folder.
 
 </td>
 </tr>
@@ -212,11 +216,16 @@ noble [--config <path>] [--no-boot]
 ## ⌨ Keys
 
 NOBLE uses a tmux-style **prefix** (default `ctrl+a`; press it twice to send a literal `ctrl+a` to the shell)
-plus a few direct shortcuts. Everything can be rebound, and `?` shows the live reference.
+plus a few direct shortcuts. Everything can be rebound: **Settings → Key bindings** lists every action with its prefix and
+direct keys (↑↓ select, `/` filter, `⏎` rebinds the prefix key, `d` the direct chord, `x` unbinds, `r` restores the default;
+a key another action has is asked about first), and each change is saved to `config.toml` at once. `?` shows the live
+reference: type to filter it, ↑↓ pick a row and ⏎ (or a click) runs it.
 
 The direct shortcuts marked \* are shell keys too (last argument, transpose words, fish's sudo and pager …), so in
 a terminal they go to the shell and work everywhere else; use the prefix column there instead. `shell_first =
-false` (Settings → Leave shell keys to the shell) gives them back to NOBLE everywhere.
+false` (Settings → Leave shell keys to the shell) gives them back to NOBLE everywhere. The first time each such
+key goes to the shell, the status bar says once which chord NOBLE uses for that action (e.g. `alt+t went to the
+shell · NOBLE: ctrl+a t`).
 
 When an app in a pane needs one of NOBLE's other shortcuts (e.g. `alt+m`, `alt+z`), **prefix `i`** locks the
 pane's keys: every shortcut goes to the app (🔒 KEYS on the pane) until prefix `i` again; the prefix itself keeps
@@ -229,6 +238,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `alt+0` | Home | `v` `\|` | split right |
 | `alt+t`\* | new tab | `s` `-` | split down |
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
+| | | `T` | reopen the last closed tab |
 | `alt+m` | system monitor | `z` | zoom pane |
 | `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
@@ -249,12 +259,16 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 
 - **Home:** `↑↓` select project · `⏎` open terminal · `→` then `⏎` pin to top (★) or more actions (⋯) · `c` Claude · `x` Codex · other AI CLIs by their shortcut
   (Settings → Quick launch) · `/` search (or click its label) · `t` terminal at home · `o` open folder · `w` save workspace ·
-  `a` add a folder to scan · `A` add one project folder (git or not; `tab` switches between the two in the
-  prompt) · ⋯ → Remove from list hides a project for good (`A` brings it back) · `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
-  `m` system · `s` settings · `q` quit. The selected project's card: click `PR #…` to open its pull request in the
-  browser, or a port (`⇄ :3000`) to open http://localhost:<port>.
-- **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values ·
-  click the left half of a value or right-click to step back · the wheel scrolls the page · `esc` back to the page you came from.
+  `a` add a project or a folder to scan (the prompt decides: a git repository or a folder without repositories is added as a
+  project, a folder holding repositories is scanned; `tab` forces one of the modes) · ⋯ → Remove from list hides a project for good (`a` brings it back) ·
+  `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
+  `m` system · `s` settings · `q` quit · `T` run a task of the selected project (only when it has tasks; the
+  palette lists them; a launcher on `T` keeps the key). The selected project's card: click `PR #…` to open its pull request in the
+  browser, or a port (`⇄ :3000`) to open http://localhost:<port>; click a task chip to run it.
+- **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
+  (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
+  `esc` back to the page you came from. The selected setting's description shows in a panel on the right on a terminal
+  140 columns or wider, and under its row on a narrower one. Every row is also in the palette as `Setting: <name> (<value>)`.
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
   "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
@@ -294,13 +308,14 @@ Errors show up as a toast and never crash the app. Most options can also be chan
 [general]
 theme = "amber"          # any of the 22 themes in Settings
 transparent = false      # let the terminal's own background (blur/opacity) show
-boot_animation = true
+boot_animation = true    # startup animation on the first launch and the first launch after an update (false: never)
 animations = true        # page transitions, zoom, fades, tab and toast animations
 animations_on_battery = true  # false: no animations while a laptop runs on battery
 clock_24h = true
 show_seconds = true
 operator = ""            # name in the greeting; empty = your user name
 check_updates = true     # look for a new release once a day and show it at the bottom right
+show_tips = true         # hints in the status bar about the current screen (terminal, Home, System; none on Settings)
 
 [terminal]
 shell = ""               # empty = pwsh → powershell → cmd on Windows, $SHELL elsewhere
@@ -314,6 +329,7 @@ background = ""          # override the scheme's background, e.g. "#c8c8c8"
 foreground = ""          # override the scheme's text color
 notify = true            # toast + bell when a background tab needs attention
 notify_after = 10        # report background commands that ran at least this many seconds (0 = off)
+dim_inactive = true      # in a split tab, fade the text of the panes without the focus
 
 [keys]
 prefix = "ctrl+a"
@@ -345,12 +361,12 @@ show = true              # false hides it from Home (Settings → Quick launch)
 # (oh-my-pi), freebuff f, grok z (Grok Build), cursor-agent u, command-code d, cline l, kilo n.
 ```
 
-**Actions** for bindings: `bridge system settings new_tab close_tab next_tab prev_tab tab_1…tab_9 move_tab_left
+**Actions** for bindings: `bridge system settings new_tab close_tab reopen_tab next_tab prev_tab tab_1…tab_9 move_tab_left
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
-dismiss_hooks_offer`.
+dismiss_hooks_offer notifications`.
 
 </details>
 
@@ -432,8 +448,9 @@ reports long-running commands. A background tab gets a marker in the top bar, af
 urgent thing that happened there: `◆` for an OSC 9 / OSC 777 notification, the bell or an agent that needs you, `✗`
 for a command that ended with a non-zero exit code, `✓` for a long command that finished, `•` for plain output. It
 clears when you open the tab. A split tab shows its pane count (`⊞2`) when the strip has room (in a narrow window
-only on the active tab), and the active tab is framed by accent bars (`▌work ×▐`). When tabs do not fit, `+N`
-keeps the most urgent marker of the hidden ones (`+3 ✗`).
+only on the active tab), and the active tab is framed by accent bars (`▌work ×▐`). When tabs do not fit, the strip
+slides to keep the active tab in view: `‹N` and `+N` count the hidden tabs before and after it, and each keeps
+the most urgent marker of the hidden ones (`+3 ✗`).
 
 The pane title shows the result of the last command typed at the prompt: `✓ 2.4s` when it worked,
 `✗ 1 · 12s` with its exit code when it failed, `· 12s` in cmd.exe. It stays until the next command starts. A

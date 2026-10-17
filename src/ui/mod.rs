@@ -77,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &mut hits);
     }
     update_notice(buf, area, app, &mut hits);
-    toasts(buf, area, app);
+    toasts(buf, area, app, &mut hits);
     app.fx.observe_overlay(app.overlay.is_some());
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
@@ -115,6 +115,9 @@ fn slide(buf: &mut Buffer, body: Rect, app: &mut App) -> bool {
     {
         let dir = if view_order(app.view) > view_order(prev) { 1 } else { -1 };
         app.slide = Some(crate::app::Slide { from, dir, started: std::time::Instant::now() });
+    }
+    if app.drawn_view.is_some_and(|prev| prev != app.view) {
+        app.tip_turn += 1;
     }
     app.drawn_view = Some(app.view);
     app.last_body = Some(current.clone());
@@ -365,6 +368,26 @@ fn tab_cell(app: &App, i: usize, compact: bool, working: &'static str) -> TabCel
     }
 }
 
+/// A count chip of the tab strip ("+N" after the window, "‹N" before it): the label, the most urgent
+/// marker of the tabs it hides, and a space. Returns the x after it.
+fn tab_chip(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    label: &str,
+    mark: Option<(u8, &'static str, Style)>,
+    limit: u16,
+    th: &crate::theme::Theme,
+) -> u16 {
+    let mut spans = vec![(label, th.dim().bg(th.raised))];
+    if let Some((_, glyph, style)) = mark {
+        spans.push((" ", th.dim().bg(th.raised)));
+        spans.push((glyph, style.bg(th.raised)));
+    }
+    spans.push((" ", th.dim().bg(th.raised)));
+    hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x))
+}
+
 /// The marker of a tab that had something happen in the background, with its rank: a notice or a
 /// bell (◆), a failed command (✗), a long command that finished (✓), plain output (•).
 fn tab_marker(tab: &crate::term::Tab, th: &crate::theme::Theme) -> Option<(u8, &'static str, Style)> {
@@ -385,7 +408,8 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     let th = &app.theme;
     hud::fill(buf, area, Style::default().bg(th.raised));
     let y = area.y;
-    let clock = format!(" {} ", clock_text(app, false));
+    // Home shows the big clock already, so the top strip leaves its space to the tabs.
+    let clock = if app.view == View::Bridge { String::new() } else { format!(" {} ", clock_text(app, false)) };
     let compact = area.width < 80;
     let settings_label = if compact { " ⚙ " } else { " ⚙ Settings " };
     let right_w = util::width(&clock) as u16 + util::width(settings_label) as u16 + 1;
@@ -401,50 +425,60 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
     let brand = if app.dev { " NOBLE dev " } else { " NOBLE " };
     let mut x = hud::put(buf, area.x, y, brand, th.chip(), limit);
     x += 1;
-    let fixed = [(View::Bridge, "Home", Hit::TabBridge), (View::System, "System", Hit::TabSystem)];
+    // Compact: one glyph per fixed tab, so the terminal tabs get the room.
+    let fixed = [
+        (View::Bridge, if compact { "⌂" } else { "Home" }, Hit::TabBridge),
+        (View::System, if compact { "▤" } else { "System" }, Hit::TabSystem),
+    ];
     for (view, label, hit) in fixed {
         let start = x;
         x = hud::put(buf, x, y, &format!(" {label} "), tab_style(app.view == view), limit.saturating_sub(x));
         hits.push((Rect::new(start, y, x - start, 1), hit));
     }
     x = hud::put(buf, x, y, " │", th.line().bg(th.raised), limit.saturating_sub(x));
-    // Terminal tabs: those that do not fit are summarized as "+N".
+    // Terminal tabs: a window of tabs that always includes the active one. Tabs before the window
+    // are summarized as "‹N", tabs after it as "+N".
     let mut cells: Vec<TabCell> = (0..app.tabs.len())
         .map(|i| tab_cell(app, i, compact, terminal::working_glyph(app, &app.tabs[i].panes())))
         .collect();
-    let mut widths: Vec<u16> = Vec::new();
-    let mut used = x;
-    for c in &cells {
-        let w = c.width();
-        if used + w + 4 > limit {
-            break;
-        }
-        used += w;
-        widths.push(w);
-    }
-    let mut shown = widths.len();
-    // The "+N" summary carries the most urgent marker of the tabs it hides; a tab gives way
-    // when that does not fit next to the count.
-    let hidden_mark = |from: usize| {
-        (from..app.tabs.len())
-            .filter(|i| app.view != View::Term(*i))
-            .filter_map(|i| tab_marker(&app.tabs[i], th))
-            .max_by_key(|m| m.0)
+    let widths: Vec<u16> = cells.iter().map(TabCell::width).collect();
+    let n = cells.len();
+    // A chip's marker is the most urgent one among the tabs it hides, which may not be the active tab.
+    let hidden_mark = |range: std::ops::Range<usize>| {
+        range.filter(|i| app.view != View::Term(*i)).filter_map(|i| tab_marker(&app.tabs[i], th)).max_by_key(|m| m.0)
     };
-    while shown > 0 && shown < cells.len() {
-        let count = util::width(&format!(" +{} ", cells.len() - shown)) as u16;
-        let need = count + if hidden_mark(shown).is_some() { 2 } else { 0 };
-        if used + need <= limit {
+    // Chip width: its label, the marker (a space and the glyph) and a closing space.
+    let chip_width = |label: &str, mark: bool| util::width(label) as u16 + if mark { 2 } else { 0 } + 1;
+    let chips = |lo: usize, hi: usize| {
+        let left = if lo > 0 { chip_width(&format!(" ‹{lo}"), hidden_mark(0..lo).is_some()) } else { 0 };
+        let right = if hi < n { chip_width(&format!(" +{}", n - hi), hidden_mark(hi..n).is_some()) } else { 0 };
+        left + right
+    };
+    // The new-tab button and a space after the strip.
+    let tail = 4;
+    let fits = |lo: usize, hi: usize| x + widths[lo..hi].iter().sum::<u16>() + chips(lo, hi) + tail <= limit;
+    // Start with the active tab (it must show even when it is alone), then grow the window one tab at a
+    // time, right and left in turn, while the tabs and their chips still fit.
+    let (mut lo, mut hi) = cells.iter().position(|c| c.active).map_or((0, 0), |a| (a, a + 1));
+    loop {
+        let mut grew = false;
+        if hi < n && fits(lo, hi + 1) {
+            hi += 1;
+            grew = true;
+        }
+        if lo > 0 && fits(lo - 1, hi) {
+            lo -= 1;
+            grew = true;
+        }
+        if !grew {
             break;
         }
-        shown -= 1;
-        used -= widths[shown];
     }
-    let hidden = cells.len() - shown;
-    if hidden == 0 {
+    let used = x + widths[lo..hi].iter().sum::<u16>();
+    if lo == 0 && hi == n {
         // Split counts are the first thing to go: they only appear in what the tabs leave free,
         // the active tab's first (and only that one in compact mode).
-        let mut slack = limit.saturating_sub(used + 4);
+        let mut slack = limit.saturating_sub(used + tail);
         let mut order: Vec<usize> = (0..cells.len()).collect();
         order.sort_by_key(|i| !cells[*i].active);
         for i in order {
@@ -472,7 +506,15 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
         }
         _ => x,
     };
-    for (i, c) in cells.iter().enumerate().take(shown) {
+    if lo > 0 {
+        let start = x;
+        x = tab_chip(buf, x, y, &format!(" ‹{lo}"), hidden_mark(0..lo), limit, th);
+        // The chip lists the hidden tabs in the command palette, like the "+N" chip.
+        if x > start {
+            hits.push((Rect::new(start, y, x - start, 1), Hit::HiddenTabs));
+        }
+    }
+    for (i, c) in cells.iter().enumerate().take(hi).skip(lo) {
         x = put_gap(buf, x, i);
         let id = app.tabs[i].id;
         // A new tab grows open: everything past its current width is cut off.
@@ -518,20 +560,12 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             x = hud::put(buf, x, y, " ", Style::default().bg(th.raised), room(x).min(1));
         }
     }
-    if gap.is_some_and(|(i, _)| i >= shown) {
+    if gap.is_some_and(|(i, _)| i >= hi) {
         x = put_gap(buf, x, gap.map_or(0, |g| g.0));
     }
-    if hidden > 0 {
-        let mark = hidden_mark(shown);
-        let count = format!(" +{hidden}");
-        let mut spans = vec![(count.as_str(), th.dim().bg(th.raised))];
-        if let Some((_, glyph, style)) = mark {
-            spans.push((" ", th.dim().bg(th.raised)));
-            spans.push((glyph, style.bg(th.raised)));
-        }
-        spans.push((" ", th.dim().bg(th.raised)));
+    if hi < n {
         let start = x;
-        x = hud::put_spans(buf, x, y, &spans, limit.saturating_sub(x));
+        x = tab_chip(buf, x, y, &format!(" +{}", n - hi), hidden_mark(hi..n), limit, th);
         // The chip lists the hidden tabs in the command palette.
         if x > start {
             hits.push((Rect::new(start, y, x - start, 1), Hit::HiddenTabs));
@@ -627,12 +661,15 @@ fn hints(app: &App) -> Vec<(String, String)> {
             // Hints are dropped from the end when the bar is narrow: "? keys" comes first so it survives longest.
             let mut v = vec![
                 h("?", "keys"),
-                h("a A", "add folder / project"),
+                h("a", "add"),
                 h("t", "terminal"),
                 h("r", "rescan"),
                 h("s", "settings"),
                 h("→", "pin / more"),
             ];
+            if app.selected_project().is_some_and(|p| !p.tasks.is_empty()) && app.tasks_key_free() {
+                v.insert(2, h("T", "run task"));
+            }
             // A kept filter (after Enter, with no match) has no other way out: "esc clear" comes first.
             if !app.bridge.filter.is_empty() {
                 v.insert(0, h("esc", "clear"));
@@ -648,7 +685,14 @@ fn hints(app: &App) -> Vec<(String, String)> {
             let back = if app.system.filter.is_empty() { "home" } else { "clear" };
             vec![h("↑↓", "select"), h("c m p n", "sort"), h("esc", back)]
         }
-        View::Settings => vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("esc", "back")],
+        View::Settings => {
+            if app.settings_filtering {
+                return vec![h("type", "filter"), h("↑↓", "move"), h("⏎", "done"), h("esc", "clear")];
+            }
+            // A kept filter is cleared by esc first (see `settings_key`), then the page is left.
+            let back = if app.settings_filter.is_empty() { "back" } else { "clear" };
+            vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("/", "search"), h("esc", back)]
+        }
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]
         }
@@ -670,34 +714,63 @@ fn hints(app: &App) -> Vec<(String, String)> {
             v.extend([h("any key", "back to live"), (app.keymap.prefix.to_string(), "menu".into())]);
             v
         }
-        View::Term(_) => {
+        View::Term(i) => {
             let mut v = vec![(app.keymap.prefix.to_string(), "menu".into())];
             if let Some(key) = app.keymap.term_hint(Action::Bridge, app.focused_locked()) {
                 v.push((key, "home".into()));
             }
-            v.extend([h("drag border", "resize"), h("right-click", "paste")]);
+            // Borders only exist between panes: the hint is for tabs with a split.
+            if app.tabs.get(i).is_some_and(|t| t.root.leaves().len() > 1) {
+                v.push(h("drag border", "resize"));
+            }
+            v.push(h("right-click", "paste"));
             v
         }
     }
 }
 
-/// Hints shown in turn on the status bar (lesser-known features). Shortcuts come from the keymap, so a
-/// rebound key shows as bound and a tip whose action has no key is left out.
+/// Hints shown in turn on the status bar (lesser-known features), chosen for the screen: terminal
+/// tips in a terminal, Home's on Home, the process list's on System, none on Settings. Shortcuts come
+/// from the keymap, so a rebound key shows as bound and a tip whose action has no key is left out.
 fn tips(app: &App) -> Vec<String> {
     let km = &app.keymap;
-    let mut v = vec![match km.term_hint(Action::OpenLink, false) {
-        Some(k) => format!("ctrl+click a URL or file:line to open it · {k} lists them"),
-        None => "ctrl+click a URL or file:line in a terminal to open it".to_string(),
-    }];
-    if let Some(k) = km.term_hint(Action::Search, false) {
-        v.push(format!("{k} searches a terminal's scrollback"));
+    let mut v = Vec::new();
+    match app.view {
+        View::Settings => return v,
+        View::Term(_) => {
+            v.push(match km.term_hint(Action::OpenLink, false) {
+                Some(k) => format!("ctrl+click a URL or file:line to open it · {k} lists them"),
+                None => "ctrl+click a URL or file:line in a terminal to open it".to_string(),
+            });
+            if let Some(k) = km.term_hint(Action::Search, false) {
+                v.push(format!("{k} searches a terminal's scrollback"));
+            }
+            v.push(match km.term_hint(Action::Zoom, false) {
+                Some(k) => format!("{k} or a double-click on its title zooms a pane"),
+                None => "a double-click on its title zooms a pane".to_string(),
+            });
+            v.push("right-click a tab or a pane title for more".to_string());
+        }
+        View::Bridge => {
+            v.extend([
+                "press a on Home to add a project or a folder of projects".to_string(),
+                "right-click a tab or a project for more".to_string(),
+                "w on Home saves your open tabs as a workspace".to_string(),
+            ]);
+            // Windows also offers the schemes from Windows Terminal's settings; Linux/macOS the built-in ones.
+            v.push(if cfg!(windows) {
+                "Settings → Terminal colors: pick any Windows Terminal scheme".to_string()
+            } else {
+                "Settings → Terminal colors: pick a color scheme for the panes".to_string()
+            });
+        }
+        View::System => {
+            v.push("/ filters the process list · K terminates the selected process after asking".to_string());
+        }
     }
-    v.extend([
-        "drag a tab to reorder it · double-click to rename".to_string(),
-        "right-click a tab, a pane title or a project for more".to_string(),
-        "background tab markers: ◆ needs you · ✗ failed · ✓ done".to_string(),
-        "press a on Home to add a folder with your projects".to_string(),
-    ]);
+    // The tab strip is on every screen with tabs to switch.
+    v.push("drag a tab to reorder it · double-click to rename".to_string());
+    v.push("background tab markers: ◆ needs you · ✗ failed · ✓ done".to_string());
     let mut switch = Vec::new();
     if let Some(range) = km.tab_range(false) {
         switch.push(range);
@@ -708,28 +781,24 @@ fn tips(app: &App) -> Vec<String> {
     if !switch.is_empty() {
         v.push(format!("{} switch tabs", switch.join(" or ")));
     }
-    // Windows also offers the schemes from Windows Terminal's settings; Linux/macOS the built-in ones.
-    v.push(if cfg!(windows) {
-        "Settings → Terminal colors: pick any Windows Terminal scheme".to_string()
-    } else {
-        "Settings → Terminal colors: pick a color scheme for the panes".to_string()
-    });
-    v.push("w on Home saves your open tabs as a workspace".to_string());
-    match km.term_hint(Action::Zoom, false) {
-        Some(k) => v.push(format!("{k} or a double-click on its title zooms a pane")),
-        None => v.push("a double-click on its title zooms a pane".to_string()),
-    }
     v
 }
 
-/// The hint to show right now (changes every 20 seconds). Until the prefix key has been
-/// used once, the tip is how to reach it, with the configured key.
-fn current_tip(app: &App) -> String {
+/// The tip for the current screen (`None`: tips off, or none for this screen). It moves on with each
+/// screen change, not with the clock. Until the prefix key has been used once, the first tip is how
+/// to reach it, with the configured key.
+fn current_tip(app: &App) -> Option<String> {
+    if !app.cfg.general.show_tips || app.view == View::Settings {
+        return None;
+    }
     if !app.ui_state.data.prefix_used {
-        return format!("press {}, then ? for all keys", app.keymap.prefix);
+        return Some(format!("press {}, then ? for all keys", app.keymap.prefix));
     }
     let tips = tips(app);
-    tips[(app.started.elapsed().as_secs() / 20) as usize % tips.len()].clone()
+    if tips.is_empty() {
+        return None;
+    }
+    Some(tips[app.tip_turn % tips.len()].clone())
 }
 
 /// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's
@@ -852,8 +921,11 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
         hud::put_spans(buf, x, y, &hint_spans("esc", "cancel", th, key_color), limit.saturating_sub(x));
     }
     // The tip shows only in the space left after the hints, with a gap on both sides.
-    if !armed && !pane_button {
-        let tip = format!("tip: {}", current_tip(app));
+    if !armed
+        && !pane_button
+        && let Some(tip) = current_tip(app)
+    {
+        let tip = format!("tip: {tip}");
         let tip_w = util::width(&tip) as u16;
         let right = limit.saturating_sub(1);
         if x + tip_w + 4 <= right {
@@ -902,7 +974,7 @@ pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
     util::width(&toast_text(text, screen_w)) as u16
 }
 
-fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
+fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let mut y = area.bottom().saturating_sub(3);
     for t in app.toasts.iter().rev() {
@@ -918,12 +990,11 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
         let text = toast_text(&t.text, area.width);
         let w = util::width(&text) as u16 + 1;
         // Slides in from the right edge, and out the same way once its time is up.
+        let now = std::time::Instant::now();
         let shift = if app.fx.enabled() {
-            let now = std::time::Instant::now();
-            let away = if now >= t.until {
-                crate::app::fx::linear(t.until, crate::app::fx::TOAST_OUT).powi(2)
-            } else {
-                1.0 - crate::app::fx::ease_out(crate::app::fx::linear(t.born, crate::app::fx::TOAST_IN))
+            let away = match t.expires_at() {
+                Some(until) if now >= until => crate::app::fx::linear(until, crate::app::fx::TOAST_OUT).powi(2),
+                _ => 1.0 - crate::app::fx::ease_out(crate::app::fx::linear(t.born, crate::app::fx::TOAST_IN)),
             };
             ((w + 1) as f64 * away).round() as u16
         } else {
@@ -933,10 +1004,13 @@ fn toasts(buf: &mut Buffer, area: Rect, app: &App) {
         let room = area.right().saturating_sub(x);
         hud::put(buf, x, y, "▌", Style::default().fg(color).bg(th.raised), room.min(1));
         hud::put(buf, x + 1, y, &text, Style::default().fg(th.fg).bg(th.raised), w.min(room.saturating_sub(1)));
-        // Countdown: the time already spent darkens the toast from its right end.
-        if app.fx.enabled() {
-            let life = t.until.saturating_duration_since(t.born).as_secs_f64().max(0.001);
-            let spent = (t.born.elapsed().as_secs_f64() / life).clamp(0.0, 1.0);
+        if room > 0 {
+            hits.push((Rect::new(x, y, w.min(room), 1), Hit::Toast(t.id)));
+        }
+        // Countdown: the time already spent darkens the toast from its right end (a sticky one has none).
+        if let Some(life) = t.life.filter(|_| app.fx.enabled()) {
+            let life = life.as_secs_f64().max(0.001);
+            let spent = (t.active(now).as_secs_f64() / life).clamp(0.0, 1.0);
             let cells = ((w - 1) as f64 * spent).round() as u16;
             let dark = crate::theme::Theme::mix(th.raised, th.bg, 0.65);
             for cx in (x + w).saturating_sub(cells)..x + w {
