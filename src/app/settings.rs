@@ -820,14 +820,18 @@ impl App {
             AddMode::Project => self.add_project(raw),
             AddMode::Folder => self.add_project_root(raw),
             AddMode::Auto => {
-                let Ok(path) = Self::resolve_folder(raw) else { return };
-                if crate::projects::git_dir(&path).is_some() {
-                    return self.add_project(raw);
-                }
                 let (tx, probe, exclude) = (self.tx.clone(), self.repo_probe, self.cfg.projects.exclude.clone());
                 let raw_owned = raw.to_string();
+                // The folder checks (is it a folder, is it a repository) touch the disk too, so they run
+                // here as well: a stalled network share must not freeze the UI. A path that is no folder
+                // is answered "project" and `add_project` reports it.
                 let spawned = std::thread::Builder::new().name("add-decide".into()).spawn(move || {
-                    let scan = holds_repos_in_time(path, probe, exclude);
+                    let scan = match Self::resolve_folder(&raw_owned) {
+                        Ok(path) if crate::projects::git_dir(&path).is_none() => {
+                            holds_repos_in_time(path, probe, exclude)
+                        }
+                        _ => false,
+                    };
                     let _ = tx.send(AppEvent::AddDecided { raw: raw_owned, scan });
                 });
                 // No thread to spare: the folder is added as a project, the answer that cannot be checked.

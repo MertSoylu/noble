@@ -401,7 +401,7 @@ impl App {
         }
         if user {
             let text = match self.keymap.hint(Action::ReopenTab) {
-                Some(key) => format!("tab closed · {key} reopens"),
+                Some(key) => format!("tab closed · {key} reopens it (launch commands run again)"),
                 None => "tab closed".into(),
             };
             self.toast(ToastLevel::Info, text);

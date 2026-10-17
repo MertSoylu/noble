@@ -681,12 +681,19 @@ fn quoted(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
 }
 
-/// Adds `entry` at the end of the table in `out` (before its trailing blank lines).
+/// Adds `entry` at the end of the table in `out`: before its trailing blank lines, and before a comment
+/// that sits right above the next header (with no blank line in between) because that comment titles the
+/// next table.
 fn push_at_table_end(out: &mut Vec<String>, entry: &str) {
     let mut tail = Vec::new();
-    while let Some(l) = out.pop_if(|l| l.trim().is_empty()) {
+    while let Some(l) = out.pop_if(|l| l.trim().is_empty() || l.trim().starts_with('#')) {
         tail.push(l);
     }
+    tail.reverse();
+    // With a blank line in the run, the entry goes before the first one (comments above it belong to the
+    // table); without one, before the whole run.
+    let at = tail.iter().position(|l| l.trim().is_empty()).unwrap_or(0);
+    out.extend(tail.drain(..at));
     out.push(entry.to_string());
     out.extend(tail);
 }
@@ -771,8 +778,10 @@ fn edit_binding(text: &str, table: &str, chord: &str, value: Option<&str>) -> Re
         }
     }
     let updated = if changed {
-        let mut s = out.join("\n");
-        s.push('\n');
+        // `lines()` dropped the `\r` of a CRLF file (Notepad on Windows): the file keeps its line endings.
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut s = out.join(eol);
+        s.push_str(eol);
         s
     } else {
         text.to_string()
@@ -1045,6 +1054,18 @@ theme = \"ice\"
         assert!(out.contains("roots = [\"~/x\"]") && out.contains("max_depth = 3"), "{out}");
         assert_eq!(parse(&out).map(|c| c.projects.max_depth), Ok(3), "{out}");
         assert_eq!(strip_value("roots = [\"a=b\"]"), " [\"a=b\"]");
+    }
+
+    /// A CRLF file stays CRLF, and a comment titling the next table stays with that table.
+    #[test]
+    fn set_binding_keeps_line_endings_and_next_section_comment() {
+        let crlf = "[keys.prefix_bindings]\r\n\"v\" = \"zoom\"\r\n\r\n[terminal]\r\n";
+        let out = set_binding(crlf, "keys.prefix_bindings", "%", "help").unwrap();
+        assert_eq!(out.matches('\n').count(), out.matches("\r\n").count(), "{out:?}");
+        assert!(out.contains("\"%\" = \"help\"\r\n\r\n[terminal]"), "{out:?}");
+        let text = "[keys.prefix_bindings]\n\"v\" = \"zoom\"\n# --- terminal ---\n[terminal]\n";
+        let out = set_binding(text, "keys.prefix_bindings", "%", "help").unwrap();
+        assert!(out.contains("\"%\" = \"help\"\n# --- terminal ---\n[terminal]"), "{out}");
     }
 
     #[test]

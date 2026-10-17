@@ -288,6 +288,10 @@ impl App {
             self.toast(ToastLevel::Info, "no notifications yet");
             return;
         }
+        // The list holds every message, so the ones still on screen go: the only keyboard way to clear a
+        // sticky error toast.
+        self.toasts.clear();
+        self.dirty = true;
         let items = self
             .notices
             .iter()

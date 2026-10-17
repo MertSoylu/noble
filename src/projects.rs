@@ -272,7 +272,7 @@ pub fn detect_tasks(dir: &Path) -> Vec<String> {
             push_task(&mut out, cmd.into());
         }
     }
-    if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
+    if let Some(text) = read_small(&dir.join("package.json")) {
         let manager = node_package_manager(dir);
         for name in package_scripts(&text) {
             push_task(&mut out, format!("{manager} run {name}"));
@@ -314,8 +314,28 @@ fn node_package_manager(dir: &Path) -> &'static str {
 fn read_first(dir: &Path, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         let path = dir.join(name);
-        path.is_file().then(|| std::fs::read_to_string(path).ok()).flatten()
+        path.is_file().then(|| read_small(&path)).flatten()
     })
+}
+
+/// Most bytes read from a project file: a generated Makefile or lockfile-sized JSON must not stall the caller.
+const MAX_TASK_FILE: u64 = 256 * 1024;
+
+/// The start of a text file (at most `MAX_TASK_FILE` bytes); `None` when it cannot be read as UTF-8.
+/// A file cut in the middle of a multi-byte character loses that last character, and a cut `package.json`
+/// no longer parses (no tasks), which is the intended outcome for a file that large.
+fn read_small(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(MAX_TASK_FILE).read_to_end(&mut bytes).ok()?;
+    match String::from_utf8(bytes) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            // Only a character cut by the limit is forgiven (the error is within the last 3 bytes).
+            (e.as_bytes().len() - valid < 4).then(|| String::from_utf8_lossy(&e.as_bytes()[..valid]).into_owned())
+        }
+    }
 }
 
 /// A name that is safe to type into a shell as it is: letters, digits and `_-.:/@`.

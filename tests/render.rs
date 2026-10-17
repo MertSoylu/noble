@@ -1886,6 +1886,8 @@ fn auto_add_decides_between_project_and_scan() {
     let mut app = demo_app(110, 30);
     let defaults = noble::projects::default_roots().len();
     app.add_by_mode(AddMode::Auto, &repo.display().to_string());
+    // Even the git check runs on the helper thread now (a stalled share must not freeze the UI).
+    pump_until(&mut app, "repo answer", |a| a.toasts.iter().any(|t| t.text == "added project repo"));
     assert!(
         app.toasts.iter().any(|t| t.text == "added project repo"),
         "{:?}",
@@ -2402,7 +2404,7 @@ fn closed_tab_reopens_with_its_panes() {
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 1, "the split tab closed");
     let key = app.keymap.hint(Action::ReopenTab).expect("T is bound");
-    let hint = format!("tab closed · {key} reopens");
+    let hint = format!("tab closed · {key} reopens it (launch commands run again)");
     assert!(
         app.toasts.iter().any(|t| t.text == hint),
         "toast {hint:?}: {:?}",

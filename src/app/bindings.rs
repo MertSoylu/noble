@@ -118,6 +118,15 @@ pub fn capture_chord(k: &KeyEvent, slot: Slot, prefix: Chord) -> Result<Chord, S
             _ => "the shell needs this key: add ctrl or alt (only F1–F12 work alone)".into(),
         });
     }
+    // ctrl+letter (and the control punctuation) is the shell's: ctrl+c interrupts, ctrl+d ends input,
+    // ctrl+z suspends, ctrl+r searches history. A direct shortcut would take it from every pane.
+    let ctrl_only = chord.mods.contains(KeyModifiers::CONTROL) && !chord.mods.contains(KeyModifiers::ALT);
+    if slot == Slot::Direct
+        && ctrl_only
+        && matches!(chord.code, KeyCode::Char(c) if c.is_ascii_alphabetic() || "[\\]^_@".contains(c))
+    {
+        return Err("ctrl+letter belongs to the shell (ctrl+c, ctrl+d, ctrl+r …): use alt, or the prefix key".into());
+    }
     Ok(chord)
 }
 
@@ -528,6 +537,10 @@ mod tests {
         assert!(capture_chord(&key(KeyCode::F(5), KeyModifiers::NONE), Slot::Direct, prefix).is_ok());
         assert!(capture_chord(&key(KeyCode::F(12), KeyModifiers::NONE), Slot::Direct, prefix).is_ok());
         assert!(capture_chord(&key(KeyCode::F(13), KeyModifiers::NONE), Slot::Direct, prefix).is_err());
+        // ctrl+letter belongs to the shell (interrupt, end of input, suspend, history search).
+        for c in ['c', 'd', 'z', 'r'] {
+            assert!(capture_chord(&key(KeyCode::Char(c), KeyModifiers::CONTROL), Slot::Direct, prefix).is_err());
+        }
         // Ctrl or alt make any of them a chord.
         assert!(capture_chord(&key(KeyCode::Up, KeyModifiers::ALT), Slot::Direct, prefix).is_ok());
         assert!(capture_chord(&key(KeyCode::Enter, KeyModifiers::CONTROL), Slot::Direct, prefix).is_ok());

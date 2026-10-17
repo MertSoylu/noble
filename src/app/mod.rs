@@ -1860,6 +1860,8 @@ impl App {
             self.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
             return;
         }
+        // The file loads now: an error toast about it is out of date (and errors never expire by themselves).
+        self.toasts.retain(|t| !matches!(t.target, Some(ToastTarget::Config { .. })));
         self.apply_config(loaded.config);
         // An open welcome card or theme/scheme selector previews on top of the old values: it starts
         // over from the file, so esc cannot put the stale values back.

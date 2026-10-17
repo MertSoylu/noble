@@ -100,6 +100,10 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- A config error toast goes away when the file loads again, and opening the notification list clears the toasts on screen.
+- The key editor refuses direct ctrl+letter shortcuts (ctrl+c, ctrl+d, ctrl+r … belong to the shell), keeps CRLF line endings
+  in `config.toml`, and adds a key before a comment that titles the next table. Reopening a tab says its launch commands run again.
+- Adding a folder on Home checks the folder on a helper thread, and project files read for quick tasks are capped at 256 KiB.
 - Resetting a shortcut (`r`) keeps a key that another action has taken since, and says so ("ctrl+a t stays on
   Zoom"). Clicking a notification dismisses that notification even when another one left the screen first.
 - The key editor refuses to write while `config.toml` does not parse (the error names the line), and refuses a
