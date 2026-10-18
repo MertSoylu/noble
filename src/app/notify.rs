@@ -116,6 +116,8 @@ impl App {
             self.search_output(sig.id);
             self.notify(&sig);
         }
+        // The output may have moved the link under the pointer (its highlight and ctrl+click target follow).
+        self.refresh_link_hover();
         if let Some(text) = clip {
             self.set_clipboard(&text, false);
         }

@@ -425,3 +425,62 @@ fn search_during_heavy_output() {
     app.run(Action::CloseTab);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The ctrl+hover highlight shows the link under the pointer while ctrl is held. A key or a mouse event
+/// without ctrl ends it (a released ctrl is not always reported), and output that moves the link moves or ends
+/// the highlight too: the link a ctrl+click opens is the one highlighted on the screen as it is.
+#[test]
+fn link_highlight_follows_ctrl_the_pointer_and_the_output() {
+    use crossterm::event::{Event, KeyEventKind, MouseEvent, MouseEventKind};
+    use noble::term::link::Link;
+    use ratatui::style::Modifier;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("links".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let feed = |app: &mut App, bytes: &[u8]| {
+        let pane = &app.panes[&id];
+        pane.parser().process(bytes);
+        pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        app.handle(AppEvent::PtyOutput);
+    };
+    feed(&mut app, b"\x1b[2J\x1b[Hopen https://example.com/a now");
+    render(&mut app, 110, 30);
+    let inner = find_hit_inner(&app).unwrap();
+    // Column 7 is inside the address (it starts at column 5).
+    let (x, y) = (inner.x + 7, inner.y);
+    let event = |app: &mut App, e: Event| app.handle(AppEvent::Input(e));
+    let moved =
+        |m: KeyModifiers| Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: m });
+    let underlined = |app: &mut App| render_cells(app, 110, 30)[(x, y)].modifier.contains(Modifier::UNDERLINED);
+
+    event(&mut app, moved(KeyModifiers::CONTROL));
+    let hover = app.link_hover.clone().expect("ctrl over a link highlights it");
+    assert_eq!(hover.target, Link::Url("https://example.com/a".into()));
+    assert_eq!((hover.row, hover.from, hover.to), (0, 5, 26));
+    assert!(underlined(&mut app));
+
+    // A key without ctrl ends the highlight with no mouse movement at all.
+    event(&mut app, Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+    assert!(app.link_hover.is_none() && !underlined(&mut app));
+    // So does the release of ctrl, when the terminal reports it as a key event.
+    event(&mut app, moved(KeyModifiers::CONTROL));
+    assert!(app.link_hover.is_some());
+    event(&mut app, Event::Key(KeyEvent::new_with_kind(KeyCode::Null, KeyModifiers::NONE, KeyEventKind::Release)));
+    assert!(app.link_hover.is_none());
+    // A mouse move without ctrl does not highlight either.
+    event(&mut app, moved(KeyModifiers::NONE));
+    assert!(app.link_hover.is_none());
+
+    // Output that changes the text under the pointer changes the highlight with it, with no input at all.
+    event(&mut app, moved(KeyModifiers::CONTROL));
+    feed(&mut app, b"\x1b[H\x1b[2Kopen https://example.com/c");
+    assert_eq!(
+        app.link_hover.as_ref().map(|h| (h.target.clone(), h.from, h.to)),
+        Some((Link::Url("https://example.com/c".into()), 5, 26)),
+        "the highlight moved to the link now under the pointer"
+    );
+    feed(&mut app, b"\x1b[H\x1b[2Kplain text");
+    assert!(app.link_hover.is_none(), "the link under the pointer is gone");
+    app.run(Action::CloseTab);
+}

@@ -2,11 +2,11 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use super::input::ctrl_held;
-use super::{App, LinkHover, SearchState, ToastLevel};
+use super::{App, Hit, LinkHover, SearchState, ToastLevel};
 use crate::term::layout::PaneId;
 use crate::term::link;
 use crate::term::pane::{Match, find_matches};
@@ -232,10 +232,11 @@ impl App {
         Some((target, row, from, to))
     }
 
-    /// ctrl+click: opens the link. `false` if there is none.
-    pub(super) fn open_link_at(&mut self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
-        let Some((target, ..)) = self.link_under(pane, inner, m.column, m.row) else { return false };
-        self.open_link(target);
+    /// ctrl+click: opens the link the highlight shows under the pointer (`on_mouse` keeps that current). `false`
+    /// if there is none.
+    pub(super) fn open_link_at(&mut self, pane: PaneId) -> bool {
+        let Some(hover) = self.link_hover.clone().filter(|h| h.pane == pane) else { return false };
+        self.open_link(hover.target);
         true
     }
 
@@ -378,14 +379,29 @@ impl App {
         }
     }
 
-    /// Highlights the link under the pointer while ctrl is held during mouse movement.
-    pub(super) fn update_link_hover(&mut self, pane: Option<(PaneId, Rect)>, m: &MouseEvent) {
-        self.link_hover = match pane {
-            Some((pane, inner)) if m.modifiers.contains(KeyModifiers::CONTROL) => self
-                .link_under(pane, inner, m.column, m.row)
-                .map(|(_, row, from, to)| LinkHover { pane, row, from, to }),
-            _ => None,
-        };
+    /// Updates the link highlight from the pointer (when given) and the modifiers of the input event. The
+    /// highlight shows the link a ctrl+click would open, so it is recomputed on every mouse and key event (a
+    /// key or click without ctrl ends it: a released ctrl is not reported by every terminal), on focus loss and
+    /// on output (the link under the pointer may have moved).
+    pub(super) fn update_link_hover(&mut self, pointer: Option<(u16, u16)>, modifiers: KeyModifiers) {
+        if let Some(p) = pointer {
+            self.pointer = Some(p);
+        }
+        self.link_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        self.refresh_link_hover();
+    }
+
+    /// Recomputes the link highlight on the screen as it is now (see `update_link_hover`).
+    pub(super) fn refresh_link_hover(&mut self) {
+        self.link_hover = self.link_under_pointer();
+    }
+
+    /// The link under the pointer, while ctrl is held and no overlay covers the terminal.
+    fn link_under_pointer(&self) -> Option<LinkHover> {
+        let (x, y) = self.pointer.filter(|_| self.link_ctrl && self.overlay.is_none())?;
+        let Some(Hit::Pane { pane, inner }) = self.hit_at(x, y) else { return None };
+        let (target, row, from, to) = self.link_under(pane, inner, x, y)?;
+        Some(LinkHover { pane, row, from, to, target })
     }
 }
 

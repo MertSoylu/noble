@@ -47,14 +47,22 @@ impl App {
 
     pub(super) fn on_input(&mut self, e: Event) {
         match e {
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            Event::Key(k) => {
+                if k.kind != KeyEventKind::Release {
+                    self.on_key(k);
+                }
+                // Any key event, a release too, shows the modifiers held now: the link highlight follows them.
+                self.update_link_hover(None, k.modifiers);
+            }
             Event::Mouse(m) => self.on_mouse(m),
             Event::Resize(w, h) => self.size = (w, h),
             Event::Paste(text) => self.on_paste(&text),
             // Only reported when the outer terminal supports focus reporting (`main` asks for it).
             Event::FocusGained => self.window_focused = Some(true),
-            Event::FocusLost => self.window_focused = Some(false),
-            _ => {}
+            Event::FocusLost => {
+                self.window_focused = Some(false);
+                self.update_link_hover(None, KeyModifiers::NONE);
+            }
         }
     }
 
@@ -760,7 +768,7 @@ impl App {
 
     // ─── Mouse ──────────────────────────────────────────────────────────────
 
-    fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
+    pub(super) fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
         self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())
     }
 
@@ -844,6 +852,8 @@ impl App {
             }
             return;
         }
+        // Every mouse event carries the pointer and the modifiers: the link highlight follows them.
+        self.update_link_hover(Some((m.column, m.row)), m.modifiers);
         match m.kind {
             MouseEventKind::Down(btn) => self.mouse_down(btn, &m),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(&m),
@@ -865,7 +875,6 @@ impl App {
                     Some(Hit::Pane { pane, inner }) if self.overlay.is_none() => Some((pane, inner)),
                     _ => None,
                 };
-                self.update_link_hover(over, &m);
                 if let Some((pane, inner)) = over
                     && Some(pane) == self.focused_pane()
                 {
@@ -983,7 +992,7 @@ impl App {
                     self.tabs[ti].focus = pane;
                 }
                 let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
-                if btn == MouseButton::Left && ctrl && self.open_link_at(pane, inner, m) {
+                if btn == MouseButton::Left && ctrl && self.open_link_at(pane) {
                     return;
                 }
                 let wants = self.pane_wants_mouse(pane) && !shift;

@@ -519,13 +519,15 @@ pub struct SearchState {
     pub refreshed: Option<Instant>,
 }
 
-/// Link under the mouse while ctrl is held: pane, screen row, column span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Link under the mouse while ctrl is held: pane, screen row, column span, and the link itself (a ctrl+click
+/// opens this one).
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkHover {
     pub pane: PaneId,
     pub row: u16,
     pub from: u16,
     pub to: u16,
+    pub target: crate::term::link::Link,
 }
 
 pub struct Boot {
@@ -778,7 +780,12 @@ pub struct App {
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
     pub search: Option<SearchState>,
+    /// The link under the pointer while ctrl is held (see `App::update_link_hover`).
     pub link_hover: Option<LinkHover>,
+    /// Where the mouse was last seen, and whether ctrl was held at the last input event: the link hover
+    /// follows both (see `App::update_link_hover`).
+    pointer: Option<(u16, u16)>,
+    link_ctrl: bool,
     pub usage_history: UsageHistory,
     pub ui_state: crate::store::UiState,
     /// Latest events from the Claude Code hooks (pane → record).
@@ -1060,6 +1067,8 @@ impl App {
             git_requested: HashMap::new(),
             search: None,
             link_hover: None,
+            pointer: None,
+            link_ctrl: false,
             usage_history: UsageHistory::memory(),
             ui_state: crate::store::UiState::memory(),
             agent_hooks: HashMap::new(),

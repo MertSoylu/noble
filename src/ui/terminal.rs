@@ -55,7 +55,7 @@ pub fn draw(
         hits.push((inner, Hit::Pane { pane: *id, inner }));
         let marks = Marks {
             search: app.search.as_ref().filter(|s| s.pane == *id),
-            link: app.link_hover.filter(|l| l.pane == *id),
+            link: app.link_hover.as_ref().filter(|l| l.pane == *id),
         };
         // Only a split tab has other panes to tell apart from the focused one (a zoomed pane is alone).
         let shown = Shown { focused, dim: app.cfg.terminal.dim_inactive && multi && !focused };
@@ -550,7 +550,7 @@ fn cluster_brackets(buf: &mut Buffer, on_top: &[(Rect, Hit)]) {
 #[derive(Default)]
 struct Marks<'a> {
     search: Option<&'a SearchState>,
-    link: Option<LinkHover>,
+    link: Option<&'a LinkHover>,
 }
 
 /// How a pane is drawn: whether it has the focus (it shows the cursor) and whether its text fades
