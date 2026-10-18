@@ -62,11 +62,14 @@ fn agent(timeout: Duration) -> ureq::Agent {
     agent_with(timeout, true)
 }
 
-/// An agent; `https_only` is off only for the local test server of `partial_download_is_an_error`.
+/// An agent; `https_only` is off only for the local test server of the download tests. Redirects are not
+/// followed by ureq (`get_following` does it, checking each address).
 fn agent_with(timeout: Duration, https_only: bool) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .https_only(https_only)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .http_status_as_error(false)
         .user_agent(concat!("noble/", env!("CARGO_PKG_VERSION")))
         .build();
@@ -109,13 +112,47 @@ pub fn parse_release(v: &Value) -> Option<Release> {
     Some(Release { version: tag.trim_start_matches(['v', 'V']).to_string(), assets })
 }
 
+/// Redirects one request may follow (GitHub's asset links take one or two hops).
+const MAX_REDIRECTS: usize = 5;
+
+/// Is `url` the GitHub API (https, `api.github.com`)?
+fn is_api_url(url: &str) -> bool {
+    url.strip_prefix("https://").is_some_and(|rest| rest.starts_with("api.github.com/"))
+}
+
+/// GETs `url` and follows its redirects by hand, at most `MAX_REDIRECTS`. ureq would follow them without looking
+/// at the hosts, and a redirect is how a download leaves GitHub: the address and every `Location` must pass
+/// `allowed` before it is requested. The status of the last response is left to the caller.
+fn get_following(
+    agent: &ureq::Agent,
+    url: &str,
+    allowed: fn(&str) -> bool,
+    accept: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let mut next = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        if !allowed(&next) {
+            return Err(format!("{next} is not an address NOBLE may fetch from"));
+        }
+        let resp = agent.get(next.as_str()).header("Accept", accept).call().map_err(net_error)?;
+        let status = resp.status().as_u16();
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(resp);
+        }
+        next = resp
+            .headers()
+            .get(ureq::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| format!("HTTP {status} without a location"))?
+            .to_string();
+    }
+    Err("too many redirects".into())
+}
+
 /// Reads the latest published release from GitHub.
 pub fn fetch_latest() -> Result<Release, String> {
-    let mut resp = agent(Duration::from_secs(10))
-        .get(LATEST_URL)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(net_error)?;
+    let mut resp =
+        get_following(&agent(Duration::from_secs(10)), LATEST_URL, is_api_url, "application/vnd.github+json")?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().read_to_string().unwrap_or_default();
     match status {
@@ -315,11 +352,12 @@ fn copy_capped(from: &mut impl std::io::Read, to: &mut impl std::io::Write, max:
 
 /// Downloads `url` into `to`, at most `max` bytes.
 fn download(url: &str, to: &Path, max: u64) -> Result<(), String> {
-    download_via(&agent(Duration::from_secs(300)), url, to, max)
+    download_via(&agent(Duration::from_secs(300)), url, to, max, is_release_url)
 }
 
-fn download_via(agent: &ureq::Agent, url: &str, to: &Path, max: u64) -> Result<(), String> {
-    let resp = agent.get(url).call().map_err(net_error)?;
+/// `download` with the agent and the address check passed in: the tests download from a local server.
+fn download_via(agent: &ureq::Agent, url: &str, to: &Path, max: u64, allowed: fn(&str) -> bool) -> Result<(), String> {
+    let resp = get_following(agent, url, allowed, "*/*")?;
     let status = resp.status().as_u16();
     if status != 200 {
         return Err(format!("download failed: HTTP {status}"));
@@ -628,6 +666,24 @@ mod tests {
         })
     }
 
+    /// A local server for the download tests: answers each connection with the next of `replies(port)`, then ends.
+    /// Returns the port and the server thread (join it after the request).
+    fn local_server(replies: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let replies = replies(port);
+        let handle = std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(reply.as_bytes());
+            }
+        });
+        (port, handle)
+    }
+
     /// A real archive for this platform holding `binary_name()` with `content`, built with the system tar
     /// (Windows 10+ `tar.exe` writes zips with `-a`; GNU tar on Linux writes tar.gz with `-z`).
     fn make_archive(dir: &Path, content: &[u8]) -> Option<Vec<u8>> {
@@ -864,10 +920,82 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("archive");
         let local = agent_with(Duration::from_secs(10), false);
-        let res = download_via(&local, &format!("http://127.0.0.1:{port}/asset"), &to, MAX_ARCHIVE);
+        let res = download_via(&local, &format!("http://127.0.0.1:{port}/asset"), &to, MAX_ARCHIVE, |_| true);
         server.join().unwrap();
         assert!(res.is_err(), "a truncated download was accepted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A redirect is followed by hand: the `Location` of each hop is checked, and the final answer is what it is.
+    #[test]
+    fn redirects_are_followed_to_allowed_addresses() {
+        let (port, server) = local_server(|p| {
+            vec![
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{p}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload".to_string(),
+            ]
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = get_following(
+            &local,
+            &format!("http://127.0.0.1:{port}/asset"),
+            |u| u.starts_with("http://127.0.0.1:"),
+            "*/*",
+        );
+        server.join().unwrap();
+        let mut resp = res.expect("the redirect was not followed");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.body_mut().read_to_string().unwrap(), "payload");
+    }
+
+    /// A redirect to another host is refused before that host is asked: the server below answers one request only,
+    /// and the second address (a TEST-NET address that would hang) is never connected to.
+    #[test]
+    fn redirect_to_another_host_is_refused_before_it_is_requested() {
+        let (port, server) = local_server(|_| {
+            vec![
+                "HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .into(),
+            ]
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res =
+            get_following(&local, &format!("http://127.0.0.1:{port}/a"), |u| u.starts_with("http://127.0.0.1:"), "*/*");
+        server.join().unwrap();
+        let err = res.expect_err("a redirect to another host was followed");
+        assert!(err.contains("192.0.2.1") && err.contains("may fetch from"), "{err}");
+    }
+
+    /// A redirect loop ends at `MAX_REDIRECTS`: the server answers exactly that many requests.
+    #[test]
+    fn redirects_stop_after_the_limit() {
+        let (port, server) = local_server(|p| {
+            (0..=MAX_REDIRECTS)
+                .map(|_| format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{p}/again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+                .collect()
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = get_following(
+            &local,
+            &format!("http://127.0.0.1:{port}/loop"),
+            |u| u.starts_with("http://127.0.0.1:"),
+            "*/*",
+        );
+        server.join().unwrap();
+        assert_eq!(res.err().as_deref(), Some("too many redirects"));
+    }
+
+    /// The download and the update check only ever ask GitHub: its API for the release, its download hosts for files.
+    #[test]
+    fn update_requests_go_to_github_only() {
+        assert!(is_api_url("https://api.github.com/repos/MertSoylu/noble/releases/latest"));
+        assert!(!is_api_url("http://api.github.com/x"));
+        assert!(!is_api_url("https://api.github.com.evil.example/x"));
+        assert!(!is_api_url("https://evil.example/api.github.com/x"));
+        assert!(is_release_url("https://objects.githubusercontent.com/x"));
+        assert!(!is_release_url("https://evil.example/x"));
     }
 
     #[test]
