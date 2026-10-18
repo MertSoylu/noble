@@ -675,19 +675,37 @@ mod tests {
     }
 
     /// A local server for the download tests: answers each connection with the next of `replies(port)`, then ends.
-    /// Returns the port and the server thread (join it after the request).
-    fn local_server(replies: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
+    /// The thread gives back how many requests it answered. It stops after `replies` or after 10 s without a
+    /// connection, so a client that asks for fewer requests than scripted cannot hang the test: the caller joins
+    /// it and asserts the count.
+    fn local_server(replies: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<usize>) {
+        use std::io::{ErrorKind, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let replies = replies(port);
         let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut served = 0;
             for reply in replies {
-                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return served,
+                    }
+                };
+                // The accepted socket may inherit the listener's non-blocking mode (Windows, macOS).
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf);
-                let _ = s.write_all(reply.as_bytes());
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply.as_bytes());
+                served += 1;
             }
+            served
         });
         (port, handle)
     }
@@ -915,21 +933,15 @@ mod tests {
     /// A local server that promises more bytes than it sends, then hangs up.
     #[test]
     fn partial_download_is_an_error() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial");
+        let (port, server) = local_server(|_| {
+            vec!["HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial".into()]
         });
         let dir = std::env::temp_dir().join(format!("noble-update-partial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("archive");
         let local = agent_with(Duration::from_secs(10), false);
         let res = download_via(&local, &format!("http://127.0.0.1:{port}/asset"), &to, MAX_ARCHIVE, |_| true);
-        server.join().unwrap();
+        assert_eq!(server.join().unwrap(), 1, "the download did not ask the server");
         assert!(res.is_err(), "a truncated download was accepted");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -952,7 +964,7 @@ mod tests {
             |u| u.starts_with("http://127.0.0.1:"),
             "*/*",
         );
-        server.join().unwrap();
+        assert_eq!(server.join().unwrap(), 2, "the redirect target was not requested");
         let mut resp = res.expect("the redirect was not followed");
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.body_mut().read_to_string().unwrap(), "payload");
@@ -971,12 +983,12 @@ mod tests {
         let local = agent_with(Duration::from_secs(10), false);
         let res =
             get_following(&local, &format!("http://127.0.0.1:{port}/a"), |u| u.starts_with("http://127.0.0.1:"), "*/*");
-        server.join().unwrap();
+        assert_eq!(server.join().unwrap(), 1, "only the first address may be asked");
         let err = res.expect_err("a redirect to another host was followed");
         assert!(err.contains("192.0.2.1") && err.contains("may fetch from"), "{err}");
     }
 
-    /// A redirect loop ends at `MAX_REDIRECTS`: the server answers exactly that many requests.
+    /// A redirect loop ends at `MAX_REDIRECTS`: the server answers the first request and each redirect followed.
     #[test]
     fn redirects_stop_after_the_limit() {
         let (port, server) = local_server(|p| {
@@ -991,7 +1003,8 @@ mod tests {
             |u| u.starts_with("http://127.0.0.1:"),
             "*/*",
         );
-        server.join().unwrap();
+        // The first request and each of the `MAX_REDIRECTS` followed redirects: nothing more is asked.
+        assert_eq!(server.join().unwrap(), MAX_REDIRECTS + 1, "the redirects were not all followed");
         assert_eq!(res.err().as_deref(), Some("too many redirects"));
     }
 
