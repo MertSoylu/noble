@@ -106,10 +106,14 @@ fn is_noble_command(command: &str) -> bool {
     stem == "noble" || stem == "noble-dev"
 }
 
+/// Is this one hook (`{"type": "command", "command": …}`) NOBLE's?
+fn is_noble_command_hook(hook: &Value) -> bool {
+    hook.get("command").and_then(Value::as_str).is_some_and(is_noble_command)
+}
+
+/// Does this matcher group hold one of NOBLE's hooks?
 fn is_noble_hook(entry: &Value) -> bool {
-    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
-        hooks.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(is_noble_command))
-    })
+    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| hooks.iter().any(is_noble_command_hook))
 }
 
 fn read_settings(path: &Path) -> Result<Value, String> {
@@ -201,14 +205,28 @@ fn requote(base: &str) -> String {
     if raw == "noble" { raw.to_string() } else { quote_for_shell(raw) }
 }
 
-/// Removes the hooks NOBLE added; also deletes lists left empty.
+/// Removes the hooks NOBLE added; also deletes lists left empty. A matcher group that holds NOBLE's hook
+/// next to the user's own hooks keeps the user's hooks: only NOBLE's entries leave it, and the group goes
+/// when nothing is left in it.
 pub fn uninstall(path: &Path) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let Some(hooks) = v.get_mut("hooks").and_then(Value::as_object_mut) else { return Ok(()) };
     for (event, _) in EVENTS {
         if let Some(list) = hooks.get_mut(event).and_then(Value::as_array_mut) {
-            list.retain(|e| !is_noble_hook(e));
-            if list.is_empty() {
+            let before = list.len();
+            list.retain_mut(|group| {
+                if !is_noble_hook(group) {
+                    return true;
+                }
+                match group.get_mut("hooks").and_then(Value::as_array_mut) {
+                    Some(inner) => {
+                        inner.retain(|h| !is_noble_command_hook(h));
+                        !inner.is_empty()
+                    }
+                    None => true,
+                }
+            });
+            if list.is_empty() && list.len() != before {
                 hooks.remove(event);
             }
         }
@@ -664,6 +682,54 @@ mod tests {
             let command = &v["hooks"][event][0]["hooks"][0]["command"];
             assert_eq!(command, &format!("{} hook {arg}", quote_for_shell("/opt/$X/noble")), "{event}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Uninstall removes NOBLE's hook from a matcher group and nothing else: a group that also holds the user's
+    /// own hook keeps it, and only a group left empty goes.
+    #[test]
+    fn uninstall_keeps_the_users_hooks_in_a_shared_group() {
+        let dir = temp("shared-group");
+        let file = dir.join("settings.json");
+        let user = json!({ "hooks": [ { "type": "command", "command": "say done" } ] });
+        let mine = json!({ "hooks": [ { "type": "command", "command": "noble hook stop" } ] });
+        let shared = json!({ "matcher": "Bash", "hooks": [
+            { "type": "command", "command": "say done" },
+            { "type": "command", "command": "noble hook stop" },
+        ] });
+        let settings = json!({ "hooks": {
+            "Stop": [ user.clone(), mine.clone(), shared ],
+            "Notification": [ mine ],
+        } });
+        std::fs::write(&file, settings.to_string()).unwrap();
+        uninstall(&file).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(
+            stop,
+            &vec![user, json!({ "matcher": "Bash", "hooks": [ { "type": "command", "command": "say done" } ] })]
+        );
+        assert!(v["hooks"].get("Notification").is_none(), "an empty list is removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backup cut short by an interrupted plain copy (an older build) is taken again from the settings file
+    /// while that file is still the original; the new backup is written in one step (no temp file left).
+    #[test]
+    fn a_truncated_backup_is_taken_again() {
+        let dir = temp("backup-repair");
+        let file = dir.join("settings.json");
+        let original = "{ \"model\": \"opus\" }";
+        std::fs::write(&file, original).unwrap();
+        std::fs::write(dir.join("settings.json.noble-bak"), "{ \"mo").unwrap();
+        install(&file, "noble").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.noble-bak")).unwrap(), original);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(left.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{left:?}");
+        // A good backup is never overwritten by a later write.
+        install(&file, "noble").unwrap();
+        uninstall(&file).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.noble-bak")).unwrap(), original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
