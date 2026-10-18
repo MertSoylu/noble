@@ -826,6 +826,7 @@ fn inactive_panes_dim_only_in_a_split() {
     app.new_tab(std::env::temp_dir(), None, Some("dim".into()));
     app.run(Action::SplitRight);
     assert_eq!(app.tabs[0].panes().len(), 2);
+    settle_layout(&mut app, 110, 30);
     write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
     let buf = render_cells(&mut app, 110, 30);
     let qs = cells_of(&buf, "Q");
@@ -853,11 +854,9 @@ fn inactive_panes_dim_only_in_a_split() {
     app.cfg.terminal.colors = "windows-terminal".into();
 
     // Zoomed: one pane is on screen, and it has the focus.
-    write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
     app.run(Action::Zoom);
     assert!(app.tabs[0].zoomed);
-    // The pane is resized on the first frame, and the shell redraws its prompt then: write again.
-    render_cells(&mut app, 110, 30);
+    settle_layout(&mut app, 110, 30);
     write_panes(&mut app, "\x1b[38;2;255;255;255m", "QQQQ");
     let buf = render_cells(&mut app, 110, 30);
     let qs = cells_of(&buf, "Q");
@@ -867,10 +866,21 @@ fn inactive_panes_dim_only_in_a_split() {
     // A single pane is never dimmed.
     let mut single = demo_app(110, 30);
     single.new_tab(std::env::temp_dir(), None, Some("one".into()));
+    settle_layout(&mut single, 110, 30);
     write_panes(&mut single, "\x1b[38;2;255;255;255m", "QQQQ");
     let buf = render_cells(&mut single, 110, 30);
     let qs = cells_of(&buf, "Q");
     assert!(qs.len() == 4 && qs.iter().all(|(fg, _)| *fg == white), "{qs:?}");
+}
+
+/// Draws one frame (which resizes the panes of the first tab if the layout changed), then waits until each
+/// pane's shell has gone quiet. A resize makes the shell redraw its prompt, and the redraw erases whatever
+/// `write_panes` has put on the first line by then. Writing only after the shell settled keeps the glyphs.
+fn settle_layout(app: &mut App, w: u16, h: u16) {
+    render_cells(app, w, h);
+    for id in app.tabs[0].panes() {
+        wait_idle(app, id);
+    }
 }
 
 /// Clears every pane of the first tab and writes `glyphs` (in the `sgr` style) at its top left.
