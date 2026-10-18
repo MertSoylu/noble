@@ -428,39 +428,55 @@ fn restored_launch_tab_reruns_its_command() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// Ticks the app for `for_how_long`, as the main loop does (the autosave runs on ticks).
+fn tick_for(app: &mut App, for_how_long: Duration) {
+    let end = std::time::Instant::now() + for_how_long;
+    while std::time::Instant::now() < end {
+        app.tick();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Ticks the app until `done` holds. The deadline is generous: the check is that the save happens, not how
+/// fast the machine is.
+fn tick_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        app.tick();
+        if done(app) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The session is saved a couple of seconds after the tabs change, without quitting (a crash or a
-/// kill keeps it), and an unchanged session is not written again.
+/// kill keeps it), and an unchanged session is not written again. The waits poll for the outcome: the save
+/// delay is 2 s, and a slow machine only makes them longer.
 #[test]
 fn session_is_saved_shortly_after_tabs_change() {
-    let data = session_dir("autosave");
-    let mut app = session_app(&data, false, session_cfg());
+    let data = TempDir::new("noble-session-autosave");
+    let mut app = session_app(data.path(), false, session_cfg());
     app.session_autosave = true;
     assert!(app.session_save_due().is_none(), "nothing changed: no wake-up needed");
-    app.new_tab(data.clone(), None, Some("autosaved".into()));
-    std::thread::sleep(Duration::from_millis(1100));
-    app.tick();
-    assert!(session_origins(&data, false).is_empty(), "debounced: not saved at once");
-    assert!(app.session_save_due().is_some(), "a save is waiting");
-    std::thread::sleep(Duration::from_millis(2100));
-    app.tick();
-    assert_eq!(session_origins(&data, false), ["autosaved"]);
+    app.new_tab(data.path().to_path_buf(), None, Some("autosaved".into()));
+    // The tick that notices the change starts the delay (checks run once a second): right then, nothing is saved.
+    tick_until(&mut app, "the change was not noticed", |a| a.session_save_due().is_some());
+    assert!(session_origins(data.path(), false).is_empty(), "debounced: not saved at once");
+    tick_until(&mut app, "the change was never saved", |_| !session_origins(data.path(), false).is_empty());
+    assert_eq!(session_origins(data.path(), false), ["autosaved"]);
     assert!(app.session_save_due().is_none(), "saved: no wake-up needed");
 
-    // Unchanged tabs are not written again.
-    let file = data.join(session_file(false));
+    // Unchanged tabs are not written again, however long the app keeps ticking.
+    let file = data.path().join(session_file(false));
     let first = std::fs::metadata(&file).unwrap().modified().unwrap();
-    std::thread::sleep(Duration::from_millis(1100));
-    app.tick();
+    tick_for(&mut app, Duration::from_millis(2500));
     assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), first);
 
     // Closing the last tab is a change too.
     app.remove_tab(0);
-    std::thread::sleep(Duration::from_millis(1100));
-    app.tick();
-    std::thread::sleep(Duration::from_millis(2100));
-    app.tick();
-    assert!(session_origins(&data, false).is_empty());
-    let _ = std::fs::remove_dir_all(&data);
+    tick_until(&mut app, "closing the last tab was never saved", |_| session_origins(data.path(), false).is_empty());
 }
 
 /// Workspaces can be deleted from the palette (after a confirmation), and saving says when it replaced
