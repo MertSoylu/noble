@@ -554,6 +554,8 @@ pub struct Pane {
     input: PtyInput,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Set by the wait thread once the child is reaped (see `kill_child`).
+    exited: Arc<AtomicBool>,
     pub dirty: Arc<AtomicBool>,
     /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
     output_gen: Arc<AtomicU64>,
@@ -724,6 +726,7 @@ impl Pane {
             Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, spec.scrollback, Callbacks::default())));
         let dirty = Arc::new(AtomicBool::new(false));
         let output_gen = Arc::new(AtomicU64::new(0));
+        let exited = Arc::new(AtomicBool::new(false));
 
         // The writer thread is the only one that writes to the PTY, so a child that does not read its input
         // blocks this thread alone. It ends when the queue closes (the pane and its reader are gone) or on the
@@ -772,8 +775,11 @@ impl Pane {
         }
         {
             let tx = tx.clone();
+            let exited = exited.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let _ = child.wait();
+                // The child is reaped: its pid may belong to another process from now on (`kill_child`).
+                exited.store(true, Ordering::Release);
                 let _ = tx.send(AppEvent::PtyExit(id));
             })?;
         }
@@ -784,6 +790,7 @@ impl Pane {
             input,
             master: pair.master,
             killer,
+            exited,
             dirty,
             output_gen,
             size: (rows, cols),
@@ -1004,7 +1011,17 @@ impl Pane {
     }
 
     pub fn kill(&mut self) {
-        let _ = self.killer.kill();
+        self.kill_child();
+    }
+
+    /// Kills the child unless the wait thread has reaped it. Its pid is free for reuse from then on, so a signal
+    /// sent by pid could reach another process. The flag is set right after the reap: a kill in the instants
+    /// between the two is not excluded (closing that gap needs `waitid` with WNOWAIT, which portable-pty does not
+    /// expose), but a pane closed long after its child exited never signals a reused pid.
+    fn kill_child(&mut self) {
+        if !self.exited.load(Ordering::Acquire) {
+            let _ = self.killer.kill();
+        }
     }
 
     /// All lines including the scrollback (0 = oldest) and the scrollback length.
@@ -1174,7 +1191,7 @@ pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        let _ = self.killer.kill();
+        self.kill_child();
     }
 }
 
@@ -1671,4 +1688,23 @@ Claude needs your permission",
         assert!(!input.send(b"y"), "the writer thread has ended");
     }
 
+    /// The wait thread records the exit before it reports `PtyExit`, so a pane closed afterwards never signals
+    /// the pid it reaped (`kill_child`).
+    #[test]
+    fn exit_is_recorded_before_pty_exit_is_sent() {
+        let (program, args) = if cfg!(windows) { ("cmd", vec!["/C", "exit 0"]) } else { ("sh", vec!["-c", "exit 0"]) };
+        let spec = ShellSpec::new(program, args.into_iter().map(String::from).collect());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd = std::env::temp_dir();
+        let spec_in = SpawnSpec { cwd: &cwd, command: None, shell: &spec, rows: 10, cols: 40, scrollback: 10 };
+        let pane = Pane::spawn(7, spec_in, tx).unwrap();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(AppEvent::PtyExit(7)) => break,
+                Ok(_) => {}
+                Err(e) => panic!("no PtyExit: {e}"),
+            }
+        }
+        assert!(pane.exited.load(Ordering::Acquire));
+    }
 }
