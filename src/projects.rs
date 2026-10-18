@@ -145,17 +145,28 @@ pub fn roots_from(cfg: &ProjectsCfg) -> Vec<PathBuf> {
 /// `.git` may be a directory or a file containing `gitdir:` (for worktrees/submodules).
 pub fn git_dir(repo: &Path) -> Option<PathBuf> {
     let dot = repo.join(".git");
-    if dot.is_dir() {
-        return Some(dot);
-    }
-    if dot.is_file() {
+    let gd = if dot.is_dir() {
+        dot
+    } else if dot.is_file() {
         // Capped like the task files: a repository file is not trusted to be small.
         let text = read_small(&dot)?;
         let target = text.trim().strip_prefix("gitdir:")?.trim();
+        // Not followed to another machine: on Windows reading `\\server\share\HEAD` connects there and sends the
+        // user's credentials (NTLM). The repository is then treated as a plain folder.
+        if crate::term::pane::is_network_path(target) {
+            return None;
+        }
         let p = PathBuf::from(target);
-        return Some(if p.is_absolute() { p } else { repo.join(p) });
-    }
-    None
+        if p.is_absolute() { p } else { repo.join(p) }
+    } else {
+        return None;
+    };
+    // Git reads `commondir` (a linked worktree's shared folder) and `gitdir` (the worktree's own `.git` file) from
+    // the git directory itself, so a repository that names a network path there is not run either.
+    let names_share = ["commondir", "gitdir"]
+        .iter()
+        .any(|f| read_small(&gd.join(f)).is_some_and(|t| crate::term::pane::is_network_path(t.trim())));
+    (!names_share).then_some(gd)
 }
 
 /// Branch name from the `HEAD` file (short hash on a detached HEAD).
@@ -800,6 +811,45 @@ mod tests {
         assert_eq!(alpha.branch.as_deref(), Some("main"));
         let beta = found.iter().find(|p| p.name == "beta").unwrap();
         assert_eq!(beta.branch.as_deref(), Some("0123456"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A `.git` file that points at a network path is not followed (Windows would connect to the server with the
+    /// user's credentials to read HEAD); a local target, absolute or relative, still names the repository.
+    #[test]
+    fn git_file_pointing_at_a_network_path_is_not_followed() {
+        let base = std::env::temp_dir().join(format!("noble-gitfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real/.git/worktrees/wt");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+        let local = base.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
+        let relative = base.join("relative");
+        std::fs::create_dir_all(&relative).unwrap();
+        std::fs::write(relative.join(".git"), "gitdir: ../real/.git/worktrees/wt\n").unwrap();
+        assert_eq!(git_dir(&local), Some(real.clone()));
+        assert_eq!(git_dir(&relative), Some(relative.join("../real/.git/worktrees/wt")));
+        for target in [r"\\attacker\share\x", "//attacker/share/x", r"\\?\UNC\attacker\share\x", r"\\.\pipe\x"] {
+            let bad = base.join(format!("bad-{}", target.len()));
+            std::fs::create_dir_all(&bad).unwrap();
+            std::fs::write(bad.join(".git"), format!("gitdir: {target}\n")).unwrap();
+            assert_eq!(git_dir(&bad), None, "{target}");
+            assert!(project_at(&bad).is_some_and(|p| !p.repo), "{target} is listed as a plain folder");
+        }
+        // Git reads `commondir` and a worktree's `gitdir` from the git directory: a network path there is refused too.
+        for (file, text) in [("commondir", r"\\attacker\share\x"), ("gitdir", "//attacker/share/x/.git")] {
+            let dir = base.join(format!("inside-{file}"));
+            let gd = dir.join(".git");
+            std::fs::create_dir_all(&gd).unwrap();
+            std::fs::write(gd.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+            std::fs::write(gd.join(file), format!("{text}\n")).unwrap();
+            assert_eq!(git_dir(&dir), None, "{file}");
+        }
+        // Scanning the folder finds the local repositories and not the ones that point at a share.
+        let found = scan(std::slice::from_ref(&base), 3, &[], 100);
+        assert!(found.iter().all(|p| !p.name.starts_with("bad-") && !p.name.starts_with("inside-")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
