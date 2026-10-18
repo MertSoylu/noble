@@ -67,14 +67,28 @@ pub fn settings_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("settings.json"))
 }
 
-/// Base of the hook command: `noble` from PATH if present, else the running file's full path.
+/// Base of the hook command: `noble` from PATH if present, else the running file's full path, quoted for the
+/// shell that runs hooks (see [`quote_for_shell`]).
 pub fn command_base() -> String {
     if crate::util::which("noble").is_some() {
         return "noble".into();
     }
     match std::env::current_exe() {
-        Ok(p) => format!("\"{}\"", p.display()),
+        Ok(p) => quote_for_shell(&p.display().to_string()),
         Err(_) => "noble".into(),
+    }
+}
+
+/// `text` as one word for the shell Claude Code runs hook commands with. Unix (`sh`): single quotes, so
+/// nothing in the path expands (`$`, backticks, `\`); a `'` is closed, escaped and reopened. Windows: double
+/// quotes, the form cmd.exe and Git Bash read (a path cannot hold a `"` there).
+pub fn quote_for_shell(text: &str) -> String {
+    if cfg!(windows) {
+        // Windows: cmd.exe and Git Bash read double quotes (a path cannot hold a `"` there).
+        format!("\"{text}\"")
+    } else {
+        // Unix: single quotes, where nothing expands. Windows uses double quotes (see above).
+        format!("'{}'", text.replace('\'', r"'\''"))
     }
 }
 
@@ -86,7 +100,7 @@ fn is_noble_command(command: &str) -> bool {
     if !EVENTS.iter().any(|(_, a)| *a == arg.trim()) {
         return false;
     }
-    let base = base.trim().trim_matches('"');
+    let base = base.trim().trim_matches(['"', '\'']);
     let file = base.rsplit(['/', '\\']).next().unwrap_or(base).to_lowercase();
     let stem = file.strip_suffix(".exe").unwrap_or(&file);
     stem == "noble" || stem == "noble-dev"
@@ -164,9 +178,16 @@ pub fn upgrade(path: &Path) -> Result<(), String> {
         })
     });
     match base {
-        Some(base) if !is_installed(path) => install(path, &base),
+        Some(base) if !is_installed(path) => install(path, &requote(&base)),
         _ => Ok(()),
     }
+}
+
+/// The base of an older install, quoted the way this build quotes it (an install from before the quoting
+/// fix used double quotes, which expand `$`). A bare `noble` from PATH stays bare.
+fn requote(base: &str) -> String {
+    let raw = base.trim().trim_matches(['"', '\'']);
+    if raw == "noble" { raw.to_string() } else { quote_for_shell(raw) }
 }
 
 /// Removes the hooks NOBLE added; also deletes lists left empty.
@@ -554,7 +575,9 @@ mod tests {
         upgrade(&file).unwrap();
         assert!(is_installed(&file));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["SubagentStop"][0]["hooks"][0]["command"], format!("{base} hook subagent-stop"));
+        // The added event is written with this build's quoting (`requote`); the existing ones are untouched.
+        let added = format!("{} hook subagent-stop", quote_for_shell(r"C:\Tools\noble.exe"));
+        assert_eq!(v["hooks"]["SubagentStop"][0]["hooks"][0]["command"], added);
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1, "existing hooks are not duplicated");
         uninstall(&file).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -586,7 +609,49 @@ mod tests {
         upgrade(&file).unwrap();
         assert!(is_installed(&file));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["SubagentStart"][0]["hooks"][0]["command"], format!("{base} hook subagent-start"));
+        // The events it adds carry the whole path (not cut at its " hook "), quoted for the shell.
+        let added = format!("{} hook subagent-start", quote_for_shell("/opt/my hook tools/noble"));
+        assert_eq!(v["hooks"]["SubagentStart"][0]["hooks"][0]["command"], added);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The base is one word for the shell that runs hooks: nothing in it expands, and a `'` survives.
+    #[test]
+    fn hook_base_is_quoted_for_the_shell() {
+        if cfg!(windows) {
+            // Windows: double quotes, as before (cmd.exe and Git Bash read them).
+            assert_eq!(quote_for_shell(r"C:\my tools\noble.exe"), r#""C:\my tools\noble.exe""#);
+        } else {
+            // Unix: single quotes, so `$`, backticks and backslashes stay literal.
+            assert_eq!(quote_for_shell("/opt/a b/$X/`y`/noble"), "'/opt/a b/$X/`y`/noble'");
+            assert_eq!(quote_for_shell("/o/it's/noble"), r"'/o/it'\''s/noble'");
+        }
+        let base = quote_for_shell("/o/it's/$HOME/noble");
+        assert!(is_noble_command(&format!("{base} hook stop")), "{base}");
+        assert_eq!(requote("noble"), "noble");
+        assert_eq!(requote(r#""/opt/$X/noble""#), quote_for_shell("/opt/$X/noble"));
+    }
+
+    /// An install written with double quotes (before this fix) gets the events it lacks in this build's form.
+    #[test]
+    fn upgrade_quotes_the_base_of_the_events_it_adds() {
+        let dir = temp("upgrade-quote");
+        let file = dir.join("settings.json");
+        let legacy = r#""/opt/$X/noble""#;
+        let mut hooks = serde_json::Map::new();
+        for (event, arg) in &EVENTS[..5] {
+            hooks.insert(
+                event.to_string(),
+                json!([{ "hooks": [ { "type": "command", "command": format!("{legacy} hook {arg}") } ] }]),
+            );
+        }
+        std::fs::write(&file, serde_json::to_string(&json!({ "hooks": hooks })).unwrap()).unwrap();
+        upgrade(&file).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        for (event, arg) in &EVENTS[5..] {
+            let command = &v["hooks"][event][0]["hooks"][0]["command"];
+            assert_eq!(command, &format!("{} hook {arg}", quote_for_shell("/opt/$X/noble")), "{event}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
