@@ -776,7 +776,7 @@ impl Pane {
         }
         self.size = (rows, cols);
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        lock(&self.parser).screen_mut().set_size(rows, cols);
+        set_screen_size(&self.parser, &self.output_gen, rows, cols);
         self.selection = None;
     }
 
@@ -1042,6 +1042,15 @@ pub struct ScrollText {
     pub history: usize,
     generation: u64,
     size: (u16, u16),
+}
+
+/// Resizes the emulator's screen and moves the output generation with it, under the lock `scroll_text` reads both
+/// with. Without the bump a copy taken before a resize stays valid after it, even when the size returns to the one
+/// it was read at (A → B → A with no output in between).
+fn set_screen_size(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, rows: u16, cols: u16) {
+    let mut p = lock(parser);
+    p.screen_mut().set_size(rows, cols);
+    output_gen.fetch_add(1, Ordering::Release);
 }
 
 /// The text of `p` at output generation `generation`: `have` itself when it was read at the same generation
@@ -1550,5 +1559,23 @@ Claude needs your permission",
         let e = super::read_scroll_text(&mut p, 2, Some(&d));
         assert!(!Arc::ptr_eq(&d.lines, &e.lines), "resize: fresh lines");
         assert!(e.lines.iter().all(|l| l.chars().count() <= 10 || l.is_empty()));
+    }
+
+    /// A resize that returns the screen to the size the copy was read at must still read the lines anew: the
+    /// generation moves with every resize (`set_screen_size`), so A → B → A with no output reuses nothing.
+    #[test]
+    fn resize_back_to_the_same_size_reads_anew() {
+        use std::sync::Arc;
+        let parser = Mutex::new(vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default()));
+        let output_gen = AtomicU64::new(0);
+        for i in 0..10 {
+            lock(&parser).process(format!("line {i}\r\n").as_bytes());
+        }
+        let a = read_scroll_text(&mut lock(&parser), output_gen.load(Ordering::Acquire), None);
+        set_screen_size(&parser, &output_gen, 4, 10);
+        set_screen_size(&parser, &output_gen, 4, 20);
+        let b = read_scroll_text(&mut lock(&parser), output_gen.load(Ordering::Acquire), Some(&a));
+        assert!(!Arc::ptr_eq(&a.lines, &b.lines), "A to B to A: the copy from before the resizes is stale");
+        assert_eq!(b.lines.len(), a.lines.len());
     }
 }
