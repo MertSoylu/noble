@@ -239,7 +239,7 @@ pub fn stdio_rpc(
         "params": {"clientInfo": {"name": "noble", "title": "NOBLE", "version": env!("CARGO_PKG_VERSION")}}}))?;
     send(serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}))?;
     let deadline = Instant::now() + timeout;
-    let result = loop {
+    loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break Err("timeout".to_string());
@@ -266,8 +266,7 @@ pub fn stdio_rpc(
             Err(RecvTimeoutError::Timeout) => break Err("timeout".into()),
             Err(RecvTimeoutError::Disconnected) => break Err("cli exited".into()),
         }
-    };
-    result
+    }
 }
 
 /// Runs a program and returns its stdout; the process is killed on timeout.
@@ -931,7 +930,9 @@ mod tests {
     #[test]
     fn rpc_timeout_ends_the_child_tree() {
         let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(unix)]
         let dir = ScratchDir::new("noble-stdio-rpc");
+        #[cfg(unix)]
         let pid_file = dir.0.join("grandchild.pid");
         let started = Instant::now();
         #[cfg(unix)]
