@@ -128,8 +128,9 @@ static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// damaged file that keeps coming back) is reported once, not as a new toast every time.
 static SENT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-/// How many damaged copies (`<name>.corrupt`, `<name>.corrupt.2` …) are kept per file. Past that the file is left
-/// as it is: a newer build sharing the file, or a bug, must not fill the folder with copies.
+/// How many damaged copies (`<name>.corrupt`, `<name>.corrupt.2` …) are kept per file. Past that the oldest copy
+/// is dropped to make room (`keep_aside`): a newer build sharing the file, or a bug, must not fill the folder
+/// with copies, and must not stop the file from being saved either.
 const MAX_COPIES: u32 = 5;
 
 /// Takes the messages about store files since the last call; the App shows them as toasts.
@@ -189,6 +190,14 @@ fn keep_aside(file: &Path, bytes: &[u8]) -> Result<(), ()> {
     if (1..=MAX_COPIES).any(kept) {
         return Ok(());
     }
+    // All slots taken: the oldest copy (number 1) makes room and every later one moves down a number, so the
+    // newest damage always gets the last slot and a file that keeps coming back cannot block saving for good.
+    if (1..=MAX_COPIES).all(|n| copy_name(file, n).exists()) {
+        let _ = std::fs::remove_file(copy_name(file, 1));
+        for n in 2..=MAX_COPIES {
+            let _ = std::fs::rename(copy_name(file, n), copy_name(file, n - 1));
+        }
+    }
     for n in 1..=MAX_COPIES {
         let copy = copy_name(file, n);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
@@ -214,10 +223,7 @@ fn keep_aside(file: &Path, bytes: &[u8]) -> Result<(), ()> {
             }
         }
     }
-    notify(format!(
-        "{shown} could not be read; {MAX_COPIES} copies are already kept, so this change was not saved \
-         and the file is left as it is"
-    ));
+    notify(format!("{shown} could not be read, and no free copy name could be found: this change was not saved"));
     Err(())
 }
 
@@ -1262,28 +1268,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Past `MAX_COPIES` the damaged file is left as it is (no copy, no write), the change still applies in
-    /// memory, and the App is told once.
+    /// Past `MAX_COPIES` the oldest copy makes room: the newest damage takes the last slot, the older ones move
+    /// down a number, and the change is saved (a file that keeps coming back cannot stop saving for good).
     #[test]
-    fn copies_are_capped_and_the_file_is_left_alone() {
+    fn copies_rotate_past_the_cap() {
         let dir = scratch_dir("noble-store-cap");
         let state = dir.join("state.json");
         let mut ui = UiState::load(state.clone());
+        let damage = |i: u32| format!("{{\"pins\": [{i}").into_bytes();
         for i in 0..MAX_COPIES {
-            std::fs::write(&state, format!("{{\"pins\": [{i}").as_bytes()).unwrap();
+            std::fs::write(&state, damage(i)).unwrap();
             ui.modify(|d| d.welcomed = true);
         }
         assert_eq!(copies_in(&dir).len(), MAX_COPIES as usize);
-        let damaged = b"{\"pins\": [\"over the cap";
-        std::fs::write(&state, damaged).unwrap();
-        for _ in 0..3 {
-            ui.modify(|d| d.hidden.push("/over-the-cap".into()));
+        std::fs::write(&state, damage(MAX_COPIES)).unwrap();
+        ui.modify(|d| d.hidden.push("/over-the-cap".into()));
+        assert_eq!(copies_in(&dir).len(), MAX_COPIES as usize, "still at the cap: {:?}", copies_in(&dir));
+        // Damage 0 (the oldest) is gone; damage 1 .. MAX_COPIES hold slots 1 .. MAX_COPIES, the newest last.
+        for n in 1..=MAX_COPIES {
+            assert_eq!(std::fs::read(copy_name(&state, n)).unwrap(), damage(n), "copy {n}");
         }
-        assert_eq!(copies_in(&dir).len(), MAX_COPIES as usize, "no copy beyond the cap");
-        assert_eq!(std::fs::read(&state).unwrap(), damaged, "the file is not written over");
-        assert!(ui.data.hidden.iter().any(|h| h == "/over-the-cap"), "the change applies in memory");
+        let back = UiState::load(state);
+        assert!(back.is_hidden(Path::new("/over-the-cap")), "the change was saved");
+        assert!(back.data.welcomed);
         let notices = notices_for(&dir);
-        assert_eq!(notices.iter().filter(|n| n.contains("copies are already kept")).count(), 1, "{notices:?}");
+        assert!(notices.iter().all(|n| !n.contains("not saved") && !n.contains("could not be saved")), "{notices:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
