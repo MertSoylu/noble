@@ -916,7 +916,9 @@ impl Pane {
     /// checked once on a background thread (`util::usable_dirs`, time-limited, so a share that stopped answering
     /// counts as unusable). Until that answers, and whenever the answer is no, this returns the start directory.
     /// The answer comes back as `AppEvent::PaneCwd` and is stored with `set_cwd_usable`. A network path is never
-    /// checked: it is not a folder this pane acts on (`shown_cwd` shows it).
+    /// checked: it is not a folder this pane acts on (`shown_cwd` shows it). The start folder can be a network path
+    /// (the pane was opened in a share): callers that touch the disk with it refuse that (`link::classify` resolves
+    /// no relative name against it, `app::git` asks for no git status there).
     pub fn cwd(&self) -> PathBuf {
         let Some(reported) = lock(&self.parser).callbacks().cwd.clone() else { return self.start_cwd.clone() };
         if is_network_path(&reported) {

@@ -3,10 +3,20 @@
 
 use super::*;
 
+/// The project whose git status is asked for when a pane's folder changes. None for a network folder
+/// (`\\server\share`, `//server/share`): git run there connects to that server, and a pane that was opened in a
+/// share keeps it as its folder (`Pane::cwd`). Otherwise the project containing `cwd`.
+pub(super) fn git_project_path(projects: &[crate::projects::Project], cwd: &std::path::Path) -> Option<PathBuf> {
+    if crate::term::pane::is_network_path(&cwd.to_string_lossy()) {
+        return None;
+    }
+    crate::projects::project_containing(projects, cwd).map(|p| p.path.clone())
+}
+
 impl App {
     /// Re-requests the git status of the project containing `cwd` (unless too frequent).
     pub fn refresh_git_at(&mut self, cwd: &std::path::Path) {
-        if let Some(path) = crate::projects::project_containing(&self.projects, cwd).map(|p| p.path.clone()) {
+        if let Some(path) = git_project_path(&self.projects, cwd) {
             self.request_git(path, Duration::from_secs(2));
         }
     }
@@ -41,6 +51,31 @@ impl App {
         for path in wanted {
             // Do not keep re-requesting failed repos (no git etc.).
             self.request_git(path, Duration::MAX);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pane in a network folder asks for no git status, even when a project lists that folder; a local folder
+    /// inside a project asks for that project.
+    #[test]
+    fn network_folders_never_ask_for_git() {
+        let project = |path: &str| crate::projects::Project {
+            name: "p".into(),
+            path: PathBuf::from(path),
+            branch: None,
+            last_active: None,
+            git: None,
+            repo: true,
+            tasks: Vec::new(),
+        };
+        let projects = [project(r"\\attacker\share\repo"), project("/home/me/repo")];
+        assert_eq!(git_project_path(&projects, Path::new("/home/me/repo/src")), Some(PathBuf::from("/home/me/repo")));
+        for share in [r"\\attacker\share\repo", r"\\attacker\share\repo\src", "//attacker/share/repo"] {
+            assert_eq!(git_project_path(&projects, Path::new(share)), None, "{share}");
         }
     }
 }

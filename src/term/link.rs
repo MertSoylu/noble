@@ -128,6 +128,11 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     if crate::term::osc::is_network_path(rest) {
         return None;
     }
+    // A pane opened in a network folder keeps it as its folder (`Pane::cwd`): a relative name joined onto it would
+    // be looked at on the share. Only an absolute name, which replaces the base, is checked then.
+    if crate::term::osc::is_network_path(&base.to_string_lossy()) && !Path::new(rest).is_absolute() {
+        return None;
+    }
     let candidate = base.join(rest);
     // Single-word texts ("make", "done") are links only if they are real files.
     let looks_like_path = path_part.contains(['/', '\\', '.']) || !nums.is_empty();
@@ -568,6 +573,25 @@ mod tests {
                 assert_eq!(cells, token, "{line:?} @{col}");
             }
         }
+    }
+
+    /// A pane whose folder is a network path (opened in a share) resolves no relative name against it: the file
+    /// below exists at the joined path (`//` plus the local folder is the same folder on Unix), so only the rule can
+    /// refuse it. An absolute name names its own folder and is looked at as before, and a local folder still works.
+    #[test]
+    fn relative_links_are_not_resolved_against_a_network_folder() {
+        let dir = std::env::temp_dir().join(format!("noble-link-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        let share = PathBuf::from(format!("//{}", dir.display()));
+        assert!(classify("a.rs", &dir).is_some());
+        for token in ["a.rs", "a.rs:3", "./a.rs", "a.rs(2,1)"] {
+            assert_eq!(classify(token, &share), None, "{token}");
+        }
+        let absolute = dir.join("a.rs").display().to_string();
+        assert!(classify(&absolute, &share).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every row: token, expected link (paths relative to a temporary directory).
