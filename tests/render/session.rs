@@ -220,9 +220,9 @@ fn a_stale_lock_does_not_block_restore_or_exit() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// A session file damaged before startup (empty, cut short, binary, or not a session at all) starts an
-/// empty window without a panic. The damaged bytes are kept as `session.json.corrupt`, and the window keeps
-/// working: its tabs are saved to a fresh file.
+/// A session file damaged before startup (cut short, binary, or not a session at all) starts an empty window
+/// without a panic. The damaged bytes are kept as `session.json.corrupt`, and the window keeps working: its tabs
+/// are saved to a fresh file. An empty file is no damage: it keeps no copy.
 #[test]
 fn a_damaged_session_file_starts_an_empty_window() {
     let bodies: [&[u8]; 4] =
@@ -235,7 +235,12 @@ fn a_damaged_session_file_starts_an_empty_window() {
         app.restore_last_session();
         assert!(app.tabs.is_empty(), "case {i}: restored {:?}", tab_origins(&app));
         assert_eq!(app.restored_tabs, 0, "case {i}");
-        assert_eq!(std::fs::read(data.join("session.json.corrupt")).unwrap(), body, "case {i}");
+        let copy = data.join("session.json.corrupt");
+        if body.is_empty() {
+            assert!(!copy.exists(), "case {i}: an empty file is not kept");
+        } else {
+            assert_eq!(std::fs::read(copy).unwrap(), body, "case {i}");
+        }
         app.new_tab(data.clone(), None, Some("after-damage".into()));
         app.shutdown();
         assert_eq!(session_origins(&data, false), ["after-damage"], "case {i}");

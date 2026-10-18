@@ -103,8 +103,9 @@ All notable changes to NOBLE are documented here. The format is based on
 - Scrollback search no longer copies the whole scrollback on every keystroke, and only copies it again (holding the
   terminal's lock) when the pane has new output or was resized.
 - A damaged `state.json`, `workspaces.json`, `session.json`, `recent.json` or `ai-history.json` no longer loses its data on the
-  next save: the file is copied to `<name>.corrupt` first (an older copy is never overwritten) and a toast names it. A
-  file that cannot be copied aside is not written over.
+  next save: its bytes are kept in `<name>.corrupt` (then `.corrupt.2` … up to five copies; identical bytes are kept once)
+  before the write, and a toast names the copy. A file that cannot be read, or whose copy cannot be made, is left alone and
+  the change is not saved; an empty file is an empty state. A failed save is reported once per run.
 - A config error toast goes away when the file loads again, and opening the notification list clears the toasts on screen.
 - The key editor refuses direct ctrl+letter shortcuts (ctrl+c, ctrl+d, ctrl+r … belong to the shell), keeps CRLF line endings
   in `config.toml`, and adds a key before a comment that titles the next table. Reopening a tab says its launch commands run again.

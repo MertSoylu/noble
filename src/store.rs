@@ -1,6 +1,7 @@
 //! Small persistent data: recent dirs (frecency), session, saved workspaces, UI state (`UiState`: welcome,
 //! pinned/hidden/added projects, update notice) and AI usage history (`UsageHistory`).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -73,61 +74,120 @@ pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
     }
 }
 
-/// Messages about damaged store files, waiting for the App to show them (`take_notices`).
+/// Messages about store files that could not be read, kept aside or saved, waiting for the App to show them
+/// (`take_notices`).
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Every message sent in this run. A condition that repeats on each save (a file that cannot be written, a
+/// damaged file that keeps coming back) is reported once, not as a new toast every time.
+static SENT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-/// Takes the messages about damaged store files since the last call; the App shows them as toasts.
+/// How many damaged copies (`<name>.corrupt`, `<name>.corrupt.2` …) are kept per file. Past that the file is left
+/// as it is: a newer build sharing the file, or a bug, must not fill the folder with copies.
+const MAX_COPIES: u32 = 5;
+
+/// Takes the messages about store files since the last call; the App shows them as toasts.
 pub fn take_notices() -> Vec<String> {
     std::mem::take(&mut *NOTICES.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 fn notify(text: String) {
-    NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(text);
-}
-
-/// Reads a store file that is about to be overwritten. `Ok(Some(value))`: valid content. `Ok(None)`: no
-/// file, or a damaged one that was kept aside (see `keep_aside`), so the caller starts from its own copy.
-/// `Err(())`: the file is damaged and could not be kept aside; the caller must leave it alone.
-fn read_stored<T: for<'de> Deserialize<'de>>(file: &Path) -> Result<Option<T>, ()> {
-    let damaged = || keep_aside(file).map(|()| None);
-    match std::fs::read_to_string(file) {
-        Ok(text) => match serde_json::from_str(crate::util::strip_bom(&text)) {
-            Ok(value) => Ok(Some(value)),
-            Err(_) => damaged(),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => damaged(),
+    let fresh = SENT.lock().unwrap_or_else(|e| e.into_inner()).insert(text.clone());
+    if fresh {
+        NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(text);
     }
 }
 
-/// Copies a damaged store file to the first free `<name>.corrupt` (then `.corrupt.2`, `.corrupt.3` …), so an
-/// older copy is never overwritten, and queues a notice. `Err` when the copy failed.
-fn keep_aside(file: &Path) -> Result<(), ()> {
-    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let mut n = 1u32;
-    let backup = loop {
-        let suffix = if n == 1 { ".corrupt".to_string() } else { format!(".corrupt.{n}") };
-        let candidate = file.with_file_name(format!("{name}{suffix}"));
-        if std::fs::symlink_metadata(&candidate).is_err() {
-            break candidate;
-        }
-        n += 1;
-    };
-    match std::fs::copy(file, &backup) {
-        Ok(_) => {
-            notify(format!("{name} was damaged: a copy is kept at {}", crate::util::tilde(&backup)));
-            Ok(())
-        }
+/// The name of the `n`th damaged copy of `file`: `<name>.corrupt`, then `<name>.corrupt.2` …
+fn copy_name(file: &Path, n: u32) -> PathBuf {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let suffix = if n == 1 { ".corrupt".to_string() } else { format!(".corrupt.{n}") };
+    file.with_file_name(format!("{name}{suffix}"))
+}
+
+/// Reads a store file that is about to be overwritten. `Ok(Some(value))`: valid content. `Ok(None)`: no file,
+/// an empty one, or a damaged one that was kept aside (`keep_aside`), so the caller starts from its own copy.
+/// `Err(())`: the file could not be read or kept aside; the caller must leave it alone and not write it.
+/// Only content that does not parse is damage. Any other read error (permissions, a sharing violation, a
+/// directory in the file's place) may hit a healthy file, so nothing is copied or overwritten.
+fn read_stored<T: for<'de> Deserialize<'de>>(file: &Path) -> Result<Option<T>, ()> {
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            notify(format!("{name} is damaged and could not be copied aside ({e}): this change was not saved"));
-            Err(())
+            notify(format!("{} could not be read ({e}): this change was not saved", crate::util::tilde(file)));
+            return Err(());
         }
+    };
+    // An empty file holds no state (a crash right after it was created): there is nothing to keep.
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let parsed: Option<T> =
+        std::str::from_utf8(&bytes).ok().and_then(|text| serde_json::from_str(crate::util::strip_bom(text)).ok());
+    match parsed {
+        Some(value) => Ok(Some(value)),
+        // Also what a newer build sharing the file wrote: the bytes are kept whatever wrote them.
+        None => keep_aside(file, &bytes).map(|()| None),
+    }
+}
+
+/// Keeps the bytes of a damaged file in its first free copy (`copy_name`) and queues a notice. Bytes that an
+/// existing copy already holds are not copied again, and then nothing is said. The copy is made from the bytes
+/// that were read (not by path, which an unlocked writer may have changed meanwhile) and created exclusively,
+/// so an older copy is never overwritten. `Err` when nothing could be kept: the caller must not write over it.
+fn keep_aside(file: &Path, bytes: &[u8]) -> Result<(), ()> {
+    use std::io::Write;
+    let shown = crate::util::tilde(file);
+    let kept = |n: u32| std::fs::read(copy_name(file, n)).is_ok_and(|old| old == bytes);
+    if (1..=MAX_COPIES).any(kept) {
+        return Ok(());
+    }
+    for n in 1..=MAX_COPIES {
+        let copy = copy_name(file, n);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
+            Ok(mut out) => {
+                if let Err(e) = out.write_all(bytes) {
+                    // A partial copy would look like a good one next time: it goes.
+                    drop(out);
+                    let _ = std::fs::remove_file(&copy);
+                    notify(format!(
+                        "{shown} could not be read, and its copy could not be written ({e}): this change was not saved"
+                    ));
+                    return Err(());
+                }
+                notify(format!("{shown} could not be read; a copy was kept at {}", crate::util::tilde(&copy)));
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                notify(format!(
+                    "{shown} could not be read, and its copy could not be made ({e}): this change was not saved"
+                ));
+                return Err(());
+            }
+        }
+    }
+    notify(format!(
+        "{shown} could not be read; {MAX_COPIES} copies are already kept, so this change was not saved \
+         and the file is left as it is"
+    ));
+    Err(())
+}
+
+/// Writes a store file after its read-modify-write. A write that fails (disk full, a locked file on Windows)
+/// leaves the change unsaved, and that is reported (once per run, see `notify`).
+fn save_stored<T: Serialize>(file: &Path, value: &T) {
+    let result =
+        serde_json::to_string_pretty(value).map_err(std::io::Error::from).and_then(|text| write_text(file, &text));
+    if let Err(e) = result {
+        notify(format!("{} could not be saved ({e}): this change was not saved", crate::util::tilde(file)));
     }
 }
 
 /// One locked read-modify-write of a store file (see `UiState::modify`): the file is read again under
-/// `<file>.lock` (`fallback` when it is missing or damaged), `f` changes the value, and the result is written
-/// atomically unless the damaged file could not be kept aside (`read_stored`). Returns the value and `f`'s result.
+/// `<file>.lock` (`fallback` when it is missing, empty or damaged), `f` changes the value, and the result is
+/// written atomically unless the file could not be read or kept aside (`read_stored`). Returns the value and
+/// `f`'s result.
 fn update_file<V, R>(file: &Path, wait: Duration, fallback: impl FnOnce() -> V, f: impl FnOnce(&mut V) -> R) -> (V, R)
 where
     V: Serialize + for<'de> Deserialize<'de>,
@@ -140,7 +200,7 @@ where
         };
         let out = f(&mut value);
         if writable {
-            write_json(file, &value);
+            save_stored(file, &value);
         }
         (value, out)
     })
@@ -358,7 +418,7 @@ pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
             session.tabs.iter_mut().for_each(|t| t.instance = me.to_string());
             session.tabs.iter().map(|t| t.tab.clone()).collect()
         });
-        write_json(file, &session);
+        save_stored(file, &session);
         restore
     })
 }
@@ -384,7 +444,7 @@ pub fn session_save_waiting(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving:
         if session.tabs.is_empty() && session.running.is_empty() {
             let _ = std::fs::remove_file(file);
         } else {
-            write_json(file, &session);
+            save_stored(file, &session);
         }
     })
 }
@@ -717,7 +777,7 @@ impl UsageHistory {
         if let Some(f) = &self.file {
             // A damaged file is kept aside first; when that fails it is not written over.
             if read_stored::<std::collections::BTreeMap<String, Vec<(i64, u8)>>>(f).is_ok() {
-                write_json(f, &self.series);
+                save_stored(f, &self.series);
             }
         }
     }
@@ -1011,15 +1071,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A damaged file is copied to `<name>.corrupt` before a write replaces it: the copy has the original
-    /// bytes, the new file holds the change, and the App is told. An older copy is never overwritten. When
-    /// the copy fails (a folder in the file's place here), nothing is written over it.
-    #[test]
-    fn damaged_files_are_kept_aside_before_they_are_overwritten() {
-        let dir = std::env::temp_dir().join(format!("noble-store-aside-{}", std::process::id()));
+    /// The notices about files in `dir` (named by its unique name). Tests run in parallel and share the queue,
+    /// so this takes only its own notices, under the queue's lock, and leaves the others queued.
+    fn notices_for(dir: &Path) -> Vec<String> {
+        let key = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let mut queue = NOTICES.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, others): (Vec<String>, Vec<String>) =
+            std::mem::take(&mut *queue).into_iter().partition(|n| n.contains(&key));
+        *queue = others;
+        mine
+    }
+
+    /// The `*.corrupt*` copies in `dir`, sorted.
+    fn copies_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".corrupt"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = take_notices();
+        dir
+    }
+
+    /// A damaged file is copied to `<name>.corrupt` before a write replaces it: the copy has the original
+    /// bytes, the new file holds the change, and the App is told. An older copy is never overwritten.
+    #[test]
+    fn damaged_files_are_kept_aside_before_they_are_overwritten() {
+        let dir = scratch_dir("noble-store-aside");
         let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
         let project = dir.join("alpha");
 
@@ -1030,7 +1116,7 @@ mod tests {
         assert!(ui.toggle_pin(&project));
         assert_eq!(read("state.json.corrupt"), broken, "the original bytes are kept");
         assert!(UiState::load(state.clone()).is_pinned(&project), "the new file holds the change");
-        // Damaged again: the older copy stays, the newer one gets its own name.
+        // Damaged again with other bytes: the older copy stays, the newer one gets its own name.
         std::fs::write(&state, b"\xff\xfe not json").unwrap();
         ui.modify(|d| d.welcomed = true);
         assert_eq!(read("state.json.corrupt"), broken, "an older copy is never overwritten");
@@ -1071,17 +1157,159 @@ mod tests {
         assert_eq!(read("ai-history.json.corrupt"), b"{\"claude/5h\": [[1");
         assert!(UsageHistory::load(history).series.contains_key("claude/5h"));
 
-        let notices = take_notices();
-        assert!(notices.iter().any(|n| n.starts_with("state.json was damaged")), "{notices:?}");
-        assert!(notices.iter().any(|n| n.starts_with("ai-history.json was damaged")), "{notices:?}");
+        let notices = notices_for(&dir);
+        for name in ["state.json", "workspaces.json", "recent.json", "session.json", "ai-history.json"] {
+            let shown = crate::util::tilde(&dir.join(name));
+            assert!(
+                notices.iter().any(|n| n.starts_with(&shown) && n.contains("could not be read; a copy was kept at")),
+                "{name}: {notices:?}"
+            );
+        }
+        assert_eq!(notices.len(), 6, "one notice per copy, the second state copy included: {notices:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let blocked = dir.join("blocked.json");
-        std::fs::create_dir_all(&blocked).unwrap();
-        let mut stuck = UiState::load(blocked.clone());
-        assert!(stuck.toggle_pin(&project), "the change still applies in memory");
-        assert!(blocked.is_dir() && !dir.join("blocked.json.corrupt").exists(), "nothing is written over it");
-        let notices = take_notices();
-        assert!(notices.iter().any(|n| n.starts_with("blocked.json is damaged") && n.ends_with("not saved")));
+    /// Damage that comes back with the same bytes (a write that failed, or a newer build sharing the file)
+    /// keeps one copy and says so once; identical bytes from an older damage are not copied again.
+    #[test]
+    fn repeated_damage_keeps_one_copy_and_one_notice() {
+        let dir = scratch_dir("noble-store-repeat");
+        let state = dir.join("state.json");
+        let broken: &[u8] = b"{\"pins\": [\"/a\", ";
+        let other: &[u8] = b"\xff\xfe not json";
+        let mut ui = UiState::load(state.clone());
+        for _ in 0..4 {
+            std::fs::write(&state, broken).unwrap();
+            ui.modify(|d| d.welcomed = true);
+        }
+        assert_eq!(copies_in(&dir), ["state.json.corrupt"]);
+        assert_eq!(std::fs::read(dir.join("state.json.corrupt")).unwrap(), broken);
+        assert_eq!(notices_for(&dir).len(), 1);
+
+        std::fs::write(&state, other).unwrap();
+        ui.modify(|d| d.welcomed = true);
+        std::fs::write(&state, broken).unwrap();
+        ui.modify(|d| d.welcomed = true);
+        assert_eq!(copies_in(&dir), ["state.json.corrupt", "state.json.corrupt.2"]);
+        assert_eq!(notices_for(&dir).len(), 1, "the older bytes came back: nothing new to say");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Past `MAX_COPIES` the damaged file is left as it is (no copy, no write), the change still applies in
+    /// memory, and the App is told once.
+    #[test]
+    fn copies_are_capped_and_the_file_is_left_alone() {
+        let dir = scratch_dir("noble-store-cap");
+        let state = dir.join("state.json");
+        let mut ui = UiState::load(state.clone());
+        for i in 0..MAX_COPIES {
+            std::fs::write(&state, format!("{{\"pins\": [{i}").as_bytes()).unwrap();
+            ui.modify(|d| d.welcomed = true);
+        }
+        assert_eq!(copies_in(&dir).len(), MAX_COPIES as usize);
+        let damaged = b"{\"pins\": [\"over the cap";
+        std::fs::write(&state, damaged).unwrap();
+        for _ in 0..3 {
+            ui.modify(|d| d.hidden.push("/over-the-cap".into()));
+        }
+        assert_eq!(copies_in(&dir).len(), MAX_COPIES as usize, "no copy beyond the cap");
+        assert_eq!(std::fs::read(&state).unwrap(), damaged, "the file is not written over");
+        assert!(ui.data.hidden.iter().any(|h| h == "/over-the-cap"), "the change applies in memory");
+        let notices = notices_for(&dir);
+        assert_eq!(notices.iter().filter(|n| n.contains("copies are already kept")).count(), 1, "{notices:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that cannot be read (a directory in its place here) is never copied or written over: the change
+    /// still applies in memory, and the App is told that it was not saved.
+    #[test]
+    fn unreadable_files_are_left_alone() {
+        let dir = scratch_dir("noble-store-unreadable");
+        let state = dir.join("state.json");
+        std::fs::create_dir_all(state.join("inside")).unwrap();
+        let project = dir.join("alpha");
+        let mut ui = UiState::load(state.clone());
+        assert!(ui.toggle_pin(&project), "the change still applies in memory");
+        assert!(state.join("inside").is_dir(), "the directory is untouched");
+        assert!(copies_in(&dir).is_empty(), "nothing is copied aside");
+        let notices = notices_for(&dir);
+        assert!(
+            notices.iter().any(|n| n.starts_with(&crate::util::tilde(&state))
+                && n.contains("could not be read")
+                && n.ends_with("this change was not saved")),
+            "{notices:?}"
+        );
+        assert!(!notices.iter().any(|n| n.contains("could not be saved")), "no write was attempted: {notices:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that cannot be written (its folder is a file here) is reported, and the same failure on the next
+    /// save is not reported again.
+    #[test]
+    fn a_failed_save_is_reported_once() {
+        let dir = scratch_dir("noble-store-save");
+        let blocker = dir.join("file-in-the-way");
+        std::fs::write(&blocker, b"x").unwrap();
+        let file = blocker.join("state.json");
+        save_stored(&file, &[1, 2]);
+        save_stored(&file, &[3]);
+        let notices = notices_for(&dir);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("could not be saved") && notices[0].ends_with("this change was not saved"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty file is an empty state: it is overwritten without a copy and without a notice.
+    #[test]
+    fn an_empty_file_is_an_empty_state() {
+        let dir = scratch_dir("noble-store-empty");
+        let state = dir.join("state.json");
+        std::fs::write(&state, b"").unwrap();
+        let project = dir.join("alpha");
+        UiState::load(state.clone()).toggle_pin(&project);
+        assert!(UiState::load(state).is_pinned(&project));
+        let session = dir.join("session.json");
+        std::fs::write(&session, b"").unwrap();
+        assert_eq!(session_begin(&session, "1-1-0"), Some(Vec::new()));
+        assert!(copies_in(&dir).is_empty(), "{:?}", copies_in(&dir));
+        assert!(notices_for(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stores that are valid (written by the store itself, then changed and read again) never produce a copy
+    /// or a notice.
+    #[test]
+    fn a_valid_file_is_never_kept_aside() {
+        let dir = scratch_dir("noble-store-valid");
+        let project = dir.join("alpha");
+        let mut ui = UiState::load(dir.join("state.json"));
+        ui.toggle_pin(&project);
+        ui.add_project(&project);
+        ui.modify(|d| d.welcomed = true);
+        let ui = UiState::load(dir.join("state.json"));
+        assert!(ui.is_pinned(&project) && ui.is_added(&project) && ui.data.welcomed);
+        let mut ws_list = Workspaces::load(dir.join("workspaces.json"));
+        ws_list.upsert(ws("one"));
+        ws_list.upsert(ws("two"));
+        ws_list.remove("one");
+        assert_eq!(Workspaces::load(dir.join("workspaces.json")).list.len(), 1);
+        Recent::load(dir.join("recent.json")).record(&dir);
+        let session = dir.join("session.json");
+        let tab = SavedTab {
+            name: None,
+            origin: "kept".into(),
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            focus: 0,
+        };
+        session_begin(&session, "1-1-0");
+        session_save(&session, "1-1-0", vec![tab], false);
+        session_save(&session, "1-1-0", Vec::new(), true);
+        let mut history = UsageHistory::load(dir.join("ai-history.json"));
+        history.record("claude/5h", now(), 10);
+        history.save();
+        UsageHistory::load(dir.join("ai-history.json")).save();
+        assert!(copies_in(&dir).is_empty(), "{:?}", copies_in(&dir));
+        assert!(notices_for(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1253,7 +1481,8 @@ mod tests {
 
     /// A session file cut short anywhere (a torn write, a disk error), or damaged another way, must not
     /// stop the window from starting: nothing is restored, the damaged bytes are kept as
-    /// `session.json.corrupt`, and the window registers itself in a fresh file. Checked at every cut.
+    /// `session.json.corrupt` (an empty file is not damage: it keeps no copy), and the window registers itself
+    /// in a fresh file. Checked at every cut.
     #[test]
     fn a_truncated_session_file_is_kept_aside_on_startup() {
         let dir = std::env::temp_dir().join(format!("noble-store-truncated-{}", std::process::id()));
@@ -1276,7 +1505,11 @@ mod tests {
             std::fs::write(&file, body).unwrap();
             let restored = session_begin(&file, "1-1-0");
             assert_eq!(restored, Some(Vec::new()), "case {i}: {:?}", String::from_utf8_lossy(body));
-            assert_eq!(std::fs::read(case.join("session.json.corrupt")).unwrap(), *body, "case {i}");
+            if body.is_empty() {
+                assert!(copies_in(&case).is_empty(), "case {i}: an empty file is not kept");
+            } else {
+                assert_eq!(std::fs::read(case.join("session.json.corrupt")).unwrap(), *body, "case {i}");
+            }
             let session = load_session(&file).expect("a fresh session file is written");
             assert_eq!(session.running, ["1-1-0"], "case {i}");
         }
