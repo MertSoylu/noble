@@ -103,7 +103,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
-  shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/input.rs` xterm key/mouse encoding and AltGr
+  shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/osc.rs` the vt100 `Callbacks` (OSC parsing, hyperlinks), `term/input.rs` xterm key/mouse encoding and AltGr
   handling.
 - **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT` (only when
   `PROMPT` is not already set in NOBLE's environment); bash (`--rcfile`; login arguments use the separate
@@ -113,7 +113,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   that replace the config (`--norc`, `-f`, `-N`, `--rcfile`, `-c` …) disable the integration.
 - **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
   owning process); without a system clipboard copied text goes out as OSC 52.
-- **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
+- **Prompt signal:** `term/osc.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
   `App::on_pty_output` (`app/notify.rs`) treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).
   OSC 9 text / OSC 777 and the bell put an `alert` (◆) on the tab the same way.

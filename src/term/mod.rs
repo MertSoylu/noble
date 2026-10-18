@@ -4,6 +4,7 @@ pub mod input;
 pub mod integration;
 pub mod layout;
 pub mod link;
+mod osc;
 pub mod pane;
 
 use std::sync::atomic::{AtomicU64, Ordering};

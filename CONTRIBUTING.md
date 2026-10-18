@@ -118,6 +118,7 @@ src/
                      menus), ops.rs (tabs, panes, launchers), search.rs (scrollback search, links),
                      palette.rs, settings.rs, agents.rs, live.rs (Home ports and PR), fx.rs (effects)
   term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
+                     osc.rs (vt100 callbacks, OSC parsing),
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
   ui/                hud.rs (bounds-safe drawing primitives), bridge.rs (Home), terminal.rs,
                      system.rs, settings.rs, overlay.rs, boot.rs
