@@ -1,7 +1,7 @@
 //! Small persistent data: recent dirs (frecency), session, saved workspaces, UI state (`UiState`: welcome,
 //! pinned/hidden/added projects, update notice) and AI usage history (`UsageHistory`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -279,6 +279,8 @@ pub struct Recent {
     pub entries: Vec<RecentEntry>,
     /// Score-sorted list of existing directories (to avoid hitting the disk every frame).
     cache: Vec<RecentEntry>,
+    /// Directories whose probe failed or timed out in this run. They are not probed again (see `probe_dirs`).
+    failed: HashSet<PathBuf>,
 }
 
 /// How long the startup check of the recent directories waits for a slow (network) path.
@@ -296,26 +298,37 @@ where
 impl Recent {
     pub fn load(file: PathBuf) -> Recent {
         let entries = read_json(&file).unwrap_or_default();
-        let mut r = Recent { file: Some(file), entries, cache: Vec::new() };
+        let mut r = Recent { file: Some(file), entries, cache: Vec::new(), failed: HashSet::new() };
         r.rebuild(None);
         r
     }
 
     pub fn memory() -> Recent {
-        Recent { file: None, entries: Vec::new(), cache: Vec::new() }
+        Recent { file: None, entries: Vec::new(), cache: Vec::new(), failed: HashSet::new() }
     }
 
-    /// Re-sorts the list of existing directories. A directory already in the cache is not
-    /// looked at again, and neither is `trusted` (the one just opened), so a new tab never
-    /// waits for a dead network share; a path seen for the first time (startup, or another
-    /// window's entry) is checked in parallel with a time limit (`util::usable_dirs`).
+    /// The directories among `dirs` that answer `probe` within `timeout` (`util::usable_dirs`). One that does not
+    /// answer is remembered for the rest of the run and not probed again: each probe costs up to `timeout` on the
+    /// UI thread, and a hung one keeps its thread until it returns. Used by the recent list and by workspace restore.
+    pub fn probe_dirs(&mut self, dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashSet<PathBuf> {
+        let fresh: Vec<PathBuf> = dirs.iter().filter(|d| !self.failed.contains(*d)).cloned().collect();
+        let usable = crate::util::usable_dirs(&fresh, timeout, probe);
+        self.failed.extend(fresh.into_iter().filter(|d| !usable.contains(d)));
+        usable
+    }
+
+    /// Re-sorts the list of existing directories. A directory already in the cache is not looked at again, and
+    /// neither is `trusted` (the one just opened), so a new tab never waits for a directory that is known. Any other
+    /// path (startup, or another window's entry) is probed once in parallel with a time limit (`probe_dirs`): a dead
+    /// or slow one is probed once per run, not on every new tab.
     fn rebuild(&mut self, trusted: Option<&str>) {
         let t = now();
-        let known: std::collections::HashSet<&str> =
-            self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
-        let unknown: Vec<PathBuf> =
-            self.entries.iter().filter(|e| !known.contains(e.path.as_str())).map(|e| PathBuf::from(&e.path)).collect();
-        let usable = crate::util::usable_dirs(&unknown, RECENT_PROBE_TIMEOUT, |p| p.is_dir());
+        let unknown: Vec<PathBuf> = {
+            let known: HashSet<&str> = self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
+            self.entries.iter().filter(|e| !known.contains(e.path.as_str())).map(|e| PathBuf::from(&e.path)).collect()
+        };
+        let usable = self.probe_dirs(&unknown, RECENT_PROBE_TIMEOUT, |p| p.is_dir());
+        let known: HashSet<&str> = self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
         let mut list: Vec<RecentEntry> = self
             .entries
             .iter()
@@ -1811,6 +1824,28 @@ mod tests {
         assert_eq!(Recent::load(recent_file).entries.len(), 2, "both windows' directories are kept");
         assert_eq!(rb.top(5).len(), 2, "b lists a's directory, checked once");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory that did not answer its probe is not probed again in this run: each probe costs up to the timeout
+    /// on the UI thread, and a hung one keeps its thread. The probe counts its calls to check that.
+    #[test]
+    fn unanswered_directories_are_not_probed_again() {
+        static HANG_PROBES: AtomicU32 = AtomicU32::new(0);
+        fn probe(p: &Path) -> bool {
+            if p.ends_with("hangs") {
+                HANG_PROBES.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            p.is_dir()
+        }
+        let here = std::env::temp_dir();
+        let dirs = vec![PathBuf::from("hangs"), here.clone()];
+        let mut r = Recent::memory();
+        let usable = r.probe_dirs(&dirs, Duration::from_millis(300), probe);
+        assert_eq!(usable, HashSet::from([here.clone()]), "the answering directory is usable");
+        let again = r.probe_dirs(&dirs, Duration::from_millis(300), probe);
+        assert_eq!(again, HashSet::from([here]), "the answering one is still usable");
+        assert_eq!(HANG_PROBES.load(Ordering::SeqCst), 1, "the hung directory was probed again");
     }
 
     /// A directory that disappears is dropped at the next start, not with every new tab.

@@ -1030,7 +1030,7 @@ impl App {
         }
         dirs.sort();
         dirs.dedup();
-        let usable = crate::util::usable_dirs(&dirs, DIR_PROBE_TIMEOUT, self.dir_probe);
+        let usable = self.recent.probe_dirs(&dirs, DIR_PROBE_TIMEOUT, self.dir_probe);
         let mut unavailable = Vec::new();
         let size = self.fresh_size();
         let mut opened = 0;
