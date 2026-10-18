@@ -604,9 +604,12 @@ mod tests {
         // Relative to the test's folder, which holds a program of this name: it must not be found through
         // the relative entry, but is found through the absolute one.
         let name = format!("noble-which-{}", std::process::id());
+        // Windows finds a program only through a PATHEXT extension (`.exe`), so the file carries one there;
+        // Unix runs any executable file, so the file keeps the bare name.
+        let file = if cfg!(windows) { format!("{name}.exe") } else { name.clone() };
         let rel = Path::new("target").join(format!("which-rel-{}", std::process::id()));
         std::fs::create_dir_all(&rel).unwrap();
-        let program = rel.join(&name);
+        let program = rel.join(&file);
         std::fs::write(&program, "").unwrap();
         let abs = std::env::current_dir().unwrap().join(&rel);
         let relative_only = std::env::join_paths([PathBuf::new(), rel.clone(), PathBuf::from(".")]).unwrap();
@@ -615,7 +618,7 @@ mod tests {
         let found_absolute = find_in_path(&name, &with_abs);
         let _ = std::fs::remove_dir_all(&rel);
         assert_eq!(found_relative, None);
-        assert_eq!(found_absolute, Some(abs.join(&name)));
+        assert_eq!(found_absolute, Some(abs.join(&file)));
         let dirs: Vec<PathBuf> = path_dirs(&with_abs).collect();
         assert_eq!(dirs, vec![abs]);
     }
