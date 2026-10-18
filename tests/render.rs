@@ -1400,6 +1400,48 @@ fn terminal_search_finds_scrollback() {
     app.run(Action::CloseTab);
 }
 
+/// Output that arrives while the search bar is open must not throw the next jump off: the matches and
+/// the history length follow the output, so the match lands in the middle of the screen.
+#[test]
+fn search_step_lands_on_match_after_new_output() {
+    let mut app = demo_app(110, 30);
+    // The script waits before its second batch, so that output arrives while the search bar is open.
+    let (script, cfg_shell) = if cfg!(windows) {
+        (
+            "(for /L %i in (1,1,60) do @echo row %i) & echo NEEDLE_DONE & ping -n 3 127.0.0.1 >nul & (for /L %i in (1,1,40) do @echo extra %i) & echo MORE_DONE & ping -n 30 127.0.0.1 >nul",
+            "cmd.exe",
+        )
+    } else {
+        (
+            "for i in $(seq 1 60); do echo row $i; done; echo NEEDLE_DONE; sleep 2; for i in $(seq 1 40); do echo extra $i; done; echo MORE_DONE; sleep 30",
+            "/bin/sh",
+        )
+    };
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = cfg_shell.into();
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), Some(script), Some("search".into()));
+    let id = app.tabs[0].focus;
+    wait_for(&mut app, id, "NEEDLE_DONE");
+    app.run(Action::Search);
+    for c in "ROW 1".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let typed = app.search.as_ref().unwrap().history;
+    wait_for(&mut app, id, "MORE_DONE");
+    let s = app.search.as_ref().unwrap();
+    assert!(s.history > typed, "the search should follow output that arrives while it is open");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let s = app.search.as_ref().unwrap();
+    let target = s.matches[s.current.unwrap()].line;
+    let pane = &app.panes[&id];
+    let (lines, _) = pane.all_lines();
+    let rows = (0u16..).take_while(|&r| pane.visible_row(r).is_some()).count();
+    let middle = pane.visible_row((rows / 2) as u16).unwrap();
+    assert_eq!(middle.trim_end(), lines[target].trim_end(), "the selected match should be in the middle");
+    app.run(Action::CloseTab);
+}
+
 /// When a background tab sends a notification a ◆ appears on it and clears when opened.
 #[test]
 fn background_tab_notification_marks_tab() {

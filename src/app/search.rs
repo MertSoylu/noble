@@ -82,7 +82,7 @@ impl App {
         };
         let (lines, history) = p.all_lines();
         let matches = find_matches(&lines, &s.query);
-        let s = self.search.as_mut().expect("search open");
+        let Some(s) = self.search.as_mut() else { return };
         // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
         // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
         // scrollback is the fallback when the matches do not line up.
