@@ -1187,6 +1187,102 @@ mod tests {
         assert!(!instance_alive("garbage"));
     }
 
+    /// A crash leaves the session file listing the dead window as running, and its lock behind (the
+    /// owner is gone). The next window is the first of the run: it gets the tabs at once, takes the
+    /// lock over and registers itself, leaving no lock behind.
+    #[test]
+    fn a_crashed_run_restores_past_its_stale_lock() {
+        let (dir, file, lock) = lock_dir("crash");
+        let dead = "4000000000-1-0";
+        let json = serde_json::json!({
+            "saved_at": 0,
+            "running": [dead],
+            "tabs": [{ "instance": dead, "name": null, "origin": "crashed",
+                       "layout": { "type": "leaf", "cwd": "." }, "focus": 0 }],
+        });
+        std::fs::write(&file, json.to_string()).unwrap();
+        std::fs::write(&lock, "4000000000-1").unwrap();
+        let started = Instant::now();
+        let tabs = session_begin(&file, "5-6-0").expect("the first window of the run restores");
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?} for a dead owner", started.elapsed());
+        assert_eq!(tabs.iter().map(|t| t.origin.as_str()).collect::<Vec<_>>(), ["crashed"]);
+        assert!(!lock.exists(), "the lock is released after use");
+        let session = load_session(&file).unwrap();
+        assert_eq!(session.running, ["5-6-0"]);
+        assert!(session.tabs.iter().all(|t| t.instance == "5-6-0"), "the tabs are taken over");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock that nobody can release must not block startup or a save for good: a lock with no readable
+    /// owner is taken over once it is old, and a lock naming a running owner once it is older than
+    /// `LOCK_STALE_LIVE` (the owner hangs). Each case returns at once, not after the waiting limit.
+    #[test]
+    fn a_stale_session_lock_never_blocks_restore_or_save() {
+        let (dir, file, lock) = lock_dir("stale");
+        let tab = |origin: &str| SavedTab {
+            name: None,
+            origin: origin.into(),
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            focus: 0,
+        };
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let age = |lock: &Path| std::fs::File::options().write(true).open(lock).unwrap().set_modified(old).unwrap();
+        let quick = |what: &str, started: Instant| {
+            assert!(started.elapsed() < Duration::from_secs(5), "{what}: waited {:?}", started.elapsed());
+        };
+
+        session_save(&file, "1-1-0", vec![tab("first")], false);
+        std::fs::write(&lock, "not an owner").unwrap();
+        age(&lock);
+        let started = Instant::now();
+        let tabs = session_begin(&file, "2-2-0").expect("restores");
+        quick("an old lock with no owner", started);
+        assert_eq!(tabs.iter().map(|t| t.origin.as_str()).collect::<Vec<_>>(), ["first"]);
+        assert!(!lock.exists());
+
+        std::fs::write(&lock, lock_owner()).unwrap();
+        age(&lock);
+        let started = Instant::now();
+        session_save(&file, "2-2-0", vec![tab("second")], false);
+        quick("an old lock of a running owner", started);
+        assert!(!lock.exists());
+        let session = load_session(&file).unwrap();
+        assert!(session.tabs.iter().any(|t| t.tab.origin == "second"), "the save went through");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session file cut short anywhere (a torn write, a disk error), or damaged another way, must not
+    /// stop the window from starting: nothing is restored, the damaged bytes are kept as
+    /// `session.json.corrupt`, and the window registers itself in a fresh file. Checked at every cut.
+    #[test]
+    fn a_truncated_session_file_is_kept_aside_on_startup() {
+        let dir = std::env::temp_dir().join(format!("noble-store-truncated-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let full = serde_json::json!({
+            "saved_at": 1,
+            "running": ["4000000000-1-0"],
+            "tabs": [{ "instance": "4000000000-1-0", "name": "ñ日本", "origin": "a", "focus": 1,
+                       "layout": { "type": "split", "dir": "Row", "ratio": 0.5,
+                                   "a": { "type": "leaf", "cwd": "." }, "b": { "type": "leaf", "cwd": "." } } }],
+        })
+        .to_string();
+        let mut bodies: Vec<Vec<u8>> = (0..full.len()).map(|cut| full.as_bytes()[..cut].to_vec()).collect();
+        bodies.extend([b"\xff\xfe\x00 garbage".to_vec(), b"{\"tabs\": 3}".to_vec(), b"null".to_vec()]);
+        for (i, body) in bodies.iter().enumerate() {
+            let case = dir.join(format!("case-{i}"));
+            std::fs::create_dir_all(&case).unwrap();
+            let file = case.join("session.json");
+            std::fs::write(&file, body).unwrap();
+            let restored = session_begin(&file, "1-1-0");
+            assert_eq!(restored, Some(Vec::new()), "case {i}: {:?}", String::from_utf8_lossy(body));
+            assert_eq!(std::fs::read(case.join("session.json.corrupt")).unwrap(), *body, "case {i}");
+            let session = load_session(&file).expect("a fresh session file is written");
+            assert_eq!(session.running, ["1-1-0"], "case {i}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn ws(name: &str) -> Workspace {
         Workspace { name: name.into(), saved_at: 0, tabs: Vec::new() }
     }

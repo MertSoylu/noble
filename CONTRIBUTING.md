@@ -63,10 +63,11 @@ place with a rename, which Unix allows for a running binary.
 ## Tests
 
 ```sh
-cargo test                        # everything: unit, headless render, real PTY and end-to-end tests
+cargo test                        # everything: unit, headless render, real PTY, end-to-end and fuzz tests
 cargo test --lib <name>           # unit tests in src/
 cargo test --test render          # render + PTY tests; add a test name to run one
 cargo test --test e2e             # runs the compiled binary inside a pseudo-terminal
+cargo test --test fuzz            # random and hostile input to the parsers: must never panic
 cargo clippy --all-targets        # must stay warning-free (CI uses -D warnings)
 cargo fmt                         # rustfmt.toml: max_width = 120
 cargo deny check                  # advisories, licenses, sources (`cargo install cargo-deny`; deny.toml)
@@ -77,7 +78,11 @@ cargo deny check                  # advisories, licenses, sources (`cargo instal
   open those files to review the layout at every size without launching the app. It also drives real shells:
   output, splits, zoom, `cd` tracking (PowerShell and cmd) and launchers.
 - **`tests/e2e.rs`** runs the real binary: open a tab, run a command, split, open the palette, quit and check
-  the session is restored on the next launch.
+  the session is restored on the next launch. On Unix a window killed with SIGKILL is restored too.
+- **`tests/fuzz.rs`** feeds random and hostile input to the parsers that read text or JSON from outside NOBLE (git
+  output, shell titles and OSC payloads, terminal lines, Windows Terminal settings, provider and GitHub API replies,
+  Claude hook payloads). Nothing may panic. The runs are deterministic: `NOBLE_FUZZ_SEED` picks another seed and
+  `NOBLE_FUZZ_SCALE` makes them longer.
 - **Performance checks** (ignored by default, run in release mode):
 
   ```sh

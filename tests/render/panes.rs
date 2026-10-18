@@ -318,7 +318,13 @@ fn mouse_only_things_have_actions() {
     for name in ["one", "two", "three"] {
         app.new_tab(std::env::temp_dir(), None, Some(name.into()));
     }
-    let names = |app: &App| (0..app.tabs.len()).map(|i| app.tab_title(i)).collect::<Vec<_>>();
+    // The title's " · <label>" part follows what the shell is running, which a real shell may still be
+    // setting up; the order is what this test checks.
+    let names = |app: &App| {
+        (0..app.tabs.len())
+            .map(|i| app.tab_title(i).split(" · ").next().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
     // The last tab is open; move it to the front with the prefix keys.
     let prefix = app.keymap.prefix;
     let press = |app: &mut App, c: char| {

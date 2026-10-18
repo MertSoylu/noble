@@ -16,6 +16,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo test --test render` — render/PTY tests only; `cargo test --test render <fn_name>` for a single test
 - `cargo test --lib <module_or_test_name>` — unit tests inside `src/` only
 - `cargo test --test e2e` — runs the compiled binary end to end inside a pseudo-terminal
+- `cargo test --test fuzz` — random and hostile input to the outside-data parsers (deterministic; `NOBLE_FUZZ_SEED`, `NOBLE_FUZZ_SCALE`)
 - `cargo test --release --test e2e idle -- --ignored --nocapture` — idle CPU/RAM measurement (`#[ignore]`)
 - `cargo test --release --test render heavy_output -- --ignored --nocapture` — 50k-line output throughput
 - `cargo clippy --all-targets` — kept warning-free

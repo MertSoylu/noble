@@ -326,6 +326,63 @@ fn termination_signals_save_the_session() {
     }
 }
 
+/// A window that is killed with SIGKILL (no shutdown, no save) leaves its split tab in the session file and
+/// its lock behind; the next launch restores the tab and releases the lock. Unix only: `kill -KILL` is how a
+/// test kills without a shutdown here. Windows has no such signal, and the same recovery (a crashed window and
+/// a stale lock) is checked in the render tests on every platform.
+#[test]
+fn a_killed_window_is_restored_on_the_next_launch() {
+    if cfg!(windows) {
+        return;
+    }
+    let home = std::env::temp_dir().join(format!("noble-e2e-kill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let session = home.join("session.json");
+    let lock = home.join("session.json.lock");
+
+    let mut h = Harness::start(&home, 34, 120);
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    h.wait_for("Projects", 20);
+    h.send(b"t");
+    h.wait_for("right-click", 10);
+    std::thread::sleep(Duration::from_millis(1500));
+    h.send(b"\x01");
+    h.send(b"v");
+    h.wait_for("⤢", 10);
+    // The split is autosaved a couple of seconds after it happens; the kill must come after that.
+    let pid = h.child.process_id().expect("pid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let text = std::fs::read_to_string(&session).unwrap_or_default();
+        if text.contains("\"split\"") && text.contains(&format!("\"{pid}-")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the split was never autosaved: {text}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let killed = std::process::Command::new("kill").arg("-KILL").arg(pid.to_string()).status().unwrap();
+    assert!(killed.success(), "kill -KILL");
+    assert!(h.wait_exit(15), "noble survived SIGKILL");
+    drop(h);
+    // The dead window's lock, as a crash in the middle of a save would leave it.
+    std::fs::write(&lock, format!("{pid}-1")).unwrap();
+
+    let mut h = Harness::start(&home, 34, 120);
+    let s = h.wait_for("2 terminals open", 25);
+    save("killed-restored", &s);
+    assert!(!s.contains("WELCOME TO NOBLE"), "welcome shown again:\n{s}");
+    h.send(b"q");
+    h.wait_for("QUIT NOBLE", 5);
+    h.send(b"y");
+    assert!(h.wait_exit(15), "noble did not exit after the restore");
+    assert!(!lock.exists(), "the lock left by the killed window was not released");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// Settings → Key bindings in the real app: a new prefix key is written to `config.toml` under its table
 /// (the rest of the file, its comments included, stays), the old key stops working at once, and the
 /// editor's "saved" confirmation shows.

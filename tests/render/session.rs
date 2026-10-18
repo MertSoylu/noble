@@ -175,6 +175,74 @@ fn a_crashed_window_does_not_block_the_restore() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A crash that also left its lock behind (the window that held it is gone): the next launch restores
+/// the tabs, and the lock is released after the restore.
+#[test]
+fn a_crash_with_its_lock_left_behind_restores() {
+    let data = session_dir("crash-lock");
+    let dead = "4000000000-1-0";
+    let json = serde_json::json!({
+        "saved_at": 0,
+        "running": [dead],
+        "tabs": [{ "instance": dead, "name": null, "origin": "crash-lock",
+                   "layout": { "type": "leaf", "cwd": data.display().to_string() }, "focus": 0 }],
+    });
+    std::fs::write(data.join("session.json"), json.to_string()).unwrap();
+    std::fs::write(data.join("session.json.lock"), "4000000000-1").unwrap();
+    let mut app = session_app(&data, false, session_cfg());
+    app.restore_last_session();
+    assert_eq!(tab_origins(&app), ["crash-lock"]);
+    assert!(!data.join("session.json.lock").exists(), "the lock is released after the restore");
+    app.shutdown();
+    assert_eq!(session_origins(&data, false), ["crash-lock"]);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A lock file left old and unreadable (a crash while it was being written, or an older NOBLE) must not
+/// hold up the restore or the save on exit: both return at once.
+#[test]
+fn a_stale_lock_does_not_block_restore_or_exit() {
+    let data = session_dir("stale-lock");
+    write_session(&data.join("session.json"), &one_tab("kept", leaf(&data)));
+    let lock = data.join("session.json.lock");
+    std::fs::write(&lock, "").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
+    let started = std::time::Instant::now();
+    let mut app = session_app(&data, false, session_cfg());
+    app.restore_last_session();
+    assert_eq!(tab_origins(&app), ["kept"]);
+    app.shutdown();
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(5), "a stale lock held the startup and exit for {took:?}");
+    assert!(!lock.exists(), "the lock is released");
+    assert_eq!(session_origins(&data, false), ["kept"]);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A session file damaged before startup (empty, cut short, binary, or not a session at all) starts an
+/// empty window without a panic. The damaged bytes are kept as `session.json.corrupt`, and the window keeps
+/// working: its tabs are saved to a fresh file.
+#[test]
+fn a_damaged_session_file_starts_an_empty_window() {
+    let bodies: [&[u8]; 4] =
+        [b"", b"{\"saved_at\": 0, \"tabs\": [{\"origin\": \"x\", \"lay", b"\xff\xfe\x00\x01", b"[1, 2]"];
+    for (i, body) in bodies.into_iter().enumerate() {
+        let data = session_dir(&format!("damaged-{i}"));
+        let file = data.join("session.json");
+        std::fs::write(&file, body).unwrap();
+        let mut app = session_app(&data, false, session_cfg());
+        app.restore_last_session();
+        assert!(app.tabs.is_empty(), "case {i}: restored {:?}", tab_origins(&app));
+        assert_eq!(app.restored_tabs, 0, "case {i}");
+        assert_eq!(std::fs::read(data.join("session.json.corrupt")).unwrap(), body, "case {i}");
+        app.new_tab(data.clone(), None, Some("after-damage".into()));
+        app.shutdown();
+        assert_eq!(session_origins(&data, false), ["after-damage"], "case {i}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
 /// A pane whose directory was deleted comes back in the home directory; the rest of the
 /// layout is kept. Checked through the startup path for both session files.
 #[test]
