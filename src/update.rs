@@ -275,15 +275,18 @@ fn old_paths(exe: &Path) -> impl Iterator<Item = PathBuf> {
     })
 }
 
-/// The system `tar` (Windows 10+ `tar.exe` opens zips too).
-fn tar_program() -> PathBuf {
-    // Windows: Git Bash's GNU tar cannot open zips, so System32's bsdtar is preferred.
-    // Linux and macOS: whatever `tar` is on PATH (bsdtar on macOS, which reads .tar.gz as well).
+/// The `tar` that unpacks archives, by full path. Windows 10+ `tar.exe` opens zips too, and System32's is taken
+/// because Git Bash's GNU tar cannot open zips. Linux and macOS have no System32 and use `tar` from PATH (bsdtar
+/// on macOS, which reads .tar.gz as well). Every other case searches PATH with `util::which`, which takes only
+/// absolute PATH folders: a bare `tar` would run one from the working folder (Windows searches it first) or from
+/// a relative PATH entry.
+fn tar_program() -> Result<PathBuf, String> {
     std::env::var_os("SystemRoot")
         .filter(|_| cfg!(windows))
         .map(|r| PathBuf::from(r).join("System32").join("tar.exe"))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("tar"))
+        .or_else(|| crate::util::which("tar"))
+        .ok_or_else(|| "tar was not found on PATH, so the archive cannot be unpacked".to_string())
 }
 
 /// Checks what `tar` would write before it writes anything: `names` is `tar -tf`, `verbose` is `tar -tvf` (the
@@ -470,7 +473,7 @@ fn private_work_dir() -> Result<PathBuf, String> {
 
 /// Downloads the release's archive for this platform and puts it in place of `exe`.
 pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
-    install_with(release, exe, &download, &tar_program())
+    install_with(release, exe, &download, &tar_program()?)
 }
 
 /// `install` with the downloader and `tar` passed in (tests use a local fetcher, never the network).
@@ -666,6 +669,11 @@ mod tests {
         })
     }
 
+    /// The `tar` the install tests unpack with (they all need one; `tar_program` names the case of a missing one).
+    fn tar() -> PathBuf {
+        tar_program().expect("a tar program")
+    }
+
     /// A local server for the download tests: answers each connection with the next of `replies(port)`, then ends.
     /// Returns the port and the server thread (join it after the request).
     fn local_server(replies: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<()>) {
@@ -692,7 +700,7 @@ mod tests {
         std::fs::write(src.join(binary_name()), content).unwrap();
         let out = dir.join(asset_name()?);
         let mode = if cfg!(windows) { "-acf" } else { "-czf" };
-        let ok = std::process::Command::new(tar_program())
+        let ok = std::process::Command::new(tar_program().ok()?)
             .arg(mode)
             .arg(&out)
             .arg("-C")
@@ -770,12 +778,12 @@ mod tests {
         let Some(archive) = make_archive(&dir, b"new") else { return };
         let name = asset_name().unwrap();
         let wrong = format!("{}  {name}\n", sha256_hex(b"something else"));
-        let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar()).unwrap_err();
         assert!(err.contains("checksum mismatch") && err.contains("corrupted"), "{err}");
         assert_intact(&exe);
         // A checksum file that does not name this archive (or is an error page) is refused too.
         let page = "<html>rate limited</html>".to_string();
-        let err = install_with(&release, &exe, &serve_with(archive, page), &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &serve_with(archive, page), &tar()).unwrap_err();
         assert!(err.contains("no SHA-256"), "{err}");
         assert_intact(&exe);
         let _ = std::fs::remove_dir_all(&dir);
@@ -791,7 +799,7 @@ mod tests {
             fetched.set(true);
             Err("no network in tests".into())
         };
-        let err = install_with(&release, &exe, &fetch, &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &fetch, &tar()).unwrap_err();
         assert!(err.contains("no checksum"), "{err}");
         assert!(!fetched.get(), "downloaded an archive that cannot be verified");
         assert_intact(&exe);
@@ -806,7 +814,7 @@ mod tests {
         let Some(release) = release_for_this_platform() else { return };
         let (dir, exe) = scratch("onestep");
         let Some(archive) = make_archive(&dir, b"new") else { return };
-        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         assert!(!old_path(&exe).exists(), "no old binary is kept on Unix");
         let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
@@ -819,7 +827,7 @@ mod tests {
         let Some(release) = release_for_this_platform() else { return };
         let (dir, exe) = scratch("verified");
         let Some(archive) = make_archive(&dir, b"new") else { return };
-        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         cleanup_old_at(&exe);
         let _ = std::fs::remove_dir_all(&dir);
@@ -833,12 +841,12 @@ mod tests {
     fn corrupt_download_keeps_the_installed_binary() {
         let Some(release) = release_for_this_platform() else { return }; // no prebuilt archive here
         let (dir, exe) = scratch("corrupt");
-        let err = install_with(&release, &exe, &serve(b"<html>captive portal</html>".to_vec()), &tar_program());
+        let err = install_with(&release, &exe, &serve(b"<html>captive portal</html>".to_vec()), &tar());
         assert!(err.is_err());
         assert_intact(&exe);
         // A valid archive whose binary is empty (a broken release) is refused too.
         if let Some(empty) = make_archive(&dir, b"") {
-            assert!(install_with(&release, &exe, &serve(empty), &tar_program()).is_err());
+            assert!(install_with(&release, &exe, &serve(empty), &tar()).is_err());
             assert_intact(&exe);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -863,7 +871,7 @@ mod tests {
         // A directory cannot be removed with remove_file nor replaced by a rename, on either platform —
         // like a previous `noble.exe.old` still running in another NOBLE window on Windows.
         std::fs::create_dir_all(old_path(&exe).join("busy")).unwrap();
-        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         let mut staged = exe.as_os_str().to_os_string();
         staged.push(".new");
@@ -893,7 +901,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&dir);
                 return;
             }
-            let err = install_with(&release, &exe_ro, &serve(archive), &tar_program()).unwrap_err();
+            let err = install_with(&release, &exe_ro, &serve(archive), &tar()).unwrap_err();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(!err.is_empty());
             assert_intact(&exe_ro);
@@ -998,6 +1006,16 @@ mod tests {
         assert!(!is_release_url("https://evil.example/x"));
     }
 
+    /// The unpacking `tar` is found through PATH's absolute folders (or System32), by its full path.
+    #[test]
+    fn tar_is_found_by_its_full_path() {
+        // No `tar` on this system: `tar_program` names the case in its error, and the install tests cannot run.
+        if let Ok(tar) = tar_program() {
+            assert!(tar.is_absolute(), "{}", tar.display());
+            assert!(tar.is_file(), "{}", tar.display());
+        }
+    }
+
     #[test]
     fn only_github_https_addresses_are_downloaded() {
         assert!(is_release_url("https://github.com/MertSoylu/noble/releases/download/v1/a.tar.gz"));
@@ -1032,7 +1050,7 @@ mod tests {
             fetched.set(true);
             Ok(())
         };
-        let err = install_with(&release, &exe, &fetch, &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &fetch, &tar()).unwrap_err();
         assert!(err.contains("not an https address on GitHub"), "{err}");
         assert!(!fetched.get());
         assert_intact(&exe);
