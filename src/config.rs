@@ -47,6 +47,8 @@ pub struct TerminalCfg {
     pub scrollback: usize,
     pub restore_session: bool,
     pub copy_on_select: bool,
+    /// Programs in a pane may set the system clipboard with OSC 52 (false: such requests are ignored).
+    pub osc52_write: bool,
     /// A tab is named after the folder its focused pane is in now (false: the folder it opened in).
     pub tab_follows_cwd: bool,
     /// Pane color scheme: "windows-terminal" (the PowerShell profile's scheme), "theme"
@@ -136,6 +138,7 @@ impl Default for TerminalCfg {
             scrollback: 5000,
             restore_session: true,
             copy_on_select: true,
+            osc52_write: true,
             tab_follows_cwd: true,
             colors: "windows-terminal".into(),
             background: String::new(),
@@ -245,6 +248,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true   # save tabs on exit, restore them at startup
 copy_on_select = true    # copy mouse-selected text to the clipboard
+osc52_write = true       # programs in a pane may set the clipboard (OSC 52); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
 colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | dark-plus | campbell | light-gray …
 background = ""          # override the scheme background, e.g. '#c8c8c8' (empty = the scheme's own)

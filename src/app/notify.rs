@@ -63,7 +63,8 @@ impl App {
         let mut signals = Vec::new();
         for (id, pane) in &self.panes {
             if pane.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                if let Some(c) = pane.take_clipboard() {
+                // Taken either way (the request is spent); ignored when the setting is off.
+                if let Some(c) = pane.take_clipboard().filter(|_| self.cfg.terminal.osc52_write) {
                     clip = Some(c);
                 }
                 let started = pane.take_started();
