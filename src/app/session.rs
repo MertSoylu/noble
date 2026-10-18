@@ -78,6 +78,9 @@ impl App {
             crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();
+        // Background commands still running (git, gh, AI quota) are killed with their process trees, so none
+        // outlives NOBLE (`ai::run_command`).
+        crate::ai::kill_background_children();
         // Windows: lets the console-close handler return (the process ends then); on Unix nothing waits for it.
         crate::termination::finished();
     }

@@ -868,6 +868,8 @@ mod live_tests {
     #[test]
     #[ignore]
     fn live_git_info() {
+        // Runs a real background command: see `ai::SPAWN_TESTS`.
+        let _serial = crate::ai::SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let git = crate::util::which("git").expect("git");
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let info = super::git_info(&path, &git);

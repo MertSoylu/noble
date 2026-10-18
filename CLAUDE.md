@@ -133,7 +133,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
   (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
-  no prompts, timeout via `ai::run_command`).
+  no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
+  commands still running with `ai::kill_background_children`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme
