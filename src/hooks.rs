@@ -127,14 +127,25 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     // The backup keeps the file as it was before NOBLE first touched it; later writes must not
-    // overwrite it with an already edited copy.
+    // overwrite it with an already edited copy. A backup that is damaged (cut short by an older build's
+    // plain copy) is taken again: the file is still the original while nothing was written yet.
     let backup = path.with_extension("json.noble-bak");
-    if path.is_file() && !backup.exists() {
-        std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
+    if path.is_file() && !backup_is_intact(&backup) {
+        let original = std::fs::read(path).map_err(|e| format!("backup failed: {e}"))?;
+        crate::store::write_bytes(&backup, original).map_err(|e| format!("backup failed: {e}"))?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     // Atomic, through a symlinked file, keeping its permissions; no temp file is left on failure.
     crate::store::write_text(path, &(text + "\n")).map_err(|e| e.to_string())
+}
+
+/// Is the backup there and usable: it exists and is empty (an empty settings file was backed up) or holds
+/// JSON. A missing backup, or one cut short by a plain copy that was interrupted, is not.
+fn backup_is_intact(backup: &Path) -> bool {
+    std::fs::read_to_string(backup).is_ok_and(|text| {
+        let text = crate::util::strip_bom(&text);
+        text.trim().is_empty() || serde_json::from_str::<Value>(text).is_ok()
+    })
 }
 
 /// Are the hooks installed for every event?
@@ -266,8 +277,9 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
         let tmp = dir.join(format!("{instance}-{pane}.tmp"));
         // A stale temp file (a crash) is replaced: the record is written as a new file each time.
         let _ = std::fs::remove_file(&tmp);
-        if crate::store::create_new_file(&tmp, &text).is_ok() {
-            let _ = std::fs::rename(&tmp, file);
+        // Windows: the reader may have the record open, so the rename is retried (`replace_file`).
+        if crate::store::create_new_file(&tmp, &text).and_then(|()| crate::store::replace_file(&tmp, &file)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }

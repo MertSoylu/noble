@@ -461,7 +461,8 @@ pub fn load(path: &Path) -> Loaded {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, DEFAULT_CONFIG);
+        // Atomic like every config write: a crash while the template is written leaves no truncated file.
+        let _ = crate::store::write_text(path, DEFAULT_CONFIG);
     }
     let mtime = mtime_of(path);
     match std::fs::read_to_string(path) {
@@ -469,6 +470,14 @@ pub fn load(path: &Path) -> Loaded {
             Ok(config) => Loaded { config, error: None, mtime },
             Err(error) => Loaded { config: Config::default(), error: Some(error), mtime },
         },
+        // A dangling link (its target is missing): the link is not replaced, so it is reported, not silently defaulted.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::fs::symlink_metadata(path).is_ok() => {
+            let error = ConfigError {
+                text: format!("config: {} is a link to a missing file", crate::util::tilde(path)),
+                line: None,
+            };
+            Loaded { config: Config::default(), error: Some(error), mtime }
+        }
         // No file (and none could be written, e.g. a read-only home): the defaults, silently.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
         // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.

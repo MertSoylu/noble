@@ -20,46 +20,84 @@ fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
     serde_json::from_str(crate::util::strip_bom(&text)).ok()
 }
 
-/// Atomic text write: temp file first, then rename. A failed write or rename leaves no temp file behind.
-/// A symlinked file (a dotfiles manager's `config.toml`) is written through, so the link stays a link,
-/// and the new file keeps the old one's permissions (a private 0600 file stays private).
+/// Atomic text write (see [`write_bytes`]).
 pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
-    let target;
-    let file = match std::fs::symlink_metadata(file) {
-        // A dangling link has no target to write to: it is replaced like a missing file.
-        Ok(m) if m.file_type().is_symlink() => match std::fs::canonicalize(file) {
-            Ok(t) => {
-                target = t;
-                target.as_path()
-            }
-            Err(_) => file,
-        },
-        _ => file,
-    };
-    if let Some(parent) = file.parent() {
+    write_bytes(file, text.as_bytes())
+}
+
+/// Atomic write of a whole file: the bytes go to a temp file next to the target, which is flushed to disk
+/// (`sync_all`), then renamed over the target, and the folder is flushed too (Unix). Every error is returned,
+/// and a failed write leaves neither a temp file nor a half-written target behind; after a power loss the
+/// target holds either the old or the new content, never a truncated one.
+/// A symlinked file (a dotfiles manager's `config.toml`) is written through, so the link stays a link,
+/// and the new file keeps the old one's permissions (a private 0600 file stays private). A dangling link
+/// has no target: that is an error, not a reason to replace the link by a regular file.
+pub(crate) fn write_bytes(file: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let target = write_target(file)?;
+    if let Some(parent) = target.parent() {
         let _ = crate::util::create_private_dir(parent);
     }
     // A name of its own per write: windows saving the same file at once must not share it.
     static SEQ: AtomicU32 = AtomicU32::new(0);
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("txt");
-    let tmp = file.with_extension(format!("{ext}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-    // A failed write (disk full) or rename (target locked on Windows, a directory in its
-    // place) must not leave the temp file behind.
-    let result = create_new_file(&tmp, text)
-        .and_then(|()| keep_permissions(file, &tmp))
-        .and_then(|()| std::fs::rename(&tmp, file));
+    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+    let tmp =
+        target.with_extension(format!("{ext}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    // A failed write (disk full), flush or rename (target locked on Windows, a directory in its place) must
+    // not leave the temp file behind.
+    let result = create_new_file(&tmp, bytes)
+        .and_then(|()| keep_permissions(&target, &tmp))
+        .and_then(|()| replace_file(&tmp, &target));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
+    } else {
+        // Best effort: the new content is already in place; only its durability across a crash depends on this.
+        let _ = sync_dir(target.parent().unwrap_or(Path::new(".")));
     }
     result
 }
 
-/// Writes `text` to a file that must not exist yet (a temp file with a name of its own). Unix: 0600 from the
-/// start (`util::private_file_options`), so `keep_permissions` only ever gives it the mode of the file it replaces.
-pub(crate) fn create_new_file(path: &Path, text: &str) -> std::io::Result<()> {
+/// The file a write goes to: the target of a symlink (the link itself is kept). A dangling link is an error.
+fn write_target(file: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(file) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(file).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("{} is a link whose target cannot be reached: {e}", file.display()))
+        }),
+        _ => Ok(file.to_path_buf()),
+    }
+}
+
+/// Writes `bytes` to a file that must not exist yet (a temp file with a name of its own), and flushes them to
+/// disk before returning. Unix: 0600 from the start (`util::private_file_options`), so `keep_permissions` only
+/// ever gives it the mode of the file it replaces.
+pub(crate) fn create_new_file(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = crate::util::private_file_options().write(true).create_new(true).open(path)?;
-    file.write_all(text.as_bytes())
+    file.write_all(bytes.as_ref())?;
+    file.sync_all()
+}
+
+/// Renames `tmp` over `file`. Windows: a rename over a file another process has open fails for a moment (a
+/// sharing violation), so it is retried with short pauses, about 150 ms in all, before the error is returned.
+/// Unix: the rename replaces the file in one step whatever else has it open, so it is tried once.
+pub(crate) fn replace_file(tmp: &Path, file: &Path) -> std::io::Result<()> {
+    let mut result = std::fs::rename(tmp, file);
+    if cfg!(windows) {
+        for pause in [10, 20, 40, 80] {
+            if result.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(pause));
+            result = std::fs::rename(tmp, file);
+        }
+    }
+    result
+}
+
+/// Flushes a folder, so a rename into it survives a power loss. Unix: `fsync` on the folder. Windows: std
+/// cannot open a folder to flush it; the file itself is flushed before the rename (`create_new_file`) and
+/// NTFS journals the rename, so nothing is done there.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if cfg!(unix) { std::fs::File::open(dir)?.sync_all() } else { Ok(()) }
 }
 
 /// Gives `tmp` the mode bits of the file it is about to replace. Unix: a file that does not exist yet keeps
