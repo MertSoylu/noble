@@ -97,17 +97,18 @@ impl App {
         if self.dev { "session-dev.json" } else { "session.json" }
     }
 
-    /// On exit: save the session.
+    /// On exit: end the background commands, then save the session.
     pub fn shutdown(&mut self) {
+        // First: background commands still running (git, gh, AI quota) are killed with their process trees, so none
+        // outlives NOBLE (`ai::run_command`), and none starts after this (the registry is closed). The session
+        // save can wait a long time for another window's lock, and on Windows the console handler gives up after 4 s.
+        crate::ai::kill_background_children();
         if self.cfg.terminal.restore_session {
             // Merged with the other windows' tabs; this window's earlier entries are replaced.
             let tabs = self.session_tabs();
             crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();
-        // Background commands still running (git, gh, AI quota) are killed with their process trees, so none
-        // outlives NOBLE (`ai::run_command`).
-        crate::ai::kill_background_children();
         // Windows: lets the console-close handler return (the process ends then); on Unix nothing waits for it.
         crate::termination::finished();
     }

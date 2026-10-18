@@ -1,6 +1,7 @@
 //! NOBLE entry point: terminal setup, input thread and the frame loop.
 
 use std::io::{Write, stdout};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -140,6 +141,8 @@ fn main() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().name() == Some("main") {
             restore_terminal();
+            // Background commands end now if the lock is free; otherwise the unwinding reaches `run`.
+            noble::ai::kill_background_children_if_free();
             default_hook(info);
         } else {
             if let Some(dir) = log_file.parent() {
@@ -201,6 +204,26 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
     // something visible (`pending`, at most at FRAME rate) or when the moment
     // comes for something that changes over time (clock, animation, notification
     // timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
+    // A panic on the main thread unwinds through the loop. The panic hook has restored the terminal already; here
+    // the session is saved and the commands are ended, then the panic goes on, so the exit stays the same.
+    let draw_error = match catch_unwind(AssertUnwindSafe(|| event_loop(&mut terminal, &mut app, &rx, colors_256))) {
+        Ok(draw_error) => draw_error,
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(|| app.shutdown()));
+            resume_unwind(payload);
+        }
+    };
+    app.shutdown();
+    draw_error.map_or(Ok(()), |e| Err(e.into()))
+}
+
+/// The frame loop. Returns the error of a failed draw (the terminal is gone), `None` on a normal quit.
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    rx: &mpsc::Receiver<AppEvent>,
+    colors_256: bool,
+) -> Option<std::io::Error> {
     let mut last_draw = Instant::now() - FRAME;
     let mut pending = true;
     let mut draw_error = None;
@@ -235,7 +258,7 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
         } else if due {
             // A failed draw (the terminal is gone) still ends through `shutdown`, which saves the session.
             if let Err(e) = terminal.draw(|f| {
-                noble::ui::draw(f, &mut app);
+                noble::ui::draw(f, app);
                 if colors_256 {
                     noble::ui::to_256_colors(f.buffer_mut());
                 }
@@ -262,6 +285,5 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
             pending = false;
         }
     }
-    app.shutdown();
-    draw_error.map_or(Ok(()), |e| Err(e.into()))
+    draw_error
 }

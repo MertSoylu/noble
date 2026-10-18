@@ -912,6 +912,20 @@ mod tests {
         assert!(running().pids.is_empty(), "a command was registered after shutdown");
     }
 
+    /// The panic hook's kill never waits for the registry lock (the panicking code may hold it): with the lock taken
+    /// it returns at once, does nothing and leaves the registry open for the unwinding to close.
+    #[test]
+    fn panic_path_kill_does_not_wait_for_the_lock() {
+        let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _reopen = Reopen;
+        let held = running();
+        kill_background_children_if_free();
+        assert!(!held.closed, "the busy lock was waited for or the registry was closed");
+        drop(held);
+        kill_background_children_if_free();
+        assert!(running().closed, "the free lock was not used");
+    }
+
     /// The codex-style RPC child never answers: the timeout ends its whole tree (Unix: the grandchild too), and the
     /// caller does not wait for it. Windows: `cmd` starts `ping`, which `taskkill /T` ends with it.
     #[test]
