@@ -476,13 +476,18 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
         }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // The fastest of `RUNS` scans: other tests running in parallel only ever add time to a scan, so the minimum
+        // is the scan's own cost and stays put on a busy machine.
         let per_scan = |roots: &[PathBuf]| {
             let _ = scan(roots, None);
-            let start = Instant::now();
-            for _ in 0..RUNS {
-                let _ = scan(roots, None);
-            }
-            start.elapsed() / RUNS
+            (0..RUNS)
+                .map(|_| {
+                    let start = Instant::now();
+                    let _ = scan(roots, None);
+                    start.elapsed()
+                })
+                .min()
+                .unwrap_or_default()
         };
         let idle = per_scan(&elsewhere);
         let mut with_listener = elsewhere.clone();
@@ -505,8 +510,11 @@ mod tests {
             let _ = std::fs::remove_dir(dir);
         }
         drop(listener);
-        // Generous limits: they catch a scan that turned expensive, not the noise of a shared runner.
+        // Generous limits: they catch a scan that turned expensive, not the noise of a shared runner. macOS runs `lsof`
+        // for the listener, which is slow there, so its limit is wider.
+        let busy_limit =
+            if cfg!(target_os = "macos") { Duration::from_millis(1000) } else { Duration::from_millis(250) };
         assert!(idle < Duration::from_millis(50), "{line}");
-        assert!(busy < Duration::from_millis(250), "{line}");
+        assert!(busy < busy_limit, "{line}");
     }
 }
