@@ -318,6 +318,33 @@ fn search_refresh_is_throttled_and_follows_the_last_output() {
     app.run(Action::CloseTab);
 }
 
+/// A resize of the search's pane re-wraps its lines, so the matches are computed again at once, not on the next
+/// output: the text the search holds is read anew at the new size, and the matches are those of that text.
+#[test]
+fn search_follows_a_pane_resize() {
+    use noble::term::pane::find_matches;
+    use std::sync::Arc;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("resize".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let text: String = (0..20).map(|i| format!("row {i} {}\r\n", "x".repeat(90))).collect();
+    app.panes[&id].parser().process(text.as_bytes());
+    app.run(Action::Search);
+    for c in "row".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let before = Arc::clone(&app.search.as_ref().unwrap().text.as_ref().unwrap().lines);
+    // Narrower: every long line wraps again, so the lines (and the matches on them) change.
+    render(&mut app, 70, 30);
+    let s = app.search.as_ref().unwrap();
+    let text = s.text.as_ref().unwrap();
+    assert!(!Arc::ptr_eq(&before, &text.lines), "the text was read anew at the new size");
+    assert_eq!(s.matches, find_matches(&text.lines, "row").0, "the matches are those of the new lines");
+    assert!(!s.stale);
+    app.run(Action::CloseTab);
+}
+
 /// Past `MAX_MATCHES` the search keeps the newest matches and the bar says so ("10000+").
 #[test]
 fn search_count_says_when_it_is_capped() {
