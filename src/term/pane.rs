@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -805,6 +805,8 @@ pub struct Pane {
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub dirty: Arc<AtomicBool>,
+    /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
+    output_gen: Arc<AtomicU64>,
     /// (row, col)
     pub size: (u16, u16),
     pub start_cwd: PathBuf,
@@ -971,11 +973,13 @@ impl Pane {
         let parser =
             Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, spec.scrollback, Callbacks::default())));
         let dirty = Arc::new(AtomicBool::new(false));
+        let output_gen = Arc::new(AtomicU64::new(0));
 
         {
             let parser = parser.clone();
             let writer = writer.clone();
             let dirty = dirty.clone();
+            let output_gen = output_gen.clone();
             let tx = tx.clone();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
@@ -987,6 +991,8 @@ impl Pane {
                                 let mut p = lock(&parser);
                                 // An emulator error must not kill the whole pane: skip this chunk.
                                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(&buf[..n])));
+                                // Bumped under the same lock `scroll_text` reads it with: a new value means new output.
+                                output_gen.fetch_add(1, Ordering::Release);
                                 std::mem::take(&mut p.callbacks_mut().responses)
                             };
                             if !responses.is_empty() {
@@ -1017,6 +1023,7 @@ impl Pane {
             master: pair.master,
             killer,
             dirty,
+            output_gen,
             size: (rows, cols),
             start_cwd: cwd,
             cwd_checked: Mutex::new(None),
@@ -1244,31 +1251,16 @@ impl Pane {
     /// All lines including the scrollback (0 = oldest) and the scrollback length.
     /// The visible scroll position is preserved.
     pub fn all_lines(&self) -> (Vec<String>, usize) {
+        scrollback_lines(&mut lock(&self.parser))
+    }
+
+    /// The text search works on: `have` (the copy the caller holds) is returned as it is while the pane has
+    /// produced no output since it was read and kept its size, so a query typed without new output does not
+    /// read the whole scrollback again. Output or a resize reads it anew.
+    pub fn scroll_text(&self, have: Option<&ScrollText>) -> ScrollText {
         let mut p = lock(&self.parser);
-        let screen = p.screen_mut();
-        let original = screen.scrollback();
-        screen.set_scrollback(usize::MAX);
-        let history = screen.scrollback();
-        let (rows, cols) = screen.size();
-        let total = history + rows as usize;
-        let mut lines: Vec<String> = Vec::with_capacity(total);
-        let mut top = 0usize;
-        while top < total {
-            let offset = history.saturating_sub(top);
-            screen.set_scrollback(offset);
-            let start = history - offset;
-            for (i, row) in screen.rows(0, cols).enumerate() {
-                if start + i == lines.len() {
-                    lines.push(row);
-                }
-            }
-            top = start + rows as usize;
-            if offset == 0 {
-                break;
-            }
-        }
-        screen.set_scrollback(original);
-        (lines, history)
+        let generation = self.output_gen.load(Ordering::Acquire);
+        read_scroll_text(&mut p, generation, have)
     }
 
     /// Scrolls so the absolute line (0 = oldest) lands in the middle of the screen.
@@ -1300,6 +1292,58 @@ impl Pane {
         let cols = p.screen().size().1;
         p.screen().rows(0, cols).nth(row as usize)
     }
+}
+
+/// All lines including the scrollback (0 = oldest) and the scrollback length, read from `p`.
+/// The visible scroll position is preserved.
+fn scrollback_lines(p: &mut vt100::Parser<Callbacks>) -> (Vec<String>, usize) {
+    let screen = p.screen_mut();
+    let original = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let history = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let total = history + rows as usize;
+    let mut lines: Vec<String> = Vec::with_capacity(total);
+    let mut top = 0usize;
+    while top < total {
+        let offset = history.saturating_sub(top);
+        screen.set_scrollback(offset);
+        let start = history - offset;
+        for (i, row) in screen.rows(0, cols).enumerate() {
+            if start + i == lines.len() {
+                lines.push(row);
+            }
+        }
+        top = start + rows as usize;
+        if offset == 0 {
+            break;
+        }
+    }
+    screen.set_scrollback(original);
+    (lines, history)
+}
+
+/// The scrollback text search works on (`Pane::scroll_text`), with the output generation and screen size it
+/// was read at.
+#[derive(Clone, Debug)]
+pub struct ScrollText {
+    /// Every line, 0 = oldest. Shared, so a reused copy costs a pointer, not the lines.
+    pub lines: Arc<Vec<String>>,
+    /// Scrollback length (see `all_lines`).
+    pub history: usize,
+    generation: u64,
+    size: (u16, u16),
+}
+
+/// The text of `p` at output generation `generation`: `have` itself when it was read at the same generation
+/// and size, otherwise read anew.
+fn read_scroll_text(p: &mut vt100::Parser<Callbacks>, generation: u64, have: Option<&ScrollText>) -> ScrollText {
+    let size = p.screen().size();
+    if let Some(text) = have.filter(|t| t.generation == generation && t.size == size) {
+        return text.clone();
+    }
+    let (lines, history) = scrollback_lines(p);
+    ScrollText { lines: Arc::new(lines), history, generation, size }
 }
 
 /// The OSC 8 link at on-screen (row, col): address and column span.
@@ -1768,5 +1812,34 @@ Claude needs your permission",
         assert_eq!(s.ordered(), ((1, 2), (3, 5)));
         assert!(s.contains(2, 0));
         assert!(!s.contains(3, 6));
+    }
+
+    /// The copy of the scrollback is reused while neither output nor the size changed; new output or a
+    /// resize reads the lines anew, and the history follows.
+    #[test]
+    fn scroll_text_is_reused_until_output_or_resize() {
+        use std::sync::Arc;
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default());
+        for i in 0..10 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        let a = super::read_scroll_text(&mut p, 1, None);
+        assert!(a.history > 0 && a.lines.iter().any(|l| l.trim_end() == "line 0"));
+        let b = super::read_scroll_text(&mut p, 1, Some(&a));
+        assert!(Arc::ptr_eq(&a.lines, &b.lines), "same generation and size: the copy is reused");
+        // Scrolling the view back does not change the text, so the copy is still reused.
+        p.screen_mut().set_scrollback(3);
+        let c = super::read_scroll_text(&mut p, 1, Some(&b));
+        assert!(Arc::ptr_eq(&a.lines, &c.lines));
+        p.screen_mut().set_scrollback(0);
+        p.process(b"line 10\r\n");
+        let d = super::read_scroll_text(&mut p, 2, Some(&c));
+        assert!(!Arc::ptr_eq(&a.lines, &d.lines), "new output: fresh lines");
+        assert!(d.lines.iter().any(|l| l.trim_end() == "line 10"));
+        assert_eq!(d.history, a.history + 1);
+        p.screen_mut().set_size(4, 10);
+        let e = super::read_scroll_text(&mut p, 2, Some(&d));
+        assert!(!Arc::ptr_eq(&d.lines, &e.lines), "resize: fresh lines");
+        assert!(e.lines.iter().all(|l| l.chars().count() <= 10 || l.is_empty()));
     }
 }

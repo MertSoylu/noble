@@ -501,6 +501,8 @@ pub struct SearchState {
     pub current: Option<usize>,
     /// Scrollback length when the matches were computed (absolute line → screen line).
     pub history: usize,
+    /// The scrollback text the matches were computed on; reused while the pane has no new output.
+    pub text: Option<crate::term::pane::ScrollText>,
 }
 
 /// Link under the mouse while ctrl is held: pane, screen row, column span.

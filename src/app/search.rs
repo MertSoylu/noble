@@ -61,7 +61,14 @@ impl App {
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
             return;
         }
-        self.search = Some(SearchState { pane, query: String::new(), matches: Vec::new(), current: None, history: 0 });
+        self.search = Some(SearchState {
+            pane,
+            query: String::new(),
+            matches: Vec::new(),
+            current: None,
+            history: 0,
+            text: None,
+        });
     }
 
     pub fn close_search(&mut self) {
@@ -80,8 +87,10 @@ impl App {
             self.search = None;
             return;
         };
-        let (lines, history) = p.all_lines();
-        let matches = find_matches(&lines, &s.query);
+        // The copy of the scrollback is reused while the pane has no new output (typing a query).
+        let text = p.scroll_text(s.text.as_ref());
+        let history = text.history;
+        let matches = find_matches(&text.lines, &s.query);
         let Some(s) = self.search.as_mut() else { return };
         // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
         // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
@@ -102,6 +111,7 @@ impl App {
         .or_else(|| matches.len().checked_sub(1));
         s.matches = matches;
         s.history = history;
+        s.text = Some(text);
     }
 
     /// Goes to the previous (older, `-1`) or next (newer, `+1`) match.

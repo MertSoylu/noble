@@ -100,6 +100,8 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Scrollback search no longer copies the whole scrollback on every keystroke, and only copies it again (holding the
+  terminal's lock) when the pane has new output or was resized.
 - A damaged `state.json`, `workspaces.json`, `session.json`, `recent.json` or `ai-history.json` no longer loses its data on the
   next save: the file is copied to `<name>.corrupt` first (an older copy is never overwritten) and a toast names it. A
   file that cannot be copied aside is not written over.
