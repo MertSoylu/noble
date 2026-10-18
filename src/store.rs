@@ -26,9 +26,11 @@ pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Atomic write of a whole file: the bytes go to a temp file next to the target, which is flushed to disk
-/// (`sync_all`), then renamed over the target, and the folder is flushed too (Unix). Every error is returned,
-/// and a failed write leaves neither a temp file nor a half-written target behind; after a power loss the
-/// target holds either the old or the new content, never a truncated one.
+/// (`sync_all`), then renamed over the target, and the folder is flushed too (Unix). Every error of the write
+/// itself is returned, and a failed write leaves neither a temp file nor a half-written target behind; after a
+/// power loss the target holds either the old or the new content, never a truncated one. The folder flush comes
+/// after the rename and is best effort: some filesystems do not support it, the new content is in place by then,
+/// so its error is ignored (only the durability of the rename across a crash depends on it).
 /// A symlinked file (a dotfiles manager's `config.toml`) is written through, so the link stays a link,
 /// and the new file keeps the old one's permissions (a private 0600 file stays private). A dangling link
 /// has no target: that is an error, not a reason to replace the link by a regular file.
