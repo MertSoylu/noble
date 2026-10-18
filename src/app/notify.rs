@@ -201,7 +201,10 @@ impl App {
     /// Runs `noble update` in a new tab; the progress shows there.
     pub fn start_update(&mut self) {
         let Ok(exe) = std::env::current_exe() else { return };
-        let command = self.shell.invocation_of(&exe, "update");
+        let Some(command) = self.shell.invocation_of(&exe, "update") else {
+            self.toast(ToastLevel::Warn, "cmd.exe cannot take this program's path: run `noble update` in a terminal");
+            return;
+        };
         let cwd = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         self.update_available = None;
         self.new_tab(cwd, Some(&command), Some("NOBLE update".into()));

@@ -307,18 +307,19 @@ impl ShellSpec {
     }
 
     /// A command line that runs a program (given by full path) with its arguments
-    /// (paths with spaces are quoted per the shell).
-    pub fn invocation_of(&self, program: &Path, args: &str) -> String {
+    /// (paths with spaces are quoted per the shell). `None` when cmd.exe cannot take the path
+    /// safely (see `quote_arg`: a `%` or `!` in it would be expanded).
+    pub fn invocation_of(&self, program: &Path, args: &str) -> Option<String> {
         let path = program.display().to_string();
-        match self.kind() {
+        Some(match self.kind() {
             ShellKind::PowerShell => format!("& {} {args}", pwsh_quote(&path)),
-            ShellKind::Cmd => format!("\"{path}\" {args}"),
+            ShellKind::Cmd => format!("{} {args}", self.quote_arg(&path)?),
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => {
                 format!("{} {args}", self.quote(&path))
             }
             // A Windows program from inside WSL: through its `/mnt/c/...` path (WSL interop runs it).
             ShellKind::Wsl => format!("\"$(wslpath {})\" {args}", self.quote(&path)),
-        }
+        })
     }
 
     /// Shell-specific environment variables: for cmd a directory-reporting PROMPT
@@ -1288,7 +1289,15 @@ mod tests {
         assert_eq!(sh.quote("it's"), r"'it'\''s'");
         let fish = ShellSpec::new("fish", vec![]);
         assert_eq!(fish.quote(r"a\b'c"), r"'a\\b\'c'");
-        assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y"), "'/opt/my tool/x' --y");
+        assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y").as_deref(), Some("'/opt/my tool/x' --y"));
+        // cmd.exe: the path is quoted as any argument is; a `%` or `!` in it is refused (cmd would expand it).
+        let cmd = ShellSpec::new("cmd.exe", vec![]);
+        assert_eq!(
+            cmd.invocation_of(Path::new(r"C:\Tools\noble.exe"), "update").as_deref(),
+            Some(r#""C:\Tools\noble.exe" update"#)
+        );
+        assert_eq!(cmd.invocation_of(Path::new(r"C:\50%\noble.exe"), "update"), None);
+        assert_eq!(cmd.invocation_of(Path::new(r"C:\hi!\noble.exe"), "update"), None);
     }
 
     /// Hostile file names are quoted so each shell takes them literally; what cmd.exe cannot
