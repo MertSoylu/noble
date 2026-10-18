@@ -72,11 +72,17 @@ All notable changes to NOBLE are documented here. The format is based on
 - A path the terminal reports as a network path (`\\server\share`, `//server/share`) is never checked on disk: an
   OSC 9;9 report of one is ignored (the pane keeps its start folder), and a Ctrl+click on one does not open or
   check it. On Windows such a check connected to the server and sent the user's credentials.
+- A pane opened in a network folder no longer resolves a relative link against that folder on the share (ctrl+hover
+  and ctrl+click), and its prompts ask for no git status there. A repository whose `.git` file, `commondir` or
+  `gitdir` names a network path is listed as a plain folder: nothing is read from the share.
 - The link opener refuses more program types (Python scripts, `.msc`, `.jnlp`, `.scf`, `.gadget`, Windows Script
   Host and installer types, `.library-ms`, `.settingcontent-ms` and others) and copies them instead of opening them.
+  Names Windows reads as a program with a trailing dot or space (`setup.exe.`) or as a stream
+  (`setup.py::$DATA`) are copied too.
 - `noble update` downloads only https addresses on GitHub, caps the download sizes, and refuses an archive with
   absolute names, `..` parts or links before unpacking anything. A bad checksum now reads as a corrupted or
-  incomplete download.
+  incomplete download. Redirects are followed by NOBLE itself, each address checked (GitHub's own download hosts
+  only), not by the HTTP client. `tar` is run by its full path, never found in the working folder.
 - NOBLE's data folder is created 0700 and its files 0600 on Unix (existing files keep their mode). Without a home
   folder NOBLE stops with a message and asks for `NOBLE_HOME`, instead of writing to a `.noble` folder in the working
   directory.
