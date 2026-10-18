@@ -217,15 +217,13 @@ pub fn stdio_rpc(
     params: Value,
     timeout: Duration,
 ) -> Result<Value, String> {
-    let mut child = util::command_for(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "cli not runnable".to_string())?;
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut cmd = util::command_for(program);
+    cmd.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Started like `run_command`'s commands: the guard ends the whole tree on every exit below (a failed write
+    // and a timeout included), and shutdown reaches it. Before, an early `?` left the child running and unreaped.
+    let mut tracked = spawn_tracked(cmd)?;
+    let mut stdin = tracked.0.stdin.take().ok_or("no stdin")?;
+    let stdout = tracked.0.stdout.take().ok_or("no stdout")?;
     let (line_tx, line_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -269,8 +267,6 @@ pub fn stdio_rpc(
             Err(RecvTimeoutError::Disconnected) => break Err("cli exited".into()),
         }
     };
-    let _ = child.kill();
-    let _ = child.wait();
     result
 }
 
@@ -293,16 +289,8 @@ pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<
     use std::io::Read;
     const CAP: u64 = 1 << 20;
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    // Unix: the child leads its own process group, so the whole tree is killed as one (`kill_tree`).
-    // Windows: no process groups; `kill_tree` uses `taskkill /T` to walk the tree instead.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().map_err(|_| "cli not runnable".to_string())?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
-    register(child.id());
+    let mut tracked = spawn_tracked(cmd)?;
+    let stdout = tracked.0.stdout.take().ok_or("no stdout")?;
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
     // The reader is never joined: after a timeout it may stay blocked on a pipe that a surviving process
     // holds, and the caller must not wait for it. `stop` closes that pipe's last holder.
@@ -316,62 +304,133 @@ pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<
         Ok(buf) => Ok(String::from_utf8_lossy(&buf).into_owned()),
         Err(_) => Err("timeout".to_string()),
     };
-    // Every outcome ends here: a helper that a command started may still run after the command itself finished.
-    stop(&mut child);
-    let _ = child.wait();
+    // Every outcome ends here (the guard drops): a helper that the command started may still run after the command
+    // itself finished, so its whole tree is killed and the child is reaped.
     result
 }
 
-/// Background commands that are running now, by pid (on Unix the pid is also the process group id).
-/// `run_command` adds a command when it starts and removes it when it stops it. `kill_background_children`
-/// ends the ones left at shutdown, so a hung helper cannot outlive NOBLE.
-static RUNNING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Background commands that are running now, by pid (on Unix the pid is also the process group id). A command is
+/// added when it starts and removed when it is stopped. `closed` is set on shutdown (`kill_background_children`):
+/// from then on no command starts, so none can outlive NOBLE. Both live under the one lock, so a command either
+/// lands in `pids` before a shutdown or sees `closed`.
+struct Registry {
+    closed: bool,
+    pids: Vec<u32>,
+}
 
-fn running() -> MutexGuard<'static, Vec<u32>> {
+static RUNNING: Mutex<Registry> = Mutex::new(Registry { closed: false, pids: Vec::new() });
+
+fn running() -> MutexGuard<'static, Registry> {
     RUNNING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn register(pid: u32) {
-    running().push(pid);
-}
-
-/// Held by every test that runs a real background command, and by `projects::live_git_info`: the shutdown test
-/// ends every command in the registry, which must not include another test's command.
+/// Held by every test that starts a real background command. The shutdown tests end every command in the registry
+/// (and close it until they reopen it), so a command of another test must not run meanwhile: each such test takes
+/// this lock first, and the registry is reopened before it is released.
 #[cfg(test)]
 pub(crate) static SPAWN_TESTS: Mutex<()> = Mutex::new(());
 
-/// Kills the tree of `child` and forgets it. Called before the child is reaped, and under the registry lock, so
-/// the pid and process group id cannot be reused while `kill_background_children` may be signalling them.
+/// A started background command. Dropping it ends the whole process tree and reaps the child, so every exit path
+/// of the caller (an early return, a timeout, a failed write) cleans up.
+pub(crate) struct Tracked(std::process::Child);
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        stop(&mut self.0);
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts a background command and registers it. Unix: the child leads a process group of its own, so the tree is
+/// killed as one. Windows: there are no process groups; `kill_tree` walks the tree with `taskkill /T`. Fails once
+/// shutdown has begun; the child is then killed again by its guard.
+fn spawn_tracked(mut cmd: std::process::Command) -> Result<Tracked, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().map_err(|_| "cli not runnable".to_string())?;
+    let pid = child.id();
+    let tracked = Tracked(child);
+    // The lock is taken after the spawn (a spawn can take a while on Windows), not across it.
+    let closed = {
+        let mut reg = running();
+        if !reg.closed {
+            reg.pids.push(pid);
+        }
+        reg.closed
+    };
+    if closed {
+        // `tracked` drops here, after the lock is released: its `stop` takes the lock itself.
+        return Err("shutting down".into());
+    }
+    Ok(tracked)
+}
+
+/// Ends the process tree of `child` and forgets it. Unix: the group is killed under the registry lock, which keeps
+/// the group id from being reused meanwhile (the leader is not reaped yet, so it still holds the id). Windows: the
+/// tree is killed outside the lock, which a slow `taskkill` must not hold up for every other command. The pid
+/// cannot be reused there while `child` still holds its handle.
 fn stop(child: &mut std::process::Child) {
     let pid = child.id();
-    let mut running = running();
-    // Unix: always. The group can outlive its leader, and the leader (not reaped yet) still holds the group id.
-    #[cfg(unix)]
-    kill_tree(pid);
+    {
+        let mut reg = running();
+        reg.pids.retain(|p| *p != pid);
+        // Unix: always. The group can outlive its leader, and the leader (not reaped yet) still holds the group id.
+        #[cfg(unix)]
+        kill_tree(pid);
+    }
     // Windows: `taskkill` finds the tree from its root, so once the root has exited there is nothing to find and
     // the process is not started. `try_wait` reaps only on exit, and Windows keeps the pid until the handle closes.
     #[cfg(windows)]
-    {
-        if matches!(child.try_wait(), Ok(None)) {
-            kill_tree(pid);
-        }
+    if matches!(child.try_wait(), Ok(None)) {
+        kill_tree(pid);
     }
     let _ = child.kill();
-    running.retain(|p| *p != pid);
 }
 
-/// Ends every background command that is still running. Called on NOBLE's shutdown path (`App::shutdown`), so a
-/// command that hangs cannot outlive NOBLE. Each one is killed as its whole tree, as on a timeout; the
-/// `run_command` calls then return as usual.
+/// Ends every background command that is still running and closes the registry, so none starts again. Called on
+/// NOBLE's shutdown path (`App::shutdown`), so a command that hangs cannot outlive NOBLE. Each one is killed as its
+/// whole tree, as on a timeout; the `run_command` calls then return as usual.
+///
+/// The lock stays held while the trees are killed (Windows: `taskkill` runs here, so this is shutdown-only). A pid
+/// listed here has not been reaped yet; a command that ends meanwhile waits in `stop`, so its pid cannot be reused
+/// under a `taskkill` aimed at it.
+///
+/// Tests: this kills every command in the registry, not only the caller's. The shutdown tests therefore hold
+/// `SPAWN_TESTS`, which every test that starts a real command also takes.
 pub fn kill_background_children() {
-    let mut running = running();
-    for pid in running.drain(..) {
+    close_and_kill(&mut running());
+}
+
+/// The same from a panic hook on the main thread, where the panicking code may still hold the registry lock. It
+/// does not wait for the lock: when the lock is busy it does nothing, and the unwinding (`main.rs`) then reaches
+/// `kill_background_children`.
+pub fn kill_background_children_if_free() {
+    let mut reg = match RUNNING.try_lock() {
+        Ok(reg) => reg,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    close_and_kill(&mut reg);
+}
+
+fn close_and_kill(reg: &mut Registry) {
+    reg.closed = true;
+    for pid in reg.pids.drain(..) {
         kill_tree(pid);
     }
 }
 
+/// Tests only: reopens the registry after a shutdown test has closed it.
+#[cfg(test)]
+fn reopen_registry() {
+    running().closed = false;
+}
+
 /// Kills the process tree led by `pid`. Unix: SIGKILL to the process group (the group id is the pid, set by
-/// `run_command`). Windows: `taskkill /T /F` ends the tree (Windows has no process groups; Unix does not run
+/// `spawn_tracked`). Windows: `taskkill /T /F` ends the tree (Windows has no process groups; Unix does not run
 /// taskkill). `taskkill` finds the tree by parent links, so a grandchild whose parent has already exited is
 /// missed: the caller never waits for a pipe that such a process keeps open.
 fn kill_tree(pid: u32) {
@@ -788,11 +847,21 @@ mod tests {
         }
     }
 
+    /// Reopens the registry when a test ends, also when it fails: the shutdown tests close it for the whole process.
+    struct Reopen;
+
+    impl Drop for Reopen {
+        fn drop(&mut self) {
+            reopen_registry();
+        }
+    }
+
     /// NOBLE's shutdown ends a command that is still running: the call returns, and on Unix its grandchild is gone
     /// too. Windows checks the return only (the grandchild is not observable there without extra tooling).
     #[test]
     fn shutdown_ends_a_running_command() {
         let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _reopen = Reopen;
         let dir = ScratchDir::new("noble-shutdown-command");
         let pid_file = dir.0.join("grandchild.pid");
         #[cfg(unix)]
@@ -814,10 +883,10 @@ mod tests {
         });
         // Running once registered; on Unix also once the grandchild has written its pid.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && (running().is_empty() || !pid_file_ready(&pid_file)) {
+        while Instant::now() < deadline && (running().pids.is_empty() || !pid_file_ready(&pid_file)) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(!running().is_empty(), "the command never registered");
+        assert!(!running().pids.is_empty(), "the command never registered");
         kill_background_children();
         let _ = done_rx.recv_timeout(Duration::from_secs(20)).expect("the shutdown did not end the command");
         #[cfg(unix)]
@@ -825,6 +894,54 @@ mod tests {
             let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
             match wait_until_gone(pid) {
                 Some(gone) => assert!(gone, "the grandchild survived the shutdown"),
+                None => eprintln!("ps is not installed: the grandchild check is skipped"),
+            }
+        }
+    }
+
+    /// After shutdown no command starts: the call fails at once, and nothing is left running.
+    #[test]
+    fn commands_do_not_start_after_shutdown() {
+        let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _reopen = Reopen;
+        kill_background_children();
+        let (program, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/C", "exit"]) } else { ("true", &[]) };
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args);
+        assert_eq!(run_command(cmd, Duration::from_secs(10)), Err("shutting down".to_string()));
+        assert!(running().pids.is_empty(), "a command was registered after shutdown");
+    }
+
+    /// The codex-style RPC child never answers: the timeout ends its whole tree (Unix: the grandchild too), and the
+    /// caller does not wait for it. Windows: `cmd` starts `ping`, which `taskkill /T` ends with it.
+    #[test]
+    fn rpc_timeout_ends_the_child_tree() {
+        let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = ScratchDir::new("noble-stdio-rpc");
+        let pid_file = dir.0.join("grandchild.pid");
+        let started = Instant::now();
+        #[cfg(unix)]
+        let (program, args) = (
+            Path::new("sh"),
+            vec![
+                "-c".to_string(),
+                r#"sleep 30 & echo $! > "$1"; wait"#.to_string(),
+                "sh".to_string(),
+                pid_file.display().to_string(),
+            ],
+        );
+        #[cfg(windows)]
+        let (program, args) =
+            (Path::new("cmd"), vec!["/C".to_string(), "ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let result = stdio_rpc(program, &args, "account/rateLimits/read", Value::Null, Duration::from_secs(2));
+        assert_eq!(result.err().as_deref(), Some("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(10), "the caller waited for the child");
+        #[cfg(unix)]
+        {
+            let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+            match wait_until_gone(pid) {
+                Some(gone) => assert!(gone, "the grandchild survived the timeout"),
                 None => eprintln!("ps is not installed: the grandchild check is skipped"),
             }
         }
