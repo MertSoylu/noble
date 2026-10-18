@@ -136,8 +136,10 @@ fn main() -> anyhow::Result<()> {
             restore_terminal();
             default_hook(info);
         } else {
-            let _ = std::fs::create_dir_all(log_file.parent().unwrap_or(std::path::Path::new(".")));
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+            if let Some(dir) = log_file.parent() {
+                let _ = noble::util::create_private_dir(dir);
+            }
+            if let Ok(mut f) = noble::util::private_file_options().create(true).append(true).open(&log_file) {
                 let thread = std::thread::current().name().unwrap_or("?").to_string();
                 let _ = writeln!(f, "[{}] panic in thread '{thread}': {info}", chrono::Local::now().format("%F %T"));
             }

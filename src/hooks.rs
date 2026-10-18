@@ -224,8 +224,8 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
         }
         let marker = dir.join(format!("{instance}-{pane}.{id}.sub"));
         if event == SUBAGENT_START {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(marker, "");
+            let _ = crate::util::create_private_dir(&dir);
+            let _ = crate::store::create_new_file(&marker, "");
         } else {
             let _ = std::fs::remove_file(marker);
         }
@@ -240,10 +240,12 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     }
     let message = field("message").map(|m| crate::util::truncate(m, 120));
     let rec = HookRecord { event: event.to_string(), message, ts: chrono::Utc::now().timestamp(), subagents: 0 };
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::util::create_private_dir(&dir);
     if let Ok(text) = serde_json::to_string(&rec) {
         let tmp = dir.join(format!("{instance}-{pane}.tmp"));
-        if std::fs::write(&tmp, text).is_ok() {
+        // A stale temp file (a crash) is replaced: the record is written as a new file each time.
+        let _ = std::fs::remove_file(&tmp);
+        if crate::store::create_new_file(&tmp, &text).is_ok() {
             let _ = std::fs::rename(&tmp, file);
         }
     }

@@ -37,7 +37,7 @@ pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
         _ => file,
     };
     if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::util::create_private_dir(parent);
     }
     // A name of its own per write: windows saving the same file at once must not share it.
     static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -45,7 +45,7 @@ pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
     let tmp = file.with_extension(format!("{ext}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     // A failed write (disk full) or rename (target locked on Windows, a directory in its
     // place) must not leave the temp file behind.
-    let result = std::fs::write(&tmp, text)
+    let result = create_new_file(&tmp, text)
         .and_then(|()| keep_permissions(file, &tmp))
         .and_then(|()| std::fs::rename(&tmp, file));
     if result.is_err() {
@@ -54,8 +54,17 @@ pub(crate) fn write_text(file: &Path, text: &str) -> std::io::Result<()> {
     result
 }
 
-/// Gives `tmp` the mode bits of the file it is about to replace. Unix: a new file gets the umask's mode,
-/// so without this a 0600 file would become 0644. Windows: the file's ACL comes from its folder and the
+/// Writes `text` to a file that must not exist yet (a temp file with a name of its own). Unix: 0600 from the
+/// start (`util::private_file_options`), so `keep_permissions` only ever gives it the mode of the file it replaces.
+pub(crate) fn create_new_file(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = crate::util::private_file_options().write(true).create_new(true).open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+/// Gives `tmp` the mode bits of the file it is about to replace. Unix: a file that does not exist yet keeps
+/// the 0600 it was created with, and an existing one hands its own mode over (a private 0600 file stays
+/// private, and nothing is loosened). Windows: the file's ACL comes from its folder and the
 /// read-only attribute must not be copied (it would block the next save), so nothing is done.
 fn keep_permissions(file: &Path, tmp: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -472,14 +481,14 @@ fn with_lock_waiting<T>(file: &Path, wait: Duration, f: impl FnOnce() -> T) -> T
     use std::io::Write;
     let lock = file.with_extension("json.lock");
     if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::util::create_private_dir(parent);
     }
     let started = Instant::now();
     let deadline = started + wait;
     // Asking the OS about the owner costs more than trying to create the file: at most 4 times a second.
     let mut next_check = Instant::now();
     let held = loop {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+        match crate::util::private_file_options().write(true).create_new(true).open(&lock) {
             Ok(mut handle) => {
                 let _ = handle.write_all(lock_owner().as_bytes());
                 break true;
@@ -836,6 +845,26 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is kept");
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new store file is 0600 from the start (whatever the umask says), and a file that exists keeps its mode.
+    /// Windows: a new file takes the ACL of its folder, so there are no mode bits to check.
+    #[cfg(unix)]
+    #[test]
+    fn new_store_files_are_private_and_existing_modes_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("noble-write-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fresh = dir.join("data").join("session.json");
+        write_text(&fresh, "{}").unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(fresh.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        let old = dir.join("old.json");
+        std::fs::write(&old, "x").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_text(&old, "y").unwrap();
+        assert_eq!(std::fs::metadata(&old).unwrap().permissions().mode() & 0o777, 0o644);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
