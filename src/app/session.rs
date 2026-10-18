@@ -70,9 +70,18 @@ impl App {
         let since = *self.session_dirty_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= SESSION_SAVE_DELAY {
             let file = self.paths.data_file(self.session_file());
-            crate::store::session_save_waiting(&file, &self.instance, tabs.clone(), false, SESSION_AUTOSAVE_LOCK_WAIT);
-            self.session_saved = tabs;
-            self.session_dirty_since = None;
+            // Only a save that happened counts: when another window holds the lock, nothing was written and
+            // the tabs stay dirty, so the next check saves them again.
+            if crate::store::session_save_waiting(
+                &file,
+                &self.instance,
+                tabs.clone(),
+                false,
+                SESSION_AUTOSAVE_LOCK_WAIT,
+            ) {
+                self.session_saved = tabs;
+                self.session_dirty_since = None;
+            }
         }
     }
 
