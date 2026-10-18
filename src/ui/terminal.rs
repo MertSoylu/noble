@@ -806,6 +806,8 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
         (_, 0) if s.query.is_empty() => String::new(),
         (_, 0) => "no matches".to_string(),
         (Some(i), _) => format!("{}/{total}", i + 1),
+        // The selection is older than the kept matches (see `SearchState::detached`): its place is not known.
+        (None, _) if s.detached.is_some() => format!("?/{total}"),
         (None, _) => total,
     };
     // The hint's keys in the accent color, the words dim.

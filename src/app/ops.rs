@@ -636,7 +636,7 @@ impl App {
                 search_resized |= self.search.as_ref().is_some_and(|s| s.pane == id);
             }
         }
-        // The search's matches follow the new lines (drawn right after this, so they are fresh in the frame).
+        // The search's matches follow the new lines: they are marked stale and recomputed by the throttled refresh.
         if search_resized {
             self.search_resized();
         }

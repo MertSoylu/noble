@@ -507,6 +507,9 @@ pub struct SearchState {
     pub matches: Vec<crate::term::pane::Match>,
     /// Selected match (index within `matches`).
     pub current: Option<usize>,
+    /// The selected match when it fell out of the kept window (`capped`: it is older than every kept match). Then
+    /// `current` is `None`, the bar shows "?", and a step goes to the nearest kept match in its direction.
+    pub detached: Option<crate::term::pane::Match>,
     /// Scrollback length when the matches were computed (absolute line → screen line).
     pub history: usize,
     /// The scrollback text the matches were computed on; reused while the pane has no new output.

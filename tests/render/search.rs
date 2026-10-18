@@ -335,8 +335,13 @@ fn search_follows_a_pane_resize() {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
     let before = Arc::clone(&app.search.as_ref().unwrap().text.as_ref().unwrap().lines);
-    // Narrower: every long line wraps again, so the lines (and the matches on them) change.
+    // Narrower: every long line wraps again, so the lines (and the matches on them) change. The draw only marks the
+    // matches stale: the throttled refresh computes them on the next tick (`redraw_after` wakes up for it).
     render(&mut app, 70, 30);
+    assert!(app.search.as_ref().unwrap().stale, "a resize marks the matches stale");
+    assert!(app.redraw_after().is_some_and(|d| d <= Duration::from_millis(100)), "a wake-up for the refresh");
+    app.search.as_mut().unwrap().refreshed = Some(std::time::Instant::now() - Duration::from_secs(1));
+    app.tick();
     let s = app.search.as_ref().unwrap();
     let text = s.text.as_ref().unwrap();
     assert!(!Arc::ptr_eq(&before, &text.lines), "the text was read anew at the new size");
@@ -373,6 +378,41 @@ fn search_count_says_when_it_is_capped() {
     for (w, h) in [(60, 12), (40, 10), (30, 8)] {
         save(&format!("search-capped-{w}x{h}"), &render(&mut app, w, h));
     }
+    app.run(Action::CloseTab);
+}
+
+/// A capped search whose selection falls out of the kept window (the newest 10 000 matches) keeps the selection on
+/// its line: no other match is selected, the bar says "?", and the next step goes to the oldest kept match.
+#[test]
+fn a_selection_older_than_the_kept_matches_is_not_jumped_to() {
+    use noble::term::pane::MAX_MATCHES;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("detach".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let line = |i: usize| format!("{i:03} {}\r\n", "o".repeat(100));
+    let text: String = (0..120).map(line).collect();
+    app.panes[&id].parser().process(text.as_bytes());
+    app.run(Action::Search);
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    let oldest = app.search.as_ref().unwrap().matches[0];
+    app.search.as_mut().unwrap().current = Some(0);
+    // Twenty more lines: the window moves on, and the oldest kept matches (lines 020 to 039) drop off it.
+    let more: String = (120..140).map(line).collect();
+    app.panes[&id].parser().process(more.as_bytes());
+    app.search.as_mut().unwrap().text = None;
+    app.refresh_search();
+    let s = app.search.as_ref().unwrap();
+    assert!(s.capped && s.matches.len() == MAX_MATCHES, "{}", s.matches.len());
+    assert_eq!(s.current, None, "the selection is not moved to the newest match");
+    assert_eq!(s.detached, Some(oldest), "the selection stays on its line");
+    let screen = render(&mut app, 110, 30);
+    assert!(screen.contains(&format!("?/{MAX_MATCHES}+")), "{screen}");
+    save("search-detached-110x30", &screen);
+    // Stepping goes to the nearest kept match: the oldest one kept.
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let s = app.search.as_ref().unwrap();
+    assert_eq!((s.current, s.detached), (Some(0), None));
     app.run(Action::CloseTab);
 }
 
@@ -509,5 +549,16 @@ fn link_highlight_follows_ctrl_the_pointer_and_the_output() {
     );
     feed(&mut app, b"\x1b[H\x1b[2Kplain text");
     assert!(app.link_hover.is_none(), "the link under the pointer is gone");
+
+    // The screen changes with no event (what a layout change does): the next draw finds the link under the pointer
+    // again, and asks for a frame that shows the new highlight.
+    feed(&mut app, b"\x1b[H\x1b[2Kopen https://example.com/d");
+    event(&mut app, moved(KeyModifiers::CONTROL));
+    assert!(app.link_hover.is_some());
+    app.panes[&id].parser().process(b"\x1b[H\x1b[2Kplain again");
+    app.take_dirty();
+    render(&mut app, 110, 30);
+    assert!(app.link_hover.is_none(), "the draw found the link gone");
+    assert!(app.take_dirty(), "a frame is drawn again with the new highlight");
     app.run(Action::CloseTab);
 }

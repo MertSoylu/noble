@@ -140,8 +140,10 @@ All notable changes to NOBLE are documented here. The format is based on
   answer within the restore's 2 s, is still not asked again in the run.
 - Scrollback search keeps up with streaming output without slowing it: while the search bar is open the matches are
   recomputed at most every 100 ms (the output that arrives in between is counted when the interval has passed), and
-  a pane resize recomputes them at once. The matches are capped at the newest 10,000, shown as "10000+" in the bar,
-  so a common letter over a long scrollback no longer builds a huge list.
+  a pane resize recomputes them through the same limit, after the frame is drawn. The matches are capped at the
+  newest 10,000, shown as "10000+" in the bar, so a common letter over a long scrollback no longer builds a huge
+  list. When the selected match falls out of that window, the selection stays on its line: the bar shows
+  "?/10000+" and the next step goes to the oldest kept match, instead of jumping to the newest one.
 - The ctrl+hover highlight of a link no longer sticks: it ends with the next key or mouse event that does not hold
   ctrl (or a released ctrl, where the terminal reports it), and output that moves the link moves the highlight with
   it. A ctrl+click opens the link that is highlighted.

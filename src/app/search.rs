@@ -71,6 +71,7 @@ impl App {
             query: String::new(),
             matches: Vec::new(),
             current: None,
+            detached: None,
             history: 0,
             text: None,
             capped: false,
@@ -100,23 +101,39 @@ impl App {
         let history = text.history;
         let (matches, capped) = find_matches(&text.lines, &s.query);
         let Some(s) = self.search.as_mut() else { return };
+        // The selected match: the one selected, or the one the selection fell out of the window on.
+        let selected = match s.current {
+            Some(i) => s.matches.get(i).copied(),
+            None => s.detached,
+        };
         // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
         // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
         // scrollback is the fallback when the matches do not line up.
         // Without a selection nothing has to be kept, so the shift is not worked out at all.
-        let previous = s.current.and_then(|i| Some((i, *s.matches.get(i)?)));
-        s.current = match previous {
-            Some((i, m)) => {
-                let dropped = match scrolled_out(&s.matches, &matches, i) {
-                    0 => (s.history as isize - history as isize).max(0) as usize,
-                    n => n,
-                };
-                let line = m.line.checked_sub(dropped);
-                line.and_then(|line| matches.iter().position(|n| n.line == line && n.col == m.col))
+        let mut current = None;
+        let mut detached = None;
+        if let Some(m) = selected {
+            let dropped = match scrolled_out(&s.matches, &matches, s.current.unwrap_or(0)) {
+                0 => (s.history as isize - history as isize).max(0) as usize,
+                n => n,
+            };
+            if let Some(line) = m.line.checked_sub(dropped) {
+                match matches.iter().position(|n| n.line == line && n.col == m.col) {
+                    Some(i) => current = Some(i),
+                    // Older than every kept match: the window moved past it (a capped search keeps the newest only).
+                    // The selection stays where it was, and the newest match is not selected instead.
+                    None if capped && matches.first().is_some_and(|f| line < f.line) => {
+                        detached = Some(Match { line, ..m });
+                    }
+                    None => {}
+                }
             }
-            None => None,
         }
-        .or_else(|| matches.len().checked_sub(1));
+        s.current = current.or_else(|| match detached {
+            Some(_) => None,
+            None => matches.len().checked_sub(1),
+        });
+        s.detached = detached;
         s.matches = matches;
         s.capped = capped;
         s.history = history;
@@ -134,13 +151,13 @@ impl App {
         }
     }
 
-    /// The search's pane was resized: its lines re-wrap, so the matches are recomputed at once.
+    /// The search's pane was resized: its lines re-wrap, so the matches are stale. They are recomputed by the
+    /// throttled refresh, on the next tick (`redraw_after` schedules it), never while the frame is drawn: a drag
+    /// of the divider would otherwise read the whole scrollback on every frame.
     pub(super) fn search_resized(&mut self) {
         if let Some(s) = self.search.as_mut() {
             s.stale = true;
-            s.refreshed = None;
         }
-        self.refresh_search_when_due();
     }
 
     /// Recomputes stale matches once the refresh interval has passed (called on every tick and on output).
@@ -154,15 +171,26 @@ impl App {
         due
     }
 
-    /// Goes to the previous (older, `-1`) or next (newer, `+1`) match.
+    /// Goes to the previous (older, `-1`) or next (newer, `+1`) match. From a selection that fell out of the kept
+    /// window (`detached`), the nearest kept match in that direction: the oldest kept one going newer.
     fn search_step(&mut self, dir: i32) {
         let Some(s) = self.search.as_mut() else { return };
         let n = s.matches.len();
         if n == 0 {
             return;
         }
-        let cur = s.current.unwrap_or(n - 1) as i32;
-        s.current = Some((cur + dir).rem_euclid(n as i32) as usize);
+        let next = match (s.current, s.detached) {
+            (Some(i), _) => (i as i32 + dir).rem_euclid(n as i32) as usize,
+            (None, Some(m)) => {
+                // The first kept match after the detached line: going newer lands on it, going older on the one
+                // before it (wrapping to the newest when there is none).
+                let after = s.matches.partition_point(|x| x.line < m.line);
+                if dir > 0 { after % n } else { after.checked_sub(1).unwrap_or(n - 1) }
+            }
+            (None, None) => (n as i32 - 1 + dir).rem_euclid(n as i32) as usize,
+        };
+        s.current = Some(next);
+        s.detached = None;
         self.reveal_match();
     }
 
@@ -188,12 +216,14 @@ impl App {
             KeyCode::Backspace => {
                 s.query.pop();
                 s.current = None;
+                s.detached = None;
                 self.refresh_search();
                 self.reveal_match();
             }
             KeyCode::Char('u') if ctrl => {
                 s.query.clear();
                 s.current = None;
+                s.detached = None;
                 self.refresh_search();
             }
             KeyCode::Char(c) if !ctrl => {
@@ -201,6 +231,7 @@ impl App {
                     s.query.push(c);
                 }
                 s.current = None;
+                s.detached = None;
                 self.refresh_search();
                 self.reveal_match();
             }
@@ -391,9 +422,21 @@ impl App {
         self.refresh_link_hover();
     }
 
-    /// Recomputes the link highlight on the screen as it is now (see `update_link_hover`).
-    pub(super) fn refresh_link_hover(&mut self) {
-        self.link_hover = self.link_under_pointer();
+    /// Recomputes the link highlight on the screen as it is now (see `update_link_hover`). `true` when it changed.
+    pub(super) fn refresh_link_hover(&mut self) -> bool {
+        let next = self.link_under_pointer();
+        let changed = next != self.link_hover;
+        self.link_hover = next;
+        changed
+    }
+
+    /// Called after a frame is drawn, when the hit list of that layout is known: a resize, a split or a config
+    /// change may have moved the link under the pointer, so it is found again. A changed highlight asks for one
+    /// more frame, since the frame just drawn shows the old one.
+    pub fn relink_after_layout(&mut self) {
+        if self.refresh_link_hover() {
+            self.dirty = true;
+        }
     }
 
     /// The link under the pointer, while ctrl is held and no overlay covers the terminal.
