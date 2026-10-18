@@ -176,6 +176,7 @@ pub fn is_openable_url(url: &str) -> bool {
 /// Windows (`FileProtocolHandler`): `.exe`, scripts, installers, shortcuts. macOS (`open`): app bundles,
 /// `.command`/`.tool`/`.terminal` scripts, installer packages, and any file with an execute bit (opened in
 /// Terminal and run). Linux (`xdg-open`): `.desktop` launchers, AppImages, and files with an execute bit.
+/// The list is by type: a type it does not name is opened as before (a rare type that runs code is a gap).
 pub fn is_launchable(path: &Path) -> bool {
     const PROGRAM_EXTS: &[&str] = &[
         // Windows
@@ -206,6 +207,29 @@ pub fn is_launchable(path: &Path) -> bool {
         "appref-ms",
         "inf",
         "sct",
+        "py",
+        "pyw",
+        "pyc",
+        "pyz",
+        "pyzw",
+        "msc",
+        "jnlp",
+        "scf",
+        "gadget",
+        "ws",
+        "wsc",
+        "library-ms",
+        "settingcontent-ms",
+        "msu",
+        "diagcab",
+        "xbap",
+        "appinstaller",
+        "msixbundle",
+        "appxbundle",
+        "msh",
+        "msh1",
+        "msh2",
+        "mshxml",
         // macOS
         "app",
         "command",
@@ -215,14 +239,20 @@ pub fn is_launchable(path: &Path) -> bool {
         "mpkg",
         "workflow",
         "scpt",
+        "scptd",
         "applescript",
+        "osax",
         "prefpane",
+        "saver",
+        "wdgt",
         "action",
         "dylib",
         "kext",
         // Linux (and anywhere)
         "desktop",
         "appimage",
+        "flatpakref",
+        "snap",
         "run",
         "sh",
         "bash",
@@ -234,6 +264,11 @@ pub fn is_launchable(path: &Path) -> bool {
         "bin",
         "deb",
         "rpm",
+        "pl",
+        "rb",
+        "php",
+        "lua",
+        "tcl",
     ];
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if PROGRAM_EXTS.contains(&ext.as_str()) {
@@ -313,6 +348,34 @@ mod tests {
     #[test]
     fn programs_are_never_opened_from_a_link() {
         for p in ["setup.command", "x.EXE", "run.bat", "Evil.app", "a.desktop", "tool.AppImage", "i.pkg", "s.ps1"] {
+            assert!(is_launchable(Path::new(p)), "{p}");
+        }
+        // Scripts, consoles, shortcuts and installers Windows runs or connects for; a link must copy them.
+        for p in [
+            "x.py",
+            "x.PYW",
+            "x.pyc",
+            "x.pyz",
+            "x.msc",
+            "x.jnlp",
+            "x.scf",
+            "x.gadget",
+            "x.ws",
+            "x.wsc",
+            "x.library-ms",
+            "x.settingcontent-ms",
+            "x.msu",
+            "x.diagcab",
+            "x.xbap",
+            "x.appinstaller",
+            "x.msixbundle",
+            "x.hta",
+            "x.cpl",
+            "x.url",
+            "x.lnk",
+            "x.appref-ms",
+            "x.msi",
+        ] {
             assert!(is_launchable(Path::new(p)), "{p}");
         }
         for p in ["README.md", "photo.png", "notes.txt", "src/main.rs"] {
