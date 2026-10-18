@@ -64,6 +64,28 @@ All notable changes to NOBLE are documented here. The format is based on
   for it, the status bar says once which chord reaches that action (`alt+t went to the shell · NOBLE: ctrl+a t`;
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
+### Security
+- Background git (the project list and Home's status) no longer runs programs a repository's own `.git/config`
+  names: a `core.fsmonitor` hook, a `filter.*` clean, smudge or process command, or `log.showSignature`'s
+  `gpg.program`. Such a repository shows no git status instead of running them. Filters from your global config
+  (git-lfs, for one) still apply.
+- A path the terminal reports as a network path (`\\server\share`, `//server/share`) is never checked on disk: an
+  OSC 9;9 report of one is ignored (the pane keeps its start folder), and a Ctrl+click on one does not open or
+  check it. On Windows such a check connected to the server and sent the user's credentials.
+- The link opener refuses more program types (Python scripts, `.msc`, `.jnlp`, `.scf`, `.gadget`, Windows Script
+  Host and installer types, `.library-ms`, `.settingcontent-ms` and others) and copies them instead of opening them.
+- `noble update` downloads only https addresses on GitHub, caps the download sizes, and refuses an archive with
+  absolute names, `..` parts or links before unpacking anything. A bad checksum now reads as a corrupted or
+  incomplete download.
+- NOBLE's data folder is created 0700 and its files 0600 on Unix (existing files keep their mode). Without a home
+  folder NOBLE stops with a message and asks for `NOBLE_HOME`, instead of writing to a `.noble` folder in the working
+  directory.
+- The `noble hook` command in `~/.claude/settings.json` is quoted for the shell on Unix (single quotes): a `$` or a
+  backtick in the install path no longer expands. An install from an older version gets the events it lacks in the
+  new form (its existing entries keep theirs until the hooks are turned off and on again).
+- Programs in a pane can set the clipboard with OSC 52 as before; Settings → "Clipboard from programs" (or
+  `osc52_write = false` under `[terminal]`) ignores those requests.
+
 ### Changed
 - Home's "/ search" label moved from the Projects panel's bottom button row to its top border, next to the
   count ("/ search · 6"); a click still starts the filter.

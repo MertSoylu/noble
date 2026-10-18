@@ -134,7 +134,14 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
   (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
   no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
-  commands still running with `ai::kill_background_children`).
+  commands still running with `ai::kill_background_children`). Its `-c` overrides
+  (`projects::repo_program_overrides`) turn off `core.fsmonitor`, `log.showSignature` and the repository's own
+  `filter.*` commands (read from its `--local`/`--worktree` config only); when that config cannot be read no status is
+  shown (fail closed).
+- **Untrusted paths:** text from the terminal is never looked at as a network path: `term/osc.rs`
+  `is_network_path` (`\\`, `//`) drops an OSC 9;9 report and `term/link.rs` `classify` refuses such tokens before any
+  file system call (on Windows that connects and sends NTLM). OSC 7 keeps its `//server/share` form (Git Bash). OSC 52
+  writes are dropped when `terminal.osc52_write` is off (`app/notify.rs`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme
@@ -155,6 +162,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   turns off the hooks settings path and AI credential detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
+- **Private files:** on Unix NOBLE's folders are 0700 and new files 0600 (`util::create_private_dir`,
+  `util::private_file_options`, `store::write_text`); existing files keep their mode. Windows: the profile's ACL applies.
+  `Paths::resolve` returns `None` without a home folder (never a relative `.noble`); `main` reports it.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (`App::tick` polls its mtime every 2 s; error =
   toast, never a crash); `store.rs` stores recent dirs, the session, workspaces, AI usage history and UI state
   (`state.json`: welcome seen, pinned, hidden and manually added projects — the scan thread gets the last two as
@@ -173,7 +183,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
   `noble update`). `noble update` downloads the `release.yml` archive for the platform and its `.sha256`,
   verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
-  without checksums are refused), unpacks it with the system `tar` and swaps the binary (the running one is
+  without checksums are refused). Only https addresses on GitHub hosts are fetched (`is_release_url`), sizes are capped
+  (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
+  before `tar` unpacks it. It then swaps the binary (the running one is
   renamed to `*.old`, falling back to `.old2` … `.old9` when one cannot be deleted). Linux/macOS delete the
   old binary right after the swap; only Windows leaves it, `update::cleanup_old` removes it on the next launch.
 

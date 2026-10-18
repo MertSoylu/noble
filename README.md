@@ -177,7 +177,8 @@ keeps the defaults; everything can be changed later in Settings.
 **Updating:** NOBLE checks GitHub for a new release once a day and shows it at the bottom right. Click
 **update** there, or run `noble update` (`noble update --check` only reports). It downloads the prebuilt
 binary for your platform, checks it against the release's SHA-256 checksum (a mismatch or a missing checksum
-stops the update and leaves the installed binary alone) and replaces the installed one; restart NOBLE afterwards. Turn the check off with
+stops the update and leaves the installed binary alone), refuses any address that is not GitHub over https and any
+archive that holds links or paths outside its folder, and replaces the installed one; restart NOBLE afterwards. Turn the check off with
 `check_updates = false` or in Settings.
 
 <details>
@@ -192,7 +193,8 @@ has no truecolor: NOBLE then draws with the nearest colors of the 256-color pale
 
 Copy and paste use the system clipboard (Windows, macOS, X11 and Wayland). Without one, e.g. over SSH, copied text is
 sent to your terminal with OSC 52, links are copied instead of opened, and files and the config open in a
-terminal editor (`$EDITOR`, else nano or vim).
+terminal editor (`$EDITOR`, else nano or vim). A program running in a pane can also set the clipboard with OSC 52;
+`osc52_write = false` under `[terminal]` (Settings → "Clipboard from programs") ignores those requests.
 
 To open NOBLE in its own tab from the Windows Terminal dropdown:
 
@@ -298,7 +300,8 @@ not as `ctrl+alt` chords.
 
 `noble --paths` prints the locations (Windows: `%APPDATA%\noble\config.toml`, data in `%LOCALAPPDATA%\noble`;
 Linux: `~/.config/noble/config.toml`, data in `~/.local/share/noble`; macOS: both in
-`~/Library/Application Support/noble`; `NOBLE_HOME` moves both). The file is created with comments on first launch and **reloaded live** when saved.
+`~/Library/Application Support/noble`; `NOBLE_HOME` moves both). On Linux and macOS NOBLE creates its data folder
+for your user only (0700) and its files 0600. The file is created with comments on first launch and **reloaded live** when saved.
 Errors show up as a toast and never crash the app. Most options can also be changed from the Settings screen.
 
 <details>
@@ -323,6 +326,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true
 copy_on_select = true
+osc52_write = true       # programs in a pane may set the clipboard (OSC 52, e.g. over SSH); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
 colors = "windows-terminal"  # windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | campbell | dark-plus | light-gray | "wt:<your scheme>" …
 background = ""          # override the scheme's background, e.g. "#c8c8c8"
