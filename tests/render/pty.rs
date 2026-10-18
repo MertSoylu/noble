@@ -66,26 +66,32 @@ fn real_terminal_session() {
 #[test]
 fn cwd_is_tracked_after_cd() {
     check_cwd_tracking("");
+    let mut checked = vec!["default"];
     if cfg!(windows) {
         check_cwd_tracking("cmd.exe");
+        checked.push("cmd.exe");
         // Windows PowerShell 5.1 is the default shell where pwsh is not installed; when pwsh took the
         // default above, 5.1 is checked on its own.
         if noble::util::which("pwsh").is_some()
             && let Some(ps) = noble::util::which("powershell")
         {
             check_cwd_tracking(&ps.display().to_string());
+            checked.push("powershell");
         }
         let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
         if git_bash.is_file() {
             check_cwd_tracking(&git_bash.display().to_string());
+            checked.push("git bash");
         }
     } else {
         for shell in ["bash", "zsh", "fish", "pwsh"] {
             if let Some(path) = noble::util::which(shell) {
                 check_cwd_tracking(&path.display().to_string());
+                checked.push(shell);
             }
         }
     }
+    assert_checked(&checked, "cwd_is_tracked_after_cd");
 }
 
 fn check_cwd_tracking(shell: &str) {
@@ -287,9 +293,10 @@ fn hostile_file_name_is_not_executed() {
             shells.extend(noble::util::which(shell).map(|p| p.display().to_string()));
         }
     }
-    for shell in shells {
-        check_hostile_file_name(&shell);
+    for shell in &shells {
+        check_hostile_file_name(shell);
     }
+    assert_checked(&shells, "hostile_file_name_is_not_executed");
 }
 
 fn check_hostile_file_name(shell: &str) {
@@ -412,7 +419,11 @@ fn pane_title_shows_the_last_command_result() {
     app.panes.get_mut(&id).unwrap().command_started = Some(std::time::Instant::now() - ms(7_300));
     let row = title_row(&mut app, 110, 30);
     assert!(row.contains(" ◷ ") && !row.contains("0:0"), "{row}");
-    assert!(app.redraw_after().unwrap() > ms(1005) || chrono::Local::now().format("%S").to_string() == "59");
+    // The timer's own wake-up is a minute away on battery. `redraw_after` is the earliest of several wake-ups, and
+    // its clock part can be due within a second (at second 59), so the timer is checked on its own: a clock-based
+    // check here would race the minute boundary.
+    assert!(noble::term::pane::live_timer_next(ms(7_300), true) > ms(1005));
+    assert!(noble::term::pane::live_timer_next(ms(7_300), false) <= ms(1005));
     app.view = View::Bridge;
     assert!(app.redraw_after().unwrap() <= ms(1005) || !app.live_clock());
     app.view = View::Term(0);
@@ -425,19 +436,24 @@ fn pane_title_shows_the_last_command_result() {
 #[test]
 fn failing_command_shows_its_exit_code() {
     check_exit_code("");
+    let mut checked = vec!["default"];
     if cfg!(windows) {
         check_exit_code("cmd.exe");
+        checked.push("cmd.exe");
         let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
         if git_bash.is_file() {
             check_exit_code(&git_bash.display().to_string());
+            checked.push("git bash");
         }
     } else {
         for shell in ["bash", "zsh", "fish", "pwsh"] {
             if let Some(path) = noble::util::which(shell) {
                 check_exit_code(&path.display().to_string());
+                checked.push(shell);
             }
         }
     }
+    assert_checked(&checked, "failing_command_shows_its_exit_code");
 }
 
 fn check_exit_code(shell: &str) {
@@ -558,13 +574,16 @@ fn command_start_marks_decide_what_ran() {
     key(&mut app, KeyCode::Char('x'));
     key(&mut app, KeyCode::Enter);
     let first = app.panes[&id].command_started.expect("Enter starts the clock");
-    std::thread::sleep(Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(200));
     key(&mut app, KeyCode::Enter);
-    assert!(app.panes[&id].command_started.unwrap() > first, "a later Enter restarts the clock");
+    let restarted = app.panes[&id].command_started.expect("a later Enter restarts the clock");
+    assert!(restarted > first, "a later Enter restarts the clock");
+    // The result is counted from the last Enter, so it is shorter than the gap the test made between the two.
+    let gap = restarted.duration_since(first);
     feed(&mut app, b"\x1b]133;D;1\x07");
     let guessed = app.panes[&id].last_result.expect("a typed line counts");
     assert_eq!(guessed.code, Some(1));
-    assert!(guessed.took < Duration::from_millis(30), "{:?}", guessed.took);
+    assert!(guessed.took < gap, "counted from the first Enter: {:?} against a gap of {gap:?}", guessed.took);
 
     // The shell marks a start: the mark starts the clock, later Enters (input for the command) do not.
     key(&mut app, KeyCode::Char('x'));
@@ -602,7 +621,9 @@ fn command_start_marks_decide_what_ran() {
 fn paste_does_not_wait_for_a_program_that_does_not_read() {
     let mut app = demo_app(110, 30);
     let mut cfg = app.cfg.clone();
-    let (program, args) = if cfg!(windows) { ("timeout", vec!["/t", "5", "/nobreak"]) } else { ("sleep", vec!["5"]) };
+    // Long enough to outlive the test on a slow runner; the pane is also checked to be alive at the end, so a program
+    // that ended early cannot make the paste look refused-free by accident.
+    let (program, args) = if cfg!(windows) { ("timeout", vec!["/t", "60", "/nobreak"]) } else { ("sleep", vec!["60"]) };
     cfg.terminal.shell = program.into();
     cfg.terminal.shell_args = args.into_iter().map(String::from).collect();
     app.apply_config(cfg);
@@ -611,8 +632,9 @@ fn paste_does_not_wait_for_a_program_that_does_not_read() {
     let body: String = (0..2500).map(|_| format!("{}\r", "a".repeat(79))).collect();
     assert!(body.len() > 190_000);
     let started = std::time::Instant::now();
-    app.panes.get_mut(&id).unwrap().paste(&body);
+    let queued = app.panes.get_mut(&id).unwrap().paste(&body);
     let took = started.elapsed();
+    assert!(queued, "the paste was refused: the program exited, or too much was waiting for it");
     assert!(took < Duration::from_secs(1), "the paste waited {took:?} for the program");
     let started = std::time::Instant::now();
     app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -620,13 +642,16 @@ fn paste_does_not_wait_for_a_program_that_does_not_read() {
     let text = render(&mut app, 110, 30);
     assert!(started.elapsed() < Duration::from_secs(1), "the UI stalled after the paste");
     assert!(text.contains(" ✕ "), "the pane still draws:\n{text}");
+    // The program is still there: the paste was queued for a program that does not read, not for one that exited.
+    assert!(!app.panes[&id].has_exited(), "the program exited during the test");
     app.run(Action::CloseTab);
     assert!(app.tabs.is_empty());
 }
 
 /// Terminal queries are answered and the answer reaches the program's input (the reader thread queues it to
 /// the pane's writer). Needs POSIX `sh`, `stty`, `dd` and `od` to read the answer back, so it runs on Unix; the
-/// Windows panes answer the same query through the same reader thread, but there is no such tool there.
+/// Windows panes answer the same query through the same reader thread, but there is no such tool there. The queue
+/// step itself is checked on every OS by `pane::tests::query_answers_are_queued_to_the_writer`.
 #[test]
 fn cursor_position_answer_reaches_the_program() {
     if cfg!(windows) {

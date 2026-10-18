@@ -738,6 +738,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What the reader thread does with one chunk of a program's output: the emulator reads it, the output counter
+/// moves, and the answers the chunk asks for (DSR/DA) are queued to the writer like keys, so they keep their place
+/// among the input. Never blocks on the program.
+fn process_output(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, input: &PtyInput, chunk: &[u8]) {
+    let responses = {
+        let mut p = lock(parser);
+        // An emulator error must not kill the whole pane: skip this chunk.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(chunk)));
+        // Bumped under the same lock `scroll_text` reads it with: a new value means new output.
+        output_gen.fetch_add(1, Ordering::Release);
+        std::mem::take(&mut p.callbacks_mut().responses)
+    };
+    input.send(&responses);
+}
+
 impl Pane {
     pub fn spawn(id: PaneId, spec: SpawnSpec<'_>, tx: Sender<AppEvent>) -> Result<Pane> {
         let rows = spec.rows.max(2);
@@ -838,16 +853,7 @@ impl Pane {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let responses = {
-                                let mut p = lock(&parser);
-                                // An emulator error must not kill the whole pane: skip this chunk.
-                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(&buf[..n])));
-                                // Bumped under the same lock `scroll_text` reads it with: a new value means new output.
-                                output_gen.fetch_add(1, Ordering::Release);
-                                std::mem::take(&mut p.callbacks_mut().responses)
-                            };
-                            // Queued like keys, so the answers keep their place among the input; never blocks.
-                            input.send(&responses);
+                            process_output(&parser, &output_gen, &input, &buf[..n]);
                             if !dirty.swap(true, Ordering::AcqRel) && tx.send(AppEvent::PtyOutput).is_err() {
                                 break;
                             }
@@ -1146,6 +1152,11 @@ impl Pane {
         if !self.exited.load(Ordering::Acquire) {
             let _ = self.killer.kill();
         }
+    }
+
+    /// Whether the child has exited (its wait thread reaped it).
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
     }
 
     /// All lines including the scrollback (0 = oldest) and the scrollback length.
@@ -1836,6 +1847,23 @@ Claude needs your permission",
         let b = read_scroll_text(&mut lock(&parser), output_gen.load(Ordering::Acquire), Some(&a));
         assert!(!Arc::ptr_eq(&a.lines, &b.lines), "A to B to A: the copy from before the resizes is stale");
         assert_eq!(b.lines.len(), a.lines.len());
+    }
+
+    /// The reader thread's step on one chunk of output (`process_output`): the answers a program asks for are queued
+    /// to the writer, in order, with nothing else. Runs on every OS: no PTY is needed to check the queue.
+    #[test]
+    fn query_answers_are_queued_to_the_writer() {
+        let parser = Mutex::new(vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default()));
+        let output = AtomicU64::new(0);
+        let (input, queue) = PtyInput::channel();
+        process_output(&parser, &output, &input, b"ab\x1b[6n");
+        process_output(&parser, &output, &input, b"plain text\r\n");
+        process_output(&parser, &output, &input, b"\x1b[c\x1b[5n");
+        let queued: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(queued, b"\x1b[1;3R\x1b[?1;2c\x1b[0n", "cursor position, primary DA, status");
+        assert_eq!(input.queued.load(Ordering::Acquire), queued.len());
+        assert_eq!(output.load(Ordering::Acquire), 3, "every chunk counts as output");
+        assert!(lock(&parser).callbacks().responses.is_empty(), "the answers were taken out of the emulator");
     }
 
     /// Input is written in the order it was queued, and nothing is queued past the cap: the program that does
