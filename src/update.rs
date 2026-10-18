@@ -339,8 +339,10 @@ fn free_old_path(exe: &Path) -> Option<PathBuf> {
 }
 
 /// Puts the new binary in place of the running one. The copy (slow, may fail half way) goes to a
-/// staging file next to it first; then the running binary is moved aside (it cannot be overwritten on
-/// Windows but it can be renamed) and the staged one renamed into place. Any failure leaves the
+/// staging file next to it first, so the rename below stays on one file system. Unix: one rename replaces
+/// the binary in a single step (the running process keeps the old inode), so a kill at any moment leaves
+/// either the old or the new binary. Windows: the running binary cannot be overwritten but it can be
+/// renamed, so it is moved aside first and the staged one renamed into place. Any failure leaves the
 /// installed binary where it was.
 fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
     let mut staged = exe.as_os_str().to_os_string();
@@ -357,6 +359,14 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     }
+    if cfg!(unix) {
+        // Unix: the binary is replaced in one step; the old one needs no clean-up.
+        return std::fs::rename(&staged, exe).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            format!("could not install the new binary: {e}")
+        });
+    }
+    // Windows: move the running binary aside first (`.old`, `.old2` …), then rename the staged one into place.
     let aside = free_old_path(exe)
         .ok_or_else(|| format!("could not move {} aside: no free .old name", exe.display()))
         .and_then(|old| {
@@ -380,10 +390,7 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
             )),
         };
     }
-    // Linux and macOS: it can be deleted right away (the new binary is a new file, so macOS never
-    // sees a signed binary change in place). Windows: the running binary cannot, `cleanup_old` does it
-    // on the next start.
-    let _ = std::fs::remove_file(&old);
+    // Windows: the running binary cannot be deleted; `cleanup_old` does it on the next start.
     Ok(())
 }
 
@@ -730,6 +737,22 @@ mod tests {
         assert!(err.contains("no checksum"), "{err}");
         assert!(!fetched.get(), "downloaded an archive that cannot be verified");
         assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unix: the new binary takes the old one's place in a single rename, so no `.old` file is made and no
+    /// staging file is left (a kill during the update never leaves the path without a binary).
+    #[cfg(unix)]
+    #[test]
+    fn unix_update_replaces_the_binary_in_one_step() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("onestep");
+        let Some(archive) = make_archive(&dir, b"new") else { return };
+        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert!(!old_path(&exe).exists(), "no old binary is kept on Unix");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".new")), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
