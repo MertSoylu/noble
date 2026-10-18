@@ -360,16 +360,28 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn resolve(config_override: Option<PathBuf>) -> Paths {
-        let base_override = std::env::var_os("NOBLE_HOME").map(PathBuf::from);
-        let config_dir = base_override
-            .clone()
-            .or_else(|| dirs::config_dir().map(|d| d.join("noble")))
-            .unwrap_or_else(|| PathBuf::from(".noble"));
-        let data = base_override
-            .or_else(|| dirs::data_local_dir().map(|d| d.join("noble")))
-            .unwrap_or_else(|| PathBuf::from(".noble"));
-        Paths { config: config_override.unwrap_or_else(|| config_dir.join("config.toml")), data }
+    /// `None` when there is no folder for the files (no home folder and no `NOBLE_HOME`): the caller reports it.
+    pub fn resolve(config_override: Option<PathBuf>) -> Option<Paths> {
+        let base = std::env::var_os("NOBLE_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
+        let config_dir = dirs::config_dir().map(|d| d.join("noble"));
+        let data_dir = dirs::data_local_dir().map(|d| d.join("noble"));
+        Paths::from_dirs(base, config_dir, data_dir, config_override)
+    }
+
+    /// The paths from the folders found; `base` (`NOBLE_HOME`) takes the place of both. A missing folder is
+    /// `None`, never a relative one: `.noble` would be written wherever NOBLE was started from.
+    fn from_dirs(
+        base: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
+        data_dir: Option<PathBuf>,
+        config_override: Option<PathBuf>,
+    ) -> Option<Paths> {
+        let config = match config_override {
+            Some(path) => path,
+            None => base.clone().or(config_dir)?.join("config.toml"),
+        };
+        let data = base.or(data_dir)?;
+        Some(Paths { config, data })
     }
 
     pub fn data_file(&self, name: &str) -> PathBuf {
@@ -810,6 +822,30 @@ pub fn remove_binding(text: &str, table: &str, chord: &str) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OSC 52 clipboard writes from programs are on by default (as before the setting) and can be turned off.
+    #[test]
+    fn osc52_write_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().terminal.osc52_write);
+        assert!(parse(DEFAULT_CONFIG).unwrap().terminal.osc52_write);
+        assert!(!parse("[terminal]\nosc52_write = false\n").unwrap().terminal.osc52_write);
+    }
+
+    /// Without a folder for the files there is no `Paths` at all: never a relative `.noble` in the working folder.
+    #[test]
+    fn paths_never_fall_back_to_the_working_folder() {
+        let home = PathBuf::from("noble-home");
+        let p = Paths::from_dirs(Some(home.clone()), None, None, None).unwrap();
+        assert_eq!((p.config.clone(), p.data.clone()), (home.join("config.toml"), home.clone()));
+        let split = Paths::from_dirs(None, Some("cfg".into()), Some("data".into()), None).unwrap();
+        assert_eq!((split.config, split.data), (PathBuf::from("cfg").join("config.toml"), PathBuf::from("data")));
+        // A config file named on the command line needs no config folder, but the data still needs one.
+        let named = Paths::from_dirs(None, None, Some("data".into()), Some("my.toml".into())).unwrap();
+        assert_eq!(named.config, PathBuf::from("my.toml"));
+        assert!(Paths::from_dirs(None, None, Some("data".into()), None).is_none());
+        assert!(Paths::from_dirs(None, Some("cfg".into()), None, None).is_none());
+        assert!(Paths::from_dirs(None, None, None, Some("my.toml".into())).is_none());
+    }
 
     /// The provider list is spelled out in several places; all of them must match the `ai::providers` registry
     /// (a new provider added to one place only would silently vanish from config, Settings or the defaults).

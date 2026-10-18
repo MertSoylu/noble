@@ -48,6 +48,11 @@ fn restore_terminal() {
     let _ = out.flush();
 }
 
+/// Reported before the terminal is touched: without a home folder NOBLE has nowhere for its files.
+fn no_folder_error() -> anyhow::Error {
+    anyhow::anyhow!("no home folder for NOBLE's files: set NOBLE_HOME to the folder to use")
+}
+
 fn main() -> anyhow::Result<()> {
     // `noble hook <event>`: called from a Claude Code hook; it never touches the
     // terminal and always exits silently with success.
@@ -57,9 +62,10 @@ fn main() -> anyhow::Result<()> {
         let mut input = String::new();
         let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
         let event = argv.get(1).map(String::as_str).unwrap_or("");
-        let data = Paths::resolve(None).data;
+        // No folder for the files: nothing to record, and a hook never reports an error.
+        let Some(paths) = Paths::resolve(None) else { return Ok(()) };
         let (instance, pane) = (std::env::var("NOBLE_INSTANCE").ok(), std::env::var("NOBLE_PANE").ok());
-        noble::hooks::run_cli(event, &input, &data, instance.as_deref(), pane.as_deref());
+        noble::hooks::run_cli(event, &input, &paths.data, instance.as_deref(), pane.as_deref());
         return Ok(());
     }
     if argv.first().map(String::as_str) == Some("update") {
@@ -86,7 +92,7 @@ fn main() -> anyhow::Result<()> {
             },
             "--no-boot" => no_boot = true,
             "--paths" => {
-                let p = Paths::resolve(config_override.clone());
+                let p = Paths::resolve(config_override.clone()).ok_or_else(no_folder_error)?;
                 println!("config: {}\ndata:   {}", p.config.display(), p.data.display());
                 return Ok(());
             }
@@ -110,7 +116,7 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let paths = Paths::resolve(config_override);
+    let paths = Paths::resolve(config_override).ok_or_else(no_folder_error)?;
 
     enable_raw_mode()?;
     let mut out = stdout();
