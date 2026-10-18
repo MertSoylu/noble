@@ -631,6 +631,30 @@ pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Pro
         .max_by_key(|p| p.path.as_os_str().len())
 }
 
+/// Takes the requests that queued up behind a rescan. Further rescans are the same scan, so they are dropped; a
+/// refresh is kept, in order, for after the scan. (`while let Ok(ProjectReq::Rescan) = req.try_recv()` used to take
+/// the first request that was not a rescan and throw it away.)
+fn drain_after_rescan(req: &std::sync::mpsc::Receiver<ProjectReq>, deferred: &mut Vec<PathBuf>) {
+    while let Ok(next) = req.try_recv() {
+        if let ProjectReq::Refresh(path) = next {
+            deferred.push(path);
+        }
+    }
+}
+
+/// Sends one repo's git status for `ProjectReq::Refresh`. A plain folder (added by hand) has no status; inside
+/// another repo `git status` would report that repo's instead. Returns false when the app is gone.
+fn refresh_one(path: PathBuf, git: Option<&Path>, tx: &Tx) -> bool {
+    if let Some(git) = git
+        && git_dir(&path).is_some()
+        && let Some(info) = git_info(&path, git)
+        && tx.send(AppEvent::Git(path, info)).is_err()
+    {
+        return false;
+    }
+    true
+}
+
 /// Scan + git status thread. Rescans when `Rescan` arrives or the interval is
 /// up; `Refresh` updates a single repo's status in between.
 pub fn spawn(
@@ -683,26 +707,26 @@ pub fn spawn(
                 }
             }
             let deadline = std::time::Instant::now() + RESCAN_EVERY;
+            let mut deferred: Vec<PathBuf> = Vec::new();
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 match req.recv_timeout(left) {
                     Ok(ProjectReq::Refresh(path)) => {
-                        // A plain folder (added by hand) has no status; inside another repo
-                        // `git status` would report that repo's instead.
-                        if let Some(git) = &git
-                            && git_dir(&path).is_some()
-                            && let Some(info) = git_info(&path, git)
-                            && tx.send(AppEvent::Git(path, info)).is_err()
-                        {
+                        if !refresh_one(path, git.as_deref(), &tx) {
                             return;
                         }
                     }
                     Ok(ProjectReq::Rescan) | Err(RecvTimeoutError::Timeout) => {
-                        // Swallow extra rescan requests arriving at the same time.
-                        while let Ok(ProjectReq::Rescan) = req.try_recv() {}
+                        drain_after_rescan(&req, &mut deferred);
                         break;
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            // Refreshes that queued up with a rescan run now, before that scan (the next pass of this loop).
+            for path in deferred.drain(..) {
+                if !refresh_one(path, git.as_deref(), &tx) {
+                    return;
                 }
             }
         }
@@ -922,6 +946,25 @@ mod tests {
         // A name a `-c` setting cannot carry fails closed.
         assert_eq!(filter_drivers("filter.we=ird.clean\0"), None);
         assert_eq!(filter_drivers("filter.a\nb.clean\0"), None);
+    }
+
+    /// Requests that queued up behind a rescan: the rescans collapse, and every refresh is kept in order. A refresh
+    /// that followed a rescan used to be dropped.
+    #[test]
+    fn refreshes_behind_a_rescan_are_kept() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (a, b, c) = (PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c"));
+        for req in
+            [ProjectReq::Rescan, ProjectReq::Refresh(a.clone()), ProjectReq::Rescan, ProjectReq::Refresh(b.clone())]
+        {
+            tx.send(req).unwrap();
+        }
+        tx.send(ProjectReq::Refresh(c.clone())).unwrap();
+        assert!(matches!(rx.recv(), Ok(ProjectReq::Rescan)));
+        let mut deferred = Vec::new();
+        drain_after_rescan(&rx, &mut deferred);
+        assert_eq!(deferred, vec![a, b, c]);
+        assert!(rx.try_recv().is_err(), "the queue is empty after the drain");
     }
 
     /// A background status must not run what the repository's own config names: `core.fsmonitor` (a hook
