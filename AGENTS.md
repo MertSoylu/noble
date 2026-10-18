@@ -131,7 +131,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); the state types stay in `app/mod.rs`.
 - **Session auto-save / termination:** `App::tick` compares the tabs with the last saved session and writes a
-  change that lasted 2 s (short lock wait). `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
+  change that lasted 2 s, only while it gets the session lock (`session_save_waiting`, 1 s wait); otherwise the
+  save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
+  fallback (`session_save`, `session_begin`). Saved tabs that could not start stay in the file (`App::unrestored`).
+  `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
 - **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
   skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
@@ -172,9 +175,13 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (`App::tick` polls its mtime every 2 s; error =
   toast, never a crash); `store.rs` stores recent dirs, the session, workspaces, AI usage history and UI state
   (`state.json`: welcome seen, pinned, hidden and manually added projects — the scan thread gets the last two as
-  `projects::Manual`) with atomic JSON writes (`store::write_json`, also used for `ai-cache.json`). The session file is shared by every window of a build: each window (`store::instance_id`)
-  merges only its own tabs in (`session_save`, under a `.lock` file), and only the first window of a run
-  restores (`session_begin`, liveness via pid + process start time).
+  `projects::Manual`) with atomic writes (`store::write_bytes`: temp file, `sync_all`, rename, folder fsync on Unix;
+  `store::write_json` for JSON, also used for `ai-cache.json`; Windows retries a rename over an open file
+  briefly, `store::replace_file`). Unknown top-level fields of `state.json`/`session.json` and workspace entries
+  are kept (`extra`). The session file is shared by every window of a build: each window
+  (`store::instance_id`) merges only its own tabs in (`session_save`, under a `.lock` file that is removed only
+  by its owner), and only the first window of a run restores (`session_begin`, liveness via pid + process start
+  time). Settings rewrites of `config.toml` are refused while it does not parse (`config::read_for_settings`).
 - **Project live data:** `ports.rs` lists the TCP ports of processes whose current folder is inside a project
   (Linux reads `/proc`; macOS filters with sysinfo and runs `lsof` only for those pids; Windows reads
   `GetExtendedTcpTable` and takes the folders from sysinfo). `pr.rs` runs `gh pr view --json` through
@@ -189,9 +196,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
   without checksums are refused). Only https addresses on GitHub hosts are fetched (`is_release_url`), sizes are capped
   (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
-  before `tar` unpacks it. It then swaps the binary (the running one is
-  renamed to `*.old`, falling back to `.old2` … `.old9` when one cannot be deleted). Linux/macOS delete the
-  old binary right after the swap; only Windows leaves it, `update::cleanup_old` removes it on the next launch.
+  before `tar` unpacks it. It then swaps the binary: on Linux/macOS one rename over the running binary (no old
+  copy is kept); on Windows the running one is renamed to `*.old`, falling back to `.old2` … `.old9` when one
+  cannot be deleted, and `update::cleanup_old` removes it on the next launch.
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, a fixed-size array whose length must be bumped,

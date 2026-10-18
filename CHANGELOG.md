@@ -122,6 +122,28 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Files NOBLE writes survive a power loss: the new content is flushed to disk before it replaces the old file
+  (and the folder is flushed on Linux and macOS), so a crash leaves the old or the new file, never a truncated one.
+  Write errors are no longer ignored before the rename. A symlinked file is still written through the link, and a dangling
+  link is reported instead of being replaced by a regular file. On Windows a save retries briefly when another
+  program has the file open.
+- A Settings change (theme, launcher, scheme, prefix key, roots) is refused while `config.toml` does not parse, with
+  a toast that opens the broken line; it used to rebuild the file from the defaults and wipe the `[[launchers]]`
+  blocks. A config file that is a link to a missing file is reported at startup.
+- Saved tabs that could not start at all (no pane could be spawned) are kept in the session file for the next start
+  instead of being replaced by the tabs that did open.
+- A periodic session save that cannot get the session lock (another window holds it) is retried later, instead of
+  writing without the lock and possibly losing another window's tabs. A stale lock is taken over safely, and a
+  window only removes its own lock.
+- Damaged-file copies rotate: past five copies the oldest is dropped, so a file that keeps coming back no longer
+  stops NOBLE from saving it.
+- `state.json`, `session.json` and workspace entries keep the fields a newer build wrote when an older build saves
+  them again.
+- Claude hooks: uninstall removes only NOBLE's hooks, and keeps the user's own hooks in a matcher group that also
+  holds one of NOBLE's. A backup cut short by an interrupted copy is taken again, and the backup is written in one
+  step.
+- Updating NOBLE on Linux and macOS replaces the binary in one step (no moved-aside copy that a kill could leave
+  without a `noble`).
 - Scrollback search no longer copies the whole scrollback on every keystroke, and only copies it again (holding the
   terminal's lock) when the pane has new output or was resized.
 - A damaged `state.json`, `workspaces.json`, `session.json`, `recent.json` or `ai-history.json` no longer loses its data on the
