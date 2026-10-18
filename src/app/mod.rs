@@ -746,6 +746,9 @@ pub struct App {
     pub quit: bool,
     pub started: Instant,
     pub restored_tabs: usize,
+    /// Saved tabs that could not be started at the last restore. They stay in the session file (with this
+    /// window's tag) so that the next start tries them again (`App::restore_last_session`).
+    pub unrestored: Vec<SavedTab>,
     /// Tabs the user closed, most recent last, with their index at the time (`reopen_tab`). In memory only.
     pub closed_tabs: Vec<(usize, SavedTab)>,
     /// Running as `noble-dev`: marked in the top bar, session in a separate file.
@@ -1038,6 +1041,7 @@ impl App {
             quit: false,
             started: Instant::now(),
             restored_tabs: 0,
+            unrestored: Vec::new(),
             closed_tabs: Vec::new(),
             dev: false,
             instance: crate::store::instance_id(),

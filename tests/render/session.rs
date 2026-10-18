@@ -248,6 +248,29 @@ fn a_damaged_session_file_starts_an_empty_window() {
     }
 }
 
+/// Saved tabs that cannot start at all (here the shell is missing, so no pane spawns) are not replaced by the
+/// empty set of tabs that opened: they stay in the session file and the next start restores them.
+#[test]
+fn tabs_that_cannot_start_are_kept_for_the_next_start() {
+    let data = session_dir("unstartable");
+    write_session(&data.join("session.json"), &one_tab("kept-for-later", leaf(&data)));
+    let mut app = session_app(&data, false, session_cfg());
+    app.shell = noble::term::pane::ShellSpec::new("/no/such/noble-test-shell", Vec::new());
+    app.restore_last_session();
+    assert_eq!(app.restored_tabs, 0);
+    assert!(app.tabs.is_empty());
+    assert_eq!(session_origins(&data, false), ["kept-for-later"], "the saved tab is still in the file");
+    app.shutdown();
+    assert_eq!(session_origins(&data, false), ["kept-for-later"], "and still there after a clean exit");
+
+    let mut next = session_app(&data, false, session_cfg());
+    next.restore_last_session();
+    assert_eq!(next.restored_tabs, 1, "the next start restores it");
+    assert_eq!(tab_origins(&next), ["kept-for-later"]);
+    next.shutdown();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// A pane whose directory was deleted comes back in the home directory; the rest of the
 /// layout is kept. Checked through the startup path for both session files.
 #[test]

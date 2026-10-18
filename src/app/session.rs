@@ -22,14 +22,32 @@ impl App {
         if tabs.is_empty() {
             return;
         }
-        let ws = crate::store::Workspace { name: "last session".into(), saved_at: 0, tabs };
-        self.restored_tabs = self.open_workspace(&ws);
+        let (opened, failed) = self.open_saved_tabs(&tabs);
+        self.restored_tabs = opened;
+        // A saved tab that could not start at all (no pane could be spawned) is not dropped: it stays in
+        // the session file, and the next start tries it again.
+        self.unrestored = failed;
+        if !self.unrestored.is_empty() {
+            let n = self.unrestored.len();
+            self.toast(
+                ToastLevel::Warn,
+                format!("{n} saved tabs could not be started; they are kept for the next start"),
+            );
+        }
         self.view = View::Bridge;
         // What actually opened (directories that fell back to home included) replaces the
         // taken-over tabs right away, so a crash keeps them as they are now.
-        let tabs = self.snapshot("last session").tabs;
+        let tabs = self.session_tabs();
         crate::store::session_save(&file, &self.instance, tabs.clone(), false);
         self.session_saved = tabs;
+    }
+
+    /// The tabs this window keeps in the session file: the open ones, then the saved tabs that could not be
+    /// started at the last restore (`unrestored`).
+    fn session_tabs(&self) -> Vec<crate::store::SavedTab> {
+        let mut tabs = self.snapshot("last session").tabs;
+        tabs.extend(self.unrestored.iter().cloned());
+        tabs
     }
 
     /// Keeps the session file current while NOBLE runs, so a crash, a kill or a power loss loses
@@ -44,7 +62,7 @@ impl App {
             return;
         }
         self.session_checked = Instant::now();
-        let tabs = self.snapshot("last session").tabs;
+        let tabs = self.session_tabs();
         if tabs == self.session_saved {
             self.session_dirty_since = None;
             return;
@@ -74,7 +92,7 @@ impl App {
     pub fn shutdown(&mut self) {
         if self.cfg.terminal.restore_session {
             // Merged with the other windows' tabs; this window's earlier entries are replaced.
-            let tabs = self.snapshot("last session").tabs;
+            let tabs = self.session_tabs();
             crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
         }
         self.panes.clear();

@@ -1008,6 +1008,12 @@ impl App {
 
     /// Reopens the saved tabs; returns how many were opened.
     pub fn open_workspace(&mut self, ws: &Workspace) -> usize {
+        self.open_saved_tabs(&ws.tabs).0
+    }
+
+    /// Reopens saved tabs. Returns how many opened and the saved tabs that did not (no pane could start at
+    /// all: the caller keeps them, see `App::unrestored`).
+    pub(super) fn open_saved_tabs(&mut self, saved: &[SavedTab]) -> (usize, Vec<SavedTab>) {
         fn saved_dirs(n: &SavedNode, out: &mut Vec<PathBuf>) {
             match n {
                 SavedNode::Leaf { cwd, .. } => out.push(PathBuf::from(cwd)),
@@ -1018,7 +1024,7 @@ impl App {
             }
         }
         let mut dirs = Vec::new();
-        for t in &ws.tabs {
+        for t in saved {
             saved_dirs(&t.layout, &mut dirs);
         }
         dirs.sort();
@@ -1027,23 +1033,26 @@ impl App {
         let mut unavailable = Vec::new();
         let size = self.fresh_size();
         let mut opened = 0;
-        for t in &ws.tabs {
-            if let Some(root) = self.build_node(&t.layout, size, &usable, &mut unavailable) {
-                let leaves = root.leaves();
-                let focus = leaves.get(t.focus).copied().unwrap_or(leaves[0]);
-                let mut tab = Tab::new(focus, t.origin.clone());
-                tab.root = root;
-                tab.name = t.name.clone();
-                // A saved quick-launch pane runs its launcher again, so the tab is a launcher tab.
-                tab.launched = has_launch(&t.layout);
-                self.tabs.push(tab);
-                opened += 1;
-            }
+        let mut failed = Vec::new();
+        for t in saved {
+            let Some(root) = self.build_node(&t.layout, size, &usable, &mut unavailable) else {
+                failed.push(t.clone());
+                continue;
+            };
+            let leaves = root.leaves();
+            let focus = leaves.get(t.focus).copied().unwrap_or(leaves[0]);
+            let mut tab = Tab::new(focus, t.origin.clone());
+            tab.root = root;
+            tab.name = t.name.clone();
+            // A saved quick-launch pane runs its launcher again, so the tab is a launcher tab.
+            tab.launched = has_launch(&t.layout);
+            self.tabs.push(tab);
+            opened += 1;
         }
         if !unavailable.is_empty() {
             self.toast(ToastLevel::Warn, format!("not available, opened in home: {}", unavailable.join(", ")));
         }
-        opened
+        (opened, failed)
     }
 
     pub fn restore_workspace(&mut self, idx: usize) {
