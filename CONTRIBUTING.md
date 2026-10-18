@@ -121,7 +121,8 @@ src/
                      notifications), redraw.rs, session.rs (auto-save, restore), power.rs (battery, clock),
                      reload.rs (config reload), git.rs, input.rs (keys, mouse, clipboard), menu.rs (context
                      menus), ops.rs (tabs, panes, launchers), search.rs (scrollback search, links),
-                     palette.rs, settings.rs, agents.rs, live.rs (Home ports and PR), fx.rs (effects)
+                     palette.rs, settings.rs, agents.rs, live.rs (Home ports and PR), fx.rs (effects),
+                     bindings.rs (key bindings), help.rs (help screen)
   term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
                      osc.rs (vt100 callbacks, OSC parsing),
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
