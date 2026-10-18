@@ -43,11 +43,12 @@ pub(super) fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: 
     text
 }
 
-/// The bytes a paste sends. Inside bracketed paste every ESC is dropped: a pasted `ESC[201~` would
-/// otherwise end the paste early and run the rest as typed input (other terminals sanitize the same way).
-fn paste_payload(text: &str, bracketed: bool) -> String {
+/// The parts of a paste: the start and end markers (empty without bracketed paste) around the body. Inside
+/// bracketed paste every ESC is dropped: a pasted `ESC[201~` would otherwise end the paste early and run the
+/// rest as typed input (other terminals sanitize the same way).
+fn paste_parts(text: &str, bracketed: bool) -> (&'static str, String, &'static str) {
     let body = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed { format!("\x1b[200~{}\x1b[201~", body.replace('\x1b', "")) } else { body }
+    if bracketed { ("\x1b[200~", body.replace('\x1b', ""), "\x1b[201~") } else { ("", body, "") }
 }
 
 /// Pane title: the process name from the shell's OSC title. `C:\WINDOWS\system32\cmd.exe`
@@ -510,9 +511,12 @@ pub fn word_range(row: &[char], col: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// Most input that may wait for a PTY whose program does not read it. Past this, input is dropped (see
+/// Most input that may wait for a PTY whose program does not read it. Past this, input is refused (see
 /// `PtyInput::send`), so a program that never reads cannot make the queue grow without limit.
 const MAX_QUEUED_INPUT: usize = 8 * 1024 * 1024;
+/// The largest piece a write is handed to the writer thread in. The waiting count falls as each piece is
+/// written, so a big paste does not wait for one long write.
+const WRITE_CHUNK: usize = 64 * 1024;
 
 /// The bytes waiting for a pane's PTY writer thread, the only thread that writes to the PTY. Sending never
 /// blocks: the main thread (keys, paste) and the reader thread (DSR/DA answers) only enqueue, and the writer
@@ -532,17 +536,86 @@ impl PtyInput {
         (PtyInput { tx, queued: Arc::new(AtomicUsize::new(0)) }, rx)
     }
 
-    /// Queues `bytes`. `false` when they were dropped: more than `MAX_QUEUED_INPUT` is still waiting, or the
-    /// writer thread has ended (the child exited or the PTY closed).
+    /// Adds up to `want` bytes to the waiting count and returns how many were added (`0` when none fit). With
+    /// `partial` false it adds all of them or none. A compare-and-swap keeps the cap exact when the reader thread
+    /// queues its answers at the same time.
+    fn reserve(&self, want: usize, partial: bool) -> usize {
+        let mut cur = self.queued.load(Ordering::Acquire);
+        loop {
+            let room = MAX_QUEUED_INPUT.saturating_sub(cur);
+            let take = if partial {
+                want.min(room)
+            } else if want <= room {
+                want
+            } else {
+                0
+            };
+            if take == 0 {
+                return 0;
+            }
+            match self.queued.compare_exchange_weak(cur, cur + take, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return take,
+                Err(now) => cur = now,
+            }
+        }
+    }
+
+    /// Gives back `n` reserved bytes that will not be written.
+    fn release(&self, n: usize) {
+        if n > 0 {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+        }
+    }
+
+    /// Hands reserved `bytes` to the writer thread, `WRITE_CHUNK` at a time. `false` when the writer has ended:
+    /// the bytes not handed over are given back.
+    fn hand_over(&self, bytes: &[u8]) -> bool {
+        let mut left = bytes.len();
+        for piece in bytes.chunks(WRITE_CHUNK) {
+            if self.tx.send(piece.to_vec()).is_err() {
+                self.release(left);
+                return false;
+            }
+            left -= piece.len();
+        }
+        true
+    }
+
+    /// Queues `bytes` whole or not at all: keys and the DSR/DA answers, which must not be cut. `false` when they
+    /// were refused: more than `MAX_QUEUED_INPUT` is still waiting, or the writer thread has ended (the child
+    /// exited or the PTY closed).
     fn send(&self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
             return true;
         }
-        let before = self.queued.fetch_add(bytes.len(), Ordering::AcqRel);
-        if before.saturating_add(bytes.len()) <= MAX_QUEUED_INPUT && self.tx.send(bytes.to_vec()).is_ok() {
-            return true;
+        self.reserve(bytes.len(), false) == bytes.len() && self.hand_over(bytes)
+    }
+
+    /// Queues a paste: `head`, then as much of `body` as fits (cut on a character boundary), then `tail`. The tail
+    /// is queued even when the body was cut, so a bracketed paste always ends. `true` only when all of the body
+    /// was queued; `false` when part of it was refused (too much is waiting, or the writer has ended), and then
+    /// nothing of the body is written past the cut.
+    fn send_paste(&self, head: &str, body: &str, tail: &str) -> bool {
+        let want = head.len() + body.len() + tail.len();
+        let got = self.reserve(want, true);
+        if got == want {
+            return self.hand_over(&[head, body, tail].concat().into_bytes());
         }
-        self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+        let overhead = head.len() + tail.len();
+        if got < overhead {
+            self.release(got);
+            return false;
+        }
+        let mut cut = (got - overhead).min(body.len());
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 && !body.is_empty() {
+            self.release(got);
+            return false;
+        }
+        self.release(got - overhead - cut);
+        self.hand_over(&[head, &body[..cut], tail].concat().into_bytes());
         false
     }
 }
@@ -824,17 +897,19 @@ impl Pane {
         })
     }
 
-    /// Queues `bytes` for the program and returns at once (see `PtyInput`). `false` when they were dropped:
+    /// Queues `bytes` for the program and returns at once (see `PtyInput`). `false` when they were refused:
     /// the program has not read more than `MAX_QUEUED_INPUT` already, or it has exited.
     pub fn write(&self, bytes: &[u8]) -> bool {
         self.input.send(bytes)
     }
 
-    /// Pastes text; wraps it in bracketed paste when the app wants that.
-    pub fn paste(&mut self, text: &str) {
+    /// Pastes text; wraps it in bracketed paste when the app wants that. `false` when part of the text was
+    /// refused (too much is waiting for the program, or it has exited): see `PtyInput::send_paste`.
+    pub fn paste(&mut self, text: &str) -> bool {
         self.edited = true;
         let bracketed = lock(&self.parser).screen().bracketed_paste();
-        self.write(paste_payload(text, bracketed).as_bytes());
+        let (head, body, tail) = paste_parts(text, bracketed);
+        self.input.send_paste(head, &body, tail)
     }
 
     /// Resizes the PTY and the emulator. `true` when the size changed.
@@ -1559,10 +1634,14 @@ mod tests {
     #[test]
     fn bracketed_paste_drops_escape_characters() {
         // A pasted end marker must not close the paste early.
+        let payload = |text: &str, bracketed: bool| {
+            let (head, body, tail) = paste_parts(text, bracketed);
+            format!("{head}{body}{tail}")
+        };
         let evil = "ls\x1b[201~\nrm -rf x";
-        assert_eq!(paste_payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
-        assert_eq!(paste_payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
-        assert_eq!(paste_payload("a\r\nb\nc", false), "a\rb\rc");
+        assert_eq!(payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
+        assert_eq!(payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
+        assert_eq!(payload("a\r\nb\nc", false), "a\rb\rc");
     }
 
     #[test]
@@ -1773,6 +1852,47 @@ Claude needs your permission",
         assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT, "the refused bytes are not counted");
         drop(queue);
         assert!(!input.send(b"y"), "the writer thread has ended");
+    }
+
+    /// A paste that fits is queued whole, in pieces of at most `WRITE_CHUNK`, with its markers around it.
+    #[test]
+    fn a_paste_is_queued_in_pieces_with_its_markers() {
+        let (input, queue) = PtyInput::channel();
+        let body = "x".repeat(WRITE_CHUNK * 2 + 5);
+        assert!(input.send_paste("\x1b[200~", &body, "\x1b[201~"));
+        let pieces: Vec<Vec<u8>> = queue.try_iter().collect();
+        assert!(pieces.iter().all(|p| p.len() <= WRITE_CHUNK), "{:?}", pieces.iter().map(Vec::len).collect::<Vec<_>>());
+        let all = pieces.concat();
+        assert_eq!(all, format!("\x1b[200~{body}\x1b[201~").into_bytes());
+        assert_eq!(input.queued.load(Ordering::Acquire), all.len());
+    }
+
+    /// A paste bigger than the queue keeps what fits, cut on a character boundary, and still gets its end marker: a
+    /// bracketed paste left open would swallow the input typed after it. The refusal is reported (`false`).
+    #[test]
+    fn a_paste_past_the_cap_is_cut_but_still_ends() {
+        let (input, queue) = PtyInput::channel();
+        let body = "\u{e9}".repeat(MAX_QUEUED_INPUT);
+        assert!(!input.send_paste("\x1b[200~", &body, "\x1b[201~"), "part of it was refused");
+        let all: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(all.len(), MAX_QUEUED_INPUT, "the queue is full and nothing past it is written");
+        assert!(all.starts_with(b"\x1b[200~") && all.ends_with(b"\x1b[201~"));
+        let text = std::str::from_utf8(&all[6..all.len() - 6]).expect("the cut keeps the characters whole");
+        assert!(text.chars().all(|c| c == '\u{e9}'));
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT);
+    }
+
+    /// A paste that finds no room at all is refused whole: no marker is sent without the text, and the count
+    /// does not change. Keys (`send`) are never cut: they are refused whole too.
+    #[test]
+    fn a_paste_without_room_is_refused_whole() {
+        let (input, queue) = PtyInput::channel();
+        assert!(input.send(&vec![0u8; MAX_QUEUED_INPUT]));
+        assert!(!input.send_paste("\x1b[200~", "abc", "\x1b[201~"));
+        assert!(!input.send(b"k"));
+        let all: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(all, vec![0u8; MAX_QUEUED_INPUT], "only the first write is queued");
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT);
     }
 
     /// The wait thread records the exit before it reports `PtyExit`, so a pane closed afterwards never signals

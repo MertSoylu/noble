@@ -126,8 +126,10 @@ impl App {
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
                     false,
                 );
-                if let Some(p) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
-                    p.write(&bytes);
+                if let Some(id) = self.focused_pane()
+                    && !self.panes.get(&id).is_some_and(|p| p.write(&bytes))
+                {
+                    self.input_refused();
                 }
             }
             Action::MoveTabLeft | Action::MoveTabRight => match self.view {
@@ -840,12 +842,7 @@ impl App {
                     self.remove_tab(ti);
                 }
             }
-            ConfirmAction::Paste { pane, text } => {
-                if let Some(p) = self.panes.get_mut(&pane) {
-                    p.scroll_reset();
-                    p.paste(&text);
-                }
-            }
+            ConfirmAction::Paste { pane, text } => self.paste_now(pane, &text),
             ConfirmAction::ReplaceWorkspace(name) => self.save_workspace(&name),
             ConfirmAction::RemoveProject(path) => self.remove_project(&path),
             ConfirmAction::DeleteWorkspace(name) => {

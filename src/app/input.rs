@@ -189,7 +189,9 @@ impl App {
                 p.edited = !(interrupt && p.command_started.is_none());
             }
         }
-        p.write(&encode_key(&k, app_cursor));
+        if !p.write(&encode_key(&k, app_cursor)) {
+            self.input_refused();
+        }
     }
 
     fn overlay_key(&mut self, k: KeyEvent) {
@@ -791,7 +793,7 @@ impl App {
         self.tabs.iter().position(|t| t.id == id)
     }
 
-    fn forward_mouse(&self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
+    fn forward_mouse(&mut self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
         let Some(p) = self.panes.get(&pane) else { return false };
         let (mode, enc) = {
             let parser = p.parser();
@@ -801,7 +803,9 @@ impl App {
         let row = m.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
         match encode_mouse(m, col, row, mode, enc) {
             Some(bytes) => {
-                p.write(&bytes);
+                if !p.write(&bytes) {
+                    self.input_refused();
+                }
                 true
             }
             None => false,
@@ -1335,8 +1339,12 @@ impl App {
                     // On the alternate screen (less, man…) the wheel becomes arrow keys.
                     let code = if dir > 0 { KeyCode::Up } else { KeyCode::Down };
                     let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), app_cursor);
+                    let mut sent = true;
                     for _ in 0..3 {
-                        p.write(&bytes);
+                        sent &= p.write(&bytes);
+                    }
+                    if !sent {
+                        self.input_refused();
                     }
                 } else {
                     p.scroll(dir * 3);
@@ -1387,7 +1395,24 @@ impl App {
             }));
             return;
         }
+        self.paste_now(pane, &text);
+    }
+
+    /// Pastes text into a pane at once, the scroll back at the newest output. Text the program did not take (too
+    /// much is waiting for it, or it has exited) gets a toast: a big paste is never dropped in silence.
+    pub(super) fn paste_now(&mut self, pane: PaneId, text: &str) {
+        let Some(p) = self.panes.get_mut(&pane) else { return };
         p.scroll_reset();
-        p.paste(&text);
+        if !p.paste(text) {
+            self.toast(ToastLevel::Warn, "paste too large, or the program is not reading its input: part was not sent");
+        }
+    }
+
+    /// Input the program did not take (`Pane::write` refused it): a toast says so, once while it shows.
+    pub(super) fn input_refused(&mut self) {
+        const TEXT: &str = "input not sent: the program is not reading its input";
+        if !self.toasts.iter().any(|t| t.text == TEXT) {
+            self.toast(ToastLevel::Warn, TEXT);
+        }
     }
 }
