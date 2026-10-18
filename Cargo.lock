@@ -728,6 +728,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "dirs",
+ "libc",
  "portable-pty",
  "ratatui",
  "ring",

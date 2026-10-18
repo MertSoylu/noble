@@ -284,15 +284,26 @@ pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>, timeout: D
     run_command(cmd, timeout)
 }
 
-/// Runs a prepared command and returns its stdout; the process is killed on timeout.
-/// Stdout is piped and capped at 1 MiB, stderr is discarded.
+/// Runs a prepared command and returns its stdout; on timeout the process and everything it started
+/// is killed (see [`kill_tree`]), so no grandchild keeps the stdout pipe open.
+/// Stdout is piped and capped at 1 MiB, stderr is discarded. These are background calls only: the child
+/// gets a process group of its own (Unix), so it is never the terminal's foreground group.
 pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<String, String> {
     use std::io::Read;
     const CAP: u64 = 1 << 20;
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    // Unix: the child leads its own process group, so a timeout can kill the whole group.
+    // Windows: no process groups are needed, `kill_tree` uses `taskkill /T` to walk the tree.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|_| "cli not runnable".to_string())?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    // The reader is never joined: after a timeout it may stay blocked on a pipe that a surviving process
+    // holds, and the caller must not wait for it. `kill_tree` closes that pipe's last holder.
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.take(CAP + 1).read_to_end(&mut buf);
@@ -301,11 +312,42 @@ pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<
     let result = match out_rx.recv_timeout(timeout) {
         Ok(buf) if buf.len() as u64 > CAP => Err("output too large".to_string()),
         Ok(buf) => Ok(String::from_utf8_lossy(&buf).into_owned()),
-        Err(_) => Err("timeout".to_string()),
+        Err(_) => {
+            kill_tree(&mut child);
+            Err("timeout".to_string())
+        }
     };
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+/// Kills `child` and every process it started. Unix: SIGKILL to the child's process group (the group id
+/// is the child's pid, set by `run_command`). Windows: `taskkill /T /F` ends the process tree (Windows has
+/// no process groups). The child is not reaped yet, so its pid cannot have been reused.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // Negative pid = the whole process group. Windows (below) has no groups and uses taskkill instead.
+        if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+            // SAFETY: a plain syscall with a valid signal; a group that is already gone yields ESRCH, ignored.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows: no process groups, so taskkill ends the child's whole process tree. Unix (above) kills
+        // the group instead.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
 
 // ─── Cache ────────────────────────────────────────────────────────────────
@@ -620,5 +662,55 @@ mod tests {
         assert!(states[0].is_stale());
         let none = initial_states(&AiCfg { providers: vec!["codex".into()], ..AiCfg::default() }, &cache);
         assert!(none.is_empty());
+    }
+
+    /// Unix: `ps` reports a zombie as `Z`; a zombie has been killed but not reaped yet, so it counts as gone.
+    #[cfg(unix)]
+    fn process_alive(pid: u32) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps is needed by this test");
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// A background `sleep` started by the shell inherits the stdout pipe, so the reader can only finish
+    /// when it dies. The timeout must kill it too, and the caller must not wait for the pipe.
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_grandchild_holding_the_pipe() {
+        let dir = std::env::temp_dir().join(format!("noble-run-command-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(r#"sleep 30 & echo $! > "$1"; wait"#).arg("sh").arg(&pid_file);
+        let started = Instant::now();
+        let result = run_command(cmd, Duration::from_secs(2));
+        assert_eq!(result, Err("timeout".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(10), "the caller waited for the pipe");
+        let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        // SIGKILL is asynchronous: give the kernel a moment to deliver it before judging.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!process_alive(pid), "the grandchild survived the timeout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows: `cmd` starts `ping`, which inherits the stdout pipe; `taskkill /T` ends both on timeout.
+    /// Only the caller's prompt return is asserted: the grandchild is not observable here without extra
+    /// tooling, so this test cannot prove the kill itself.
+    #[cfg(windows)]
+    #[test]
+    fn timeout_returns_promptly_with_grandchild_holding_the_pipe() {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "ping", "-n", "30", "127.0.0.1"]);
+        let started = Instant::now();
+        let result = run_command(cmd, Duration::from_secs(2));
+        assert_eq!(result, Err("timeout".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(10), "the caller waited for the pipe");
     }
 }

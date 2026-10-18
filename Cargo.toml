@@ -43,6 +43,8 @@ vt100 = "0.16.2"
 
 # The OS asking NOBLE to end (`termination.rs`): signals on Unix, console control events on Windows.
 [target.'cfg(unix)'.dependencies]
+# Kills a timed-out command's whole process group (`ai::run_command`); already in the tree, so no new crate.
+libc = "0.2.189"
 signal-hook = "0.4.4"
 
 [target.'cfg(windows)'.dependencies]
