@@ -511,6 +511,12 @@ pub struct SearchState {
     pub history: usize,
     /// The scrollback text the matches were computed on; reused while the pane has no new output.
     pub text: Option<crate::term::pane::ScrollText>,
+    /// More matches than `MAX_MATCHES`: only the newest are kept (the bar shows "10000+").
+    pub capped: bool,
+    /// Output or a resize changed the text since the matches were computed (see `App::search_output`).
+    pub stale: bool,
+    /// When the matches were last computed (throttles the refresh while output streams).
+    pub refreshed: Option<Instant>,
 }
 
 /// Link under the mouse while ctrl is held: pane, screen row, column span.
@@ -1344,6 +1350,10 @@ impl App {
             && self.focused_pane() != Some(s.pane)
         {
             self.search = None;
+        }
+        // Output that came in during the refresh interval of the search: its matches are computed now.
+        if self.refresh_search_when_due() {
+            self.dirty = true;
         }
         if self.services.is_some() && self.cfg.general.check_updates && self.next_update_check.is_some_and(|t| now >= t)
         {

@@ -240,6 +240,17 @@ pub(crate) fn wait_for(app: &mut App, pane: noble::term::layout::PaneId, needle:
     }
 }
 
+/// Pumps and ticks the app for `for_how_long`, as the main loop does while output arrives: the timed work
+/// (the search refresh after output, notifications) runs its course.
+pub(crate) fn run_for(app: &mut App, for_how_long: Duration) {
+    let end = std::time::Instant::now() + for_how_long;
+    while std::time::Instant::now() < end {
+        app.pump();
+        app.tick();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub(crate) fn find_hit_inner(app: &App) -> Option<ratatui::layout::Rect> {
     app.hits.iter().find_map(|(_, h)| match h {
         noble::app::Hit::Pane { inner, .. } => Some(*inner),

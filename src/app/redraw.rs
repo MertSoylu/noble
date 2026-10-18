@@ -71,6 +71,10 @@ impl App {
         if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
         }
+        // Search matches that output made stale: recomputed when the refresh interval has passed.
+        if let Some(s) = self.search.as_ref().filter(|s| s.stale) {
+            want(s.refreshed.map_or(Duration::ZERO, |t| search::SEARCH_REFRESH.saturating_sub(t.elapsed())));
+        }
         // A notification's countdown darkens one cell at a time: wake for the next cell only.
         if self.anim_on() {
             let now = Instant::now();

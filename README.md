@@ -274,6 +274,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 - **System:** `↑↓` select · `c m p n` sort by CPU / memory / pid / name (again to flip) · `/` filter (or the
   "/ Filter" button) · `K` or `del` terminate (asks first; or the "K Terminate" button) · `esc` clears the filter, then back to Home.
 - **Search:** type to find (case-insensitive) · `⏎`/`↑` older match · `↓`/`shift+⏎` newer · `esc` close.
+  The newest 10,000 matches are kept (the bar then shows `10000+`).
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
   (needs an outer terminal that reports Shift). The pane menu and palette can launch an agent in a split.

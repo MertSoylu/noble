@@ -84,6 +84,8 @@ fn search_step_lands_on_match_after_new_output() {
     }
     let typed = app.search.as_ref().unwrap().history;
     wait_for(&mut app, id, "MORE_DONE");
+    // The matches of the last output follow within one refresh interval (the main loop ticks meanwhile).
+    run_for(&mut app, Duration::from_millis(300));
     let s = app.search.as_ref().unwrap();
     assert!(s.history > typed, "the search should follow output that arrives while it is open");
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -274,6 +276,152 @@ fn open_link_lists_the_links_on_screen() {
     save("open-link-menu-110x30", &render(&mut app, 110, 30));
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.overlay.is_none());
+    app.run(Action::CloseTab);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Output while the search is open refreshes the matches at most once per interval, and the output that came
+/// in during the interval is computed when it has passed (the main loop ticks meanwhile). The interval is moved
+/// by setting the time of the last refresh, so the test does not depend on how long the shell takes.
+#[test]
+fn search_refresh_is_throttled_and_follows_the_last_output() {
+    let mut app = demo_app(110, 30);
+    // The shell prints the third row two seconds later, after the search has started.
+    let script = if cfg!(windows) {
+        "(echo row 1) & (echo row 2) & ping -n 3 127.0.0.1 >nul & (echo row 3) & ping -n 30 127.0.0.1 >nul"
+    } else {
+        "echo row 1; echo row 2; sleep 2; echo row 3; sleep 30"
+    };
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into();
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), Some(script), Some("throttle".into()));
+    let id = app.tabs[0].focus;
+    wait_for(&mut app, id, "row 2");
+    app.run(Action::Search);
+    for c in "row".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let before = app.search.as_ref().unwrap().matches.len();
+    assert!(before >= 2, "{before}");
+    // Refreshed "just now": the interval is far from over, so output that arrives now waits for it.
+    app.search.as_mut().unwrap().refreshed = Some(std::time::Instant::now() + Duration::from_secs(60));
+    wait_for(&mut app, id, "row 3");
+    let s = app.search.as_ref().unwrap();
+    assert_eq!((s.matches.len(), s.stale), (before, true), "throttled while the output comes in");
+    assert!(app.redraw_after().is_some_and(|d| d <= Duration::from_millis(100)), "a wake-up for the refresh");
+    // The interval has passed: the next tick computes the stale matches.
+    app.search.as_mut().unwrap().refreshed = Some(std::time::Instant::now() - Duration::from_secs(1));
+    app.tick();
+    let s = app.search.as_ref().unwrap();
+    assert_eq!((s.matches.len(), s.stale), (before + 1, false), "the last output is never left out");
+    app.run(Action::CloseTab);
+}
+
+/// Past `MAX_MATCHES` the search keeps the newest matches and the bar says so ("10000+").
+#[test]
+fn search_count_says_when_it_is_capped() {
+    use noble::term::pane::MAX_MATCHES;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("cap".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    // 120 lines of 100 "o": 12 000 matches, more than the cap.
+    let text: String = (0..120).map(|i| format!("{i:03} {}\r\n", "o".repeat(100))).collect();
+    app.panes[&id].parser().process(text.as_bytes());
+    app.run(Action::Search);
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    let s = app.search.as_ref().unwrap();
+    assert!(s.capped, "{}", s.matches.len());
+    assert_eq!(s.matches.len(), MAX_MATCHES);
+    // The newest 10 000 matches are the last 100 of the 120 lines (100 matches each): the oldest kept one is line 020.
+    let (lines, _) = app.panes[&id].all_lines();
+    let first = lines.iter().position(|l| l.starts_with("020 ")).unwrap();
+    let last = lines.iter().rposition(|l| l.starts_with("119 ")).unwrap();
+    assert_eq!((s.matches.first().unwrap().line, s.matches.last().unwrap().line), (first, last));
+    let screen = render(&mut app, 110, 30);
+    assert!(screen.contains(&format!("{MAX_MATCHES}/{MAX_MATCHES}+")), "{screen}");
+    save("search-capped-110x30", &screen);
+    // Small panes: the bar keeps its counter (the hints go first). Narrower, the lines wrap: fewer matches.
+    for (w, h) in [(60, 12), (40, 10), (30, 8)] {
+        save(&format!("search-capped-{w}x{h}"), &render(&mut app, w, h));
+    }
+    app.run(Action::CloseTab);
+}
+
+/// Search open while 50 thousand lines stream through the pty: the time the output takes to handle (the
+/// search follows it), the draws, and the cost of one refresh of the search on the full scrollback. Checks
+/// that the search is final once the output stopped. Run with `--ignored --nocapture`, ideally `--release`.
+#[test]
+#[ignore]
+fn search_during_heavy_output() {
+    const LINES: usize = 50_000;
+    let dir = std::env::temp_dir().join(format!("noble-search-perf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("lines.txt");
+    let body: String = (0..LINES).map(|i| format!("line {i:05} lorem ipsum dolor sit amet consectetur\n")).collect();
+    std::fs::write(&file, body + "PERF_DONE\n").unwrap();
+    let mut app = demo_app(160, 45);
+    let mut cfg = app.cfg.clone();
+    if cfg!(windows) {
+        cfg.terminal.shell = "cmd.exe".into();
+    }
+    app.apply_config(cfg);
+    let cmd = if cfg!(windows) { format!("type \"{}\"", file.display()) } else { format!("cat '{}'", file.display()) };
+    app.new_tab(dir.clone(), Some(&cmd), Some("perf".into()));
+    let id = app.tabs[0].focus;
+    // "o" occurs several times on every line: the match count runs far past any cap.
+    app.run(Action::Search);
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    let started = std::time::Instant::now();
+    let (mut frames, mut draw, mut output) = (0u32, Duration::ZERO, Duration::ZERO);
+    let mut term = Terminal::new(TestBackend::new(160, 45)).unwrap();
+    loop {
+        let t = std::time::Instant::now();
+        app.pump();
+        app.tick();
+        output += t.elapsed();
+        let t = std::time::Instant::now();
+        term.draw(|f| noble::ui::draw(f, &mut app)).unwrap();
+        draw += t.elapsed();
+        frames += 1;
+        let (lines, _) = app.panes[&id].all_lines();
+        if lines.iter().any(|l| l.trim() == "PERF_DONE") {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(120), "output never finished");
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let total = started.elapsed();
+    // Once the output stopped the search must be final (a throttled refresh follows at most one interval later).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        app.pump();
+        app.tick();
+        if app.search.as_ref().unwrap().history == app.panes[&id].history_len() || std::time::Instant::now() > deadline
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let s = app.search.as_ref().unwrap();
+    assert_eq!(s.history, app.panes[&id].history_len(), "the search is final once the output stopped");
+    // One refresh on the full scrollback: the copy is dropped first, so the lines are read anew.
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        app.search.as_mut().unwrap().text = None;
+        app.refresh_search();
+    }
+    let per_refresh = started.elapsed() / 20;
+    println!(
+        "{LINES} lines in {:.2}s · {frames} frames · output handling {:.1} ms · avg draw {:.2} ms · \
+         one refresh {:.2} ms · {} matches",
+        total.as_secs_f64(),
+        output.as_secs_f64() * 1000.0,
+        draw.as_secs_f64() * 1000.0 / frames as f64,
+        per_refresh.as_secs_f64() * 1000.0,
+        app.search.as_ref().unwrap().matches.len()
+    );
     app.run(Action::CloseTab);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -625,11 +625,18 @@ impl App {
         let Some(tab) = self.current_tab() else { return };
         let rects: Vec<(PaneId, ratatui::layout::Rect)> =
             if tab.zoomed { vec![(tab.focus, body)] } else { tab.root.layout(body).0 };
+        let mut search_resized = false;
         for (id, tile) in rects {
             let inner = crate::ui::pane_outline(tile, body).inner();
-            if let Some(p) = self.panes.get_mut(&id) {
-                p.resize(inner.height, inner.width);
+            if let Some(p) = self.panes.get_mut(&id)
+                && p.resize(inner.height, inner.width)
+            {
+                search_resized |= self.search.as_ref().is_some_and(|s| s.pane == id);
             }
+        }
+        // The search's matches follow the new lines (drawn right after this, so they are fresh in the frame).
+        if search_resized {
+            self.search_resized();
         }
     }
 

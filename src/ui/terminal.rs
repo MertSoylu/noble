@@ -800,11 +800,13 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
     let y = inner.bottom() - 1;
     let bar = Rect::new(inner.x, y, inner.width, 1);
     hud::fill(buf, bar, Style::default().bg(th.raised).fg(th.fg));
+    // Past the cap the count says so ("10000+"): only the newest matches are kept.
+    let total = if s.capped { format!("{}+", s.matches.len()) } else { s.matches.len().to_string() };
     let count = match (s.current, s.matches.len()) {
         (_, 0) if s.query.is_empty() => String::new(),
         (_, 0) => "no matches".to_string(),
-        (Some(i), n) => format!("{}/{n}", i + 1),
-        (None, n) => format!("{n}"),
+        (Some(i), _) => format!("{}/{total}", i + 1),
+        (None, _) => total,
     };
     // The hint's keys in the accent color, the words dim.
     let hint: [(&str, bool); 6] =

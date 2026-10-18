@@ -122,6 +122,10 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Scrollback search keeps up with streaming output without slowing it: while the search bar is open the matches are
+  recomputed at most every 100 ms (the output that arrives in between is counted when the interval has passed), and
+  a pane resize recomputes them at once. The matches are capped at the newest 10,000, shown as "10000+" in the bar,
+  so a common letter over a long scrollback no longer builds a huge list.
 - Files NOBLE writes survive a power loss: the new content is flushed to disk before it replaces the old file
   (and the folder is flushed on Linux and macOS), so a crash leaves the old or the new file, never a truncated one.
   Write errors are no longer ignored before the rename. A symlinked file is still written through the link, and a dangling

@@ -1,5 +1,7 @@
 //! Scrollback search and ctrl+click links.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
@@ -13,6 +15,9 @@ use crate::term::pane::{Match, find_matches};
 const SHIFT_WINDOW: usize = 64;
 /// How many shifts `scrolled_out` tries at most.
 const SHIFT_CANDIDATES: usize = 256;
+/// Output while the search is open recomputes the matches at most this often: a burst of output costs one
+/// refresh per interval, and the last output always gets its refresh (`App::refresh_search_when_due`).
+pub(super) const SEARCH_REFRESH: Duration = Duration::from_millis(100);
 
 /// How many lines dropped off the top since `old` was computed: the shift that makes most old matches
 /// around the selected one (`old[selected]`) reappear (same column, `shift` lines higher) in `new`.
@@ -68,6 +73,9 @@ impl App {
             current: None,
             history: 0,
             text: None,
+            capped: false,
+            stale: false,
+            refreshed: None,
         });
     }
 
@@ -90,7 +98,7 @@ impl App {
         // The copy of the scrollback is reused while the pane has no new output (typing a query).
         let text = p.scroll_text(s.text.as_ref());
         let history = text.history;
-        let matches = find_matches(&text.lines, &s.query);
+        let (matches, capped) = find_matches(&text.lines, &s.query);
         let Some(s) = self.search.as_mut() else { return };
         // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
         // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
@@ -110,8 +118,40 @@ impl App {
         }
         .or_else(|| matches.len().checked_sub(1));
         s.matches = matches;
+        s.capped = capped;
         s.history = history;
         s.text = Some(text);
+        s.stale = false;
+        s.refreshed = Some(Instant::now());
+    }
+
+    /// Output in the search's pane makes the matches stale. They are recomputed right away when the last
+    /// refresh is older than `SEARCH_REFRESH`; otherwise `refresh_search_when_due` does it once it is.
+    pub(super) fn search_output(&mut self, pane: PaneId) {
+        if let Some(s) = self.search.as_mut().filter(|s| s.pane == pane) {
+            s.stale = true;
+            self.refresh_search_when_due();
+        }
+    }
+
+    /// The search's pane was resized: its lines re-wrap, so the matches are recomputed at once.
+    pub(super) fn search_resized(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.stale = true;
+            s.refreshed = None;
+        }
+        self.refresh_search_when_due();
+    }
+
+    /// Recomputes stale matches once the refresh interval has passed (called on every tick and on output).
+    /// `true` when it refreshed them.
+    pub(super) fn refresh_search_when_due(&mut self) -> bool {
+        let due =
+            self.search.as_ref().is_some_and(|s| s.stale && s.refreshed.is_none_or(|t| t.elapsed() >= SEARCH_REFRESH));
+        if due {
+            self.refresh_search();
+        }
+        due
     }
 
     /// Goes to the previous (older, `-1`) or next (newer, `+1`) match.

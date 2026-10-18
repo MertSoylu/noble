@@ -113,9 +113,7 @@ impl App {
                     p.prompted = true;
                 }
             }
-            if self.search.as_ref().is_some_and(|s| s.pane == sig.id) {
-                self.refresh_search();
-            }
+            self.search_output(sig.id);
             self.notify(&sig);
         }
         if let Some(text) = clip {

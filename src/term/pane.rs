@@ -837,15 +837,17 @@ impl Pane {
         self.write(paste_payload(text, bracketed).as_bytes());
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    /// Resizes the PTY and the emulator. `true` when the size changed.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> bool {
         let (rows, cols) = (rows.max(2), cols.max(4));
         if self.size == (rows, cols) {
-            return;
+            return false;
         }
         self.size = (rows, cols);
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         set_screen_size(&self.parser, &self.output_gen, rows, cols);
         self.selection = None;
+        true
     }
 
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<Callbacks>> {
@@ -1203,26 +1205,35 @@ pub struct Match {
     pub width: u16,
 }
 
-/// Case-insensitive plain text search; columns are computed with display width.
-pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
+/// The most matches a search keeps (`find_matches`): the newest ones, when there are more.
+pub const MAX_MATCHES: usize = 10_000;
+
+/// Case-insensitive plain text search; columns are computed with display width. At most `MAX_MATCHES` matches
+/// come back, the newest ones; the flag says whether there were more. The lines are searched from the newest
+/// back, so a capped search stops early instead of scanning all of a long scrollback.
+pub fn find_matches(lines: &[String], query: &str) -> (Vec<Match>, bool) {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
     let q: Vec<char> = query.chars().map(fold).collect();
     if q.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
-    let mut out = Vec::new();
-    for (line_no, line) in lines.iter().enumerate() {
-        let chars: Vec<(char, u16)> =
-            line.chars().map(|c| (fold(c), unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)).collect();
+    // Newest first; the matches of one line are pushed in reverse too, so the whole list is reversed at the end.
+    let mut newest_first: Vec<Match> = Vec::new();
+    let mut line_matches = Vec::new();
+    let mut chars: Vec<(char, u16)> = Vec::new();
+    for (line_no, line) in lines.iter().enumerate().rev() {
+        chars.clear();
+        chars.extend(line.chars().map(|c| (fold(c), unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)));
         if chars.len() < q.len() {
             continue;
         }
+        line_matches.clear();
         let mut col = 0u16;
         let mut i = 0;
         while i + q.len() <= chars.len() {
             if chars[i..i + q.len()].iter().zip(&q).all(|((a, _), b)| a == b) {
                 let width = chars[i..i + q.len()].iter().map(|(_, w)| *w).sum();
-                out.push(Match { line: line_no, col, width });
+                line_matches.push(Match { line: line_no, col, width });
                 col += width;
                 i += q.len();
             } else {
@@ -1230,8 +1241,16 @@ pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
                 i += 1;
             }
         }
+        newest_first.extend(line_matches.iter().rev());
+        // One more than the cap is enough to know that there are more.
+        if newest_first.len() > MAX_MATCHES {
+            break;
+        }
     }
-    out
+    newest_first.reverse();
+    let capped = newest_first.len() > MAX_MATCHES;
+    newest_first.drain(..newest_first.len().saturating_sub(MAX_MATCHES));
+    (newest_first, capped)
 }
 
 impl Drop for Pane {
@@ -1647,7 +1666,7 @@ Claude needs your permission",
     #[test]
     fn search_is_case_insensitive_and_width_aware() {
         let lines = vec!["Error: x".to_string(), "日本 error error".to_string(), "none".to_string()];
-        let m = find_matches(&lines, "ERROR");
+        let (m, capped) = find_matches(&lines, "ERROR");
         assert_eq!(
             m,
             vec![
@@ -1656,7 +1675,28 @@ Claude needs your permission",
                 Match { line: 1, col: 11, width: 5 },
             ]
         );
-        assert!(find_matches(&lines, "").is_empty());
+        assert!(!capped);
+        assert!(find_matches(&lines, "").0.is_empty());
+    }
+
+    /// Past the cap the newest matches are kept, in order, and the flag says there were more; a cap that is
+    /// exactly reached is not reported as one that cut anything.
+    #[test]
+    fn search_keeps_the_newest_matches_up_to_the_cap() {
+        let lines: Vec<String> = (0..MAX_MATCHES + 5).map(|i| format!("x{i} x")).collect();
+        let (m, capped) = find_matches(&lines, "x");
+        assert!(capped);
+        assert_eq!(m.len(), MAX_MATCHES);
+        assert_eq!(m.last().unwrap().line, MAX_MATCHES + 4);
+        assert!(m.windows(2).all(|w| (w[0].line, w[0].col) < (w[1].line, w[1].col)), "in order");
+        let (m, capped) = find_matches(&["x".repeat(MAX_MATCHES)], "x");
+        assert!(!capped && m.len() == MAX_MATCHES, "exactly the cap cuts nothing");
+        // A single line over the cap is cut from its oldest match: the first match of the line goes.
+        let line = "ab".repeat(MAX_MATCHES + 1);
+        let (m, capped) = find_matches(&[line], "ab");
+        assert!(capped);
+        assert_eq!(m.len(), MAX_MATCHES);
+        assert_eq!((m[0].col, m.last().unwrap().col), (2, 2 * MAX_MATCHES as u16));
     }
 
     #[test]
