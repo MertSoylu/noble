@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 use super::ops::DIR_PROBE_TIMEOUT;
-use super::{AddMode, App, ToastLevel, View};
+use super::{AddMode, App, ToastLevel, ToastTarget, View};
 use crate::event::AppEvent;
 use crate::theme::THEMES;
 
@@ -396,15 +396,24 @@ impl App {
         }
     }
 
+    /// The config text a Settings change is written into (`config::read_for_settings`): `None` while the file
+    /// does not parse, with a toast that opens the broken line.
+    fn config_text_for_settings(&mut self) -> Option<String> {
+        match crate::config::read_for_settings(&self.paths.config) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                self.toast_target(ToastLevel::Error, e.text, Some(ToastTarget::Config { line: e.line }));
+                None
+            }
+        }
+    }
+
     /// Updates a single value in the config file, preserving its comments.
     pub(super) fn persist(&mut self, section: &str, key: &str, value_toml: &str) {
         if self.services.is_none() {
             return;
         }
-        let text = match crate::config::read_for_edit(&self.paths.config) {
-            Ok(text) => text,
-            Err(e) => return self.toast(ToastLevel::Error, e),
-        };
+        let Some(text) = self.config_text_for_settings() else { return };
         let updated = crate::config::set_value(&text, section, key, value_toml);
         self.write_config(updated);
     }
@@ -430,10 +439,7 @@ impl App {
         if self.services.is_none() {
             return;
         }
-        let text = match crate::config::read_for_edit(&self.paths.config) {
-            Ok(text) => text,
-            Err(e) => return self.toast(ToastLevel::Error, e),
-        };
+        let Some(text) = self.config_text_for_settings() else { return };
         let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
         self.write_config(updated);
     }

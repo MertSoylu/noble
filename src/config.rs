@@ -498,6 +498,20 @@ pub fn read_for_edit(path: &Path) -> Result<String, String> {
     }
 }
 
+/// The text a Settings change is written into. A file that does not parse is refused: NOBLE runs on the
+/// defaults then, and a rewrite built from them would wipe the user's `[[launchers]]` blocks and the rest of the
+/// broken text. The error carries the line to open (`read_for_edit` errors have none).
+pub fn read_for_settings(path: &Path) -> Result<String, ConfigError> {
+    let text = read_for_edit(path).map_err(|text| ConfigError { text, line: None })?;
+    if let Err(e) = parse(&text) {
+        return Err(ConfigError {
+            text: format!("settings not saved: fix config.toml first ({})", e.text),
+            line: e.line,
+        });
+    }
+    Ok(text)
+}
+
 /// Byte index of the `#` that starts a line's comment; a `#` inside a "basic" or 'literal'
 /// string does not count.
 fn comment_start(line: &str) -> Option<usize> {
@@ -1039,6 +1053,32 @@ providers = [\"claude\", \"gemini\"]
         assert_eq!(read_for_edit(&path).as_deref(), Ok(DEFAULT_CONFIG));
         std::fs::write(&path, b"# caf\xe9\n[general]\n").unwrap();
         assert!(read_for_edit(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Settings change is refused while config.toml does not parse, so a rewrite never rebuilds the broken
+    /// file from the defaults (and wipes its `[[launchers]]` blocks). The refusal names the line to open.
+    #[test]
+    fn settings_are_refused_while_config_is_broken() {
+        let dir = std::env::temp_dir().join(format!("noble-cfg-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let broken = concat!(
+            "[general]\ntheme = \"dark\"\n\n",
+            "[[launchers]]\nkey = \"c\"\nname = \"Claude\"\ncommand = \"claude\"\n\n",
+            "[terminal\n",
+        );
+        std::fs::write(&path, broken).unwrap();
+        let err = read_for_settings(&path).unwrap_err();
+        assert!(err.text.starts_with("settings not saved: fix config.toml first"), "{}", err.text);
+        assert_eq!(err.line, Some(9), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "the file is not touched");
+        // A valid file (and a missing one, which gets the template) is read as before.
+        std::fs::write(&path, "[general]\ntheme = \"dark\"\n").unwrap();
+        assert!(read_for_settings(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_for_settings(&path).as_deref(), Ok(DEFAULT_CONFIG));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
