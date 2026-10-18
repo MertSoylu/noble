@@ -11,7 +11,7 @@ use noble::store::{SavedTab, Workspace};
 use noble::term::layout::SavedNode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub(crate) fn audit_dir() -> PathBuf {
@@ -40,6 +40,34 @@ pub(crate) fn render(app: &mut App, w: u16, h: u16) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A folder under the temp dir, removed with everything in it when the guard drops (also when the test returns
+/// early or panics). Parallel tests give theirs a name with the process id in it.
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    /// `name` plus the process id, created empty.
+    pub(crate) fn new(name: &str) -> TempDir {
+        TempDir::at(std::env::temp_dir().join(format!("{name}-{}", std::process::id())))
+    }
+
+    /// The folder at `path`, emptied first and removed when the guard drops.
+    pub(crate) fn at(path: PathBuf) -> TempDir {
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 pub(crate) fn save(name: &str, text: &str) {

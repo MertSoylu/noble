@@ -133,19 +133,20 @@ fn agent_state_follows_the_program_in_the_pane() {
 
 fn check_agent_lifecycle(shell: &str) {
     use noble::app::AgentState;
+    let tag = std::path::Path::new(shell)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".into());
+    // Own data folder: headless apps share one, and panes of parallel tests have the same ids. Declared before
+    // the app, so the app (and its panes) ends before the folder is removed.
+    let data = TempDir::new(&format!("noble-agent-life-{tag}"));
     let mut app = demo_app(160, 45);
     if !shell.is_empty() {
         let mut cfg = app.cfg.clone();
         cfg.terminal.shell = shell.into();
         app.apply_config(cfg);
     }
-    let tag = std::path::Path::new(shell)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "default".into());
-    // Own data folder: headless apps share one, and panes of parallel tests have the same ids.
-    app.paths.data = std::env::temp_dir().join(format!("noble-agent-life-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&app.paths.data);
+    app.paths.data = data.path().to_path_buf();
     let me = std::process::id();
     let agents = noble::hooks::agents_dir(&app.paths.data);
 
@@ -235,7 +236,6 @@ fn check_agent_lifecycle(shell: &str) {
     assert!(app.overlay.is_none(), "{shell}: an idle pane's tab closes without asking");
     assert!(app.agent_hooks.is_empty(), "{shell}: closing the tab left its agent");
     assert!(!agents.join(format!("{me}-{pane}.json")).exists(), "{shell}: record left after close");
-    let _ = std::fs::remove_dir_all(&app.paths.data);
 }
 
 /// `noble hook <event>`: the compiled binary reads the JSON on stdin and writes

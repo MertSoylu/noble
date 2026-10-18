@@ -650,13 +650,15 @@ mod tests {
 
     /// SHA-256 of bytes, lower-case hex (through the same code path as a download).
     fn sha256_hex(bytes: &[u8]) -> String {
-        let dir = std::env::temp_dir().join(format!("noble-sha-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A folder of its own per call (tests run in parallel), removed with its file.
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let f = dir.join(SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("noble-sha-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("bytes");
         std::fs::write(&f, bytes).unwrap();
         let hex = sha256_file(&f).unwrap();
-        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&dir);
         hex
     }
 

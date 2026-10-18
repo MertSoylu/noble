@@ -66,8 +66,14 @@ impl IsolatedShell {
 
 impl Drop for IsolatedShell {
     fn drop(&mut self) {
+        // The shell may still be exiting (bash writes its history then), so its folder is removed once it is gone.
         if let Some(root) = self.home.parent() {
-            let _ = std::fs::remove_dir_all(root);
+            for _ in 0..100 {
+                if std::fs::remove_dir_all(root).is_ok() || !root.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
@@ -154,8 +160,7 @@ fn cd_and_check(app: &mut App, id: PaneId, dir: &Path, marker: &str, what: &str)
 /// The user's own prompt hooks keep running next to NOBLE's, which still reports the cwd.
 #[test]
 fn user_prompt_hooks_keep_working() {
-    let target = std::env::temp_dir().join(format!("noble-hooks-{}", std::process::id()));
-    std::fs::create_dir_all(&target).unwrap();
+    let target = TempDir::new("noble-hooks");
     // bash: a string PROMPT_COMMAND ending in a comment, and the bash 5.1+ array form.
     let cases = [
         ("bash-str", "PROMPT_COMMAND='__u=$((__u+1)); echo \"UHOOK$__u\" # user hook'\n"),
@@ -175,7 +180,7 @@ fn user_prompt_hooks_keep_working() {
             let (mut app, id) = sh.open(&[], &sh.home);
             wait_cwd(&mut app, id, &sh.home, case);
             wait_screen(&mut app, id, "UHOOK1", case);
-            cd_and_check(&mut app, id, &target, "UHOOK2", case);
+            cd_and_check(&mut app, id, target.path(), "UHOOK2", case);
             app.run(Action::CloseTab);
         }
     }
@@ -189,7 +194,7 @@ fn user_prompt_hooks_keep_working() {
         wait_cwd(&mut app, id, &sh.home, "zsh");
         wait_screen(&mut app, id, "UHOOK1", "zsh");
         wait_screen(&mut app, id, "VHOOK", "zsh");
-        cd_and_check(&mut app, id, &target, "UHOOK2", "zsh");
+        cd_and_check(&mut app, id, target.path(), "UHOOK2", "zsh");
         app.run(Action::CloseTab);
     }
     if let Some(sh) = IsolatedShell::new("fish", "hooks", &[]) {
@@ -200,10 +205,9 @@ fn user_prompt_hooks_keep_working() {
         let (mut app, id) = sh.open(&[], &sh.home);
         wait_cwd(&mut app, id, &sh.home, "fish");
         wait_screen(&mut app, id, "UHOOK1>", "fish");
-        cd_and_check(&mut app, id, &target, "UHOOK2>", "fish");
+        cd_and_check(&mut app, id, target.path(), "UHOOK2>", "fish");
         app.run(Action::CloseTab);
     }
-    let _ = std::fs::remove_dir_all(&target);
 }
 
 /// zsh finds the user's startup files in their own `ZDOTDIR`: one set by `~/.zshenv`
@@ -211,8 +215,7 @@ fn user_prompt_hooks_keep_working() {
 /// (`extra_env` hands it over as `NOBLE_USER_ZDOTDIR`).
 #[test]
 fn zsh_user_zdotdir_is_sourced() {
-    let target = std::env::temp_dir().join(format!("noble-zdotdir-{}", std::process::id()));
-    std::fs::create_dir_all(&target).unwrap();
+    let target = TempDir::new("noble-zdotdir");
     let Some(sh) = IsolatedShell::new("zsh", "zdot-env", &[]) else { return };
     sh.write(".zshenv", "ZDOTDIR=$HOME/.config/zsh\n");
     sh.write(".config/zsh/.zshrc", "precmd() { echo ZRC_HOOK }\n");
@@ -221,7 +224,7 @@ fn zsh_user_zdotdir_is_sourced() {
     wait_screen(&mut app, id, "ZRC_HOOK", "zshenv ZDOTDIR");
     app.panes[&id].write(b"echo \"ZD=$ZDOTDIR\"\r");
     wait_screen(&mut app, id, &format!("ZD={}", sh.home.join(".config/zsh").display()), "zshenv ZDOTDIR");
-    cd_and_check(&mut app, id, &target, "ZRC_HOOK", "zshenv ZDOTDIR");
+    cd_and_check(&mut app, id, target.path(), "ZRC_HOOK", "zshenv ZDOTDIR");
     app.run(Action::CloseTab);
     drop(sh);
 
@@ -236,17 +239,15 @@ fn zsh_user_zdotdir_is_sourced() {
     let (mut app, id) = sh.open(&[], &sh.home);
     wait_cwd(&mut app, id, &sh.home, "inherited ZDOTDIR");
     wait_screen(&mut app, id, "ZRC2_HOOK1", "inherited ZDOTDIR");
-    cd_and_check(&mut app, id, &target, "ZRC2_HOOK1", "inherited ZDOTDIR");
+    cd_and_check(&mut app, id, target.path(), "ZRC2_HOOK1", "inherited ZDOTDIR");
     app.run(Action::CloseTab);
-    let _ = std::fs::remove_dir_all(&target);
 }
 
 /// User shell options: login shells keep the integration (and load their login files);
 /// options that skip every startup file start the shell as asked.
 #[test]
 fn user_shell_args_and_integration() {
-    let target = std::env::temp_dir().join(format!("noble-args-{}", std::process::id()));
-    std::fs::create_dir_all(&target).unwrap();
+    let target = TempDir::new("noble-args");
     // bash login shells read ~/.bash_profile, not the rc file: NOBLE loads it itself.
     for login in ["-l", "--login"] {
         let Some(sh) = IsolatedShell::new("bash", &format!("login{login}"), &[]) else { break };
@@ -256,7 +257,7 @@ fn user_shell_args_and_integration() {
         wait_cwd(&mut app, id, &sh.home, login);
         wait_screen(&mut app, id, "PROFILE_LOADED", login);
         wait_screen(&mut app, id, "RC_HOOK", login);
-        cd_and_check(&mut app, id, &target, "RC_HOOK", login);
+        cd_and_check(&mut app, id, target.path(), "RC_HOOK", login);
         app.run(Action::CloseTab);
     }
     // The documented opt-out (README): these start the shell untouched, without the user's
@@ -276,5 +277,4 @@ fn user_shell_args_and_integration() {
         assert!(!screen.contains("RC_READ"), "{shell} {arg}: rc file was read\n{screen}");
         app.run(Action::CloseTab);
     }
-    let _ = std::fs::remove_dir_all(&target);
 }
