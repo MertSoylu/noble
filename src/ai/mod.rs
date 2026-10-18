@@ -809,13 +809,20 @@ mod tests {
         Some(!stat.is_empty() && !stat.starts_with('Z'))
     }
 
-    /// Windows: `tasklist` names a process's id in its output only while the process runs. `None` when `tasklist`
-    /// cannot run: the caller then skips the check.
+    /// Windows: `tasklist` names a process's id in its output only while the process runs. Its exit status is not
+    /// trusted for "gone": a failed `tasklist` (no output, an error) is unknown, so `None` and the caller skips the
+    /// check (as when it cannot run). A listing that succeeds without the id means gone.
     #[cfg(windows)]
     fn process_alive(pid: u32) -> Option<bool> {
         let out =
             std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().ok()?;
-        Some(String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+        let text = String::from_utf8_lossy(&out.stdout);
+        // The id as a whole column, not a part of a number in another column (a memory size, a session number).
+        let id = pid.to_string();
+        if text.split_whitespace().any(|field| field == id) {
+            return Some(true);
+        }
+        out.status.success().then_some(false)
     }
 
     /// Waits up to 5 s for `pid` to be gone (the kill is asynchronous). `None` when the process list cannot be read.
