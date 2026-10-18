@@ -283,7 +283,9 @@ fn event_loop(
                 let _ = out.flush();
             }
             last_draw = Instant::now();
-            pending = false;
+            // A draw can ask for one more frame (`relink_after_layout` re-finds the link under the pointer after a
+            // layout change): it is drawn at the frame limit, not only at the next event or idle tick.
+            pending = app.take_dirty();
         }
     }
     draw_error

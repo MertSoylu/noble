@@ -135,7 +135,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
   fallback (`session_save`, `session_begin`). Saved tabs that could not start stay in the file (`App::unrestored`).
   `App::shutdown` ends the background commands before it saves; `main.rs` runs the frame loop under `catch_unwind`,
-  so a main-thread panic saves and ends them as well (the panic hook uses `ai::kill_background_children_if_free`,
+  so a main-thread panic saves (only when the session lock is had within 500 ms; otherwise the last saved file stays) and ends them as well (the panic hook uses `ai::kill_background_children_if_free`,
   which never waits for the registry lock).
   `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.

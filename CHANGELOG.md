@@ -133,7 +133,12 @@ All notable changes to NOBLE are documented here. The format is based on
   the same way (the program is not reading its input) get a toast too, once while it shows.
 - The periodic session save no longer stalls the screen while another window holds the session lock: it tries once
   (10 ms) and retries at the next check, instead of waiting up to a second on the UI thread each time. A panic on the
-  main thread waits at most half a second for that lock before it saves the session, so the exit is not held up.
+  main thread waits at most half a second for that lock; when it is still held, the session is not saved then and the
+  file keeps the tabs saved last, so the exit is not held up and another window's tabs are not overwritten.
+- A verbatim local Windows path (`\\?\C:\...`, what `canonicalize` returns) is a local folder: it was taken for
+  a network share, so relative links and git status in such a folder were refused. `\\?\UNC\` paths stay network paths.
+- The ctrl+hover link highlight is drawn again at once when a layout change moves the link under the pointer, instead
+  of at the next event or idle tick (up to 2 s later).
 - A recent or saved directory on a slow network share or a spun-down disk is no longer skipped for the whole run: the
   startup check of the recent list (0.5 s) only marks a directory that does not answer as slow, and the session and
   workspace restore (2 s) still asks it, so its tabs open in that folder. A directory that is gone, or that gave no

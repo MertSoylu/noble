@@ -266,7 +266,14 @@ fn is_local_host(host: &str) -> bool {
 /// system call. Unix: `//x` means `/x`, so refusing it costs nothing there.
 pub fn is_network_path(path: &str) -> bool {
     let b = path.as_bytes();
-    b.len() >= 2 && matches!(b[0], b'\\' | b'/') && matches!(b[1], b'\\' | b'/')
+    if b.len() < 2 || !matches!(b[0], b'\\' | b'/') || !matches!(b[1], b'\\' | b'/') {
+        return false;
+    }
+    // A verbatim local path (`\\?\C:\x`, `//?/C:/x`: what `std::fs::canonicalize` returns on Windows) names a folder
+    // on this machine. `\\?\UNC\server\share` and every other `\\` path are still network paths.
+    let verbatim_drive =
+        b.len() >= 6 && b[2] == b'?' && matches!(b[3], b'\\' | b'/') && b[4].is_ascii_alphabetic() && b[5] == b':';
+    !verbatim_drive
 }
 
 /// An OSC 7 path as a Windows directory: Git Bash's `/c/x` → `C:\x`, its `//server/share` → `\\server\share`,

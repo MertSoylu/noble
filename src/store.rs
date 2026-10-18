@@ -539,19 +539,13 @@ pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
 /// keeps the other windows' tabs. `leaving`: the window is closing. Waits for the lock like
 /// `with_lock_waiting`: the closing window saves even when the lock could not be had.
 pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
-    session_save_within(file, me, tabs, leaving, LOCK_WAIT);
+    with_lock_waiting(file, LOCK_WAIT, || merge_session(file, me, tabs, leaving));
 }
 
-/// `session_save` with a wait of `wait` for another window's lock instead of `LOCK_WAIT`: the save runs anyway when
-/// the lock is not had in time (see `with_lock_waiting`). Used where a long wait would stall the caller, such as the
-/// panic path.
-pub fn session_save_within(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool, wait: Duration) {
-    with_lock_waiting(file, wait, || merge_session(file, me, tabs, leaving));
-}
-
-/// The periodic save: only under the session lock (`try_with_lock`), waiting at most `wait` for another
-/// window's. `false` when the lock was not taken: nothing was written, and the caller saves again later
-/// (it must not count the tabs as saved).
+/// A save only under the session lock (`try_with_lock`), waiting at most `wait` for another window's. Used by the
+/// periodic save and by the panic path, which must not write without the lock (another window may be saving; a
+/// write then could drop its tabs). `false` when the lock was not taken: nothing was written, and the file keeps the
+/// tabs saved last; the caller saves again later (it must not count the tabs as saved).
 pub fn session_save_waiting(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool, wait: Duration) -> bool {
     try_with_lock(file, wait, || merge_session(file, me, tabs, leaving)).is_some()
 }
@@ -1637,24 +1631,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The save on a panic waits only its short wait for a live window's lock, then saves without it: the tabs are
-    /// kept and the other window's lock stays.
+    /// The panic path's save waits only its short wait for a live window's lock. When the lock is still held it writes
+    /// nothing: the file keeps the tabs saved last (no write without the lock, which could drop the other window's
+    /// tabs), and the other window's lock stays. Once the lock is free the save goes through.
     #[test]
-    fn a_save_within_a_short_wait_still_saves() {
-        let (dir, file, lock) = lock_dir("within");
-        std::fs::write(&lock, lock_owner()).unwrap();
-        let tab = SavedTab {
+    fn a_save_with_a_held_lock_keeps_the_last_saved_file() {
+        let (dir, file, lock) = lock_dir("held");
+        let tab = |origin: &str| SavedTab {
             name: None,
-            origin: "panic".into(),
+            origin: origin.into(),
             layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
             focus: 0,
         };
+        session_save(&file, "1-1-0", vec![tab("saved")], false);
+        std::fs::write(&lock, lock_owner()).unwrap();
         let started = Instant::now();
-        session_save_within(&file, "1-1-0", vec![tab], true, Duration::from_millis(300));
+        assert!(!session_save_waiting(&file, "1-1-0", vec![tab("panic")], true, Duration::from_millis(300)));
         assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
-        let origins: Vec<_> = load_session(&file).unwrap().tabs.into_iter().map(|t| t.tab.origin).collect();
-        assert_eq!(origins, ["panic"]);
+        let origins = |file: &Path| -> Vec<String> {
+            load_session(file).unwrap().tabs.into_iter().map(|t| t.tab.origin).collect()
+        };
+        assert_eq!(origins(&file), ["saved"], "the last saved tabs stay");
         assert!(lock.exists(), "the other window's lock stays");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(session_save_waiting(&file, "1-1-0", vec![tab("panic")], true, Duration::from_millis(300)));
+        assert_eq!(origins(&file), ["panic"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

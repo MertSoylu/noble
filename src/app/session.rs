@@ -10,7 +10,7 @@ const SESSION_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// one short try (the lock is held for milliseconds at most); a save that misses it is retried at the next check.
 const SESSION_AUTOSAVE_LOCK_WAIT: Duration = Duration::from_millis(10);
 /// How long the save on a panic waits for another window's lock. The panic message is out already; past this the
-/// save runs without the lock (`store::session_save_within`), so the exit is not held up for the full wait.
+/// save is skipped (the file keeps the tabs saved last), so the exit is not held up for the full wait.
 pub(super) const PANIC_SAVE_LOCK_WAIT: Duration = Duration::from_millis(500);
 
 impl App {
@@ -122,7 +122,11 @@ impl App {
             let tabs = self.session_tabs();
             let file = self.paths.data_file(self.session_file());
             match lock_wait {
-                Some(wait) => crate::store::session_save_within(&file, &self.instance, tabs, true, wait),
+                // Skipped when the lock is not had in time: a write without it could overwrite another window's tabs
+                // saved meanwhile. The file keeps this window's tabs as they were at the last save, as after a crash.
+                Some(wait) => {
+                    crate::store::session_save_waiting(&file, &self.instance, tabs, true, wait);
+                }
                 None => crate::store::session_save(&file, &self.instance, tabs, true),
             }
         }

@@ -1393,6 +1393,9 @@ mod tests {
     fn osc_9_9_refuses_network_paths() {
         assert!(is_network_path(r"\\server\share") && is_network_path("//server/share"));
         assert!(!is_network_path("/home/me") && !is_network_path(r"C:\x") && !is_network_path("/"));
+        // A verbatim local path is a local folder (`canonicalize` writes them); a verbatim UNC path is a share.
+        assert!(!is_network_path(r"\\?\C:\work") && !is_network_path("//?/c:/work") && !is_network_path(r"\\?\C:"));
+        assert!(is_network_path(r"\\?\UNC\server\share") && is_network_path(r"\\?\UNC\server\share\x"));
         let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
         parser.process(b"\x1b]9;9;C:\\work\\proj\x1b\\");
         assert_eq!(parser.callbacks().cwd.as_deref(), Some(r"C:\work\proj"));
