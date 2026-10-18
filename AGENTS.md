@@ -134,6 +134,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   change that lasted 2 s, only while it gets the session lock (`session_save_waiting`, 1 s wait); otherwise the
   save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
   fallback (`session_save`, `session_begin`). Saved tabs that could not start stay in the file (`App::unrestored`).
+  `App::shutdown` ends the background commands before it saves; `main.rs` runs the frame loop under `catch_unwind`,
+  so a main-thread panic saves and ends them as well (the panic hook uses `ai::kill_background_children_if_free`,
+  which never waits for the registry lock).
   `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
 - **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
@@ -141,7 +144,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
   (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
   no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
-  commands still running with `ai::kill_background_children`). Its `-c` overrides
+  commands still running with `ai::kill_background_children`, which also closes the registry so none starts after
+  it). The codex RPC child (`ai::stdio_rpc`) starts the same way (`ai::spawn_tracked`: group, registry, `Tracked`
+  guard). Its `-c` overrides
   (`projects::repo_program_overrides`) turn off `core.fsmonitor`, `log.showSignature` and the repository's own
   `filter.*` commands (read from its `--local`/`--worktree` config only); when that config cannot be read no status is
   shown (fail closed).

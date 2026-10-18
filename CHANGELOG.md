@@ -181,6 +181,15 @@ All notable changes to NOBLE are documented here. The format is based on
 - A pane opened while another pane or window was writing NOBLE's shell scripts (the first start, or the
   first start after an update) could start without the shell integration: no directory tracking, no exit
   codes. The scripts are now replaced atomically.
+- Terminating a process (System's K or its dialog) checks that it is still the process that was listed (its start
+  time): when its pid has been reused by another process, nothing is terminated and a notice says so.
+- The codex usage check ends its whole process tree when it times out or fails (on Windows the npm `codex.cmd` shim
+  used to leave the CLI running), and it is ended on shutdown like the other background commands.
+- Quitting ends the background commands before it saves the session, and a crash on the main thread still saves the
+  session and ends them.
+- A dead folder in the recent list is checked once per run: each new tab no longer stalls up to half a second on it.
+- A git refresh that was requested while a project rescan was queued is no longer lost.
+- On Windows one slow background command kill no longer holds up every other background command.
 
 ## [1.9.0] - 2026-10-06
 
