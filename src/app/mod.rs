@@ -1796,6 +1796,10 @@ impl App {
     }
 
     fn tick_inner(&mut self) {
+        // Store files found damaged by a write since the last tick (kept aside, see `store::keep_aside`).
+        for text in crate::store::take_notices() {
+            self.toast(ToastLevel::Error, text);
+        }
         if self.boot.as_ref().is_some_and(|b| b.started.elapsed() >= BOOT_DURATION) {
             self.boot = None;
         }

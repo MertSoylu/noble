@@ -2,6 +2,7 @@
 //! pinned/hidden/added projects, update notice) and AI usage history (`UsageHistory`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,79 @@ pub(crate) fn write_json<T: Serialize>(file: &Path, value: &T) {
     }
 }
 
+/// Messages about damaged store files, waiting for the App to show them (`take_notices`).
+static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Takes the messages about damaged store files since the last call; the App shows them as toasts.
+pub fn take_notices() -> Vec<String> {
+    std::mem::take(&mut *NOTICES.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn notify(text: String) {
+    NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+}
+
+/// Reads a store file that is about to be overwritten. `Ok(Some(value))`: valid content. `Ok(None)`: no
+/// file, or a damaged one that was kept aside (see `keep_aside`), so the caller starts from its own copy.
+/// `Err(())`: the file is damaged and could not be kept aside; the caller must leave it alone.
+fn read_stored<T: for<'de> Deserialize<'de>>(file: &Path) -> Result<Option<T>, ()> {
+    let damaged = || keep_aside(file).map(|()| None);
+    match std::fs::read_to_string(file) {
+        Ok(text) => match serde_json::from_str(crate::util::strip_bom(&text)) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => damaged(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => damaged(),
+    }
+}
+
+/// Copies a damaged store file to the first free `<name>.corrupt` (then `.corrupt.2`, `.corrupt.3` …), so an
+/// older copy is never overwritten, and queues a notice. `Err` when the copy failed.
+fn keep_aside(file: &Path) -> Result<(), ()> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let mut n = 1u32;
+    let backup = loop {
+        let suffix = if n == 1 { ".corrupt".to_string() } else { format!(".corrupt.{n}") };
+        let candidate = file.with_file_name(format!("{name}{suffix}"));
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            break candidate;
+        }
+        n += 1;
+    };
+    match std::fs::copy(file, &backup) {
+        Ok(_) => {
+            notify(format!("{name} was damaged: a copy is kept at {}", crate::util::tilde(&backup)));
+            Ok(())
+        }
+        Err(e) => {
+            notify(format!("{name} is damaged and could not be copied aside ({e}): this change was not saved"));
+            Err(())
+        }
+    }
+}
+
+/// One locked read-modify-write of a store file (see `UiState::modify`): the file is read again under
+/// `<file>.lock` (`fallback` when it is missing or damaged), `f` changes the value, and the result is written
+/// atomically unless the damaged file could not be kept aside (`read_stored`). Returns the value and `f`'s result.
+fn update_file<V, R>(file: &Path, wait: Duration, fallback: impl FnOnce() -> V, f: impl FnOnce(&mut V) -> R) -> (V, R)
+where
+    V: Serialize + for<'de> Deserialize<'de>,
+{
+    with_lock_waiting(file, wait, || {
+        let (mut value, writable) = match read_stored(file) {
+            Ok(Some(value)) => (value, true),
+            Ok(None) => (fallback(), true),
+            Err(()) => (fallback(), false),
+        };
+        let out = f(&mut value);
+        if writable {
+            write_json(file, &value);
+        }
+        (value, out)
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RecentEntry {
     pub path: String,
@@ -97,19 +171,13 @@ pub struct Recent {
 /// How long the startup check of the recent directories waits for a slow (network) path.
 const RECENT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// One locked read-modify-write of a JSON list shared by every window (see `UiState::modify`):
-/// the file is read again under `<file>.lock`, `f` changes the list, the result is written
-/// atomically. A missing or unreadable file starts from `current`. Returns the new list.
+/// One locked read-modify-write of a JSON list shared by every window (see `update_file`). A missing
+/// file starts from `current`; a damaged one is kept aside first. Returns the new list.
 fn modify_list<T, R>(file: &Path, current: &[T], f: impl FnOnce(&mut Vec<T>) -> R) -> (Vec<T>, R)
 where
     T: Clone + Serialize + for<'de> Deserialize<'de>,
 {
-    with_lock_waiting(file, UI_LOCK_WAIT, || {
-        let mut list: Vec<T> = read_json(file).unwrap_or_else(|| current.to_vec());
-        let out = f(&mut list);
-        write_json(file, &list);
-        (list, out)
-    })
+    update_file(file, UI_LOCK_WAIT, || current.to_vec(), f)
 }
 
 impl Recent {
@@ -281,7 +349,8 @@ pub fn load_session(file: &Path) -> Option<Session> {
 /// crash before its next save keeps them; a later window gets `None` and starts empty.
 pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
     with_lock(file, || {
-        let mut session: Session = read_json(file).unwrap_or_default();
+        let Ok(stored) = read_stored::<Session>(file) else { return None };
+        let mut session = stored.unwrap_or_default();
         session.running.retain(|id| id != me && instance_alive(id));
         let first = session.running.is_empty();
         session.running.push(me.to_string());
@@ -304,7 +373,8 @@ pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
 /// save on the main thread waits far less than a closing window does.
 pub fn session_save_waiting(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool, wait: Duration) {
     with_lock_waiting(file, wait, || {
-        let mut session: Session = read_json(file).unwrap_or_default();
+        let Ok(stored) = read_stored::<Session>(file) else { return };
+        let mut session = stored.unwrap_or_default();
         session.tabs.retain(|t| t.instance != me);
         session.tabs.extend(tabs.into_iter().map(|tab| SessionTab { instance: me.to_string(), tab }));
         if leaving {
@@ -534,17 +604,13 @@ impl UiState {
 
     /// Applies one change: under the lock the file is read again (other windows may have
     /// written it), `f` changes only what it is about, and the result is written atomically
-    /// and becomes the in-memory state, other windows' changes included. A missing or
-    /// unreadable file starts from the in-memory state. Without a file (tests) only memory changes.
+    /// and becomes the in-memory state, other windows' changes included. A missing file starts from the
+    /// in-memory state; a damaged one is kept as `<name>.corrupt` first (`keep_aside`). Without a file
+    /// (tests) only memory changes.
     pub fn modify<T>(&mut self, f: impl FnOnce(&mut UiStateData) -> T) -> T {
         let Some(file) = self.file.clone() else { return f(&mut self.data) };
         let current = &self.data;
-        let (data, out) = with_lock_waiting(&file, UI_LOCK_WAIT, || {
-            let mut data: UiStateData = read_json(&file).unwrap_or_else(|| current.clone());
-            let out = f(&mut data);
-            write_json(&file, &data);
-            (data, out)
-        });
+        let (data, out) = update_file(&file, UI_LOCK_WAIT, || current.clone(), f);
         self.data = data;
         out
     }
@@ -649,7 +715,10 @@ impl UsageHistory {
 
     pub fn save(&self) {
         if let Some(f) = &self.file {
-            write_json(f, &self.series);
+            // A damaged file is kept aside first; when that fails it is not written over.
+            if read_stored::<std::collections::BTreeMap<String, Vec<(i64, u8)>>>(f).is_ok() {
+                write_json(f, &self.series);
+            }
         }
     }
 
@@ -939,6 +1008,80 @@ mod tests {
             let _ = session_begin(&file, "1-1-0");
             session_save(&file, "1-1-0", Vec::new(), true);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A damaged file is copied to `<name>.corrupt` before a write replaces it: the copy has the original
+    /// bytes, the new file holds the change, and the App is told. An older copy is never overwritten. When
+    /// the copy fails (a folder in the file's place here), nothing is written over it.
+    #[test]
+    fn damaged_files_are_kept_aside_before_they_are_overwritten() {
+        let dir = std::env::temp_dir().join(format!("noble-store-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_notices();
+        let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+        let project = dir.join("alpha");
+
+        let state = dir.join("state.json");
+        let broken: &[u8] = b"{\"pins\": [\"/a\", ";
+        std::fs::write(&state, broken).unwrap();
+        let mut ui = UiState::load(state.clone());
+        assert!(ui.toggle_pin(&project));
+        assert_eq!(read("state.json.corrupt"), broken, "the original bytes are kept");
+        assert!(UiState::load(state.clone()).is_pinned(&project), "the new file holds the change");
+        // Damaged again: the older copy stays, the newer one gets its own name.
+        std::fs::write(&state, b"\xff\xfe not json").unwrap();
+        ui.modify(|d| d.welcomed = true);
+        assert_eq!(read("state.json.corrupt"), broken, "an older copy is never overwritten");
+        assert_eq!(read("state.json.corrupt.2"), b"\xff\xfe not json");
+        let back = UiState::load(state);
+        assert!(back.data.welcomed && back.is_pinned(&project), "memory is written when the file is damaged");
+
+        let workspaces = dir.join("workspaces.json");
+        std::fs::write(&workspaces, b"[{\"name\": ").unwrap();
+        Workspaces::load(workspaces.clone()).upsert(ws("fresh"));
+        assert_eq!(read("workspaces.json.corrupt"), b"[{\"name\": ");
+        let names: Vec<_> = Workspaces::load(workspaces).list.into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["fresh"]);
+
+        let recent = dir.join("recent.json");
+        std::fs::write(&recent, b"[{\"path\"").unwrap();
+        Recent::load(recent.clone()).record(&dir);
+        assert_eq!(read("recent.json.corrupt"), b"[{\"path\"");
+        assert_eq!(Recent::load(recent).entries.len(), 1);
+
+        let session = dir.join("session.json");
+        std::fs::write(&session, b"{\"tabs\": [").unwrap();
+        let tab = SavedTab {
+            name: None,
+            origin: "kept".into(),
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            focus: 0,
+        };
+        session_save(&session, "1-1-0", vec![tab], false);
+        assert_eq!(read("session.json.corrupt"), b"{\"tabs\": [");
+        assert_eq!(load_session(&session).map(|s| s.tabs.len()), Some(1));
+
+        let history = dir.join("ai-history.json");
+        std::fs::write(&history, b"{\"claude/5h\": [[1").unwrap();
+        let mut h = UsageHistory::load(history.clone());
+        h.record("claude/5h", 100, 10);
+        h.save();
+        assert_eq!(read("ai-history.json.corrupt"), b"{\"claude/5h\": [[1");
+        assert!(UsageHistory::load(history).series.contains_key("claude/5h"));
+
+        let notices = take_notices();
+        assert!(notices.iter().any(|n| n.starts_with("state.json was damaged")), "{notices:?}");
+        assert!(notices.iter().any(|n| n.starts_with("ai-history.json was damaged")), "{notices:?}");
+
+        let blocked = dir.join("blocked.json");
+        std::fs::create_dir_all(&blocked).unwrap();
+        let mut stuck = UiState::load(blocked.clone());
+        assert!(stuck.toggle_pin(&project), "the change still applies in memory");
+        assert!(blocked.is_dir() && !dir.join("blocked.json.corrupt").exists(), "nothing is written over it");
+        let notices = take_notices();
+        assert!(notices.iter().any(|n| n.starts_with("blocked.json is damaged") && n.ends_with("not saved")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
