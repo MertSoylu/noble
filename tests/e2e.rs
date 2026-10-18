@@ -86,6 +86,21 @@ impl Harness {
         }
     }
 
+    /// Waits until the focused pane's shell runs what is typed: the line `echo` prints shows up. Input typed while the
+    /// shell is still starting can be lost, so the command is typed again every half second until it runs.
+    fn wait_shell_ready(&self, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            let s = self.screen();
+            if s.lines().any(|l| l.trim() == "e2e-ready-42") {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the shell never ran a command; screen:\n{s}");
+            self.send(b"echo e2e-ready-42\r");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     fn wait_exit(&mut self, secs: u64) -> bool {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
@@ -104,6 +119,32 @@ impl Drop for Harness {
     }
 }
 
+/// A folder for one test's NOBLE home: emptied first, removed when the test ends (also on a panic). Declared
+/// before the harness, so the app is killed before its folder is removed.
+struct Home(PathBuf);
+
+impl Home {
+    fn new(name: &str) -> Home {
+        let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Home(path)
+    }
+}
+
+impl std::ops::Deref for Home {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn save(name: &str, text: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("audit");
     let _ = std::fs::create_dir_all(&dir);
@@ -112,9 +153,7 @@ fn save(name: &str, text: &str) {
 
 #[test]
 fn full_session_lifecycle() {
-    let home = std::env::temp_dir().join(format!("noble-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = Home::new("noble-e2e");
 
     let mut h = Harness::start(&home, 34, 120);
     // First launch: welcome card; esc dismisses it for good.
@@ -137,7 +176,7 @@ fn full_session_lifecycle() {
     // New tab + command.
     h.send(b"t");
     h.wait_for("right-click", 10);
-    std::thread::sleep(Duration::from_millis(1500));
+    h.wait_shell_ready(20);
     h.send(b"echo e2e-marker-$((6*7))\r");
     h.send(b"echo e2e-marker-42\r");
     let s = h.wait_for("e2e-marker-42", 20);
@@ -195,7 +234,6 @@ fn full_session_lifecycle() {
     h.send(b"y");
     assert!(h.wait_exit(15));
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Idle resource use: with the bridge open the average CPU must stay low.
@@ -221,9 +259,8 @@ fn measure(h: &Harness, secs: u64) -> (f64, u64) {
     (per_min, mem)
 }
 
-fn idle_home(tag: &str) -> PathBuf {
-    let home = std::env::temp_dir().join(format!("noble-idle-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&home).unwrap();
+fn idle_home(tag: &str) -> Home {
+    let home = Home::new(&format!("noble-idle-{tag}"));
     // A typical idle state is measured: the welcome card was already dismissed.
     std::fs::write(home.join("state.json"), r#"{"welcomed": true}"#).unwrap();
     home
@@ -241,7 +278,6 @@ fn idle_cpu_is_low() {
     println!("idle home: {ms:.0} ms CPU per minute ({:.2}% of one core) · rss {} MB", ms / 600.0, mem / 1024 / 1024);
     assert!(ms < 15_000.0, "idle CPU too high: {ms} ms/min");
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Idle terminal tab: the shell is waiting, NOBLE must do almost no work.
@@ -262,7 +298,6 @@ fn idle_terminal_cpu_is_low() {
     );
     assert!(ms < 15_000.0, "idle CPU too high: {ms} ms/min");
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// `noble <dir>` needs an existing folder: anything else prints an error and exits non-zero before the
@@ -306,9 +341,7 @@ fn termination_signals_save_the_session() {
         return;
     }
     for signal in ["TERM", "HUP"] {
-        let home = std::env::temp_dir().join(format!("noble-e2e-sig{signal}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
+        let home = Home::new(&format!("noble-e2e-sig{signal}"));
         let mut h = Harness::start(&home, 34, 120);
         h.wait_for("WELCOME TO NOBLE", 20);
         h.send(b"\x1b");
@@ -322,7 +355,6 @@ fn termination_signals_save_the_session() {
         let session = std::fs::read_to_string(home.join("session.json")).unwrap_or_default();
         assert!(session.contains("\"tabs\""), "SIG{signal}: session not saved: {session}");
         drop(h);
-        let _ = std::fs::remove_dir_all(&home);
     }
 }
 
@@ -335,9 +367,7 @@ fn a_killed_window_is_restored_on_the_next_launch() {
     if cfg!(windows) {
         return;
     }
-    let home = std::env::temp_dir().join(format!("noble-e2e-kill-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = Home::new("noble-e2e-kill");
     let session = home.join("session.json");
     let lock = home.join("session.json.lock");
 
@@ -347,7 +377,7 @@ fn a_killed_window_is_restored_on_the_next_launch() {
     h.wait_for("Projects", 20);
     h.send(b"t");
     h.wait_for("right-click", 10);
-    std::thread::sleep(Duration::from_millis(1500));
+    h.wait_shell_ready(20);
     h.send(b"\x01");
     h.send(b"v");
     h.wait_for("⤢", 10);
@@ -380,7 +410,6 @@ fn a_killed_window_is_restored_on_the_next_launch() {
     assert!(h.wait_exit(15), "noble did not exit after the restore");
     assert!(!lock.exists(), "the lock left by the killed window was not released");
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Settings → Key bindings in the real app: a new prefix key is written to `config.toml` under its table
@@ -388,9 +417,7 @@ fn a_killed_window_is_restored_on_the_next_launch() {
 /// editor's "saved" confirmation shows.
 #[test]
 fn key_bindings_are_saved_to_the_config() {
-    let home = std::env::temp_dir().join(format!("noble-e2e-keys-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = Home::new("noble-e2e-keys");
 
     let h = Harness::start(&home, 34, 120);
     h.wait_for("WELCOME TO NOBLE", 20);
@@ -433,5 +460,6 @@ fn key_bindings_are_saved_to_the_config() {
     // The old key is unbound now; the new one is what Split Pane Right answers to.
     h.send(b"\x01v");
     h.wait_for("ctrl+a v is not bound", 10);
-    let _ = std::fs::remove_dir_all(&home);
+    // The app goes first: while it runs it can still write to the folder.
+    drop(h);
 }
