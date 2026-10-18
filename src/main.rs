@@ -200,10 +200,6 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
         app.open_project_shell(dir);
     }
 
-    // Drawing happens in only two cases: when an event arrives that changed
-    // something visible (`pending`, at most at FRAME rate) or when the moment
-    // comes for something that changes over time (clock, animation, notification
-    // timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
     // A panic on the main thread unwinds through the loop. The panic hook has restored the terminal already; here
     // the session is saved and the commands are ended, then the panic goes on, so the exit stays the same.
     let draw_error = match catch_unwind(AssertUnwindSafe(|| event_loop(&mut terminal, &mut app, &rx, colors_256))) {
@@ -218,6 +214,11 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
 }
 
 /// The frame loop. Returns the error of a failed draw (the terminal is gone), `None` on a normal quit.
+///
+/// Drawing happens in only two cases: when an event arrives that changed
+/// something visible (`pending`, at most at FRAME rate) or when the moment
+/// comes for something that changes over time (clock, animation, notification
+/// timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
