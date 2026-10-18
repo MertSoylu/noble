@@ -1028,11 +1028,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("noble-hostile-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // The setup reads no user or system git config (a signing key or an `include` there would change what the
+        // test does): the global config is an empty file, and the system config is off.
+        let empty_config = std::env::temp_dir().join(format!("noble-hostile-git-{}.gitconfig", std::process::id()));
+        std::fs::write(&empty_config, b"").unwrap();
         let run = |args: &[&str]| {
             let out = std::process::Command::new(&git)
                 .arg("-C")
                 .arg(&dir)
+                .env("GIT_CONFIG_GLOBAL", &empty_config)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .args(["-c", "user.name=noble", "-c", "user.email=noble@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
                 .args(args)
                 .output()
                 .unwrap();
@@ -1047,17 +1054,25 @@ mod tests {
         // file keeps the status output non-empty (`git_info` returns nothing for a clean tree).
         std::fs::write(dir.join("tracked.txt"), "ho\n").unwrap();
         std::fs::write(dir.join("untracked.txt"), "new\n").unwrap();
-        // `#` turns the arguments git appends to the hook (protocol version and token) into a comment.
+        // Each command writes its marker with the shell's own redirection (git runs these through its `sh`, on
+        // Windows too), so no external program such as `touch` is needed. `#` turns the arguments git appends to the
+        // hook (protocol version and token) into a comment.
         let marker = |name: &str| dir.join(name).to_string_lossy().replace('\\', "/");
-        run(&["config", "core.fsmonitor", &format!("touch \"{}\" #", marker("fsmonitor"))]);
-        run(&["config", "filter.evil.clean", &format!("touch \"{}\"; cat", marker("clean"))]);
+        run(&["config", "core.fsmonitor", &format!("echo x > \"{}\" #", marker("fsmonitor"))]);
+        run(&["config", "filter.evil.clean", &format!("echo x > \"{}\"; cat", marker("clean"))]);
         run(&["config", "filter.evil.smudge", "cat"]);
-        run(&["config", "filter.evil.process", &format!("touch \"{}\"", marker("process"))]);
+        run(&["config", "filter.evil.process", &format!("echo x > \"{}\"", marker("process"))]);
         let names = ["fsmonitor", "clean", "process"];
         let ran = |dir: &Path| names.into_iter().filter(|n| dir.join(n).exists()).collect::<Vec<_>>();
 
         // The control's exit status does not matter: the hostile fsmonitor makes plain git fail, too.
-        let _ = std::process::Command::new(&git).arg("-C").arg(&dir).args(["status", "--porcelain=v1"]).output();
+        let _ = std::process::Command::new(&git)
+            .arg("-C")
+            .arg(&dir)
+            .env("GIT_CONFIG_GLOBAL", &empty_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["status", "--porcelain=v1"])
+            .output();
         let control_ran = ran(&dir);
         for name in names {
             let _ = std::fs::remove_file(dir.join(name));
@@ -1065,6 +1080,7 @@ mod tests {
         let info = git_info(&dir, &git);
         let guarded_ran = ran(&dir);
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&empty_config);
 
         assert!(control_ran.contains(&"fsmonitor"), "the control run should show the hazard: {control_ran:?}");
         assert!(info.is_some(), "a background status still runs without the repo's programs");
