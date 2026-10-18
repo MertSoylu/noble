@@ -2,8 +2,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
@@ -510,10 +510,48 @@ pub fn word_range(row: &[char], col: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// Most input that may wait for a PTY whose program does not read it. Past this, input is dropped (see
+/// `PtyInput::send`), so a program that never reads cannot make the queue grow without limit.
+const MAX_QUEUED_INPUT: usize = 8 * 1024 * 1024;
+
+/// The bytes waiting for a pane's PTY writer thread, the only thread that writes to the PTY. Sending never
+/// blocks: the main thread (keys, paste) and the reader thread (DSR/DA answers) only enqueue, and the writer
+/// writes in the order they were queued, so a program that does not read its input cannot stall the UI or
+/// the output.
+#[derive(Clone)]
+struct PtyInput {
+    tx: Sender<Vec<u8>>,
+    /// Bytes queued and not yet written (added by `send`, taken off by the writer thread).
+    queued: Arc<AtomicUsize>,
+}
+
+impl PtyInput {
+    /// The queue and the receiver the writer thread takes its bytes from.
+    fn channel() -> (PtyInput, Receiver<Vec<u8>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (PtyInput { tx, queued: Arc::new(AtomicUsize::new(0)) }, rx)
+    }
+
+    /// Queues `bytes`. `false` when they were dropped: more than `MAX_QUEUED_INPUT` is still waiting, or the
+    /// writer thread has ended (the child exited or the PTY closed).
+    fn send(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        let before = self.queued.fetch_add(bytes.len(), Ordering::AcqRel);
+        if before.saturating_add(bytes.len()) <= MAX_QUEUED_INPUT && self.tx.send(bytes.to_vec()).is_ok() {
+            return true;
+        }
+        self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+        false
+    }
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Input and DSR/DA answers on their way to the PTY (`PtyInput`).
+    input: PtyInput,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub dirty: Arc<AtomicBool>,
@@ -680,16 +718,31 @@ impl Pane {
         let pid = child.process_id();
         let killer = child.clone_killer();
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().context("pty writer")?));
+        let mut writer = pair.master.take_writer().context("pty writer")?;
+        let (input, queue) = PtyInput::channel();
         let parser =
             Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, spec.scrollback, Callbacks::default())));
         let dirty = Arc::new(AtomicBool::new(false));
         let output_gen = Arc::new(AtomicU64::new(0));
 
+        // The writer thread is the only one that writes to the PTY, so a child that does not read its input
+        // blocks this thread alone. It ends when the queue closes (the pane and its reader are gone) or on the
+        // first write error (the child exited or the PTY closed).
+        {
+            let queued = input.queued.clone();
+            std::thread::Builder::new().name(format!("pty-write-{id}")).spawn(move || {
+                for bytes in queue {
+                    let ok = writer.write_all(&bytes).and_then(|()| writer.flush()).is_ok();
+                    queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+                    if !ok {
+                        break;
+                    }
+                }
+            })?;
+        }
         {
             let parser = parser.clone();
-            let writer = writer.clone();
+            let input = input.clone();
             let dirty = dirty.clone();
             let output_gen = output_gen.clone();
             let tx = tx.clone();
@@ -707,11 +760,8 @@ impl Pane {
                                 output_gen.fetch_add(1, Ordering::Release);
                                 std::mem::take(&mut p.callbacks_mut().responses)
                             };
-                            if !responses.is_empty() {
-                                let mut w = lock(&writer);
-                                let _ = w.write_all(&responses);
-                                let _ = w.flush();
-                            }
+                            // Queued like keys, so the answers keep their place among the input; never blocks.
+                            input.send(&responses);
                             if !dirty.swap(true, Ordering::AcqRel) && tx.send(AppEvent::PtyOutput).is_err() {
                                 break;
                             }
@@ -731,7 +781,7 @@ impl Pane {
         Ok(Pane {
             id,
             parser,
-            writer,
+            input,
             master: pair.master,
             killer,
             dirty,
@@ -756,13 +806,10 @@ impl Pane {
         })
     }
 
-    pub fn write(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        let mut w = lock(&self.writer);
-        let _ = w.write_all(bytes);
-        let _ = w.flush();
+    /// Queues `bytes` for the program and returns at once (see `PtyInput`). `false` when they were dropped:
+    /// the program has not read more than `MAX_QUEUED_INPUT` already, or it has exited.
+    pub fn write(&self, bytes: &[u8]) -> bool {
+        self.input.send(bytes)
     }
 
     /// Pastes text; wraps it in bracketed paste when the app wants that.
@@ -1604,4 +1651,24 @@ Claude needs your permission",
         assert!(!Arc::ptr_eq(&a.lines, &b.lines), "A to B to A: the copy from before the resizes is stale");
         assert_eq!(b.lines.len(), a.lines.len());
     }
+
+    /// Input is written in the order it was queued, and nothing is queued past the cap: the program that does
+    /// not read it cannot grow the queue, and a sender after the writer is gone is refused at once.
+    #[test]
+    fn queued_input_keeps_order_and_is_capped() {
+        let (input, queue) = PtyInput::channel();
+        assert!(input.send(b"ab") && input.send(b"") && input.send(b"c"));
+        // The writer thread takes each chunk off the count once it is written.
+        for want in [&b"ab"[..], b"c"] {
+            let got = queue.recv().unwrap();
+            assert_eq!(got, want);
+            input.queued.fetch_sub(got.len(), Ordering::AcqRel);
+        }
+        assert!(input.send(&vec![0u8; MAX_QUEUED_INPUT]));
+        assert!(!input.send(b"x"), "past the cap");
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT, "the refused bytes are not counted");
+        drop(queue);
+        assert!(!input.send(b"y"), "the writer thread has ended");
+    }
+
 }

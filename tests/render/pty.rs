@@ -593,3 +593,65 @@ fn command_start_marks_decide_what_ran() {
     assert!(row.contains(" ✗ 4 · ") && !row.contains('◷'), "{row}");
     app.run(Action::CloseTab);
 }
+
+/// Input never waits for the program: a program that runs and never reads its input takes a 200 KB paste at
+/// once, and the UI keeps answering keys and drawing while it sits there (the paste used to block the main
+/// thread until the program exited).
+#[test]
+fn paste_does_not_wait_for_a_program_that_does_not_read() {
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    let (program, args) = if cfg!(windows) { ("timeout", vec!["/t", "5", "/nobreak"]) } else { ("sleep", vec!["5"]) };
+    cfg.terminal.shell = program.into();
+    cfg.terminal.shell_args = args.into_iter().map(String::from).collect();
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("stuck".into()));
+    let id = app.tabs[0].focus;
+    let body: String = (0..2500).map(|_| format!("{}\r", "a".repeat(79))).collect();
+    assert!(body.len() > 190_000);
+    let started = std::time::Instant::now();
+    app.panes.get_mut(&id).unwrap().paste(&body);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(1), "the paste waited {took:?} for the program");
+    let started = std::time::Instant::now();
+    app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.pump();
+    let text = render(&mut app, 110, 30);
+    assert!(started.elapsed() < Duration::from_secs(1), "the UI stalled after the paste");
+    assert!(text.contains(" ✕ "), "the pane still draws:\n{text}");
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
+/// Terminal queries are answered and the answer reaches the program's input (the reader thread queues it to
+/// the pane's writer). Needs POSIX `sh`, `stty`, `dd` and `od` to read the answer back, so it runs on Unix; the
+/// Windows panes answer the same query through the same reader thread, but there is no such tool there.
+#[test]
+fn cursor_position_answer_reaches_the_program() {
+    if cfg!(windows) {
+        return;
+    }
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "sh".into();
+    // Raw mode, ask for the cursor position, read the 6-byte answer (`ESC [ 1 ; 1 R`) and print its hex.
+    cfg.terminal.shell_args = vec![
+        "-c".into(),
+        r"stty raw -echo; printf '\033[6n'; dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \n'; sleep 3".into(),
+    ];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("dsr".into()));
+    let id = app.tabs[0].focus;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        app.pump();
+        let screen = app.panes[&id].parser().screen().contents();
+        if screen.contains("1b5b313b3152") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer came back:\n{screen}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
