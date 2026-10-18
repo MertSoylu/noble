@@ -134,6 +134,10 @@ All notable changes to NOBLE are documented here. The format is based on
 - The periodic session save no longer stalls the screen while another window holds the session lock: it tries once
   (10 ms) and retries at the next check, instead of waiting up to a second on the UI thread each time. A panic on the
   main thread waits at most half a second for that lock before it saves the session, so the exit is not held up.
+- A recent or saved directory on a slow network share or a spun-down disk is no longer skipped for the whole run: the
+  startup check of the recent list (0.5 s) only marks a directory that does not answer as slow, and the session and
+  workspace restore (2 s) still asks it, so its tabs open in that folder. A directory that is gone, or that gave no
+  answer within the restore's 2 s, is still not asked again in the run.
 - Scrollback search keeps up with streaming output without slowing it: while the search bar is open the matches are
   recomputed at most every 100 ms (the output that arrives in between is counted when the interval has passed), and
   a pane resize recomputes them at once. The matches are capped at the newest 10,000, shown as "10000+" in the bar,

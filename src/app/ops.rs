@@ -15,7 +15,7 @@ use crate::theme;
 
 /// How long restoring a session or workspace waits for the saved directories to answer; a
 /// network share that stopped responding would otherwise hold up startup.
-pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DIR_PROBE_TIMEOUT: Duration = crate::store::LONG_PROBE_TIMEOUT;
 
 /// How many closed tabs `reopen_tab` can bring back.
 const CLOSED_TABS_KEPT: usize = 10;

@@ -1,6 +1,6 @@
 //! Small, pure helpers: formatting, fuzzy matching, PATH lookup.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -261,11 +261,17 @@ pub fn resolve_start_dir(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<P
     if path.is_dir() { Ok(path) } else { Err(format!("'{arg}' is not a directory")) }
 }
 
-/// Which of `dirs` pass `probe` within `timeout`; all are probed in parallel. A stat on a
-/// network share that stopped answering (SMB/UNC on Windows, NFS/SMB/sshfs mounts on Linux)
-/// can block for tens of seconds; a probe that does not answer in time counts as unusable and
-/// its thread is left to finish on its own.
+/// Which of `dirs` pass `probe` within `timeout`; a probe that does not answer in time counts as unusable
+/// (`dir_answers`).
 pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashSet<PathBuf> {
+    dir_answers(dirs, timeout, probe).into_iter().filter(|(_, answer)| *answer == Some(true)).map(|(d, _)| d).collect()
+}
+
+/// What `probe` answered for each of `dirs` within `timeout`; all are probed in parallel. `Some` for an answer in
+/// time, `None` for no answer. A stat on a network share that stopped answering (SMB/UNC on Windows,
+/// NFS/SMB/sshfs mounts on Linux) can block for tens of seconds; a probe that does not answer in time is
+/// `None`, and its thread is left to finish on its own.
+pub fn dir_answers(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashMap<PathBuf, Option<bool>> {
     let (tx, rx) = std::sync::mpsc::channel();
     for dir in dirs {
         let (thread_tx, thread_dir) = (tx.clone(), dir.clone());
@@ -280,13 +286,11 @@ pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool
     }
     drop(tx);
     let deadline = std::time::Instant::now() + timeout;
-    let mut usable = HashSet::new();
+    let mut answers: HashMap<PathBuf, Option<bool>> = dirs.iter().map(|d| (d.clone(), None)).collect();
     while let Ok((dir, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
-        if ok {
-            usable.insert(dir);
-        }
+        answers.insert(dir, Some(ok));
     }
-    usable
+    answers
 }
 
 /// Is there a graphical session to open files, folders and URLs in? Not over SSH (the user sits at

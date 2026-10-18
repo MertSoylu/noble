@@ -279,12 +279,24 @@ pub struct Recent {
     pub entries: Vec<RecentEntry>,
     /// Score-sorted list of existing directories (to avoid hitting the disk every frame).
     cache: Vec<RecentEntry>,
-    /// Directories whose probe failed or timed out in this run. They are not probed again (see `probe_dirs`).
+    /// Directories that are gone, or that did not answer a long probe (`LONG_PROBE_TIMEOUT`), in this run. They are
+    /// not probed again (see `probe_dirs`).
     failed: HashSet<PathBuf>,
+    /// Directories that did not answer a short probe in this run. The startup list leaves them out and does not
+    /// probe them again; a longer probe (the restore's) still does.
+    slow: HashSet<PathBuf>,
 }
 
 /// How long the startup check of the recent directories waits for a slow (network) path.
 const RECENT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long a probe may wait for an answer before a directory that gave none is remembered for the whole run (the
+/// restore's probe, `app::ops::DIR_PROBE_TIMEOUT`). A shorter wait only marks the directory as slow.
+pub const LONG_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether `dir` does not exist at all (as opposed to being unreadable, or a file).
+fn is_missing(dir: &Path) -> bool {
+    matches!(std::fs::metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
 
 /// One locked read-modify-write of a JSON list shared by every window (see `update_file`). A missing
 /// file starts from `current`; a damaged one is kept aside first. Returns the new list.
@@ -298,22 +310,44 @@ where
 impl Recent {
     pub fn load(file: PathBuf) -> Recent {
         let entries = read_json(&file).unwrap_or_default();
-        let mut r = Recent { file: Some(file), entries, cache: Vec::new(), failed: HashSet::new() };
+        let mut r =
+            Recent { file: Some(file), entries, cache: Vec::new(), failed: HashSet::new(), slow: HashSet::new() };
         r.rebuild(None);
         r
     }
 
     pub fn memory() -> Recent {
-        Recent { file: None, entries: Vec::new(), cache: Vec::new(), failed: HashSet::new() }
+        Recent { file: None, entries: Vec::new(), cache: Vec::new(), failed: HashSet::new(), slow: HashSet::new() }
     }
 
-    /// The directories among `dirs` that answer `probe` within `timeout` (`util::usable_dirs`). One that does not
-    /// answer is remembered for the rest of the run and not probed again: each probe costs up to `timeout` on the
-    /// UI thread, and a hung one keeps its thread until it returns. Used by the recent list and by workspace restore.
+    /// The directories among `dirs` that answer `probe` within `timeout` (`util::dir_answers`). What is remembered
+    /// depends on the answer: a directory that is gone is not probed again in this run, and one that gave no answer
+    /// within `LONG_PROBE_TIMEOUT` is not either (each such probe costs up to `timeout` on the UI thread, and a hung
+    /// one keeps its thread until it returns). A directory that gave no answer to a shorter probe only is marked slow:
+    /// a slow network share can answer the restore's longer probe, so that one still asks it. Used by the recent list
+    /// and by workspace restore.
     pub fn probe_dirs(&mut self, dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashSet<PathBuf> {
         let fresh: Vec<PathBuf> = dirs.iter().filter(|d| !self.failed.contains(*d)).cloned().collect();
-        let usable = crate::util::usable_dirs(&fresh, timeout, probe);
-        self.failed.extend(fresh.into_iter().filter(|d| !usable.contains(d)));
+        let mut usable = HashSet::new();
+        for (dir, answer) in crate::util::dir_answers(&fresh, timeout, probe) {
+            match answer {
+                Some(true) => {
+                    usable.insert(dir);
+                }
+                // Not a directory, but it answered: only a missing one is final (an unreadable one may be a share
+                // that is back next time).
+                Some(false) if is_missing(&dir) => {
+                    self.failed.insert(dir);
+                }
+                Some(false) => {}
+                None if timeout >= LONG_PROBE_TIMEOUT => {
+                    self.failed.insert(dir);
+                }
+                None => {
+                    self.slow.insert(dir);
+                }
+            }
+        }
         usable
     }
 
@@ -325,7 +359,11 @@ impl Recent {
         let t = now();
         let unknown: Vec<PathBuf> = {
             let known: HashSet<&str> = self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
-            self.entries.iter().filter(|e| !known.contains(e.path.as_str())).map(|e| PathBuf::from(&e.path)).collect()
+            self.entries
+                .iter()
+                .filter(|e| !known.contains(e.path.as_str()) && !self.slow.contains(Path::new(&e.path)))
+                .map(|e| PathBuf::from(&e.path))
+                .collect()
         };
         let usable = self.probe_dirs(&unknown, RECENT_PROBE_TIMEOUT, |p| p.is_dir());
         let known: HashSet<&str> = self.cache.iter().map(|e| e.path.as_str()).chain(trusted).collect();
@@ -1867,8 +1905,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A directory that did not answer its probe is not probed again in this run: each probe costs up to the timeout
-    /// on the UI thread, and a hung one keeps its thread. The probe counts its calls to check that.
+    /// A directory that gave no answer to a long probe is not probed again in this run: each probe costs up to the
+    /// timeout on the UI thread, and a hung one keeps its thread. The probe counts its calls to check that.
     #[test]
     fn unanswered_directories_are_not_probed_again() {
         static HANG_PROBES: AtomicU32 = AtomicU32::new(0);
@@ -1882,11 +1920,55 @@ mod tests {
         let here = std::env::temp_dir();
         let dirs = vec![PathBuf::from("hangs"), here.clone()];
         let mut r = Recent::memory();
-        let usable = r.probe_dirs(&dirs, Duration::from_millis(300), probe);
+        let usable = r.probe_dirs(&dirs, LONG_PROBE_TIMEOUT, probe);
         assert_eq!(usable, HashSet::from([here.clone()]), "the answering directory is usable");
-        let again = r.probe_dirs(&dirs, Duration::from_millis(300), probe);
+        let again = r.probe_dirs(&dirs, LONG_PROBE_TIMEOUT, probe);
         assert_eq!(again, HashSet::from([here]), "the answering one is still usable");
         assert_eq!(HANG_PROBES.load(Ordering::SeqCst), 1, "the hung directory was probed again");
+    }
+
+    /// A slow directory (no answer to the startup's short probe) is not lost: the restore's longer probe asks it
+    /// again, and it counts as usable once it answers. The startup list leaves it out meanwhile.
+    #[test]
+    fn a_short_probe_timeout_does_not_block_a_later_long_probe() {
+        static SLOW_PROBES: AtomicU32 = AtomicU32::new(0);
+        fn probe(p: &Path) -> bool {
+            if p.ends_with("share") && SLOW_PROBES.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Answers only after the short probe gave up on it.
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            p.ends_with("share") || p.is_dir()
+        }
+        let dirs = vec![PathBuf::from("share")];
+        let mut r = Recent::memory();
+        assert!(r.probe_dirs(&dirs, Duration::from_millis(100), probe).is_empty(), "no answer in time");
+        assert!(r.slow.contains(Path::new("share")) && !r.failed.contains(Path::new("share")));
+        assert_eq!(r.probe_dirs(&dirs, LONG_PROBE_TIMEOUT, probe), HashSet::from([PathBuf::from("share")]));
+        assert_eq!(SLOW_PROBES.load(Ordering::SeqCst), 2, "the long probe asked again");
+    }
+
+    /// A directory that is gone is remembered for the run, while one that answers "no" but is still there (a file,
+    /// an unreadable folder) is asked again: it may come back.
+    #[test]
+    fn missing_directories_are_remembered_and_others_are_asked_again() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        fn probe(_: &Path) -> bool {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+        let dir = std::env::temp_dir().join(format!("noble-store-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = dir.join("gone");
+        let file = dir.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let dirs = vec![gone.clone(), file.clone()];
+        let mut r = Recent::memory();
+        assert!(r.probe_dirs(&dirs, LONG_PROBE_TIMEOUT, probe).is_empty());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        assert!(r.probe_dirs(&dirs, LONG_PROBE_TIMEOUT, probe).is_empty());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3, "only the file was asked again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A directory that disappears is dropped at the next start, not with every new tab.
