@@ -344,10 +344,14 @@ fn idle_terminal_cpu_is_low() {
 /// terminal is touched. A second folder and unknown options are refused too; `--help` describes the argument.
 #[test]
 fn folder_argument_is_validated() {
+    // Its own NOBLE home, and the isolation every e2e test uses (no AI credentials, no hooks, no update check).
+    let home = Home::new("noble-e2e-args");
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
             .args(args)
-            .env("NOBLE_HOME", std::env::temp_dir().join("noble-e2e-args"))
+            .env("NOBLE_HOME", &*home)
+            .env(noble::ai::ISOLATED_ENV, "1")
+            .env("NOBLE_NO_UPDATE_CHECK", "1")
             .output()
             .unwrap()
     };
@@ -392,8 +396,12 @@ fn termination_signals_save_the_session() {
         let ok = std::process::Command::new("kill").arg(format!("-{signal}")).arg(pid.to_string()).status().unwrap();
         assert!(ok.success(), "kill -{signal}");
         assert!(h.wait_exit(15), "SIG{signal}: noble did not exit");
-        let session = std::fs::read_to_string(home.join("session.json")).unwrap_or_default();
-        assert!(session.contains("\"tabs\""), "SIG{signal}: session not saved: {session}");
+        // The one tab opened above is in the saved session (parsed, not matched as text).
+        let saved = noble::store::load_session(&home.join("session.json"))
+            .unwrap_or_else(|| panic!("SIG{signal}: no session file was saved"));
+        assert_eq!(saved.tabs.len(), 1, "SIG{signal}: the open tab is not in the session: {:?}", saved.tabs);
+        let single = matches!(saved.tabs[0].tab.layout, noble::term::layout::SavedNode::Leaf { .. });
+        assert!(single, "SIG{signal}: the tab is not one pane as it was opened: {:?}", saved.tabs[0].tab.layout);
         drop(h);
     }
 }
