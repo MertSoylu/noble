@@ -49,13 +49,36 @@ pub struct Release {
     pub assets: Vec<(String, String)>,
 }
 
+/// Hosts a release's files come from: GitHub, and the storage its download links redirect to.
+const DOWNLOAD_HOSTS: [&str; 3] =
+    ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+
+/// Largest archive a download may be (a NOBLE binary is a few MB) and largest checksum file (a few lines).
+const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
+const MAX_SUMS: u64 = 64 * 1024;
+
+/// An agent for the GitHub API (https only).
 fn agent(timeout: Duration) -> ureq::Agent {
+    agent_with(timeout, true)
+}
+
+/// An agent; `https_only` is off only for the local test server of `partial_download_is_an_error`.
+fn agent_with(timeout: Duration, https_only: bool) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .https_only(https_only)
         .http_status_as_error(false)
         .user_agent(concat!("noble/", env!("CARGO_PKG_VERSION")))
         .build();
     ureq::Agent::new_with_config(config)
+}
+
+/// Is `url` an https address on one of `DOWNLOAD_HOSTS`, with no user info or port? The asset list comes from
+/// the API response, so each address in it is checked before anything is fetched from it.
+pub fn is_release_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    DOWNLOAD_HOSTS.iter().any(|known| host.eq_ignore_ascii_case(known))
 }
 
 fn net_error(e: ureq::Error) -> String {
@@ -170,8 +193,8 @@ fn verify(archive: &Path, name: &str, sums: &str) -> Result<(), String> {
     let actual = sha256_file(archive)?;
     if actual != expected {
         return Err(format!(
-            "checksum mismatch for {name} (expected {expected}, got {actual}); the download is damaged or was \
-             tampered with, nothing was installed"
+            "checksum mismatch for {name} (expected {expected}, got {actual}): the download is corrupted or \
+             incomplete, nothing was installed"
         ));
     }
     Ok(())
@@ -226,8 +249,46 @@ fn tar_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("tar"))
 }
 
-/// Extracts the archive with `tar`.
+/// Checks what `tar` would write before it writes anything: `names` is `tar -tf`, `verbose` is `tar -tvf` (the
+/// same entries in the same order). Refused: an absolute name, a `..` part (both would leave the work folder),
+/// and a link (a symlink or a hard link can point anywhere). Only regular files and folders are unpacked.
+fn check_listing(names: &str, verbose: &str) -> Result<(), String> {
+    let names: Vec<&str> = names.lines().collect();
+    let kinds: Vec<&str> = verbose.lines().collect();
+    if names.len() != kinds.len() {
+        return Err("the archive listing does not match its entries, nothing was unpacked".into());
+    }
+    for (name, line) in names.iter().zip(&kinds) {
+        let absolute = name.starts_with(['/', '\\']) || name.as_bytes().get(1) == Some(&b':');
+        let escapes = name.split(['/', '\\']).any(|part| part == "..");
+        let plain = matches!(line.as_bytes().first(), Some(b'-' | b'd')) && !line.contains(" link to ");
+        if absolute || escapes || !plain {
+            return Err(format!("the archive has an unsafe entry ({name}), nothing was unpacked"));
+        }
+    }
+    Ok(())
+}
+
+/// The entries of an archive, from `tar` (names, then verbose lines for the entry types).
+fn list_archive(tar: &Path, archive: &Path) -> Result<(String, String), String> {
+    let list = |flag: &str| -> Result<String, String> {
+        let out = std::process::Command::new(tar)
+            .arg(flag)
+            .arg(archive)
+            .output()
+            .map_err(|e| format!("could not run tar: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("could not read the archive: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    Ok((list("-tf")?, list("-tvf")?))
+}
+
+/// Unpacks the archive with `tar` into `dest`, after `check_listing` has passed every entry.
 fn extract(tar: &Path, archive: &Path, dest: &Path) -> Result<(), String> {
+    let (names, verbose) = list_archive(tar, archive)?;
+    check_listing(&names, &verbose)?;
     let out = std::process::Command::new(tar)
         .arg("-xf")
         .arg(archive)
@@ -241,14 +302,30 @@ fn extract(tar: &Path, archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn download(url: &str, to: &Path) -> Result<(), String> {
-    let resp = agent(Duration::from_secs(300)).get(url).call().map_err(net_error)?;
+/// Copies at most `max` bytes from `from` to `to`. More than that is refused (the copy stops at `max + 1`),
+/// so a runaway download cannot fill the disk.
+fn copy_capped(from: &mut impl std::io::Read, to: &mut impl std::io::Write, max: u64) -> Result<(), String> {
+    let mut limited = std::io::Read::take(from, max + 1);
+    let copied = std::io::copy(&mut limited, to).map_err(|e| format!("download failed: {e}"))?;
+    if copied > max {
+        return Err(format!("the download is larger than {max} bytes, nothing was installed"));
+    }
+    Ok(())
+}
+
+/// Downloads `url` into `to`, at most `max` bytes.
+fn download(url: &str, to: &Path, max: u64) -> Result<(), String> {
+    download_via(&agent(Duration::from_secs(300)), url, to, max)
+}
+
+fn download_via(agent: &ureq::Agent, url: &str, to: &Path, max: u64) -> Result<(), String> {
+    let resp = agent.get(url).call().map_err(net_error)?;
     let status = resp.status().as_u16();
     if status != 200 {
         return Err(format!("download failed: HTTP {status}"));
     }
     let mut file = std::fs::File::create(to).map_err(|e| format!("could not write {}: {e}", to.display()))?;
-    std::io::copy(&mut resp.into_body().into_reader(), &mut file).map_err(|e| format!("download failed: {e}"))?;
+    copy_capped(&mut resp.into_body().into_reader(), &mut file, max)?;
     file.flush().map_err(|e| e.to_string())
 }
 
@@ -352,10 +429,11 @@ pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
 }
 
 /// `install` with the downloader and `tar` passed in (tests use a local fetcher, never the network).
+/// `fetch` gets the address, the file to write and the most bytes it may write.
 fn install_with(
     release: &Release,
     exe: &Path,
-    fetch: &dyn Fn(&str, &Path) -> Result<(), String>,
+    fetch: &dyn Fn(&str, &Path, u64) -> Result<(), String>,
     tar: &Path,
 ) -> Result<(), String> {
     let name = asset_name().ok_or("no prebuilt binary for this platform; update with `cargo install noble`")?;
@@ -370,15 +448,20 @@ fn install_with(
     let sum_url = release.assets.iter().find(|(n, _)| *n == sum_name).map(|(_, u)| u.clone()).ok_or_else(|| {
         format!("release {} publishes no checksum ({sum_name}), so the download cannot be verified", release.version)
     })?;
+    for address in [&url, &sum_url] {
+        if !is_release_url(address) {
+            return Err(format!("{address} is not an https address on GitHub, nothing was downloaded"));
+        }
+    }
     let work = private_work_dir()?;
     let result = (|| {
         // The checksum first: small, and a release without a usable one is refused before the big download.
         let sums_path = work.join(&sum_name);
-        fetch(&sum_url, &sums_path)?;
+        fetch(&sum_url, &sums_path, MAX_SUMS)?;
         let sums = std::fs::read_to_string(&sums_path).map_err(|_| format!("{sum_name} is not a checksum file"))?;
         let archive = work.join(name);
         println!("Downloading {name}…");
-        fetch(&url, &archive)?;
+        fetch(&url, &archive, MAX_ARCHIVE)?;
         verify(&archive, name, &sums)?;
         println!("Checksum verified (SHA-256).");
         extract(tar, &archive, &work)?;
@@ -531,7 +614,10 @@ mod tests {
         let name = asset_name()?;
         Some(Release {
             version: "9.9.9".into(),
-            assets: vec![(name.into(), "http://fake/asset".into()), (checksum_name(name), "http://fake/sum".into())],
+            assets: vec![
+                (name.into(), "https://github.com/MertSoylu/noble/releases/download/v9.9.9/archive".into()),
+                (checksum_name(name), "https://github.com/MertSoylu/noble/releases/download/v9.9.9/sums".into()),
+            ],
         })
     }
 
@@ -568,15 +654,15 @@ mod tests {
     }
 
     /// A fetcher that "downloads" the archive `bytes` and the checksum file `sums`, never touching the network.
-    fn serve_with(bytes: Vec<u8>, sums: String) -> impl Fn(&str, &Path) -> Result<(), String> {
-        move |url, to| {
-            let body = if url.ends_with("/sum") { sums.as_bytes() } else { &bytes[..] };
+    fn serve_with(bytes: Vec<u8>, sums: String) -> impl Fn(&str, &Path, u64) -> Result<(), String> {
+        move |url, to, _max| {
+            let body = if url.ends_with("/sums") { sums.as_bytes() } else { &bytes[..] };
             std::fs::write(to, body).map_err(|e| e.to_string())
         }
     }
 
     /// Serves `bytes` with its correct checksum file (`sha256sum` format).
-    fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path) -> Result<(), String> {
+    fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path, u64) -> Result<(), String> {
         let sums = format!("{}  {}\n", sha256_hex(&bytes), asset_name().unwrap_or("archive"));
         serve_with(bytes, sums)
     }
@@ -620,7 +706,7 @@ mod tests {
         let name = asset_name().unwrap();
         let wrong = format!("{}  {name}\n", sha256_hex(b"something else"));
         let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar_program()).unwrap_err();
-        assert!(err.contains("checksum mismatch"), "{err}");
+        assert!(err.contains("checksum mismatch") && err.contains("corrupted"), "{err}");
         assert_intact(&exe);
         // A checksum file that does not name this archive (or is an error page) is refused too.
         let page = "<html>rate limited</html>".to_string();
@@ -636,7 +722,7 @@ mod tests {
         release.assets.retain(|(n, _)| !n.ends_with(".sha256"));
         let (dir, exe) = scratch("nosum");
         let fetched = std::cell::Cell::new(false);
-        let fetch = |_: &str, _: &Path| -> Result<(), String> {
+        let fetch = |_: &str, _: &Path, _: u64| -> Result<(), String> {
             fetched.set(true);
             Err("no network in tests".into())
         };
@@ -752,10 +838,89 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("noble-update-partial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("archive");
-        let res = download(&format!("http://127.0.0.1:{port}/asset"), &to);
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = download_via(&local, &format!("http://127.0.0.1:{port}/asset"), &to, MAX_ARCHIVE);
         server.join().unwrap();
         assert!(res.is_err(), "a truncated download was accepted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_github_https_addresses_are_downloaded() {
+        assert!(is_release_url("https://github.com/MertSoylu/noble/releases/download/v1/a.tar.gz"));
+        assert!(is_release_url("https://objects.githubusercontent.com/github-production-release-asset/x"));
+        assert!(is_release_url("https://release-assets.githubusercontent.com/x?sig=1"));
+        for url in [
+            "http://github.com/a",
+            "https://github.com.evil.example/a",
+            "https://user@github.com/a",
+            "https://github.com:8443/a",
+            "https://evil.example/github.com/a",
+            "https:/github.com/a",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert!(!is_release_url(url), "{url}");
+        }
+    }
+
+    /// A release whose asset addresses are not GitHub's is refused before anything is fetched.
+    #[test]
+    fn foreign_download_address_is_refused_before_fetching() {
+        let Some(mut release) = release_for_this_platform() else { return };
+        let name = asset_name().unwrap_or("archive");
+        release.assets = vec![
+            (name.into(), "https://evil.example/archive".into()),
+            (checksum_name(name), "https://evil.example/sums".into()),
+        ];
+        let (dir, exe) = scratch("foreign");
+        let fetched = std::cell::Cell::new(false);
+        let fetch = |_: &str, _: &Path, _: u64| -> Result<(), String> {
+            fetched.set(true);
+            Ok(())
+        };
+        let err = install_with(&release, &exe, &fetch, &tar_program()).unwrap_err();
+        assert!(err.contains("not an https address on GitHub"), "{err}");
+        assert!(!fetched.get());
+        assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_entries_that_escape_or_link_are_refused() {
+        // Plain files and folders pass (names as `tar -tf`, types as `tar -tvf`, GNU and bsdtar alike).
+        let names = "noble\n./\n./noble\nsrc/main.rs\n";
+        let kinds = "-rwxr-xr-x user/group 12 2026-01-01 00:00 noble\ndrwxr-xr-x u/g 0 2026-01-01 00:00 ./\n\
+            -rwxr-xr-x u/g 1 2026-01-01 00:00 src/main.rs\n-rw-r--r-- u/g 1 2026-01-01 00:00 ./noble\n";
+        assert!(check_listing(names, kinds).is_ok());
+        // Each unsafe entry is refused by its own rule: absolute, `..`, a symlink, a hard link, a device.
+        let cases = [
+            ("/etc/cron.d/x", "-rw-r--r-- u/g 1 d x"),
+            ("C:/Windows/x", "-rw-r--r-- u/g 1 d x"),
+            (r"\\server\share\x", "-rw-r--r-- u/g 1 d x"),
+            ("../../.bashrc", "-rw-r--r-- u/g 1 d x"),
+            ("src/../../x", "-rw-r--r-- u/g 1 d x"),
+            ("noble", "lrwxrwxrwx u/g 0 d noble -> /etc/passwd"),
+            ("noble", "hrw-r--r-- u/g 0 d noble link to /etc/passwd"),
+            ("noble", "-rw-r--r-- u/g 0 d noble link to /etc/passwd"),
+            ("dev", "crw-r--r-- u/g 1, 3 d dev"),
+        ];
+        for (name, kind) in cases {
+            assert!(check_listing(name, kind).is_err(), "{name} / {kind}");
+        }
+        // A listing whose two views disagree is refused too.
+        assert!(check_listing("a\nb\n", "-rw-r--r-- u/g 1 d a\n").is_err());
+    }
+
+    #[test]
+    fn copies_stop_at_the_size_cap() {
+        let mut out = Vec::new();
+        assert!(copy_capped(&mut std::io::Cursor::new(vec![7u8; 10]), &mut out, 10).is_ok());
+        assert_eq!(out.len(), 10);
+        let mut out = Vec::new();
+        let err = copy_capped(&mut std::io::Cursor::new(vec![7u8; 11]), &mut out, 10).unwrap_err();
+        assert!(err.contains("larger than 10 bytes"), "{err}");
+        assert!(out.len() <= 11, "the copy did not stop at the cap");
     }
 
     #[test]
