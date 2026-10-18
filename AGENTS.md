@@ -152,8 +152,13 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   shown (fail closed).
 - **Untrusted paths:** text from the terminal is never looked at as a network path: `term/osc.rs`
   `is_network_path` (`\\`, `//`) drops an OSC 9;9 report and `term/link.rs` `classify` refuses such tokens before any
-  file system call (on Windows that connects and sends NTLM). OSC 7 keeps its `//server/share` form (Git Bash). OSC 52
-  writes are dropped when `terminal.osc52_write` is off (`app/notify.rs`).
+  file system call (on Windows that connects and sends NTLM). An OSC 7 `//server/share` (Git Bash) becomes
+  `\\server\share` (`osc::windows_cwd`) and is stored, but `Pane::cwd` refuses it like a 9;9 report: the probe never
+  sees it, the pane keeps its start folder and `shown_cwd` shows the share. A pane opened in a share keeps it as its
+  start folder, so `classify` resolves no relative name against it and git refresh asks for none there.
+  `projects::git_dir` does not follow a `.git` file, nor a `commondir` or `gitdir` file in the git directory, that
+  names a network path (git itself would read it when it runs in the repository). OSC 52 writes are dropped when
+  `terminal.osc52_write` is off (`app/notify.rs`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme
@@ -199,9 +204,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
   `noble update`). `noble update` downloads the `release.yml` archive for the platform and its `.sha256`,
   verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
-  without checksums are refused). Only https addresses on GitHub hosts are fetched (`is_release_url`), sizes are capped
+  without checksums are refused). Only https addresses on GitHub hosts are fetched (`is_release_url`): ureq's own
+  redirects are off, `get_following` requests each `Location` itself and checks it, sizes are capped
   (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
-  before `tar` unpacks it. It then swaps the binary: on Linux/macOS one rename over the running binary (no old
+  before `tar` unpacks it. `tar` is run by its full path (`tar_program`: System32 on Windows, else `util::which`). It then swaps the binary: on Linux/macOS one rename over the running binary (no old
   copy is kept); on Windows the running one is renamed to `*.old`, falling back to `.old2` … `.old9` when one
   cannot be deleted, and `update::cleanup_old` removes it on the next launch.
 

@@ -51,7 +51,7 @@ __noble_osc7() {
     case $p in
       /[a-zA-Z] | /[a-zA-Z]/*) ;;
       /cygdrive/*) p=${p#/cygdrive} ;;
-      # A network share (`//server/share`): NOBLE turns it into a UNC path.
+      # A network share (`//server/share`): NOBLE turns it into a UNC path, which Pane::cwd never checks or uses.
       //*) ;;
       /tmp | /tmp/*) p=/$__noble_tmp${p#/tmp} ;;
       /*) p=/${__noble_root%/}$p ;;
