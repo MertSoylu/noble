@@ -4,13 +4,19 @@
 mod agents;
 pub mod bindings;
 pub mod fx;
+mod git;
 pub mod help;
 mod input;
 mod live;
 mod menu;
+mod notify;
 mod ops;
 mod palette;
+mod power;
+mod redraw;
+mod reload;
 mod search;
+mod session;
 mod settings;
 
 use std::collections::HashMap;
@@ -824,13 +830,6 @@ pub struct App {
     pr_in_flight: Option<(PathBuf, String)>,
 }
 
-/// How long the tabs must have differed from the saved session before it is written again (debounce).
-const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
-/// How often the tabs are compared with the saved session.
-const SESSION_CHECK_EVERY: Duration = Duration::from_secs(1);
-/// How long the periodic save waits for another window's session lock (the main thread must not stall).
-const SESSION_AUTOSAVE_LOCK_WAIT: Duration = Duration::from_secs(1);
-
 fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
     list.iter()
         .map(|l| {
@@ -966,28 +965,6 @@ impl App {
         app
     }
 
-    /// Startup: registers this window in the session file (`session.json`, `session-dev.json`
-    /// for `noble-dev`) and, when it is the first window of the run, reopens the saved tabs of
-    /// every window. Only with `restore_session` on.
-    pub fn restore_last_session(&mut self) {
-        if !self.cfg.terminal.restore_session {
-            return;
-        }
-        let file = self.paths.data_file(self.session_file());
-        let Some(tabs) = crate::store::session_begin(&file, &self.instance) else { return };
-        if tabs.is_empty() {
-            return;
-        }
-        let ws = crate::store::Workspace { name: "last session".into(), saved_at: 0, tabs };
-        self.restored_tabs = self.open_workspace(&ws);
-        self.view = View::Bridge;
-        // What actually opened (directories that fell back to home included) replaces the
-        // taken-over tabs right away, so a crash keeps them as they are now.
-        let tabs = self.snapshot("last session").tabs;
-        crate::store::session_save(&file, &self.instance, tabs.clone(), false);
-        self.session_saved = tabs;
-    }
-
     fn build(
         cfg: Config,
         paths: Paths,
@@ -1105,76 +1082,9 @@ impl App {
         }
     }
 
-    pub fn toast(&mut self, level: ToastLevel, text: impl Into<String>) {
-        self.toast_target(level, text, None);
-    }
-
-    /// A notification whose click does more than dismiss it (see `ToastTarget`).
-    pub fn toast_target(&mut self, level: ToastLevel, text: impl Into<String>, target: Option<ToastTarget>) {
-        let text = text.into();
-        self.toast_serial += 1;
-        self.dirty = true;
-        // Errors stay until they are clicked away; the others leave after a few seconds.
-        let life = match level {
-            ToastLevel::Error => None,
-            ToastLevel::Warn => Some(Duration::from_secs(4)),
-            _ => Some(Duration::from_secs(3)),
-        };
-        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now() });
-        while self.notices.len() > NOTICE_HISTORY {
-            self.notices.pop_front();
-        }
-        self.toasts.retain(|t| t.text != text);
-        self.toasts.push(Toast {
-            id: self.toast_serial,
-            text,
-            level,
-            born: Instant::now(),
-            life,
-            held: Duration::ZERO,
-            hover_from: None,
-            target,
-        });
-        // At most four on screen: the oldest one that leaves by itself goes first (a sticky error only
-        // when nothing else is left).
-        if self.toasts.len() > 4 {
-            let oldest = self.toasts.iter().position(|t| t.life.is_some()).unwrap_or(0);
-            self.toasts.remove(oldest);
-        }
-    }
-
     /// Terminal body: the area between the top strip and the status bar.
     pub fn body(&self) -> Rect {
         Rect::new(0, 1, self.size.0, self.size.1.saturating_sub(2))
-    }
-
-    /// Does an animation need frequent redraws?
-    pub fn animating(&self) -> bool {
-        self.moving() || self.fx.busy()
-    }
-
-    /// The animations drawn on every frame (the effects in `fx` pace themselves: `Effects::next_frame`).
-    fn moving(&self) -> bool {
-        self.boot.is_some() || self.slide.is_some() || self.zoom_anim.is_some() || self.toast_moving()
-    }
-
-    /// Whether animations play now: the setting, and on battery the "animations on battery" one.
-    pub fn anim_on(&self) -> bool {
-        let g = &self.cfg.general;
-        g.animations && (g.animations_on_battery || !self.on_battery())
-    }
-
-    /// A notification sliding in or out.
-    fn toast_moving(&self) -> bool {
-        self.anim_on()
-            && self.toasts.iter().any(|t| {
-                t.born.elapsed() < fx::TOAST_IN + fx::GRACE || t.expires_at().is_some_and(|u| Instant::now() >= u)
-            })
-    }
-
-    /// How long notifications stay on screen after their time is up (they slide out meanwhile).
-    pub fn toast_linger(&self) -> Duration {
-        if self.anim_on() { fx::TOAST_OUT } else { Duration::ZERO }
     }
 
     /// Handles the event; `true` when something visible changed (redraw).
@@ -1201,16 +1111,6 @@ impl App {
         let power = self.on_battery();
         let changed = self.apply(ev);
         shown || changed || self.ui_fingerprint() != before || self.on_battery() != power
-    }
-
-    /// Whether a non-event change happened since the last draw (read once).
-    pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    /// State shown by every screen: notifications and tab markers.
-    fn ui_fingerprint(&self) -> (u64, usize, Vec<(bool, Option<TabAlert>)>) {
-        (self.toast_serial, self.toasts.len(), self.tabs.iter().map(|t| (t.activity, t.alert)).collect())
     }
 
     /// The event's state change. `true`: something visible changed (output in a visible pane, a value Home shows).
@@ -1300,149 +1200,6 @@ impl App {
         })
     }
 
-    /// When the screen changes even with no events: clock, animation,
-    /// loading indicator, notification timeout… `None`: never changes.
-    /// The main loop draws only when that moment arrives (or an event fires).
-    pub fn redraw_after(&self) -> Option<Duration> {
-        use chrono::Timelike;
-        if self.moving() {
-            return Some(Duration::from_millis(16));
-        }
-        let mut best: Option<Duration> = None;
-        let mut want = |d: Duration| best = Some(best.map_or(d, |b| b.min(d)));
-        // Effects: every frame while something fades, only at visible steps for sliding numbers.
-        if let Some(d) = self.fx.next_frame() {
-            want(d);
-        }
-        let now = chrono::Local::now();
-        let into_sec = now.timestamp_subsec_millis().min(999) as u64;
-        let to_second = Duration::from_millis(1000 - into_sec + 5);
-        match self.view {
-            // Home: seconds of the big clock and its two blinking dots (absent on battery).
-            View::Bridge if self.live_clock() => want(to_second),
-            // On other screens only HH:MM in the top strip.
-            _ => want(to_second + Duration::from_secs(59 - now.second().min(59) as u64)),
-        }
-        let loading = match self.view {
-            View::Bridge => {
-                // Only providers on the quota panel spin: a configured but missing CLI stays
-                // Pending forever and would otherwise redraw Home ~8 times a second.
-                !self.projects_loaded
-                    || self
-                        .quota_providers()
-                        .any(|p| matches!(p.status, crate::ai::Status::Loading | crate::ai::Status::Pending))
-                    || self.sensors.last.is_none()
-            }
-            View::System => self.sensors.last.is_none(),
-            _ => false,
-        };
-        if loading {
-            want(Duration::from_millis(120));
-        }
-        if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
-            want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
-        }
-        // A notification's countdown darkens one cell at a time: wake for the next cell only.
-        if self.anim_on() {
-            let now = Instant::now();
-            for t in &self.toasts {
-                let (Some(life), None) = (t.life, t.hover_from) else { continue };
-                let cells = crate::ui::toast_cells(&t.text, self.size.0).max(1) as f64;
-                let step = life.as_secs_f64() / cells;
-                if step > 0.0 {
-                    // The drawing rounds: the next cell turns half a step past a whole one.
-                    let elapsed = t.active(now).as_secs_f64();
-                    let k = (elapsed / step + 0.5).floor() + 0.5;
-                    let at = Duration::from_secs_f64(k * step);
-                    want(at.saturating_sub(Duration::from_secs_f64(elapsed)).max(Duration::from_millis(16)));
-                }
-            }
-        }
-        // The blinking cursor of the palette and of prompts (steady on battery, see `cursor_lit`).
-        if self.live_clock() && matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
-            want(Duration::from_millis(500));
-        }
-        // The live timer of a command running in a visible pane (see `pane::live_timer`). A pane
-        // running an agent shows the agent's state instead of the timer.
-        let battery = self.on_battery();
-        for id in self.visible_panes().into_iter().filter(|id| self.agent_state(*id).is_none()) {
-            if let Some(elapsed) = self.panes.get(&id).and_then(|p| p.running_for()) {
-                want(crate::term::pane::live_timer_next(elapsed, battery));
-            }
-        }
-        // A working agent in a visible pane: its spinner (see `agent_spinning`), and the minutes
-        // of its "working 2m", which change once a minute (on battery that is its only redraw).
-        if self.agent_spinning() {
-            want(Duration::from_millis(crate::ui::hud::AGENT_SPIN_MS));
-        }
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        for since in self.visible_panes().into_iter().filter_map(|p| self.agent_badge(p)?.working_since) {
-            let into_minute = (now_ms - since * 1000).rem_euclid(60_000) as u64;
-            want(Duration::from_millis(60_000 - into_minute + 5));
-        }
-        let charging = self.sensors.battery().is_some_and(|(b, _)| b.state == crate::battery::PowerState::Charging);
-        if charging && matches!(self.view, View::Bridge | View::System) {
-            want(Duration::from_millis(450));
-        }
-        best
-    }
-
-    /// Sets up the update check: the previous check's result shows right away,
-    /// and if it is older than a day the first `tick` performs a new one.
-    fn init_updates(&mut self) {
-        if !crate::update::check_allowed() {
-            return;
-        }
-        let latest = self.ui_state.data.update_latest.clone();
-        self.set_latest_version(&latest);
-        let age = chrono::Utc::now().timestamp().saturating_sub(self.ui_state.data.update_checked);
-        let wait = (crate::update::CHECK_INTERVAL - age).clamp(0, crate::update::CHECK_INTERVAL);
-        self.next_update_check = Some(Instant::now() + Duration::from_secs(wait as u64));
-    }
-
-    /// Latest known release: announced when newer than this one and not dismissed.
-    pub fn set_latest_version(&mut self, version: &str) {
-        let newer = crate::update::is_newer(version, crate::update::current());
-        let skipped = self.ui_state.data.update_skipped == version;
-        self.update_available = (newer && !skipped).then(|| version.to_string());
-    }
-
-    /// New version to show bottom right (none when the setting is off).
-    pub fn update_notice(&self) -> Option<&str> {
-        self.update_available.as_deref().filter(|_| self.cfg.general.check_updates)
-    }
-
-    /// Runs `noble update` in a new tab; the progress shows there.
-    pub fn start_update(&mut self) {
-        let Ok(exe) = std::env::current_exe() else { return };
-        let command = self.shell.invocation_of(&exe, "update");
-        let cwd = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        self.update_available = None;
-        self.new_tab(cwd, Some(&command), Some("NOBLE update".into()));
-    }
-
-    /// Dismisses the notice: never shown again for the same version.
-    pub fn dismiss_update(&mut self) {
-        if let Some(v) = self.update_available.take() {
-            self.edit_ui_state(|d| d.update_skipped = v);
-        }
-    }
-
-    /// Warns once each when dropping to 20% and 10% while on battery.
-    fn check_battery(&mut self) {
-        let Some((b, eta)) = self.sensors.battery() else { return };
-        if b.state != crate::battery::PowerState::Discharging {
-            self.battery_warned = 100;
-            return;
-        }
-        let level = [10u8, 20].into_iter().find(|l| b.percent <= *l as f32 && *l < self.battery_warned);
-        if let Some(level) = level {
-            let text = format!("battery at {:.0}% · {}", b.percent, crate::battery::describe(b, eta));
-            self.battery_warned = level;
-            self.toast(if level <= 10 { ToastLevel::Error } else { ToastLevel::Warn }, text);
-        }
-    }
-
     /// New quota data: recorded in history, warns once per window over the threshold.
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
@@ -1530,262 +1287,6 @@ impl App {
         self.projects.get(idx)
     }
 
-    fn on_pty_output(&mut self) -> bool {
-        let visible: Vec<PaneId> = match self.view {
-            View::Term(i) => self.tabs.get(i).map(|t| t.panes()).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let mut clip: Option<String> = None;
-        let mut signals = Vec::new();
-        for (id, pane) in &self.panes {
-            if pane.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                if let Some(c) = pane.take_clipboard() {
-                    clip = Some(c);
-                }
-                let started = pane.take_started();
-                let prompt = pane.take_prompt();
-                signals.push(PaneSignal {
-                    id: *id,
-                    visible: visible.contains(id),
-                    bell: pane.take_bell(),
-                    notice: pane.take_notice(),
-                    started,
-                    finished: prompt.and_then(|_| started.or(pane.command_started).map(|t| t.elapsed())),
-                    cwd: prompt.map(|_| pane.cwd()),
-                    exit: prompt.flatten(),
-                    failed: false,
-                });
-            }
-        }
-        let mut shown = signals.iter().any(|s| s.visible);
-        for mut sig in signals {
-            if let Some(p) = self.panes.get_mut(&sig.id) {
-                p.last_output = Some(Instant::now());
-                // The shell marks command starts: from now on only that mark starts the clock.
-                if let Some(t) = sig.started {
-                    p.start_marks = true;
-                    p.ran = true;
-                    p.command_started = Some(t);
-                }
-            }
-            if let Some(cwd) = &sig.cwd {
-                // Command finished: the repo may have changed.
-                self.refresh_git_at(cwd);
-                // An agent there has exited; the tab title in the top bar may change too.
-                shown |= self.agent_state(sig.id).is_some();
-                self.clear_agent(sig.id);
-                if let Some(p) = self.panes.get_mut(&sig.id) {
-                    // Only a command typed at a prompt counts (`Pane::command_ran`): the shell's first
-                    // prompt (after it starts, or after a launcher command, whose code the shell does
-                    // not know) and an Enter on an empty line leave the last result in place.
-                    if let Some(took) = sig.finished.filter(|_| p.command_ran()) {
-                        p.last_result = Some(CommandResult { code: sig.exit, took, at: Instant::now() });
-                        sig.failed = sig.exit.is_some_and(|code| code != 0);
-                    }
-                    p.command_started = None;
-                    p.edited = false;
-                    p.ran = false;
-                    p.prompted = true;
-                }
-            }
-            if self.search.as_ref().is_some_and(|s| s.pane == sig.id) {
-                self.refresh_search();
-            }
-            self.notify(&sig);
-        }
-        if let Some(text) = clip {
-            self.set_clipboard(&text, false);
-        }
-        shown
-    }
-
-    /// Turns signals from background tabs into tab markers and notifications.
-    fn notify(&mut self, sig: &PaneSignal) {
-        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(sig.id)) else { return };
-        let title = self.tab_title(ti);
-        let long = sig
-            .finished
-            .filter(|d| self.cfg.terminal.notify_after > 0 && d.as_secs() >= self.cfg.terminal.notify_after);
-        let took = long.map(crate::util::fmt_duration);
-        let message = if let Some(n) = &sig.notice {
-            Some(format!("{title} · {n}"))
-        } else if let Some(took) = took {
-            Some(match sig.exit.filter(|_| sig.failed) {
-                Some(code) => format!("{title} · failed (exit {code}) after {took}"),
-                None => format!("{title} · done in {took}"),
-            })
-        } else if sig.bell {
-            Some(format!("{title} · needs attention"))
-        } else {
-            None
-        };
-        // The marker on the tab strip: the most urgent thing that happened. A short command that
-        // fails leaves a marker only (no toast, no bell): failures of quick commands are routine.
-        let kind = [
-            (sig.notice.is_some() || sig.bell, TabAlert::Notice),
-            (sig.failed, TabAlert::Failed),
-            (long.is_some(), TabAlert::Done),
-        ]
-        .into_iter()
-        .filter_map(|(on, kind)| on.then_some(kind))
-        .max();
-        let tab = &mut self.tabs[ti];
-        if sig.visible {
-            // On the visible tab only the app's own notice is shown.
-            if let Some(n) = &sig.notice {
-                self.toast(ToastLevel::Info, n.clone());
-            }
-            return;
-        }
-        tab.activity = true;
-        if let Some(kind) = kind {
-            tab.raise(kind);
-        }
-        let Some(message) = message else { return };
-        if self.cfg.terminal.notify {
-            self.outer_notice = Some(message.clone());
-            self.toast(ToastLevel::Info, message);
-            self.outer_bell = true;
-        }
-    }
-
-    /// Running on laptop battery (`false` when plugged in or without a battery).
-    pub fn on_battery(&self) -> bool {
-        self.sensors.battery().is_some_and(|(b, _)| b.state == crate::battery::PowerState::Discharging)
-    }
-
-    /// Seconds and the two blinking dots of the Home clock: they stop on battery
-    /// (so the screen draws only once a minute).
-    pub fn live_clock(&self) -> bool {
-        !self.on_battery()
-    }
-
-    /// The time the clocks show: now, or the fixed `clock` of the screenshots.
-    pub fn now(&self) -> chrono::DateTime<chrono::Local> {
-        self.clock.unwrap_or_else(chrono::Local::now)
-    }
-
-    /// Whether a text field's cursor is drawn now: it blinks every 500 ms, and like the
-    /// Home clock it stays lit on battery so an open palette does not redraw twice a second.
-    pub fn cursor_lit(&self) -> bool {
-        !self.live_clock() || (self.started.elapsed().as_millis() / 500).is_multiple_of(2)
-    }
-
-    /// Tunes background work to the visible screen: sensor rate and refreshing
-    /// (at most once a minute) the git status of the projects shown on Home.
-    fn sync_power_state(&mut self) {
-        let want = match self.view {
-            View::System => SensorMode::Detail,
-            View::Bridge => SensorMode::Summary,
-            _ => SensorMode::Background,
-        };
-        let on_battery = self.on_battery();
-        if self.sensor_mode != Some(want) || self.sensor_on_battery != on_battery {
-            if let Some(s) = &self.services {
-                let _ = s.sensor_req.send(SensorRequest::Mode(want, on_battery));
-            }
-            self.sensor_mode = Some(want);
-            self.sensor_on_battery = on_battery;
-        }
-        // The quota panel only exists on Home: refresh only there, immediately on entry.
-        let home = self.view == View::Bridge;
-        if home != (self.last_view == Some(View::Bridge))
-            && let Some(s) = &self.services
-        {
-            let _ = s.ai_refresh.send(crate::ai::AiReq::Visible(home));
-        }
-        if self.view == View::Bridge && self.last_view != Some(View::Bridge) {
-            self.ports_asked = None;
-            let vis = self.visible_projects();
-            let from = self.bridge.proj_sel.saturating_sub(10);
-            let paths: Vec<PathBuf> = vis.iter().skip(from).take(25).map(|i| self.projects[*i].path.clone()).collect();
-            for p in paths {
-                self.request_git(p, Duration::from_secs(60));
-            }
-        }
-        self.last_view = Some(self.view);
-    }
-
-    /// Re-requests the git status of the project containing `cwd` (unless too frequent).
-    pub fn refresh_git_at(&mut self, cwd: &std::path::Path) {
-        if let Some(path) = crate::projects::project_containing(&self.projects, cwd).map(|p| p.path.clone()) {
-            self.request_git(path, Duration::from_secs(2));
-        }
-    }
-
-    fn request_git(&mut self, path: PathBuf, min_gap: Duration) {
-        let Some(s) = &self.services else { return };
-        if self.git_requested.get(&path).is_some_and(|t| t.elapsed() < min_gap) {
-            return;
-        }
-        if s.rescan.send(ProjectReq::Refresh(path.clone())).is_ok() {
-            self.git_requested.insert(path, Instant::now());
-        }
-    }
-
-    /// Requests git status for projects shown on Home that do not have one yet
-    /// (the first scan only fetches the most recently used ones).
-    fn request_visible_git(&mut self) {
-        if self.view != View::Bridge || self.services.is_none() {
-            return;
-        }
-        let vis = self.visible_projects();
-        let from = self.bridge.proj_sel.saturating_sub(20);
-        let wanted: Vec<PathBuf> = vis
-            .iter()
-            .skip(from)
-            .take(60)
-            .map(|i| &self.projects[*i])
-            .filter(|p| p.repo && p.git.is_none() && !self.git_requested.contains_key(&p.path))
-            .take(8)
-            .map(|p| p.path.clone())
-            .collect();
-        for path in wanted {
-            // Do not keep re-requesting failed repos (no git etc.).
-            self.request_git(path, Duration::MAX);
-        }
-    }
-
-    pub fn set_clipboard(&mut self, text: &str, announce: bool) {
-        match self.clipboard.set(text) {
-            Some(via) => {
-                if announce {
-                    let n = text.chars().count();
-                    let how = if via == crate::clipboard::Copied::Terminal { " via the terminal" } else { "" };
-                    self.toast(ToastLevel::Ok, format!("copied {n} chars{how}"));
-                }
-            }
-            None => self.toast(ToastLevel::Warn, "clipboard unavailable"),
-        }
-    }
-
-    /// Pastes the system clipboard into a pane.
-    pub fn paste_clipboard(&mut self, pane: PaneId) {
-        match self.clipboard.get() {
-            Some(text) => self.paste_into(pane, text),
-            None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
-        }
-    }
-
-    /// Pastes text into a pane. Text with a line break would run as commands in an app without bracketed paste
-    /// (cmd, older PowerShell, a plain `sh`): that asks first.
-    pub fn paste_into(&mut self, pane: PaneId, text: String) {
-        let Some(p) = self.panes.get_mut(&pane) else { return };
-        let bracketed = p.parser().screen().bracketed_paste();
-        if !bracketed && text.contains(['\n', '\r']) {
-            let lines = text.lines().count().max(1);
-            let s = if lines == 1 { "" } else { "s" };
-            self.overlay = Some(Overlay::Confirm(Confirm {
-                title: "PASTE".into(),
-                body: format!("{lines} line{s} — each may run as a command. Paste?"),
-                action: ConfirmAction::Paste { pane, text },
-            }));
-            return;
-        }
-        p.scroll_reset();
-        p.paste(&text);
-    }
-
     /// Periodic work: boot animation, notifications, config watching.
     pub fn tick(&mut self) {
         // `fx` effects are left out: their pacing already draws their final frame.
@@ -1849,120 +1350,6 @@ impl App {
                 self.reload_config(false);
             }
         }
-    }
-
-    /// Re-reads the Windows Terminal settings (untouched in headless mode).
-    pub fn reload_schemes(&mut self) {
-        if self.services.is_some() {
-            self.term_schemes = crate::wt::all_schemes(crate::wt::load().as_ref());
-        }
-    }
-
-    pub fn reload_config(&mut self, announce: bool) {
-        self.reload_schemes();
-        let loaded = config::load(&self.paths.config);
-        self.cfg_mtime = loaded.mtime;
-        if let Some(err) = loaded.error {
-            self.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
-            return;
-        }
-        // The file loads now: an error toast about it is out of date (and errors never expire by themselves).
-        self.toasts.retain(|t| !matches!(t.target, Some(ToastTarget::Config { .. })));
-        self.apply_config(loaded.config);
-        // An open welcome card or theme/scheme selector previews on top of the old values: it starts
-        // over from the file, so esc cannot put the stale values back.
-        self.refresh_welcome();
-        match self.overlay {
-            Some(Overlay::Themes(_)) => self.open_theme_picker(),
-            Some(Overlay::Schemes(_)) => self.open_scheme_picker(),
-            _ => {}
-        }
-        if announce || self.keymap.warnings.is_empty() {
-            self.toast(ToastLevel::Ok, "config reloaded");
-        }
-        for w in self.keymap.warnings.clone() {
-            self.toast(ToastLevel::Warn, w);
-        }
-    }
-
-    pub fn apply_config(&mut self, cfg: Config) {
-        let old = std::mem::replace(&mut self.cfg, cfg);
-        self.theme = Theme::by_name(&self.cfg.general.theme, self.cfg.general.transparent);
-        self.keymap = Keymap::from_config(&self.cfg.keys);
-        self.shell = resolve_shell(&self.cfg.terminal, &self.paths.data);
-        self.launchers = launcher_availability(&self.cfg.launchers);
-        if !self.cfg.general.operator.trim().is_empty() {
-            self.operator = self.cfg.general.operator.trim().to_string();
-        }
-        if let Some(s) = &self.services {
-            if old.projects != self.cfg.projects {
-                if let Ok(mut c) = s.proj_cfg.lock() {
-                    *c = self.cfg.projects.clone();
-                }
-                let _ = s.rescan.send(crate::projects::ProjectReq::Rescan);
-            }
-            if old.ai != self.cfg.ai {
-                if let Ok(mut c) = s.ai_cfg.lock() {
-                    *c = self.cfg.ai.clone();
-                }
-                if !self.cfg.ai.enabled {
-                    self.ai.clear();
-                } else {
-                    self.ai.retain(|p| self.cfg.ai.providers.iter().any(|x| x.eq_ignore_ascii_case(p.id)));
-                }
-                let _ = s.ai_refresh.send(crate::ai::AiReq::Refresh);
-            }
-        }
-    }
-
-    /// Keeps the session file current while NOBLE runs, so a crash, a kill or a power loss loses
-    /// at most a few seconds of tabs, splits and directories. The tabs are compared with what was
-    /// last saved at most once a second (`tick` runs on every event and at least every 2 s, so an
-    /// idle NOBLE gains no wake-ups); a difference that lasts `SESSION_SAVE_DELAY` is written.
-    fn autosave_session(&mut self) {
-        if !self.session_autosave || !self.cfg.terminal.restore_session {
-            return;
-        }
-        if self.session_checked.elapsed() < SESSION_CHECK_EVERY {
-            return;
-        }
-        self.session_checked = Instant::now();
-        let tabs = self.snapshot("last session").tabs;
-        if tabs == self.session_saved {
-            self.session_dirty_since = None;
-            return;
-        }
-        let since = *self.session_dirty_since.get_or_insert_with(Instant::now);
-        if since.elapsed() >= SESSION_SAVE_DELAY {
-            let file = self.paths.data_file(self.session_file());
-            crate::store::session_save_waiting(&file, &self.instance, tabs.clone(), false, SESSION_AUTOSAVE_LOCK_WAIT);
-            self.session_saved = tabs;
-            self.session_dirty_since = None;
-        }
-    }
-
-    /// When the main loop must wake up for the session save: only while unsaved changes wait.
-    pub fn session_save_due(&self) -> Option<Duration> {
-        let since = self.session_dirty_since?;
-        let due = (since + SESSION_SAVE_DELAY).max(self.session_checked + SESSION_CHECK_EVERY);
-        Some(due.saturating_duration_since(Instant::now()))
-    }
-
-    /// Session file: separate so `noble-dev` does not overwrite the stable build's tabs.
-    fn session_file(&self) -> &'static str {
-        if self.dev { "session-dev.json" } else { "session.json" }
-    }
-
-    /// On exit: save the session.
-    pub fn shutdown(&mut self) {
-        if self.cfg.terminal.restore_session {
-            // Merged with the other windows' tabs; this window's earlier entries are replaced.
-            let tabs = self.snapshot("last session").tabs;
-            crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
-        }
-        self.panes.clear();
-        // Windows: lets the console-close handler return (the process ends then); on Unix nothing waits for it.
-        crate::termination::finished();
     }
 
     /// The ongoing drag kind (for hover effects).

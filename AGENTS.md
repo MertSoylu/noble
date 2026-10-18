@@ -75,6 +75,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Event flow:** input, sensors, project scan, git, the AI collector and a reader/waiter thread per shell send
   `event::AppEvent` over a single `mpsc` channel; `App` (`app/mod.rs`) handles them in the main loop.
   New background job = new `AppEvent` variant + a matching branch in `App`.
+- **App submodules:** `app/mod.rs` holds the state types and the event dispatch (`App::handle`, `apply`, `tick`);
+  `notify.rs` (toasts, notices, the update notice, PTY output → notifications), `redraw.rs` (animations and the
+  next wake-up), `session.rs` (auto-save, restore, shutdown), `power.rs` (battery, clock, sensor rate), `reload.rs`
+  (live config reload) and `git.rs` (git status requests) hold the methods on `App`.
 - **Redraw (battery-friendly):** there is no fixed frame rate. `App::handle` returns `true` if the event changed
   something visible (e.g. a sensor event while in a terminal returns `false`); anything that changes over time
   (clock, animation, spinner, toast timeout, cursor blink) must be added to `App::redraw_after`, otherwise it
@@ -86,7 +90,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   last fetch is older than 30 s, `AiReq::Refresh` — config change, R key — fetches even while Home is hidden).
   Listening ports (every 10 s, 30 s on battery) and the selected project's PR/CI state (60 s, 180 s on battery,
   or at once when its branch changed) are requested only while Home is open (`app/live.rs`).
-  The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`) the Home clock has no
+  The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`, `app/power.rs`) the Home clock has no
   seconds and does not blink.
   When adding periodic work, run it only while the relevant screen is open; measure with
   `cargo test --release --test e2e idle -- --ignored --nocapture` (CPU ms per minute).
@@ -110,7 +114,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
   owning process); without a system clipboard copied text goes out as OSC 52.
 - **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
-  `App::on_pty_output` treats it as "command finished" → that repo's git status is refreshed with
+  `App::on_pty_output` (`app/notify.rs`) treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).
   OSC 9 text / OSC 777 and the bell put an `alert` (◆) on the tab the same way.
   NOBLE's hooks send `OSC 133;D;<exit code>` before the directory (cmd.exe cannot; the first code of a prompt

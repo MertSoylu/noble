@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
+use super::{App, Confirm, ConfirmAction, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -1337,5 +1337,48 @@ impl App {
             Some(Hit::Proc(_)) => self.move_proc(-dir * 3),
             _ => {}
         }
+    }
+}
+
+/// Clipboard use from input: copying a selection out and pasting text into a pane.
+impl App {
+    pub fn set_clipboard(&mut self, text: &str, announce: bool) {
+        match self.clipboard.set(text) {
+            Some(via) => {
+                if announce {
+                    let n = text.chars().count();
+                    let how = if via == crate::clipboard::Copied::Terminal { " via the terminal" } else { "" };
+                    self.toast(ToastLevel::Ok, format!("copied {n} chars{how}"));
+                }
+            }
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+        }
+    }
+
+    /// Pastes the system clipboard into a pane.
+    pub fn paste_clipboard(&mut self, pane: PaneId) {
+        match self.clipboard.get() {
+            Some(text) => self.paste_into(pane, text),
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
+        }
+    }
+
+    /// Pastes text into a pane. Text with a line break would run as commands in an app without bracketed paste
+    /// (cmd, older PowerShell, a plain `sh`): that asks first.
+    pub fn paste_into(&mut self, pane: PaneId, text: String) {
+        let Some(p) = self.panes.get_mut(&pane) else { return };
+        let bracketed = p.parser().screen().bracketed_paste();
+        if !bracketed && text.contains(['\n', '\r']) {
+            let lines = text.lines().count().max(1);
+            let s = if lines == 1 { "" } else { "s" };
+            self.overlay = Some(Overlay::Confirm(Confirm {
+                title: "PASTE".into(),
+                body: format!("{lines} line{s} — each may run as a command. Paste?"),
+                action: ConfirmAction::Paste { pane, text },
+            }));
+            return;
+        }
+        p.scroll_reset();
+        p.paste(&text);
     }
 }
