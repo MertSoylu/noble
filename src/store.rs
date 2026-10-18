@@ -1169,7 +1169,8 @@ mod tests {
     /// separator is the same folder everywhere, a different case only on Windows and macOS.
     #[test]
     fn recent_and_pins_compare_paths_platform_aware() {
-        let base = std::env::temp_dir().join("Noble-Same-Path");
+        // A folder name of its own per process: test binaries run in parallel and share the temp folder.
+        let base = std::env::temp_dir().join(format!("Noble-Same-Path-{}", std::process::id()));
         let slash = PathBuf::from(format!("{}{}", base.display(), std::path::MAIN_SEPARATOR));
         let upper = PathBuf::from(base.to_string_lossy().to_uppercase());
         let ignores_case = cfg!(any(windows, target_os = "macos"));
