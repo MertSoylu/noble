@@ -809,8 +809,16 @@ mod tests {
         Some(!stat.is_empty() && !stat.starts_with('Z'))
     }
 
-    /// Unix: waits up to 5 s for `pid` to be gone (SIGKILL is asynchronous). `None` when `ps` cannot run.
-    #[cfg(unix)]
+    /// Windows: `tasklist` names a process's id in its output only while the process runs. `None` when `tasklist`
+    /// cannot run: the caller then skips the check.
+    #[cfg(windows)]
+    fn process_alive(pid: u32) -> Option<bool> {
+        let out =
+            std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+    }
+
+    /// Waits up to 5 s for `pid` to be gone (the kill is asynchronous). `None` when the process list cannot be read.
     fn wait_until_gone(pid: u32) -> Option<bool> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -855,8 +863,10 @@ mod tests {
         }
     }
 
-    /// NOBLE's shutdown ends a command that is still running: the call returns, and on Unix its grandchild is gone
-    /// too. Windows checks the return only (the grandchild is not observable there without extra tooling).
+    /// NOBLE's shutdown ends a command that is still running: the call returns, and its process tree is gone. Unix
+    /// checks the grandchild too. Windows checks the root process (the `cmd` that runs `ping`) with `tasklist`: the
+    /// grandchild is ended by the same `taskkill /T`, but telling it apart from other `ping`s needs a command-line
+    /// query, which this test does not make.
     #[test]
     fn shutdown_ends_a_running_command() {
         let _serial = SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -885,9 +895,12 @@ mod tests {
         while Instant::now() < deadline && (running().pids.is_empty() || !pid_file_ready(&pid_file)) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(!running().pids.is_empty(), "the command never registered");
+        // The registry holds the command's own process (its tree root): the Windows check looks at it.
+        #[cfg(windows)]
+        let root = running().pids.first().copied().expect("the command never registered");
         kill_background_children();
-        let _ = done_rx.recv_timeout(Duration::from_secs(20)).expect("the shutdown did not end the command");
+        // The kill is a `taskkill` or a SIGKILL: the call returns within seconds once it has taken effect.
+        let _ = done_rx.recv_timeout(Duration::from_secs(10)).expect("the shutdown did not end the command");
         #[cfg(unix)]
         {
             let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
@@ -895,6 +908,11 @@ mod tests {
                 Some(gone) => assert!(gone, "the grandchild survived the shutdown"),
                 None => eprintln!("ps is not installed: the grandchild check is skipped"),
             }
+        }
+        #[cfg(windows)]
+        match wait_until_gone(root) {
+            Some(gone) => assert!(gone, "the command's process survived the shutdown"),
+            None => eprintln!("tasklist is not runnable: the process check is skipped"),
         }
     }
 
