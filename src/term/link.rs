@@ -182,6 +182,21 @@ pub fn is_openable_url(url: &str) -> bool {
 /// `.command`/`.tool`/`.terminal` scripts, installer packages, and any file with an execute bit (opened in
 /// Terminal and run). Linux (`xdg-open`): `.desktop` launchers, AppImages, and files with an execute bit.
 /// The list is by type: a type it does not name is opened as before (a rare type that runs code is a gap).
+/// The extensions (lower-case) a file name could be run by. Windows reads a name differently from its text in two
+/// ways, so both readings are checked: trailing dots and spaces are not part of the name (`evil.exe.` and
+/// `evil.exe ` are `evil.exe`), and `evil.py::$DATA` is the stream `$DATA` of `evil.py`, so the name is also read
+/// up to its first ':' (a file name has no drive prefix to skip). Every system refuses the extra readings too.
+fn launch_extensions(path: &Path) -> Vec<String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let whole = name.trim_end_matches(['.', ' ']);
+    let before_stream = name.split(':').next().unwrap_or_default().trim_end_matches(['.', ' ']);
+    [whole, before_stream]
+        .into_iter()
+        .filter_map(|n| n.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .collect()
+}
+
 pub fn is_launchable(path: &Path) -> bool {
     const PROGRAM_EXTS: &[&str] = &[
         // Windows
@@ -275,8 +290,7 @@ pub fn is_launchable(path: &Path) -> bool {
         "lua",
         "tcl",
     ];
-    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if PROGRAM_EXTS.contains(&ext.as_str()) {
+    if launch_extensions(path).iter().any(|ext| PROGRAM_EXTS.contains(&ext.as_str())) {
         return true;
     }
     // Unix: an executable file (a directory's execute bit only means it can be entered). Windows has no
@@ -385,6 +399,24 @@ mod tests {
         }
         for p in ["README.md", "photo.png", "notes.txt", "src/main.rs"] {
             assert!(!is_launchable(Path::new(p)), "{p}");
+        }
+        // Windows drops trailing dots and spaces from a name and reads `name::$DATA` as the file `name`: each
+        // spelling of a program is refused, whatever the case. The check reads the name text, so every system runs it.
+        for p in [
+            "evil.py.",
+            "evil.exe ",
+            "evil.exe. .",
+            "evil.EXE   ",
+            "evil.py::$DATA",
+            "evil.py:stream",
+            "evil.exe:Zone.Identifier",
+            "a:b.ps1",
+        ] {
+            assert!(is_launchable(&Path::new("dir").join(p)), "{p}");
+        }
+        // The same spellings of a document are still opened: the reading does not refuse a text file.
+        for p in ["notes.txt.", "readme.md ", "data::$DATA", "x.txt:stream"] {
+            assert!(!is_launchable(&Path::new("dir").join(p)), "{p}");
         }
         // Unix: an executable file without an extension (`open` would run it in Terminal on macOS).
         #[cfg(unix)]
