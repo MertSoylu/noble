@@ -111,9 +111,12 @@ impl vt100::Callbacks for Callbacks {
                 }
                 self.shell_prompt();
             }
-            // OSC 9;9: Windows Terminal's cwd report.
+            // OSC 9;9: Windows Terminal's cwd report. A network path is not taken (see `is_network_path`): the
+            // pane falls back to the folder it started in, and nothing ever probes the share.
             [b"9", b"9", rest @ ..] if !rest.is_empty() => {
-                self.cwd = Some(join(rest).trim_matches('"').to_string());
+                let reported = join(rest);
+                let dir = reported.trim_matches(|c: char| c == '"' || c.is_whitespace());
+                self.cwd = (!is_network_path(dir)).then(|| dir.to_string());
                 self.shell_prompt();
             }
             // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
@@ -255,6 +258,15 @@ fn is_local_host(host: &str) -> bool {
         return true;
     }
     NAME.get_or_init(sysinfo::System::host_name).as_deref().is_some_and(|name| same_host(name, host))
+}
+
+/// Does `path` start with two separators: `\\server\share`, `//server/share`, `\\?\UNC\…`, a `\\.\` device?
+/// On Windows such a path names another machine (or a device), and touching it connects there and sends the
+/// user's credentials (NTLM) to that machine. Text from the terminal is checked with this before any file
+/// system call. Unix: `//x` means `/x`, so refusing it costs nothing there.
+pub fn is_network_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && matches!(b[0], b'\\' | b'/') && matches!(b[1], b'\\' | b'/')
 }
 
 /// An OSC 7 path as a Windows directory: Git Bash's `/c/x` → `C:\x`, its `//server/share` → `\\server\share`,

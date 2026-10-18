@@ -118,12 +118,17 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     if path_part.is_empty() || path_part.len() > 400 {
         return None;
     }
-    let candidate = if let Some(rest) = path_part.strip_prefix("~/").or_else(|| path_part.strip_prefix("~\\")) {
-        dirs::home_dir()?.join(rest)
-    } else {
-        let p = PathBuf::from(path_part);
-        if p.is_absolute() { p } else { cwd.join(path_part.trim_start_matches("./").trim_start_matches(".\\")) }
+    // A network path from the screen is never looked at: on Windows a check connects to that server and sends
+    // the user's credentials (`osc::is_network_path`). The check is on the text after the `~` or `./` prefix,
+    // because joining a rooted path onto a base replaces the base (`~\\\server` would escape the home folder).
+    let (base, rest) = match path_part.strip_prefix("~/").or_else(|| path_part.strip_prefix("~\\")) {
+        Some(rest) => (dirs::home_dir()?, rest),
+        None => (cwd.to_path_buf(), path_part.trim_start_matches("./").trim_start_matches(".\\")),
     };
+    if crate::term::osc::is_network_path(rest) {
+        return None;
+    }
+    let candidate = base.join(rest);
     // Single-word texts ("make", "done") are links only if they are real files.
     let looks_like_path = path_part.contains(['/', '\\', '.']) || !nums.is_empty();
     if !looks_like_path || !candidate.exists() {
@@ -393,6 +398,33 @@ mod tests {
             assert_eq!(open(&link), Err(OpenError::Program));
             let _ = std::fs::remove_file(&f);
         }
+    }
+
+    /// A token that is a network path is refused before the file system is asked anything: on Windows an
+    /// `exists` on `\\server\share\…` would send the user's credentials to that server. The file below
+    /// exists, so only the network rule can turn each spelling down.
+    #[test]
+    fn network_paths_are_never_looked_at() {
+        let dir = std::env::temp_dir().join(format!("noble-link-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.rs");
+        std::fs::write(&file, "fn a() {}\n").unwrap();
+        let plain = file.to_string_lossy().into_owned();
+        let found = classify(&plain, &dir).is_some();
+        let refused = [
+            format!("//{plain}"),
+            format!("\\\\{plain}"),
+            format!("file:////{}", plain.trim_start_matches(['/', '\\'])),
+            r"\\attacker\share\a.rs:3".to_string(),
+            r"\\?\UNC\attacker\share\a.rs".to_string(),
+            r"~\\\attacker\share\a.rs".to_string(),
+            r".\\\attacker\share\a.rs".to_string(),
+        ];
+        let got: Vec<_> = refused.iter().filter_map(|t| classify(t, &dir).map(|_| t.clone())).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(found, "the control path must be a link");
+        assert!(got.is_empty(), "network paths became links: {got:?}");
     }
 
     #[test]

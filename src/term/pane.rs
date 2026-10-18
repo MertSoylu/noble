@@ -17,7 +17,9 @@ use crate::util;
 
 #[cfg(test)]
 use super::osc::same_host;
-pub use super::osc::{Callbacks, Hyperlink, cwd_url_host, msys_to_windows, parse_cwd_url, windows_cwd};
+pub use super::osc::{
+    Callbacks, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
+};
 
 /// Scrollback length (without disturbing the visible scroll position).
 pub(super) fn history_len(screen: &mut vt100::Screen) -> usize {
@@ -1177,6 +1179,21 @@ mod tests {
         assert_eq!(cwd_url_host("file://box/home"), Some("box".into()));
         assert_eq!(cwd_url_host("file:///home"), None);
         assert!(same_host("Box", "box.lan") && !same_host("box", "other"));
+    }
+
+    /// OSC 9;9 (Windows Terminal's cwd report) never records a network path: the pane falls back to the folder
+    /// it started in and nothing probes the share (on Windows that would send the user's credentials to it).
+    #[test]
+    fn osc_9_9_refuses_network_paths() {
+        assert!(is_network_path(r"\\server\share") && is_network_path("//server/share"));
+        assert!(!is_network_path("/home/me") && !is_network_path(r"C:\x") && !is_network_path("/"));
+        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        parser.process(b"\x1b]9;9;C:\\work\\proj\x1b\\");
+        assert_eq!(parser.callbacks().cwd.as_deref(), Some(r"C:\work\proj"));
+        for hostile in [r"\\attacker\share", r#""\\attacker\share""#, " //attacker/share", r"\\?\UNC\attacker\share"] {
+            parser.process(format!("\x1b]9;9;{hostile}\x1b\\").as_bytes());
+            assert_eq!(parser.callbacks().cwd, None, "{hostile}");
+        }
     }
 
     #[test]
