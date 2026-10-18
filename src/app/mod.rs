@@ -888,7 +888,9 @@ impl App {
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let data = std::env::temp_dir().join("noble-headless").join(format!("{}-{seq}", std::process::id()));
-        let paths = Paths { config: PathBuf::from("config.toml"), data: data.clone() };
+        // The config file lives in the app's own folder too: a relative path would be read from, and written into,
+        // the folder the tests run in.
+        let paths = Paths { config: data.join("config.toml"), data: data.clone() };
         let mut app = App::build(cfg, paths, None, tx, size, Recent::memory(), Workspaces::memory());
         app.boot = None;
         app.rx = Some(rx);

@@ -116,7 +116,12 @@ impl App {
         // First: background commands still running (git, gh, AI quota) are killed with their process trees, so none
         // outlives NOBLE (`ai::run_command`), and none starts after this (the registry is closed). The session
         // save can wait a long time for another window's lock, and on Windows the console handler gives up after 4 s.
-        crate::ai::kill_background_children();
+        // Only an app with background services does this: the registry is process-wide and closes for good, so a
+        // headless app (tests, screenshots) shutting down would stop every other app in the process from starting one.
+        // A headless app starts no background command of its own that outlives a call.
+        if self.services.is_some() {
+            crate::ai::kill_background_children();
+        }
         if self.cfg.terminal.restore_session {
             // Merged with the other windows' tabs; this window's earlier entries are replaced.
             let tabs = self.session_tabs();
