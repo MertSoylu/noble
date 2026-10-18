@@ -71,7 +71,13 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
     ]
     .iter()
     .enumerate()
-    .map(|(i, (n, c, m))| ProcInfo { pid: 1000 + i as u32 * 17, name: n.to_string(), cpu: *c, mem: m * 1024 * 1024 })
+    .map(|(i, (n, c, m))| ProcInfo {
+        pid: 1000 + i as u32 * 17,
+        started: 0,
+        name: n.to_string(),
+        cpu: *c,
+        mem: m * 1024 * 1024,
+    })
     .collect();
     for i in 0..120 {
         let t = i as f32 / 8.0;

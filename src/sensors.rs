@@ -23,6 +23,9 @@ pub struct StaticInfo {
 #[derive(Clone, Debug, Default)]
 pub struct ProcInfo {
     pub pid: u32,
+    /// Start time (seconds since the epoch). A pid is reused once its process exits, so the pid with this start time
+    /// names one process: a kill request carries both (`kill_listed`).
+    pub started: u64,
     pub name: String,
     /// Normalized across all cores (0..100).
     pub cpu: f32,
@@ -56,9 +59,8 @@ pub struct SensorSample {
 }
 
 pub enum SensorRequest {
-    Kill {
-        pid: u32,
-    },
+    /// Terminate the process listed as `pid` with start time `started` (see `ProcInfo::started`).
+    Kill { pid: u32, started: u64, name: String },
     /// Sampling rate based on what is on screen; second field: on battery or not.
     Mode(SensorMode, bool),
 }
@@ -181,6 +183,30 @@ impl SysStatus {
     }
 }
 
+/// What became of a request to terminate a process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillOutcome {
+    Terminated,
+    /// The OS refused (no permission, or a protected process).
+    Failed,
+    /// No process has that pid any more.
+    Gone,
+    /// The pid belongs to another process now: the listed one exited and its pid was reused.
+    Replaced,
+}
+
+/// Terminates `pid` only if it is still the process that was listed, which `started` (its start time) names. The
+/// list is a snapshot: a pid alone could already belong to a new process when the request arrives.
+fn kill_listed(sys: &mut System, pid: u32, started: u64, kind: ProcessRefreshKind) -> KillOutcome {
+    let spid = Pid::from_u32(pid);
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[spid]), true, kind);
+    let Some(p) = sys.process(spid) else { return KillOutcome::Gone };
+    if p.start_time() != started {
+        return KillOutcome::Replaced;
+    }
+    if p.kill() { KillOutcome::Terminated } else { KillOutcome::Failed }
+}
+
 /// Starts the sampling thread.
 pub fn spawn(tx: Tx, requests: Receiver<SensorRequest>) {
     let _ = std::thread::Builder::new().name("sensors".into()).spawn(move || run(tx, requests));
@@ -234,14 +260,9 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
                 }
                 mode = m;
             }
-            Ok(SensorRequest::Kill { pid }) => {
-                let spid = Pid::from_u32(pid);
-                sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[spid]), true, proc_kind);
-                let (ok, name) = match sys.process(spid) {
-                    Some(p) => (p.kill(), p.name().to_string_lossy().into_owned()),
-                    None => (false, format!("pid {pid}")),
-                };
-                let _ = tx.send(AppEvent::KillResult { pid, name, ok });
+            Ok(SensorRequest::Kill { pid, started, name }) => {
+                let outcome = kill_listed(&mut sys, pid, started, proc_kind);
+                let _ = tx.send(AppEvent::KillResult { pid, name, outcome });
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -270,6 +291,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
                 .values()
                 .map(|p| ProcInfo {
                     pid: p.pid().as_u32(),
+                    started: p.start_time(),
                     name: p.name().to_string_lossy().into_owned(),
                     cpu: (p.cpu_usage() / cores).clamp(0.0, 100.0),
                     mem: p.memory(),
@@ -423,6 +445,37 @@ fn skip_mount(mount: &str, fs: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long-running process of the test's own, killed when dropped.
+    struct Sleeper(std::process::Child);
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A kill names the process by pid and start time: a request whose start time no longer matches (its pid was
+    /// reused) leaves the process alone. Only the test's own child is ever signalled.
+    #[test]
+    fn kill_takes_only_the_listed_process() {
+        let mut command = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" });
+        command.args(if cfg!(windows) { &["-n", "30", "127.0.0.1"][..] } else { &["30"][..] });
+        command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let mut child = Sleeper(command.spawn().expect("a sleeping process"));
+        let pid = child.0.id();
+        let kind = ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::Never);
+        let mut sys = System::new_with_specifics(RefreshKind::nothing());
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true, kind);
+        let started = sys.process(Pid::from_u32(pid)).expect("the child is listed").start_time();
+
+        assert_eq!(kill_listed(&mut sys, pid, started.wrapping_add(1), kind), KillOutcome::Replaced);
+        assert!(child.0.try_wait().expect("wait").is_none(), "a mismatched start time killed the process");
+        assert_eq!(kill_listed(&mut sys, pid, started, kind), KillOutcome::Terminated);
+        child.0.wait().expect("reap");
+        assert_eq!(kill_listed(&mut sys, pid, started, kind), KillOutcome::Gone);
+    }
 
     #[test]
     fn history_is_bounded_and_status_tracks_load() {

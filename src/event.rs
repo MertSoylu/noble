@@ -24,7 +24,7 @@ pub enum AppEvent {
     KillResult {
         pid: u32,
         name: String,
-        ok: bool,
+        outcome: crate::sensors::KillOutcome,
     },
     /// A program started with `util::spawn_reporting` exited with an error (an `xdg-open` with no
     /// handler for the file): the text to show.

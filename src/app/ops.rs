@@ -784,11 +784,11 @@ impl App {
         self.toast(ToastLevel::Info, "scanning projects…");
     }
 
-    pub fn request_kill(&mut self, pid: u32, name: String) {
+    pub fn request_kill(&mut self, pid: u32, started: u64, name: String) {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "TERMINATE PROCESS".into(),
             body: format!("{name} · pid {pid}"),
-            action: ConfirmAction::Kill { pid, name },
+            action: ConfirmAction::Kill { pid, started, name },
         }));
     }
 
@@ -848,9 +848,9 @@ impl App {
                     self.toast(ToastLevel::Warn, format!("workspace '{name}' not found"));
                 }
             }
-            ConfirmAction::Kill { pid, name } => match &self.services {
+            ConfirmAction::Kill { pid, started, name } => match &self.services {
                 Some(s) => {
-                    let _ = s.sensor_req.send(SensorRequest::Kill { pid });
+                    let _ = s.sensor_req.send(SensorRequest::Kill { pid, started, name });
                 }
                 None => self.toast(ToastLevel::Warn, format!("cannot terminate {name}")),
             },

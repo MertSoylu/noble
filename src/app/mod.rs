@@ -32,7 +32,7 @@ use crate::config::{self, Config, Launcher, Paths};
 use crate::event::{AppEvent, Tx};
 use crate::keys::Keymap;
 use crate::projects::{Project, ProjectReq};
-use crate::sensors::{self, SensorMode, SensorRequest, Sensors};
+use crate::sensors::{self, KillOutcome, SensorMode, SensorRequest, Sensors};
 use crate::store::{Recent, SavedTab, UsageHistory, Workspaces};
 use crate::term::layout::{Divider, PaneId};
 use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
@@ -94,8 +94,10 @@ pub enum ConfirmAction {
         pane: PaneId,
         text: String,
     },
+    /// Terminate the process listed as `pid` with start time `started` (checked again before the kill).
     Kill {
         pid: u32,
+        started: u64,
         name: String,
     },
     /// The saved workspace by name (another window may have changed the list meanwhile).
@@ -1140,13 +1142,15 @@ impl App {
                 self.sensors.ingest(*s);
                 self.check_battery();
             }
-            AppEvent::KillResult { pid, name, ok } => {
-                if ok {
-                    self.toast(ToastLevel::Ok, format!("terminated {name} ({pid})"));
-                } else {
-                    self.toast(ToastLevel::Error, format!("could not terminate {name} ({pid})"));
-                }
-            }
+            AppEvent::KillResult { pid, name, outcome } => match outcome {
+                KillOutcome::Terminated => self.toast(ToastLevel::Ok, format!("terminated {name} ({pid})")),
+                KillOutcome::Failed => self.toast(ToastLevel::Error, format!("could not terminate {name} ({pid})")),
+                KillOutcome::Gone => self.toast(ToastLevel::Info, format!("{name} ({pid}) has already exited")),
+                KillOutcome::Replaced => self.toast(
+                    ToastLevel::Warn,
+                    format!("{name} has already exited: pid {pid} is another process now, nothing was terminated"),
+                ),
+            },
             AppEvent::LaunchFailed(text) => self.toast(ToastLevel::Error, text),
             AppEvent::Projects(list) => self.set_projects(list),
             AppEvent::Git(path, info) => {

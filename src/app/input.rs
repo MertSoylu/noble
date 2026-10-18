@@ -680,7 +680,7 @@ impl App {
     fn terminate_selected(&mut self) {
         let procs = self.visible_procs();
         if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
-            self.request_kill(p.pid, p.name.clone());
+            self.request_kill(p.pid, p.started, p.name.clone());
         } else {
             self.toast(ToastLevel::Info, "select a process first (↑/↓)");
         }

@@ -316,7 +316,7 @@ fn hostile_external_data_renders() {
             rx_rate: f64::NAN,
             tx_rate: f64::INFINITY,
             disks: vec![DiskInfo { mount: weird.into(), total: 0, used: u64::MAX }],
-            procs: vec![ProcInfo { pid: 1, name: weird.into(), cpu: f32::NAN, mem: u64::MAX }],
+            procs: vec![ProcInfo { pid: 1, started: 0, name: weird.into(), cpu: f32::NAN, mem: u64::MAX }],
             proc_count: usize::MAX,
             uptime: u64::MAX,
             battery: Some(noble::battery::Battery {
