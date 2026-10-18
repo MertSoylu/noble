@@ -11,6 +11,24 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use noble::term::pane::Callbacks;
 
+/// The word the shell prints in `wait_shell_ready`. The command typed for it spells the word as `$((6*7))`, so
+/// the echo of the typed line never contains the word: only the shell's output does.
+const READY_WORD: &str = "e2e-ready-42";
+const READY_COMMAND: &[u8] = b"echo e2e-ready-$((6*7))\r";
+
+/// The screen as text, one line per row. `vt100::Screen::contents()` joins a row that wrapped onto the next one with
+/// no line break, so a shell's output can end up on one long line with the text around it (on Windows the whole
+/// screen was one such line in the failing run).
+fn screen_text(screen: &vt100::Screen) -> String {
+    let (_, cols) = screen.size();
+    screen.rows(0, cols).collect::<Vec<_>>().join("\n")
+}
+
+/// Whether `word` is a whole word of some line. Text stuck to it, such as a title's `├──word`, does not count.
+fn has_word(text: &str, word: &str) -> bool {
+    text.lines().any(|line| line.split_whitespace().any(|w| w == word))
+}
+
 struct Harness {
     parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -61,7 +79,7 @@ impl Harness {
     }
 
     fn screen(&self) -> String {
-        self.parser.lock().unwrap().screen().contents()
+        screen_text(self.parser.lock().unwrap().screen())
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -86,17 +104,18 @@ impl Harness {
         }
     }
 
-    /// Waits until the focused pane's shell runs what is typed: the line `echo` prints shows up. Input typed while the
-    /// shell is still starting can be lost, so the command is typed again every half second until it runs.
+    /// Waits until the focused pane's shell runs what is typed: the word `echo` prints shows up as a word of its own
+    /// (the title and the typed line do not count). Input typed while the shell is still starting can be lost, so the
+    /// command is typed again every half second until it runs.
     fn wait_shell_ready(&self, secs: u64) {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
             let s = self.screen();
-            if s.lines().any(|l| l.trim() == "e2e-ready-42") {
+            if has_word(&s, READY_WORD) {
                 return;
             }
             assert!(Instant::now() < deadline, "the shell never ran a command; screen:\n{s}");
-            self.send(b"echo e2e-ready-42\r");
+            self.send(READY_COMMAND);
             std::thread::sleep(Duration::from_millis(500));
         }
     }
@@ -143,6 +162,27 @@ impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// The screen reading behind `wait_shell_ready`, checked without a shell: a row that wrapped onto the next one is
+/// still read as its own line, and neither the title nor the typed command counts as the output.
+#[test]
+fn ready_word_is_read_from_its_own_row() {
+    let read = |bytes: &[u8]| {
+        let mut parser = vt100::Parser::new(6, 20, 0);
+        parser.process(bytes);
+        (parser.screen().contents(), has_word(&screen_text(parser.screen()), READY_WORD))
+    };
+    // The first row fills all 20 columns and wraps: `contents()` glues the output to it on one line.
+    let (joined, found) = read(b"0123456789ABCDEFGHIJe2e-ready-42\r\n$ ");
+    assert!(!joined.lines().any(|l| l.trim() == READY_WORD), "the wrapped row was not joined: {joined:?}");
+    assert!(found, "the output on a wrapped row was not found");
+    let (_, found) = read(b"PS C:\\> echo e2e-ready-42\r\ne2e-ready-42\r\nPS C:\\> ");
+    assert!(found, "the output after the typed command was not found");
+    let (_, found) = read(b"PS C:\\> echo e2e-ready-$((6*7))\r\nPS C:\\> ");
+    assert!(!found, "the typed command counted as the output");
+    let (_, found) = read("├──e2e-ready-42\r\n".as_bytes());
+    assert!(!found, "the title counted as the output");
 }
 
 fn save(name: &str, text: &str) {
