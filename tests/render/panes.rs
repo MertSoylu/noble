@@ -456,9 +456,8 @@ fn scroll_bar_clears_wide_characters_under_it() {
     use noble::app::Hit;
     let mut app = demo_app(80, 24);
     app.new_tab(std::env::temp_dir(), None, Some("wide".into()));
-    std::thread::sleep(Duration::from_millis(1500));
-    app.pump();
     let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
     render(&mut app, 80, 24);
     let cols = app.panes[&id].size.1 as usize;
     {

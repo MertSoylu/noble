@@ -107,9 +107,8 @@ fn scrollback_helpers_while_scrolled_back() {
     use noble::app::Hit;
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("scroll".into()));
-    std::thread::sleep(Duration::from_millis(1500));
-    app.pump();
     let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
     let feed = |app: &mut App, from: usize, to: usize| {
         let pane = &app.panes[&id];
         let text: String = (from..to).map(|i| format!("line {i}\r\n")).collect();

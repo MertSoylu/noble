@@ -117,8 +117,10 @@ fn wait_screen(app: &mut App, id: PaneId, needle: &str, what: &str) {
 /// space are reported by every installed bash/zsh/fish and decoded back to the same path.
 #[test]
 fn cwd_with_special_characters_is_tracked() {
+    let mut checked = Vec::new();
     for shell in bashes().into_iter().chain(["zsh", "fish"]) {
         let Some(sh) = IsolatedShell::new(shell, "chars", &[]) else { continue };
+        checked.push(shell);
         let base = sh.home.join("dir with spaces ü 日本");
         let odd = base.join("100% #1;x? ");
         std::fs::create_dir_all(&odd).unwrap();
@@ -129,6 +131,7 @@ fn cwd_with_special_characters_is_tracked() {
         assert_eq!(app.panes[&id].cwd(), odd, "{}", sh.shell);
         app.run(Action::CloseTab);
     }
+    assert_checked(&checked, "cwd_with_special_characters_is_tracked");
 }
 
 /// bash on PATH, and on macOS also the system `/bin/bash` (3.2), which Homebrew's bash 5
@@ -166,6 +169,7 @@ fn user_prompt_hooks_keep_working() {
         ("bash-str", "PROMPT_COMMAND='__u=$((__u+1)); echo \"UHOOK$__u\" # user hook'\n"),
         ("bash-arr", "__u=0\nPROMPT_COMMAND=('__u=$((__u+1))' 'echo \"UHOOK$__u\"')\n"),
     ];
+    let mut checked = Vec::new();
     for bash in bashes() {
         for (case, rc) in cases {
             // Older bash (macOS 3.2) runs only the first element of an array PROMPT_COMMAND.
@@ -173,6 +177,7 @@ fn user_prompt_hooks_keep_working() {
                 continue;
             }
             let Some(sh) = IsolatedShell::new(bash, case, &[]) else { break };
+            checked.push(bash);
             sh.write(".bashrc", rc);
             // macOS starts bash as a login shell, which reads ~/.bash_profile; users source
             // ~/.bashrc from there. (Linux starts it with the rc file only.)
@@ -190,6 +195,7 @@ fn user_prompt_hooks_keep_working() {
             "precmd() { __u=$((__u+1)); echo \"UHOOK$__u\" }\n\
              __v() { echo VHOOK }\nprecmd_functions+=(__v)\n",
         );
+        checked.push("zsh");
         let (mut app, id) = sh.open(&[], &sh.home);
         wait_cwd(&mut app, id, &sh.home, "zsh");
         wait_screen(&mut app, id, "UHOOK1", "zsh");
@@ -202,12 +208,14 @@ fn user_prompt_hooks_keep_working() {
             ".config/fish/config.fish",
             "set -g __u 0\nfunction fish_prompt\n    set -g __u (math $__u + 1)\n    echo \"UHOOK$__u> \"\nend\n",
         );
+        checked.push("fish");
         let (mut app, id) = sh.open(&[], &sh.home);
         wait_cwd(&mut app, id, &sh.home, "fish");
         wait_screen(&mut app, id, "UHOOK1>", "fish");
         cd_and_check(&mut app, id, target.path(), "UHOOK2>", "fish");
         app.run(Action::CloseTab);
     }
+    assert_checked(&checked, "user_prompt_hooks_keep_working");
 }
 
 /// zsh finds the user's startup files in their own `ZDOTDIR`: one set by `~/.zshenv`
@@ -216,7 +224,11 @@ fn user_prompt_hooks_keep_working() {
 #[test]
 fn zsh_user_zdotdir_is_sourced() {
     let target = TempDir::new("noble-zdotdir");
-    let Some(sh) = IsolatedShell::new("zsh", "zdot-env", &[]) else { return };
+    // zsh alone: not on every image, so it is skipped (loudly) where it is missing.
+    let Some(sh) = IsolatedShell::new("zsh", "zdot-env", &[]) else {
+        eprintln!("zsh_user_zdotdir_is_sourced: zsh is not installed, skipped");
+        return;
+    };
     sh.write(".zshenv", "ZDOTDIR=$HOME/.config/zsh\n");
     sh.write(".config/zsh/.zshrc", "precmd() { echo ZRC_HOOK }\n");
     let (mut app, id) = sh.open(&[], &sh.home);
@@ -232,6 +244,7 @@ fn zsh_user_zdotdir_is_sourced() {
     let user = root.join("home").join("zdot");
     let Some(sh) = IsolatedShell::new("zsh", "zdot-inherit", &[("NOBLE_USER_ZDOTDIR", &user.display().to_string())])
     else {
+        eprintln!("zsh_user_zdotdir_is_sourced: zsh is not installed, skipped");
         return;
     };
     sh.write("zdot/.zshenv", "export ZENV_SEEN=1\n");
@@ -248,9 +261,11 @@ fn zsh_user_zdotdir_is_sourced() {
 #[test]
 fn user_shell_args_and_integration() {
     let target = TempDir::new("noble-args");
+    let mut checked = Vec::new();
     // bash login shells read ~/.bash_profile, not the rc file: NOBLE loads it itself.
     for login in ["-l", "--login"] {
         let Some(sh) = IsolatedShell::new("bash", &format!("login{login}"), &[]) else { break };
+        checked.push("bash");
         sh.write(".bash_profile", "echo PROFILE_LOADED\n. ~/.bashrc\n");
         sh.write(".bashrc", "PROMPT_COMMAND='echo RC_HOOK'\n");
         let (mut app, id) = sh.open(&[login], &sh.home);
@@ -266,6 +281,7 @@ fn user_shell_args_and_integration() {
         [("bash", "--norc"), ("zsh", "-f"), ("zsh", "--no-rcs"), ("fish", "--no-config"), ("fish", "-N")]
     {
         let Some(sh) = IsolatedShell::new(shell, &format!("norc{arg}"), &[]) else { continue };
+        checked.push(shell);
         sh.write(".bashrc", "echo RC_READ\n");
         sh.write(".zshrc", "echo RC_READ\n");
         sh.write(".config/fish/config.fish", "echo RC_READ\n");
@@ -277,4 +293,5 @@ fn user_shell_args_and_integration() {
         assert!(!screen.contains("RC_READ"), "{shell} {arg}: rc file was read\n{screen}");
         app.run(Action::CloseTab);
     }
+    assert_checked(&checked, "user_shell_args_and_integration");
 }

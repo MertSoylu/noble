@@ -343,12 +343,13 @@ pub(crate) fn fake_agent(shell: &noble::term::pane::ShellSpec, title: &str) -> S
     }
 }
 
-/// Waits until the shell's startup output settles (content unchanged for 700 ms).
+/// Waits until the shell's startup output settles: the screen is unchanged for 700 ms and not blank. Panics with
+/// the screen when that does not happen within 15 s, so a shell that never gets to its prompt fails the test.
 pub(crate) fn wait_idle(app: &mut App, pane: noble::term::layout::PaneId) {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut last = String::new();
     let mut stable = std::time::Instant::now();
-    while std::time::Instant::now() < deadline {
+    loop {
         app.pump();
         let now = app.panes[&pane].parser().screen().contents();
         if now != last {
@@ -357,8 +358,17 @@ pub(crate) fn wait_idle(app: &mut App, pane: noble::term::layout::PaneId) {
         } else if !last.trim().is_empty() && stable.elapsed() > Duration::from_millis(700) {
             return;
         }
+        assert!(std::time::Instant::now() < deadline, "the shell's output never settled:\n{last}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Asserts that a test over "every installed shell" checked at least one shell, and says which. The default shell is
+/// always on the platform's image (cmd or pwsh on Windows, bash or sh on Unix), so an empty list means the skips hid
+/// the whole test.
+pub(crate) fn assert_checked<S: std::fmt::Debug>(checked: &[S], test: &str) {
+    assert!(!checked.is_empty(), "{test}: no shell was checked");
+    eprintln!("{test}: checked {checked:?}");
 }
 
 /// Degenerate sizes: zero width or height, 1×1, one row, one column.
