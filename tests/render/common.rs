@@ -328,6 +328,30 @@ pub(crate) fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool)
     }
 }
 
+/// Presses Enter until `done` holds, sending it again every 300 ms. A key sent before a program is reading input
+/// can be lost: the cmd.exe agent's `pause` (CI, Windows) kept waiting after one Enter sent as soon as its title
+/// showed. An Enter that lands at the shell prompt only makes an empty line, so repeating it does no harm.
+pub(crate) fn press_enter_until(
+    app: &mut App,
+    pane: noble::term::layout::PaneId,
+    what: &str,
+    done: impl Fn(&App) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        app.panes[&pane].write(b"\r");
+        let next = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < next {
+            app.pump();
+            if done(app) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(std::time::Instant::now() < deadline, "{what} never happened\n{}", render(app, 110, 30));
+    }
+}
+
 /// A stand-in for an agent's TUI in `shell`: sets the window title the way the agent
 /// does, then waits for a line (Enter "exits" it).
 pub(crate) fn fake_agent(shell: &noble::term::pane::ShellSpec, title: &str) -> String {

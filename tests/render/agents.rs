@@ -224,8 +224,8 @@ fn check_agent_lifecycle(shell: &str) {
     let label = app.panes[&pane].label();
     assert!(tab.contains("codex") || (shell == "cmd.exe" && label.contains("codex")), "{shell}: {tab:?} / {label:?}");
     assert!(!tab.contains("claude"), "{shell}: {tab:?}");
-    app.panes[&pane].write(b"\r");
-    pump_until(&mut app, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
+    // Enter is repeated until the agent takes one: see `press_enter_until`.
+    press_enter_until(&mut app, pane, &format!("{shell}: back at the shell"), |a| a.agent_state(pane).is_none());
     assert!(!app.panes[&pane].label().contains("codex"), "{shell}");
     // The title can reset before the shell's next prompt mark arrives; until then the pane still counts as
     // running a command, and closing its tab below would ask first instead of closing.
