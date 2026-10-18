@@ -66,7 +66,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `buf.cell_mut(..)` (as in `ui/mod.rs`, `ui/overlay.rs`); never index it. `ui::draw` also updates layout state
   (`sync_layout`, `hits`, the slide animation), so it is not a pure function of `App`.
 - State only changes on the main thread; background jobs send an `AppEvent`. The one deliberate exception:
-  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself.
+  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself
+  (queued to the pane's writer thread, like keys).
 - Network/CLI errors never panic: providers return `Err(String)`, the UI shows the cache with "~".
 
 ## Architecture (parts that span several files)
@@ -104,7 +105,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
-  shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/osc.rs` the vt100 `Callbacks` (OSC parsing, hyperlinks), `term/input.rs` xterm key/mouse encoding and AltGr
+  shell integration (cwd tracking via OSC 7 / OSC 9;9; the pane's writer thread is the only writer to the PTY
+  (`PtyInput`), so `Pane::write` never blocks on a program that does not read; `Pane::cwd` checks a reported folder
+  on a background thread (`AppEvent::PaneCwd`), and a network path is shown (`shown_cwd`) but never checked or used),
+  `term/osc.rs` the vt100 `Callbacks` (OSC parsing, hyperlinks), `term/input.rs` xterm key/mouse encoding and AltGr
   handling.
 - **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT` (only when
   `PROMPT` is not already set in NOBLE's environment); bash (`--rcfile`; login arguments use the separate

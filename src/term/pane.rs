@@ -547,6 +547,14 @@ impl PtyInput {
     }
 }
 
+/// What the pane knows about the folder the shell reported (`Pane::cwd`): the reported text the answer is for,
+/// and whether that folder answered the probe (`None` while it is pending).
+#[derive(Default)]
+struct CwdCheck {
+    raw: Option<String>,
+    usable: Option<bool>,
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
@@ -556,14 +564,16 @@ pub struct Pane {
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// Set by the wait thread once the child is reaped (see `kill_child`).
     exited: Arc<AtomicBool>,
+    /// Sends the folder-check answers (`AppEvent::PaneCwd`) to the main loop.
+    events: Sender<AppEvent>,
     pub dirty: Arc<AtomicBool>,
     /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
     output_gen: Arc<AtomicU64>,
     /// (row, col)
     pub size: (u16, u16),
     pub start_cwd: PathBuf,
-    /// The last directory the shell reported, checked once (`cwd`): (reported text, usable path).
-    cwd_checked: Mutex<Option<(String, PathBuf)>>,
+    /// The last directory the shell reported and whether it is usable (`cwd`).
+    cwd_check: Mutex<CwdCheck>,
     pub shell_label: String,
     pub command: Option<String>,
     /// The quick-launch command (as configured, e.g. `claude`) this pane was opened with;
@@ -791,11 +801,12 @@ impl Pane {
             master: pair.master,
             killer,
             exited,
+            events: tx,
             dirty,
             output_gen,
             size: (rows, cols),
             start_cwd: cwd,
-            cwd_checked: Mutex::new(None),
+            cwd_check: Mutex::new(CwdCheck::default()),
             shell_label: spec.shell.label(),
             command: spec.command.map(str::to_string),
             launcher: None,
@@ -898,23 +909,57 @@ impl Pane {
         process_label(&p.callbacks().title, &self.shell_label)
     }
 
-    /// The directory the shell reported, or the start directory when it is not usable. Each newly
-    /// reported directory is checked once (time-limited, `util::usable_dirs`) and the answer is
-    /// kept, so drawing never touches the disk and a dead network share cannot freeze the UI.
+    /// The folder commands and the UI act on: the directory the shell reported when it is usable, otherwise the
+    /// start directory. Drawing never touches the disk, and nothing here waits for it: a reported directory is
+    /// checked once on a background thread (`util::usable_dirs`, time-limited, so a share that stopped answering
+    /// counts as unusable). Until that answers, and whenever the answer is no, this returns the start directory.
+    /// The answer comes back as `AppEvent::PaneCwd` and is stored with `set_cwd_usable`. A network path is never
+    /// checked: it is not a folder this pane acts on (`shown_cwd` shows it).
     pub fn cwd(&self) -> PathBuf {
-        let reported = lock(&self.parser).callbacks().cwd.clone();
-        let Some(reported) = reported else { return self.start_cwd.clone() };
-        let mut checked = lock(&self.cwd_checked);
-        if let Some((raw, path)) = checked.as_ref()
-            && *raw == reported
-        {
-            return path.clone();
+        let Some(reported) = lock(&self.parser).callbacks().cwd.clone() else { return self.start_cwd.clone() };
+        if is_network_path(&reported) {
+            return self.start_cwd.clone();
         }
-        let dir = PathBuf::from(&reported);
-        let usable = util::usable_dirs(std::slice::from_ref(&dir), CWD_PROBE_TIMEOUT, |p| p.is_dir()).contains(&dir);
-        let path = if usable { dir } else { self.start_cwd.clone() };
-        *checked = Some((reported, path.clone()));
-        path
+        let mut check = lock(&self.cwd_check);
+        if check.raw.as_deref() != Some(reported.as_str()) {
+            let dir = PathBuf::from(&reported);
+            let events = self.events.clone();
+            let id = self.id;
+            let probe_reported = reported.clone();
+            let probe = std::thread::Builder::new().name("cwd-probe".into()).spawn(move || {
+                let usable =
+                    util::usable_dirs(std::slice::from_ref(&dir), CWD_PROBE_TIMEOUT, |p| p.is_dir()).contains(&dir);
+                let _ = events.send(AppEvent::PaneCwd { pane: id, reported: probe_reported, usable });
+            });
+            check.raw = Some(reported);
+            // No thread to spare: the folder counts as unusable rather than being checked on this thread.
+            check.usable = if probe.is_ok() { None } else { Some(false) };
+        }
+        match (check.usable, check.raw.as_deref()) {
+            (Some(true), Some(raw)) => PathBuf::from(raw),
+            _ => self.start_cwd.clone(),
+        }
+    }
+
+    /// The folder as the title shows it: the reported text itself for a network path (shown, never touched),
+    /// otherwise `cwd`.
+    pub fn shown_cwd(&self) -> PathBuf {
+        let reported = lock(&self.parser).callbacks().cwd.clone();
+        match reported {
+            Some(reported) if is_network_path(&reported) => PathBuf::from(reported),
+            _ => self.cwd(),
+        }
+    }
+
+    /// Stores the answer of a folder check (`AppEvent::PaneCwd`). An answer for a folder the shell has since
+    /// left is ignored. `true` when it was stored.
+    pub fn set_cwd_usable(&self, reported: &str, usable: bool) -> bool {
+        let mut check = lock(&self.cwd_check);
+        if check.raw.as_deref() != Some(reported) || check.usable.is_some() {
+            return false;
+        }
+        check.usable = Some(usable);
+        true
     }
 
     /// Name of the folder the shell last reported (or started in). No file system access, so

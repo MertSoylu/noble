@@ -395,7 +395,7 @@ fn pane_frame(
     }
     let inner = hud::frame_outline(buf, outline, "", "", focused, th);
     let y = rect.y;
-    let cwd = util::tilde(&pane.cwd());
+    let cwd = util::tilde(&pane.shown_cwd());
     // The lock leads the title so it shows even when the pane is too narrow for the tag or all its
     // buttons (`fit_title` ranks it right after close).
     let lock = if pane.passthrough { "🔒 " } else { "" };

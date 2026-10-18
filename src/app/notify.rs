@@ -124,6 +124,20 @@ impl App {
         shown
     }
 
+    /// A folder check came back (`Pane::cwd`). While it was pending the prompt's git refresh ran on the start
+    /// folder, so the folder the pane shows now is refreshed here. `true` when the answer was stored.
+    pub(super) fn on_pane_cwd(&mut self, id: PaneId, reported: &str, usable: bool) -> bool {
+        let Some(pane) = self.panes.get(&id) else { return false };
+        if !pane.set_cwd_usable(reported, usable) {
+            return false;
+        }
+        let cwd = pane.cwd();
+        if cwd != pane.start_cwd {
+            self.refresh_git_at(&cwd);
+        }
+        true
+    }
+
     /// Turns signals from background tabs into tab markers and notifications.
     pub(super) fn notify(&mut self, sig: &PaneSignal) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(sig.id)) else { return };

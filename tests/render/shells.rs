@@ -79,12 +79,15 @@ fn wait_cwd(app: &mut App, id: PaneId, want: &Path, what: &str) {
     loop {
         app.pump();
         let reported = app.panes[&id].parser().callbacks().cwd.clone();
-        if reported.as_ref().and_then(|c| std::fs::canonicalize(c).ok()) == Some(want.clone()) {
+        // The folder the pane acts on (`Pane::cwd`) follows the report once its check has been applied.
+        let acted = app.panes[&id].cwd();
+        let acted_ok = std::fs::canonicalize(&acted).ok() == Some(want.clone());
+        if acted_ok && reported.as_ref().and_then(|c| std::fs::canonicalize(c).ok()) == Some(want.clone()) {
             return;
         }
         if std::time::Instant::now() > deadline {
             let screen = app.panes[&id].parser().screen().contents();
-            panic!("{what}: reported cwd {reported:?}, want {want:?}\n{screen}");
+            panic!("{what}: reported cwd {reported:?}, acted on {acted:?}, want {want:?}\n{screen}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }

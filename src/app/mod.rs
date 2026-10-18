@@ -1104,7 +1104,7 @@ impl App {
                 self.view == View::Bridge || self.overlay.is_some()
             }
             // Decided by `apply`: only a value that Home shows counts.
-            AppEvent::Ports(_) | AppEvent::Pr(..) | AppEvent::AddDecided { .. } => false,
+            AppEvent::Ports(_) | AppEvent::Pr(..) | AppEvent::AddDecided { .. } | AppEvent::PaneCwd { .. } => false,
         };
         let before = self.ui_fingerprint();
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
@@ -1119,6 +1119,7 @@ impl App {
             AppEvent::Input(e) => self.on_input(e),
             AppEvent::Quit => self.quit = true,
             AppEvent::PtyOutput => return self.on_pty_output(),
+            AppEvent::PaneCwd { pane, reported, usable } => return self.on_pane_cwd(pane, &reported, usable),
             AppEvent::PtyExit(id) => {
                 if let Some(cwd) = self.panes.get(&id).map(|p| p.cwd()) {
                     self.refresh_git_at(&cwd);

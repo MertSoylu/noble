@@ -6,6 +6,7 @@ use noble::event::AppEvent;
 use noble::keys::Action;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::common::*;
@@ -654,4 +655,65 @@ fn cursor_position_answer_reaches_the_program() {
     }
     app.run(Action::CloseTab);
     assert!(app.tabs.is_empty());
+}
+
+/// A folder the shell reports on a network path (Git Bash's `file://localhost//server/share`) is shown in the
+/// title, but it is never checked, joined or acted on: the pane keeps using its start folder.
+#[test]
+fn network_folder_is_shown_but_never_used() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("unc".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let start = app.panes[&id].start_cwd.clone();
+    app.panes[&id].parser().process(b"\x1b]7;file://localhost//server/share\x1b\\");
+    let shown = PathBuf::from(if cfg!(windows) { r"\\server\share" } else { "//server/share" });
+    assert_eq!(app.panes[&id].shown_cwd(), shown);
+    assert_eq!(app.panes[&id].cwd(), start);
+    // No check was started for it, so no answer for it is accepted either.
+    assert!(!app.panes[&id].set_cwd_usable(&shown.display().to_string(), true));
+    app.pump();
+    assert_eq!(app.panes[&id].cwd(), start);
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("server/share") || text.contains(r"server\share"), "the title shows it:\n{text}");
+    app.run(Action::CloseTab);
+}
+
+/// A folder the shell reports is checked on a background thread: `cwd` answers the start folder until the check
+/// comes back as `AppEvent::PaneCwd`, which `pump` applies. A folder that does not exist is never used.
+#[test]
+fn reported_folder_is_checked_in_the_background() {
+    let mut app = demo_app(110, 30);
+    let target = std::env::temp_dir().join(format!("noble-check-{}", std::process::id()));
+    std::fs::create_dir_all(&target).unwrap();
+    app.new_tab(dirs::home_dir().unwrap(), None, Some("check".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let start = app.panes[&id].start_cwd.clone();
+    let report = |app: &mut App, dir: &std::path::Path| {
+        let p = dir.display().to_string().replace('\\', "/");
+        let p = p.trim_start_matches('/');
+        app.panes[&id].parser().process(format!("\x1b]7;file://localhost/{p}\x1b\\").as_bytes());
+    };
+    report(&mut app, &target);
+    // Nothing waits for the disk: until the answer is applied the start folder is used.
+    assert_eq!(app.panes[&id].cwd(), start);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.panes[&id].cwd() != target {
+        assert!(std::time::Instant::now() < deadline, "the reported folder was never applied");
+        app.pump();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let missing = target.join("missing");
+    report(&mut app, &missing);
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while std::time::Instant::now() < until {
+        app.pump();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.panes[&id].cwd(), start, "a folder that does not exist is not used");
+    // An answer for a folder the shell has left is ignored.
+    assert!(!app.panes[&id].set_cwd_usable(&target.display().to_string(), true));
+    let _ = std::fs::remove_dir_all(&target);
+    app.run(Action::CloseTab);
 }

@@ -13,6 +13,12 @@ pub enum AppEvent {
     /// Output arrived in one or more panes (a per-pane `dirty` flag is kept).
     PtyOutput,
     PtyExit(PaneId),
+    /// Whether the folder a pane's shell reported is usable: the answer to `Pane::cwd`'s background check.
+    PaneCwd {
+        pane: PaneId,
+        reported: String,
+        usable: bool,
+    },
     SensorStatic(Box<StaticInfo>),
     Sensors(Box<SensorSample>),
     KillResult {
