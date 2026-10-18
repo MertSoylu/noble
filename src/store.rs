@@ -391,11 +391,14 @@ pub struct SavedTab {
     pub focus: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Workspace {
     pub name: String,
     pub saved_at: i64,
     pub tabs: Vec<SavedTab>,
+    /// Fields this build does not know (a newer build wrote them): kept as they are when the file is saved again.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Workspace {
@@ -434,6 +437,9 @@ pub struct Session {
     pub running: Vec<String>,
     #[serde(default)]
     pub tabs: Vec<SessionTab>,
+    /// Fields this build does not know (a newer build wrote them): kept as they are when the file is saved again.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// An id for one window: `<pid>-<process start time>-<n>`. The start time tells a live window
@@ -681,6 +687,10 @@ pub struct UiStateData {
     pub shell_keys_told: Vec<String>,
     /// Palette commands run lately, newest first (`App::palette_key`); listed first on an empty query.
     pub palette_recent: Vec<String>,
+    /// Fields this build does not know (a newer build wrote them): kept as they are when the file is saved again,
+    /// so an older build sharing `state.json` does not drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl UiStateData {
@@ -1593,7 +1603,7 @@ mod tests {
     }
 
     fn ws(name: &str) -> Workspace {
-        Workspace { name: name.into(), saved_at: 0, tabs: Vec::new() }
+        Workspace { name: name.into(), saved_at: 0, tabs: Vec::new(), ..Default::default() }
     }
 
     /// Two windows saving workspaces / recent directories into one file keep each other's entries
@@ -1673,6 +1683,7 @@ mod tests {
                 },
                 focus: 1,
             }],
+            ..Default::default()
         };
         let text = serde_json::to_string(&ws).unwrap();
         let back: Workspace = serde_json::from_str(&text).unwrap();

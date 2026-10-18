@@ -414,7 +414,7 @@ impl App {
         let Some((index, tab)) = self.closed_tabs.last().cloned() else {
             return self.no_op("no closed tab to reopen");
         };
-        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab] };
+        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab], ..Default::default() };
         let before = self.tabs.len();
         if self.open_workspace(&ws) == 0 {
             // Every pane failed to start (already reported): the tab stays in the list for another try.
@@ -956,6 +956,7 @@ impl App {
             name: name.to_string(),
             saved_at: chrono::Utc::now().timestamp(),
             tabs: self.tabs.iter().map(|t| self.saved_tab(t)).collect(),
+            extra: Default::default(),
         }
     }
 

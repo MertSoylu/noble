@@ -172,6 +172,7 @@ fn closed_tab_reopens_with_its_panes() {
         name: "split".into(),
         saved_at: 0,
         tabs: vec![SavedTab { name: Some("grid".into()), origin: "grid".into(), layout, focus: 1 }],
+        ..Default::default()
     };
     assert_eq!(app.open_workspace(&ws), 1);
     app.view = View::Term(1);

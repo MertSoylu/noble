@@ -63,6 +63,7 @@ fn one_tab(origin: &str, layout: SavedNode) -> Workspace {
         name: "last session".into(),
         saved_at: 0,
         tabs: vec![SavedTab { name: None, origin: origin.into(), layout, focus: 0 }],
+        ..Default::default()
     }
 }
 

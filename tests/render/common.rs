@@ -197,6 +197,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
             layout: SavedNode::Leaf { cwd: "C:\\".into(), launch: None },
             focus: 0,
         }],
+        ..Default::default()
     });
     app.recent.record(&std::env::temp_dir());
     app
