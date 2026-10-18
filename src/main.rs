@@ -205,7 +205,7 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
     let draw_error = match catch_unwind(AssertUnwindSafe(|| event_loop(&mut terminal, &mut app, &rx, colors_256))) {
         Ok(draw_error) => draw_error,
         Err(payload) => {
-            let _ = catch_unwind(AssertUnwindSafe(|| app.shutdown()));
+            let _ = catch_unwind(AssertUnwindSafe(|| app.shutdown_after_panic()));
             resume_unwind(payload);
         }
     };

@@ -499,7 +499,14 @@ pub fn session_begin(file: &Path, me: &str) -> Option<Vec<SavedTab>> {
 /// keeps the other windows' tabs. `leaving`: the window is closing. Waits for the lock like
 /// `with_lock_waiting`: the closing window saves even when the lock could not be had.
 pub fn session_save(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool) {
-    with_lock_waiting(file, LOCK_WAIT, || merge_session(file, me, tabs, leaving));
+    session_save_within(file, me, tabs, leaving, LOCK_WAIT);
+}
+
+/// `session_save` with a wait of `wait` for another window's lock instead of `LOCK_WAIT`: the save runs anyway when
+/// the lock is not had in time (see `with_lock_waiting`). Used where a long wait would stall the caller, such as the
+/// panic path.
+pub fn session_save_within(file: &Path, me: &str, tabs: Vec<SavedTab>, leaving: bool, wait: Duration) {
+    with_lock_waiting(file, wait, || merge_session(file, me, tabs, leaving));
 }
 
 /// The periodic save: only under the session lock (`try_with_lock`), waiting at most `wait` for another
@@ -1574,6 +1581,40 @@ mod tests {
         let origins: Vec<_> = load_session(&file).unwrap().tabs.into_iter().map(|t| t.tab.origin).collect();
         assert_eq!(origins, ["saved"]);
         assert!(!lock.exists(), "the lock is released");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The periodic save's wait for a lock another live window holds is one short try (it runs on the UI thread):
+    /// it returns at once, writes nothing and keeps the other window's lock.
+    #[test]
+    fn a_periodic_save_with_a_short_wait_returns_at_once() {
+        let (dir, file, lock) = lock_dir("short");
+        std::fs::write(&lock, lock_owner()).unwrap();
+        let started = Instant::now();
+        assert!(!session_save_waiting(&file, "1-1-0", Vec::new(), false, Duration::from_millis(10)));
+        assert!(started.elapsed() < Duration::from_millis(500), "waited {:?}", started.elapsed());
+        assert!(!file.exists() && lock.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The save on a panic waits only its short wait for a live window's lock, then saves without it: the tabs are
+    /// kept and the other window's lock stays.
+    #[test]
+    fn a_save_within_a_short_wait_still_saves() {
+        let (dir, file, lock) = lock_dir("within");
+        std::fs::write(&lock, lock_owner()).unwrap();
+        let tab = SavedTab {
+            name: None,
+            origin: "panic".into(),
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            focus: 0,
+        };
+        let started = Instant::now();
+        session_save_within(&file, "1-1-0", vec![tab], true, Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
+        let origins: Vec<_> = load_session(&file).unwrap().tabs.into_iter().map(|t| t.tab.origin).collect();
+        assert_eq!(origins, ["panic"]);
+        assert!(lock.exists(), "the other window's lock stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

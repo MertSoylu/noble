@@ -131,6 +131,9 @@ All notable changes to NOBLE are documented here. The format is based on
 - A paste is no longer dropped in silence when it is bigger than the input a program has not read yet (8 MiB): the
   part that fits is queued, bracketed paste still ends, and a toast says that the rest was not sent. Keys refused
   the same way (the program is not reading its input) get a toast too, once while it shows.
+- The periodic session save no longer stalls the screen while another window holds the session lock: it tries once
+  (10 ms) and retries at the next check, instead of waiting up to a second on the UI thread each time. A panic on the
+  main thread waits at most half a second for that lock before it saves the session, so the exit is not held up.
 - Scrollback search keeps up with streaming output without slowing it: while the search bar is open the matches are
   recomputed at most every 100 ms (the output that arrives in between is counted when the interval has passed), and
   a pane resize recomputes them at once. The matches are capped at the newest 10,000, shown as "10000+" in the bar,

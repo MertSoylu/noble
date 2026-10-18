@@ -6,8 +6,12 @@ use super::*;
 const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
 /// How often the tabs are compared with the saved session.
 const SESSION_CHECK_EVERY: Duration = Duration::from_secs(1);
-/// How long the periodic save waits for another window's session lock (the main thread must not stall).
-const SESSION_AUTOSAVE_LOCK_WAIT: Duration = Duration::from_secs(1);
+/// How long the periodic save waits for another window's session lock. It runs on the UI thread, so the wait is
+/// one short try (the lock is held for milliseconds at most); a save that misses it is retried at the next check.
+const SESSION_AUTOSAVE_LOCK_WAIT: Duration = Duration::from_millis(10);
+/// How long the save on a panic waits for another window's lock. The panic message is out already; past this the
+/// save runs without the lock (`store::session_save_within`), so the exit is not held up for the full wait.
+pub(super) const PANIC_SAVE_LOCK_WAIT: Duration = Duration::from_millis(500);
 
 impl App {
     /// Startup: registers this window in the session file (`session.json`, `session-dev.json`
@@ -99,6 +103,16 @@ impl App {
 
     /// On exit: end the background commands, then save the session.
     pub fn shutdown(&mut self) {
+        self.end_session(None);
+    }
+
+    /// On a panic on the main thread: `shutdown`, with a short wait for another window's session lock.
+    pub fn shutdown_after_panic(&mut self) {
+        self.end_session(Some(PANIC_SAVE_LOCK_WAIT));
+    }
+
+    /// `shutdown` and `shutdown_after_panic`. `lock_wait` `None` waits the usual long time for the session lock.
+    fn end_session(&mut self, lock_wait: Option<Duration>) {
         // First: background commands still running (git, gh, AI quota) are killed with their process trees, so none
         // outlives NOBLE (`ai::run_command`), and none starts after this (the registry is closed). The session
         // save can wait a long time for another window's lock, and on Windows the console handler gives up after 4 s.
@@ -106,7 +120,11 @@ impl App {
         if self.cfg.terminal.restore_session {
             // Merged with the other windows' tabs; this window's earlier entries are replaced.
             let tabs = self.session_tabs();
-            crate::store::session_save(&self.paths.data_file(self.session_file()), &self.instance, tabs, true);
+            let file = self.paths.data_file(self.session_file());
+            match lock_wait {
+                Some(wait) => crate::store::session_save_within(&file, &self.instance, tabs, true, wait),
+                None => crate::store::session_save(&file, &self.instance, tabs, true),
+            }
         }
         self.panes.clear();
         // Windows: lets the console-close handler return (the process ends then); on Unix nothing waits for it.
