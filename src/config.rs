@@ -47,6 +47,8 @@ pub struct TerminalCfg {
     pub scrollback: usize,
     pub restore_session: bool,
     pub copy_on_select: bool,
+    /// Programs in a pane may set the system clipboard with OSC 52 (false: such requests are ignored).
+    pub osc52_write: bool,
     /// A tab is named after the folder its focused pane is in now (false: the folder it opened in).
     pub tab_follows_cwd: bool,
     /// Pane color scheme: "windows-terminal" (the PowerShell profile's scheme), "theme"
@@ -136,6 +138,7 @@ impl Default for TerminalCfg {
             scrollback: 5000,
             restore_session: true,
             copy_on_select: true,
+            osc52_write: true,
             tab_follows_cwd: true,
             colors: "windows-terminal".into(),
             background: String::new(),
@@ -245,6 +248,7 @@ shell_args = []
 scrollback = 5000
 restore_session = true   # save tabs on exit, restore them at startup
 copy_on_select = true    # copy mouse-selected text to the clipboard
+osc52_write = true       # programs in a pane may set the clipboard (OSC 52); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
 colors = "windows-terminal"  # pane colors: windows-terminal (your PowerShell scheme; the theme elsewhere) | theme | dark-plus | campbell | light-gray …
 background = ""          # override the scheme background, e.g. '#c8c8c8' (empty = the scheme's own)
@@ -356,16 +360,28 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn resolve(config_override: Option<PathBuf>) -> Paths {
-        let base_override = std::env::var_os("NOBLE_HOME").map(PathBuf::from);
-        let config_dir = base_override
-            .clone()
-            .or_else(|| dirs::config_dir().map(|d| d.join("noble")))
-            .unwrap_or_else(|| PathBuf::from(".noble"));
-        let data = base_override
-            .or_else(|| dirs::data_local_dir().map(|d| d.join("noble")))
-            .unwrap_or_else(|| PathBuf::from(".noble"));
-        Paths { config: config_override.unwrap_or_else(|| config_dir.join("config.toml")), data }
+    /// `None` when there is no folder for the files (no home folder and no `NOBLE_HOME`): the caller reports it.
+    pub fn resolve(config_override: Option<PathBuf>) -> Option<Paths> {
+        let base = std::env::var_os("NOBLE_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
+        let config_dir = dirs::config_dir().map(|d| d.join("noble"));
+        let data_dir = dirs::data_local_dir().map(|d| d.join("noble"));
+        Paths::from_dirs(base, config_dir, data_dir, config_override)
+    }
+
+    /// The paths from the folders found; `base` (`NOBLE_HOME`) takes the place of both. A missing folder is
+    /// `None`, never a relative one: `.noble` would be written wherever NOBLE was started from.
+    fn from_dirs(
+        base: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
+        data_dir: Option<PathBuf>,
+        config_override: Option<PathBuf>,
+    ) -> Option<Paths> {
+        let config = match config_override {
+            Some(path) => path,
+            None => base.clone().or(config_dir)?.join("config.toml"),
+        };
+        let data = base.or(data_dir)?;
+        Some(Paths { config, data })
     }
 
     pub fn data_file(&self, name: &str) -> PathBuf {
@@ -445,7 +461,8 @@ pub fn load(path: &Path) -> Loaded {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, DEFAULT_CONFIG);
+        // Atomic like every config write: a crash while the template is written leaves no truncated file.
+        let _ = crate::store::write_text(path, DEFAULT_CONFIG);
     }
     let mtime = mtime_of(path);
     match std::fs::read_to_string(path) {
@@ -453,6 +470,14 @@ pub fn load(path: &Path) -> Loaded {
             Ok(config) => Loaded { config, error: None, mtime },
             Err(error) => Loaded { config: Config::default(), error: Some(error), mtime },
         },
+        // A dangling link (its target is missing): the link is not replaced, so it is reported, not silently defaulted.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::fs::symlink_metadata(path).is_ok() => {
+            let error = ConfigError {
+                text: format!("config: {} is a link to a missing file", crate::util::tilde(path)),
+                line: None,
+            };
+            Loaded { config: Config::default(), error: Some(error), mtime }
+        }
         // No file (and none could be written, e.g. a read-only home): the defaults, silently.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
         // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.
@@ -471,6 +496,20 @@ pub fn read_for_edit(path: &Path) -> Result<String, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULT_CONFIG.into()),
         Err(e) => Err(format!("config not saved: {e}")),
     }
+}
+
+/// The text a Settings change is written into. A file that does not parse is refused: NOBLE runs on the
+/// defaults then, and a rewrite built from them would wipe the user's `[[launchers]]` blocks and the rest of the
+/// broken text. The error carries the line to open (`read_for_edit` errors have none).
+pub fn read_for_settings(path: &Path) -> Result<String, ConfigError> {
+    let text = read_for_edit(path).map_err(|text| ConfigError { text, line: None })?;
+    if let Err(e) = parse(&text) {
+        return Err(ConfigError {
+            text: format!("settings not saved: fix config.toml first ({})", e.text),
+            line: e.line,
+        });
+    }
+    Ok(text)
 }
 
 /// Byte index of the `#` that starts a line's comment; a `#` inside a "basic" or 'literal'
@@ -807,6 +846,30 @@ pub fn remove_binding(text: &str, table: &str, chord: &str) -> Result<String, St
 mod tests {
     use super::*;
 
+    /// OSC 52 clipboard writes from programs are on by default (as before the setting) and can be turned off.
+    #[test]
+    fn osc52_write_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().terminal.osc52_write);
+        assert!(parse(DEFAULT_CONFIG).unwrap().terminal.osc52_write);
+        assert!(!parse("[terminal]\nosc52_write = false\n").unwrap().terminal.osc52_write);
+    }
+
+    /// Without a folder for the files there is no `Paths` at all: never a relative `.noble` in the working folder.
+    #[test]
+    fn paths_never_fall_back_to_the_working_folder() {
+        let home = PathBuf::from("noble-home");
+        let p = Paths::from_dirs(Some(home.clone()), None, None, None).unwrap();
+        assert_eq!((p.config.clone(), p.data.clone()), (home.join("config.toml"), home.clone()));
+        let split = Paths::from_dirs(None, Some("cfg".into()), Some("data".into()), None).unwrap();
+        assert_eq!((split.config, split.data), (PathBuf::from("cfg").join("config.toml"), PathBuf::from("data")));
+        // A config file named on the command line needs no config folder, but the data still needs one.
+        let named = Paths::from_dirs(None, None, Some("data".into()), Some("my.toml".into())).unwrap();
+        assert_eq!(named.config, PathBuf::from("my.toml"));
+        assert!(Paths::from_dirs(None, None, Some("data".into()), None).is_none());
+        assert!(Paths::from_dirs(None, Some("cfg".into()), None, None).is_none());
+        assert!(Paths::from_dirs(None, None, None, Some("my.toml".into())).is_none());
+    }
+
     /// The provider list is spelled out in several places; all of them must match the `ai::providers` registry
     /// (a new provider added to one place only would silently vanish from config, Settings or the defaults).
     #[test]
@@ -990,6 +1053,32 @@ providers = [\"claude\", \"gemini\"]
         assert_eq!(read_for_edit(&path).as_deref(), Ok(DEFAULT_CONFIG));
         std::fs::write(&path, b"# caf\xe9\n[general]\n").unwrap();
         assert!(read_for_edit(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Settings change is refused while config.toml does not parse, so a rewrite never rebuilds the broken
+    /// file from the defaults (and wipes its `[[launchers]]` blocks). The refusal names the line to open.
+    #[test]
+    fn settings_are_refused_while_config_is_broken() {
+        let dir = std::env::temp_dir().join(format!("noble-cfg-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let broken = concat!(
+            "[general]\ntheme = \"dark\"\n\n",
+            "[[launchers]]\nkey = \"c\"\nname = \"Claude\"\ncommand = \"claude\"\n\n",
+            "[terminal\n",
+        );
+        std::fs::write(&path, broken).unwrap();
+        let err = read_for_settings(&path).unwrap_err();
+        assert!(err.text.starts_with("settings not saved: fix config.toml first"), "{}", err.text);
+        assert_eq!(err.line, Some(9), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "the file is not touched");
+        // A valid file (and a missing one, which gets the template) is read as before.
+        std::fs::write(&path, "[general]\ntheme = \"dark\"\n").unwrap();
+        assert!(read_for_settings(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_for_settings(&path).as_deref(), Ok(DEFAULT_CONFIG));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

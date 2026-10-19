@@ -15,7 +15,7 @@ use crate::theme;
 
 /// How long restoring a session or workspace waits for the saved directories to answer; a
 /// network share that stopped responding would otherwise hold up startup.
-pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DIR_PROBE_TIMEOUT: Duration = crate::store::LONG_PROBE_TIMEOUT;
 
 /// How many closed tabs `reopen_tab` can bring back.
 const CLOSED_TABS_KEPT: usize = 10;
@@ -126,8 +126,10 @@ impl App {
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
                     false,
                 );
-                if let Some(p) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
-                    p.write(&bytes);
+                if let Some(id) = self.focused_pane()
+                    && !self.panes.get(&id).is_some_and(|p| p.write(&bytes))
+                {
+                    self.input_refused();
                 }
             }
             Action::MoveTabLeft | Action::MoveTabRight => match self.view {
@@ -414,7 +416,7 @@ impl App {
         let Some((index, tab)) = self.closed_tabs.last().cloned() else {
             return self.no_op("no closed tab to reopen");
         };
-        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab] };
+        let ws = Workspace { name: "closed tab".into(), saved_at: 0, tabs: vec![tab], ..Default::default() };
         let before = self.tabs.len();
         if self.open_workspace(&ws) == 0 {
             // Every pane failed to start (already reported): the tab stays in the list for another try.
@@ -625,11 +627,18 @@ impl App {
         let Some(tab) = self.current_tab() else { return };
         let rects: Vec<(PaneId, ratatui::layout::Rect)> =
             if tab.zoomed { vec![(tab.focus, body)] } else { tab.root.layout(body).0 };
+        let mut search_resized = false;
         for (id, tile) in rects {
             let inner = crate::ui::pane_outline(tile, body).inner();
-            if let Some(p) = self.panes.get_mut(&id) {
-                p.resize(inner.height, inner.width);
+            if let Some(p) = self.panes.get_mut(&id)
+                && p.resize(inner.height, inner.width)
+            {
+                search_resized |= self.search.as_ref().is_some_and(|s| s.pane == id);
             }
+        }
+        // The search's matches follow the new lines: they are marked stale and recomputed by the throttled refresh.
+        if search_resized {
+            self.search_resized();
         }
     }
 
@@ -784,11 +793,11 @@ impl App {
         self.toast(ToastLevel::Info, "scanning projects…");
     }
 
-    pub fn request_kill(&mut self, pid: u32, name: String) {
+    pub fn request_kill(&mut self, pid: u32, started: u64, name: String) {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "TERMINATE PROCESS".into(),
             body: format!("{name} · pid {pid}"),
-            action: ConfirmAction::Kill { pid, name },
+            action: ConfirmAction::Kill { pid, started, name },
         }));
     }
 
@@ -833,12 +842,7 @@ impl App {
                     self.remove_tab(ti);
                 }
             }
-            ConfirmAction::Paste { pane, text } => {
-                if let Some(p) = self.panes.get_mut(&pane) {
-                    p.scroll_reset();
-                    p.paste(&text);
-                }
-            }
+            ConfirmAction::Paste { pane, text } => self.paste_now(pane, &text),
             ConfirmAction::ReplaceWorkspace(name) => self.save_workspace(&name),
             ConfirmAction::RemoveProject(path) => self.remove_project(&path),
             ConfirmAction::DeleteWorkspace(name) => {
@@ -848,9 +852,9 @@ impl App {
                     self.toast(ToastLevel::Warn, format!("workspace '{name}' not found"));
                 }
             }
-            ConfirmAction::Kill { pid, name } => match &self.services {
+            ConfirmAction::Kill { pid, started, name } => match &self.services {
                 Some(s) => {
-                    let _ = s.sensor_req.send(SensorRequest::Kill { pid });
+                    let _ = s.sensor_req.send(SensorRequest::Kill { pid, started, name });
                 }
                 None => self.toast(ToastLevel::Warn, format!("cannot terminate {name}")),
             },
@@ -956,6 +960,7 @@ impl App {
             name: name.to_string(),
             saved_at: chrono::Utc::now().timestamp(),
             tabs: self.tabs.iter().map(|t| self.saved_tab(t)).collect(),
+            extra: Default::default(),
         }
     }
 
@@ -1008,6 +1013,12 @@ impl App {
 
     /// Reopens the saved tabs; returns how many were opened.
     pub fn open_workspace(&mut self, ws: &Workspace) -> usize {
+        self.open_saved_tabs(&ws.tabs).0
+    }
+
+    /// Reopens saved tabs. Returns how many opened and the saved tabs that did not (no pane could start at
+    /// all: the caller keeps them, see `App::unrestored`).
+    pub(super) fn open_saved_tabs(&mut self, saved: &[SavedTab]) -> (usize, Vec<SavedTab>) {
         fn saved_dirs(n: &SavedNode, out: &mut Vec<PathBuf>) {
             match n {
                 SavedNode::Leaf { cwd, .. } => out.push(PathBuf::from(cwd)),
@@ -1018,32 +1029,35 @@ impl App {
             }
         }
         let mut dirs = Vec::new();
-        for t in &ws.tabs {
+        for t in saved {
             saved_dirs(&t.layout, &mut dirs);
         }
         dirs.sort();
         dirs.dedup();
-        let usable = crate::util::usable_dirs(&dirs, DIR_PROBE_TIMEOUT, self.dir_probe);
+        let usable = self.recent.probe_dirs(&dirs, DIR_PROBE_TIMEOUT, self.dir_probe);
         let mut unavailable = Vec::new();
         let size = self.fresh_size();
         let mut opened = 0;
-        for t in &ws.tabs {
-            if let Some(root) = self.build_node(&t.layout, size, &usable, &mut unavailable) {
-                let leaves = root.leaves();
-                let focus = leaves.get(t.focus).copied().unwrap_or(leaves[0]);
-                let mut tab = Tab::new(focus, t.origin.clone());
-                tab.root = root;
-                tab.name = t.name.clone();
-                // A saved quick-launch pane runs its launcher again, so the tab is a launcher tab.
-                tab.launched = has_launch(&t.layout);
-                self.tabs.push(tab);
-                opened += 1;
-            }
+        let mut failed = Vec::new();
+        for t in saved {
+            let Some(root) = self.build_node(&t.layout, size, &usable, &mut unavailable) else {
+                failed.push(t.clone());
+                continue;
+            };
+            let leaves = root.leaves();
+            let focus = leaves.get(t.focus).copied().unwrap_or(leaves[0]);
+            let mut tab = Tab::new(focus, t.origin.clone());
+            tab.root = root;
+            tab.name = t.name.clone();
+            // A saved quick-launch pane runs its launcher again, so the tab is a launcher tab.
+            tab.launched = has_launch(&t.layout);
+            self.tabs.push(tab);
+            opened += 1;
         }
         if !unavailable.is_empty() {
             self.toast(ToastLevel::Warn, format!("not available, opened in home: {}", unavailable.join(", ")));
         }
-        opened
+        (opened, failed)
     }
 
     pub fn restore_workspace(&mut self, idx: usize) {

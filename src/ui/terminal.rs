@@ -55,7 +55,7 @@ pub fn draw(
         hits.push((inner, Hit::Pane { pane: *id, inner }));
         let marks = Marks {
             search: app.search.as_ref().filter(|s| s.pane == *id),
-            link: app.link_hover.filter(|l| l.pane == *id),
+            link: app.link_hover.as_ref().filter(|l| l.pane == *id),
         };
         // Only a split tab has other panes to tell apart from the focused one (a zoomed pane is alone).
         let shown = Shown { focused, dim: app.cfg.terminal.dim_inactive && multi && !focused };
@@ -395,7 +395,7 @@ fn pane_frame(
     }
     let inner = hud::frame_outline(buf, outline, "", "", focused, th);
     let y = rect.y;
-    let cwd = util::tilde(&pane.cwd());
+    let cwd = util::tilde(&pane.shown_cwd());
     // The lock leads the title so it shows even when the pane is too narrow for the tag or all its
     // buttons (`fit_title` ranks it right after close).
     let lock = if pane.passthrough { "🔒 " } else { "" };
@@ -550,7 +550,7 @@ fn cluster_brackets(buf: &mut Buffer, on_top: &[(Rect, Hit)]) {
 #[derive(Default)]
 struct Marks<'a> {
     search: Option<&'a SearchState>,
-    link: Option<LinkHover>,
+    link: Option<&'a LinkHover>,
 }
 
 /// How a pane is drawn: whether it has the focus (it shows the cursor) and whether its text fades
@@ -800,11 +800,15 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
     let y = inner.bottom() - 1;
     let bar = Rect::new(inner.x, y, inner.width, 1);
     hud::fill(buf, bar, Style::default().bg(th.raised).fg(th.fg));
+    // Past the cap the count says so ("10000+"): only the newest matches are kept.
+    let total = if s.capped { format!("{}+", s.matches.len()) } else { s.matches.len().to_string() };
     let count = match (s.current, s.matches.len()) {
         (_, 0) if s.query.is_empty() => String::new(),
         (_, 0) => "no matches".to_string(),
-        (Some(i), n) => format!("{}/{n}", i + 1),
-        (None, n) => format!("{n}"),
+        (Some(i), _) => format!("{}/{total}", i + 1),
+        // The selection is older than the kept matches (see `SearchState::detached`): its place is not known.
+        (None, _) if s.detached.is_some() => format!("?/{total}"),
+        (None, _) => total,
     };
     // The hint's keys in the accent color, the words dim.
     let hint: [(&str, bool); 6] =

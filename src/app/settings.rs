@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 use super::ops::DIR_PROBE_TIMEOUT;
-use super::{AddMode, App, ToastLevel, View};
+use super::{AddMode, App, ToastLevel, ToastTarget, View};
 use crate::event::AppEvent;
 use crate::theme::THEMES;
 
@@ -22,6 +22,7 @@ pub enum SettingKey {
     Shell,
     Restore,
     CopySelect,
+    Osc52Write,
     TabFollowsCwd,
     DimInactive,
     TermColors,
@@ -92,6 +93,7 @@ impl SettingKey {
             SettingKey::Shell => "Shell",
             SettingKey::Restore => "Restore tabs on launch",
             SettingKey::CopySelect => "Copy text on select",
+            SettingKey::Osc52Write => "Clipboard from programs",
             SettingKey::TabFollowsCwd => "Tab name follows the folder",
             SettingKey::DimInactive => "Dim inactive panes",
             SettingKey::Notify => "Notify from background tabs",
@@ -129,6 +131,7 @@ impl SettingKey {
             SettingKey::Shell => "Program that new terminal panes start",
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
+            SettingKey::Osc52Write => "Let programs in a pane set the clipboard (OSC 52, e.g. over SSH)",
             SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
             SettingKey::DimInactive => "Fade the text of the split panes without the focus",
             SettingKey::Notify => "Alert when a long command ends in a background tab",
@@ -249,8 +252,17 @@ impl App {
     fn settings_layout(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
         use SettingKey::*;
         let rows = |keys: &[SettingKey]| keys.iter().map(|k| SettingItem::Setting(*k)).collect::<Vec<_>>();
-        let mut terminal =
-            rows(&[Shell, TermColors, Restore, CopySelect, TabFollowsCwd, DimInactive, Notify, QuickLaunch]);
+        let mut terminal = rows(&[
+            Shell,
+            TermColors,
+            Restore,
+            CopySelect,
+            Osc52Write,
+            TabFollowsCwd,
+            DimInactive,
+            Notify,
+            QuickLaunch,
+        ]);
         if self.claude_hooks_available() {
             terminal.push(SettingItem::Setting(ClaudeHooks));
         }
@@ -324,6 +336,7 @@ impl App {
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
             SettingKey::CopySelect => c.terminal.copy_on_select,
+            SettingKey::Osc52Write => c.terminal.osc52_write,
             SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
             SettingKey::DimInactive => c.terminal.dim_inactive,
             SettingKey::ShellFirst => c.keys.shell_first,
@@ -383,15 +396,24 @@ impl App {
         }
     }
 
+    /// The config text a Settings change is written into (`config::read_for_settings`): `None` while the file
+    /// does not parse, with a toast that opens the broken line.
+    fn config_text_for_settings(&mut self) -> Option<String> {
+        match crate::config::read_for_settings(&self.paths.config) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                self.toast_target(ToastLevel::Error, e.text, Some(ToastTarget::Config { line: e.line }));
+                None
+            }
+        }
+    }
+
     /// Updates a single value in the config file, preserving its comments.
     pub(super) fn persist(&mut self, section: &str, key: &str, value_toml: &str) {
         if self.services.is_none() {
             return;
         }
-        let text = match crate::config::read_for_edit(&self.paths.config) {
-            Ok(text) => text,
-            Err(e) => return self.toast(ToastLevel::Error, e),
-        };
+        let Some(text) = self.config_text_for_settings() else { return };
         let updated = crate::config::set_value(&text, section, key, value_toml);
         self.write_config(updated);
     }
@@ -417,10 +439,7 @@ impl App {
         if self.services.is_none() {
             return;
         }
-        let text = match crate::config::read_for_edit(&self.paths.config) {
-            Ok(text) => text,
-            Err(e) => return self.toast(ToastLevel::Error, e),
-        };
+        let Some(text) = self.config_text_for_settings() else { return };
         let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
         self.write_config(updated);
     }
@@ -504,6 +523,10 @@ impl App {
                     SettingKey::CopySelect => {
                         c.terminal.copy_on_select ^= true;
                         ("terminal", "copy_on_select", c.terminal.copy_on_select.to_string())
+                    }
+                    SettingKey::Osc52Write => {
+                        c.terminal.osc52_write ^= true;
+                        ("terminal", "osc52_write", c.terminal.osc52_write.to_string())
                     }
                     SettingKey::TabFollowsCwd => {
                         c.terminal.tab_follows_cwd ^= true;

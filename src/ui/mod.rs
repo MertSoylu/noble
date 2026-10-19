@@ -86,6 +86,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         boot::draw(buf, area, app, ms);
     }
     app.hits = hits;
+    app.relink_after_layout();
     if app.overlay.is_none()
         && boot_ms.is_none()
         && let Some((x, y)) = cursor

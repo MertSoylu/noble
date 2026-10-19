@@ -118,12 +118,22 @@ pub fn classify(token: &str, cwd: &Path) -> Option<Link> {
     if path_part.is_empty() || path_part.len() > 400 {
         return None;
     }
-    let candidate = if let Some(rest) = path_part.strip_prefix("~/").or_else(|| path_part.strip_prefix("~\\")) {
-        dirs::home_dir()?.join(rest)
-    } else {
-        let p = PathBuf::from(path_part);
-        if p.is_absolute() { p } else { cwd.join(path_part.trim_start_matches("./").trim_start_matches(".\\")) }
+    // A network path from the screen is never looked at: on Windows a check connects to that server and sends
+    // the user's credentials (`osc::is_network_path`). The check is on the text after the `~` or `./` prefix,
+    // because joining a rooted path onto a base replaces the base (`~\\\server` would escape the home folder).
+    let (base, rest) = match path_part.strip_prefix("~/").or_else(|| path_part.strip_prefix("~\\")) {
+        Some(rest) => (dirs::home_dir()?, rest),
+        None => (cwd.to_path_buf(), path_part.trim_start_matches("./").trim_start_matches(".\\")),
     };
+    if crate::term::osc::is_network_path(rest) {
+        return None;
+    }
+    // A pane opened in a network folder keeps it as its folder (`Pane::cwd`): a relative name joined onto it would
+    // be looked at on the share. Only an absolute name, which replaces the base, is checked then.
+    if crate::term::osc::is_network_path(&base.to_string_lossy()) && !Path::new(rest).is_absolute() {
+        return None;
+    }
+    let candidate = base.join(rest);
     // Single-word texts ("make", "done") are links only if they are real files.
     let looks_like_path = path_part.contains(['/', '\\', '.']) || !nums.is_empty();
     if !looks_like_path || !candidate.exists() {
@@ -176,6 +186,22 @@ pub fn is_openable_url(url: &str) -> bool {
 /// Windows (`FileProtocolHandler`): `.exe`, scripts, installers, shortcuts. macOS (`open`): app bundles,
 /// `.command`/`.tool`/`.terminal` scripts, installer packages, and any file with an execute bit (opened in
 /// Terminal and run). Linux (`xdg-open`): `.desktop` launchers, AppImages, and files with an execute bit.
+/// The list is by type: a type it does not name is opened as before (a rare type that runs code is a gap).
+/// The extensions (lower-case) a file name could be run by. Windows reads a name differently from its text in two
+/// ways, so both readings are checked: trailing dots and spaces are not part of the name (`evil.exe.` and
+/// `evil.exe ` are `evil.exe`), and `evil.py::$DATA` is the stream `$DATA` of `evil.py`, so the name is also read
+/// up to its first ':' (a file name has no drive prefix to skip). Every system refuses the extra readings too.
+fn launch_extensions(path: &Path) -> Vec<String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let whole = name.trim_end_matches(['.', ' ']);
+    let before_stream = name.split(':').next().unwrap_or_default().trim_end_matches(['.', ' ']);
+    [whole, before_stream]
+        .into_iter()
+        .filter_map(|n| n.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .collect()
+}
+
 pub fn is_launchable(path: &Path) -> bool {
     const PROGRAM_EXTS: &[&str] = &[
         // Windows
@@ -206,6 +232,29 @@ pub fn is_launchable(path: &Path) -> bool {
         "appref-ms",
         "inf",
         "sct",
+        "py",
+        "pyw",
+        "pyc",
+        "pyz",
+        "pyzw",
+        "msc",
+        "jnlp",
+        "scf",
+        "gadget",
+        "ws",
+        "wsc",
+        "library-ms",
+        "settingcontent-ms",
+        "msu",
+        "diagcab",
+        "xbap",
+        "appinstaller",
+        "msixbundle",
+        "appxbundle",
+        "msh",
+        "msh1",
+        "msh2",
+        "mshxml",
         // macOS
         "app",
         "command",
@@ -215,14 +264,20 @@ pub fn is_launchable(path: &Path) -> bool {
         "mpkg",
         "workflow",
         "scpt",
+        "scptd",
         "applescript",
+        "osax",
         "prefpane",
+        "saver",
+        "wdgt",
         "action",
         "dylib",
         "kext",
         // Linux (and anywhere)
         "desktop",
         "appimage",
+        "flatpakref",
+        "snap",
         "run",
         "sh",
         "bash",
@@ -234,9 +289,13 @@ pub fn is_launchable(path: &Path) -> bool {
         "bin",
         "deb",
         "rpm",
+        "pl",
+        "rb",
+        "php",
+        "lua",
+        "tcl",
     ];
-    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if PROGRAM_EXTS.contains(&ext.as_str()) {
+    if launch_extensions(path).iter().any(|ext| PROGRAM_EXTS.contains(&ext.as_str())) {
         return true;
     }
     // Unix: an executable file (a directory's execute bit only means it can be entered). Windows has no
@@ -315,8 +374,54 @@ mod tests {
         for p in ["setup.command", "x.EXE", "run.bat", "Evil.app", "a.desktop", "tool.AppImage", "i.pkg", "s.ps1"] {
             assert!(is_launchable(Path::new(p)), "{p}");
         }
+        // Scripts, consoles, shortcuts and installers Windows runs or connects for; a link must copy them.
+        for p in [
+            "x.py",
+            "x.PYW",
+            "x.pyc",
+            "x.pyz",
+            "x.msc",
+            "x.jnlp",
+            "x.scf",
+            "x.gadget",
+            "x.ws",
+            "x.wsc",
+            "x.library-ms",
+            "x.settingcontent-ms",
+            "x.msu",
+            "x.diagcab",
+            "x.xbap",
+            "x.appinstaller",
+            "x.msixbundle",
+            "x.hta",
+            "x.cpl",
+            "x.url",
+            "x.lnk",
+            "x.appref-ms",
+            "x.msi",
+        ] {
+            assert!(is_launchable(Path::new(p)), "{p}");
+        }
         for p in ["README.md", "photo.png", "notes.txt", "src/main.rs"] {
             assert!(!is_launchable(Path::new(p)), "{p}");
+        }
+        // Windows drops trailing dots and spaces from a name and reads `name::$DATA` as the file `name`: each
+        // spelling of a program is refused, whatever the case. The check reads the name text, so every system runs it.
+        for p in [
+            "evil.py.",
+            "evil.exe ",
+            "evil.exe. .",
+            "evil.EXE   ",
+            "evil.py::$DATA",
+            "evil.py:stream",
+            "evil.exe:Zone.Identifier",
+            "a:b.ps1",
+        ] {
+            assert!(is_launchable(&Path::new("dir").join(p)), "{p}");
+        }
+        // The same spellings of a document are still opened: the reading does not refuse a text file.
+        for p in ["notes.txt.", "readme.md ", "data::$DATA", "x.txt:stream"] {
+            assert!(!is_launchable(&Path::new("dir").join(p)), "{p}");
         }
         // Unix: an executable file without an extension (`open` would run it in Terminal on macOS).
         #[cfg(unix)]
@@ -330,6 +435,33 @@ mod tests {
             assert_eq!(open(&link), Err(OpenError::Program));
             let _ = std::fs::remove_file(&f);
         }
+    }
+
+    /// A token that is a network path is refused before the file system is asked anything: on Windows an
+    /// `exists` on `\\server\share\…` would send the user's credentials to that server. The file below
+    /// exists, so only the network rule can turn each spelling down.
+    #[test]
+    fn network_paths_are_never_looked_at() {
+        let dir = std::env::temp_dir().join(format!("noble-link-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.rs");
+        std::fs::write(&file, "fn a() {}\n").unwrap();
+        let plain = file.to_string_lossy().into_owned();
+        let found = classify(&plain, &dir).is_some();
+        let refused = [
+            format!("//{plain}"),
+            format!("\\\\{plain}"),
+            format!("file:////{}", plain.trim_start_matches(['/', '\\'])),
+            r"\\attacker\share\a.rs:3".to_string(),
+            r"\\?\UNC\attacker\share\a.rs".to_string(),
+            r"~\\\attacker\share\a.rs".to_string(),
+            r".\\\attacker\share\a.rs".to_string(),
+        ];
+        let got: Vec<_> = refused.iter().filter_map(|t| classify(t, &dir).map(|_| t.clone())).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(found, "the control path must be a link");
+        assert!(got.is_empty(), "network paths became links: {got:?}");
     }
 
     #[test]
@@ -441,6 +573,25 @@ mod tests {
                 assert_eq!(cells, token, "{line:?} @{col}");
             }
         }
+    }
+
+    /// A pane whose folder is a network path (opened in a share) resolves no relative name against it: the file
+    /// below exists at the joined path (`//` plus the local folder is the same folder on Unix), so only the rule can
+    /// refuse it. An absolute name names its own folder and is looked at as before, and a local folder still works.
+    #[test]
+    fn relative_links_are_not_resolved_against_a_network_folder() {
+        let dir = std::env::temp_dir().join(format!("noble-link-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        let share = PathBuf::from(format!("//{}", dir.display()));
+        assert!(classify("a.rs", &dir).is_some());
+        for token in ["a.rs", "a.rs:3", "./a.rs", "a.rs(2,1)"] {
+            assert_eq!(classify(token, &share), None, "{token}");
+        }
+        let absolute = dir.join("a.rs").display().to_string();
+        assert!(classify(&absolute, &share).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every row: token, expected link (paths relative to a temporary directory).

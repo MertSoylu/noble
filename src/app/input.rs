@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{App, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
+use super::{App, Confirm, ConfirmAction, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
@@ -47,14 +47,22 @@ impl App {
 
     pub(super) fn on_input(&mut self, e: Event) {
         match e {
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            Event::Key(k) => {
+                if k.kind != KeyEventKind::Release {
+                    self.on_key(k);
+                }
+                // Any key event, a release too, shows the modifiers held now: the link highlight follows them.
+                self.update_link_hover(None, k.modifiers);
+            }
             Event::Mouse(m) => self.on_mouse(m),
             Event::Resize(w, h) => self.size = (w, h),
             Event::Paste(text) => self.on_paste(&text),
             // Only reported when the outer terminal supports focus reporting (`main` asks for it).
             Event::FocusGained => self.window_focused = Some(true),
-            Event::FocusLost => self.window_focused = Some(false),
-            _ => {}
+            Event::FocusLost => {
+                self.window_focused = Some(false);
+                self.update_link_hover(None, KeyModifiers::NONE);
+            }
         }
     }
 
@@ -181,7 +189,9 @@ impl App {
                 p.edited = !(interrupt && p.command_started.is_none());
             }
         }
-        p.write(&encode_key(&k, app_cursor));
+        if !p.write(&encode_key(&k, app_cursor)) {
+            self.input_refused();
+        }
     }
 
     fn overlay_key(&mut self, k: KeyEvent) {
@@ -680,7 +690,7 @@ impl App {
     fn terminate_selected(&mut self) {
         let procs = self.visible_procs();
         if let Some(p) = self.system.selected_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)) {
-            self.request_kill(p.pid, p.name.clone());
+            self.request_kill(p.pid, p.started, p.name.clone());
         } else {
             self.toast(ToastLevel::Info, "select a process first (↑/↓)");
         }
@@ -760,7 +770,7 @@ impl App {
 
     // ─── Mouse ──────────────────────────────────────────────────────────────
 
-    fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
+    pub(super) fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
         self.hits.iter().rev().find(|(r, _)| r.contains(Position { x, y })).map(|(_, h)| h.clone())
     }
 
@@ -783,7 +793,7 @@ impl App {
         self.tabs.iter().position(|t| t.id == id)
     }
 
-    fn forward_mouse(&self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
+    fn forward_mouse(&mut self, pane: PaneId, inner: Rect, m: &MouseEvent) -> bool {
         let Some(p) = self.panes.get(&pane) else { return false };
         let (mode, enc) = {
             let parser = p.parser();
@@ -793,7 +803,9 @@ impl App {
         let row = m.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
         match encode_mouse(m, col, row, mode, enc) {
             Some(bytes) => {
-                p.write(&bytes);
+                if !p.write(&bytes) {
+                    self.input_refused();
+                }
                 true
             }
             None => false,
@@ -844,6 +856,8 @@ impl App {
             }
             return;
         }
+        // Every mouse event carries the pointer and the modifiers: the link highlight follows them.
+        self.update_link_hover(Some((m.column, m.row)), m.modifiers);
         match m.kind {
             MouseEventKind::Down(btn) => self.mouse_down(btn, &m),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(&m),
@@ -865,7 +879,6 @@ impl App {
                     Some(Hit::Pane { pane, inner }) if self.overlay.is_none() => Some((pane, inner)),
                     _ => None,
                 };
-                self.update_link_hover(over, &m);
                 if let Some((pane, inner)) = over
                     && Some(pane) == self.focused_pane()
                 {
@@ -983,7 +996,7 @@ impl App {
                     self.tabs[ti].focus = pane;
                 }
                 let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
-                if btn == MouseButton::Left && ctrl && self.open_link_at(pane, inner, m) {
+                if btn == MouseButton::Left && ctrl && self.open_link_at(pane) {
                     return;
                 }
                 let wants = self.pane_wants_mouse(pane) && !shift;
@@ -1326,8 +1339,12 @@ impl App {
                     // On the alternate screen (less, man…) the wheel becomes arrow keys.
                     let code = if dir > 0 { KeyCode::Up } else { KeyCode::Down };
                     let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), app_cursor);
+                    let mut sent = true;
                     for _ in 0..3 {
-                        p.write(&bytes);
+                        sent &= p.write(&bytes);
+                    }
+                    if !sent {
+                        self.input_refused();
                     }
                 } else {
                     p.scroll(dir * 3);
@@ -1336,6 +1353,66 @@ impl App {
             Some(Hit::Project(_)) => self.move_project(-dir),
             Some(Hit::Proc(_)) => self.move_proc(-dir * 3),
             _ => {}
+        }
+    }
+}
+
+/// Clipboard use from input: copying a selection out and pasting text into a pane.
+impl App {
+    pub fn set_clipboard(&mut self, text: &str, announce: bool) {
+        match self.clipboard.set(text) {
+            Some(via) => {
+                if announce {
+                    let n = text.chars().count();
+                    let how = if via == crate::clipboard::Copied::Terminal { " via the terminal" } else { "" };
+                    self.toast(ToastLevel::Ok, format!("copied {n} chars{how}"));
+                }
+            }
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable"),
+        }
+    }
+
+    /// Pastes the system clipboard into a pane.
+    pub fn paste_clipboard(&mut self, pane: PaneId) {
+        match self.clipboard.get() {
+            Some(text) => self.paste_into(pane, text),
+            None => self.toast(ToastLevel::Warn, "clipboard unavailable — paste with your terminal's shortcut"),
+        }
+    }
+
+    /// Pastes text into a pane. Text with a line break would run as commands in an app without bracketed paste
+    /// (cmd, older PowerShell, a plain `sh`): that asks first.
+    pub fn paste_into(&mut self, pane: PaneId, text: String) {
+        let Some(p) = self.panes.get_mut(&pane) else { return };
+        let bracketed = p.parser().screen().bracketed_paste();
+        if !bracketed && text.contains(['\n', '\r']) {
+            let lines = text.lines().count().max(1);
+            let s = if lines == 1 { "" } else { "s" };
+            self.overlay = Some(Overlay::Confirm(Confirm {
+                title: "PASTE".into(),
+                body: format!("{lines} line{s} — each may run as a command. Paste?"),
+                action: ConfirmAction::Paste { pane, text },
+            }));
+            return;
+        }
+        self.paste_now(pane, &text);
+    }
+
+    /// Pastes text into a pane at once, the scroll back at the newest output. Text the program did not take (too
+    /// much is waiting for it, or it has exited) gets a toast: a big paste is never dropped in silence.
+    pub(super) fn paste_now(&mut self, pane: PaneId, text: &str) {
+        let Some(p) = self.panes.get_mut(&pane) else { return };
+        p.scroll_reset();
+        if !p.paste(text) {
+            self.toast(ToastLevel::Warn, "paste too large, or the program is not reading its input: part was not sent");
+        }
+    }
+
+    /// Input the program did not take (`Pane::write` refused it): a toast says so, once while it shows.
+    pub(super) fn input_refused(&mut self) {
+        const TEXT: &str = "input not sent: the program is not reading its input";
+        if !self.toasts.iter().any(|t| t.text == TEXT) {
+            self.toast(ToastLevel::Warn, TEXT);
         }
     }
 }

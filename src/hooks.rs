@@ -67,14 +67,28 @@ pub fn settings_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("settings.json"))
 }
 
-/// Base of the hook command: `noble` from PATH if present, else the running file's full path.
+/// Base of the hook command: `noble` from PATH if present, else the running file's full path, quoted for the
+/// shell that runs hooks (see [`quote_for_shell`]).
 pub fn command_base() -> String {
     if crate::util::which("noble").is_some() {
         return "noble".into();
     }
     match std::env::current_exe() {
-        Ok(p) => format!("\"{}\"", p.display()),
+        Ok(p) => quote_for_shell(&p.display().to_string()),
         Err(_) => "noble".into(),
+    }
+}
+
+/// `text` as one word for the shell Claude Code runs hook commands with. Unix (`sh`): single quotes, so
+/// nothing in the path expands (`$`, backticks, `\`); a `'` is closed, escaped and reopened. Windows: double
+/// quotes, the form cmd.exe and Git Bash read (a path cannot hold a `"` there).
+pub fn quote_for_shell(text: &str) -> String {
+    if cfg!(windows) {
+        // Windows: cmd.exe and Git Bash read double quotes (a path cannot hold a `"` there).
+        format!("\"{text}\"")
+    } else {
+        // Unix: single quotes, where nothing expands. Windows uses double quotes (see above).
+        format!("'{}'", text.replace('\'', r"'\''"))
     }
 }
 
@@ -86,16 +100,20 @@ fn is_noble_command(command: &str) -> bool {
     if !EVENTS.iter().any(|(_, a)| *a == arg.trim()) {
         return false;
     }
-    let base = base.trim().trim_matches('"');
+    let base = base.trim().trim_matches(['"', '\'']);
     let file = base.rsplit(['/', '\\']).next().unwrap_or(base).to_lowercase();
     let stem = file.strip_suffix(".exe").unwrap_or(&file);
     stem == "noble" || stem == "noble-dev"
 }
 
+/// Is this one hook (`{"type": "command", "command": …}`) NOBLE's?
+fn is_noble_command_hook(hook: &Value) -> bool {
+    hook.get("command").and_then(Value::as_str).is_some_and(is_noble_command)
+}
+
+/// Does this matcher group hold one of NOBLE's hooks?
 fn is_noble_hook(entry: &Value) -> bool {
-    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
-        hooks.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(is_noble_command))
-    })
+    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| hooks.iter().any(is_noble_command_hook))
 }
 
 fn read_settings(path: &Path) -> Result<Value, String> {
@@ -113,14 +131,25 @@ fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     // The backup keeps the file as it was before NOBLE first touched it; later writes must not
-    // overwrite it with an already edited copy.
+    // overwrite it with an already edited copy. A backup that is damaged (cut short by an older build's
+    // plain copy) is taken again: the file is still the original while nothing was written yet.
     let backup = path.with_extension("json.noble-bak");
-    if path.is_file() && !backup.exists() {
-        std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
+    if path.is_file() && !backup_is_intact(&backup) {
+        let original = std::fs::read(path).map_err(|e| format!("backup failed: {e}"))?;
+        crate::store::write_bytes(&backup, original).map_err(|e| format!("backup failed: {e}"))?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     // Atomic, through a symlinked file, keeping its permissions; no temp file is left on failure.
     crate::store::write_text(path, &(text + "\n")).map_err(|e| e.to_string())
+}
+
+/// Is the backup there and usable: it exists and is empty (an empty settings file was backed up) or holds
+/// JSON. A missing backup, or one cut short by a plain copy that was interrupted, is not.
+fn backup_is_intact(backup: &Path) -> bool {
+    std::fs::read_to_string(backup).is_ok_and(|text| {
+        let text = crate::util::strip_bom(&text);
+        text.trim().is_empty() || serde_json::from_str::<Value>(text).is_ok()
+    })
 }
 
 /// Are the hooks installed for every event?
@@ -164,19 +193,40 @@ pub fn upgrade(path: &Path) -> Result<(), String> {
         })
     });
     match base {
-        Some(base) if !is_installed(path) => install(path, &base),
+        Some(base) if !is_installed(path) => install(path, &requote(&base)),
         _ => Ok(()),
     }
 }
 
-/// Removes the hooks NOBLE added; also deletes lists left empty.
+/// The base of an older install, quoted the way this build quotes it (an install from before the quoting
+/// fix used double quotes, which expand `$`). A bare `noble` from PATH stays bare.
+fn requote(base: &str) -> String {
+    let raw = base.trim().trim_matches(['"', '\'']);
+    if raw == "noble" { raw.to_string() } else { quote_for_shell(raw) }
+}
+
+/// Removes the hooks NOBLE added; also deletes lists left empty. A matcher group that holds NOBLE's hook
+/// next to the user's own hooks keeps the user's hooks: only NOBLE's entries leave it, and the group goes
+/// when nothing is left in it.
 pub fn uninstall(path: &Path) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let Some(hooks) = v.get_mut("hooks").and_then(Value::as_object_mut) else { return Ok(()) };
     for (event, _) in EVENTS {
         if let Some(list) = hooks.get_mut(event).and_then(Value::as_array_mut) {
-            list.retain(|e| !is_noble_hook(e));
-            if list.is_empty() {
+            let before = list.len();
+            list.retain_mut(|group| {
+                if !is_noble_hook(group) {
+                    return true;
+                }
+                match group.get_mut("hooks").and_then(Value::as_array_mut) {
+                    Some(inner) => {
+                        inner.retain(|h| !is_noble_command_hook(h));
+                        !inner.is_empty()
+                    }
+                    None => true,
+                }
+            });
+            if list.is_empty() && list.len() != before {
                 hooks.remove(event);
             }
         }
@@ -224,8 +274,8 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
         }
         let marker = dir.join(format!("{instance}-{pane}.{id}.sub"));
         if event == SUBAGENT_START {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(marker, "");
+            let _ = crate::util::create_private_dir(&dir);
+            let _ = crate::store::create_new_file(&marker, "");
         } else {
             let _ = std::fs::remove_file(marker);
         }
@@ -240,11 +290,14 @@ pub fn run_cli(event: &str, stdin: &str, data: &Path, instance: Option<&str>, pa
     }
     let message = field("message").map(|m| crate::util::truncate(m, 120));
     let rec = HookRecord { event: event.to_string(), message, ts: chrono::Utc::now().timestamp(), subagents: 0 };
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::util::create_private_dir(&dir);
     if let Ok(text) = serde_json::to_string(&rec) {
         let tmp = dir.join(format!("{instance}-{pane}.tmp"));
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, file);
+        // A stale temp file (a crash) is replaced: the record is written as a new file each time.
+        let _ = std::fs::remove_file(&tmp);
+        // Windows: the reader may have the record open, so the rename is retried (`replace_file`).
+        if crate::store::create_new_file(&tmp, &text).and_then(|()| crate::store::replace_file(&tmp, &file)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -552,7 +605,9 @@ mod tests {
         upgrade(&file).unwrap();
         assert!(is_installed(&file));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["SubagentStop"][0]["hooks"][0]["command"], format!("{base} hook subagent-stop"));
+        // The added event is written with this build's quoting (`requote`); the existing ones are untouched.
+        let added = format!("{} hook subagent-stop", quote_for_shell(r"C:\Tools\noble.exe"));
+        assert_eq!(v["hooks"]["SubagentStop"][0]["hooks"][0]["command"], added);
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1, "existing hooks are not duplicated");
         uninstall(&file).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -584,7 +639,97 @@ mod tests {
         upgrade(&file).unwrap();
         assert!(is_installed(&file));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["SubagentStart"][0]["hooks"][0]["command"], format!("{base} hook subagent-start"));
+        // The events it adds carry the whole path (not cut at its " hook "), quoted for the shell.
+        let added = format!("{} hook subagent-start", quote_for_shell("/opt/my hook tools/noble"));
+        assert_eq!(v["hooks"]["SubagentStart"][0]["hooks"][0]["command"], added);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The base is one word for the shell that runs hooks: nothing in it expands, and a `'` survives.
+    #[test]
+    fn hook_base_is_quoted_for_the_shell() {
+        if cfg!(windows) {
+            // Windows: double quotes, as before (cmd.exe and Git Bash read them).
+            assert_eq!(quote_for_shell(r"C:\my tools\noble.exe"), r#""C:\my tools\noble.exe""#);
+        } else {
+            // Unix: single quotes, so `$`, backticks and backslashes stay literal.
+            assert_eq!(quote_for_shell("/opt/a b/$X/`y`/noble"), "'/opt/a b/$X/`y`/noble'");
+            assert_eq!(quote_for_shell("/o/it's/noble"), r"'/o/it'\''s/noble'");
+        }
+        let base = quote_for_shell("/o/it's/$HOME/noble");
+        assert!(is_noble_command(&format!("{base} hook stop")), "{base}");
+        assert_eq!(requote("noble"), "noble");
+        assert_eq!(requote(r#""/opt/$X/noble""#), quote_for_shell("/opt/$X/noble"));
+    }
+
+    /// An install written with double quotes (before this fix) gets the events it lacks in this build's form.
+    #[test]
+    fn upgrade_quotes_the_base_of_the_events_it_adds() {
+        let dir = temp("upgrade-quote");
+        let file = dir.join("settings.json");
+        let legacy = r#""/opt/$X/noble""#;
+        let mut hooks = serde_json::Map::new();
+        for (event, arg) in &EVENTS[..5] {
+            hooks.insert(
+                event.to_string(),
+                json!([{ "hooks": [ { "type": "command", "command": format!("{legacy} hook {arg}") } ] }]),
+            );
+        }
+        std::fs::write(&file, serde_json::to_string(&json!({ "hooks": hooks })).unwrap()).unwrap();
+        upgrade(&file).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        for (event, arg) in &EVENTS[5..] {
+            let command = &v["hooks"][event][0]["hooks"][0]["command"];
+            assert_eq!(command, &format!("{} hook {arg}", quote_for_shell("/opt/$X/noble")), "{event}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Uninstall removes NOBLE's hook from a matcher group and nothing else: a group that also holds the user's
+    /// own hook keeps it, and only a group left empty goes.
+    #[test]
+    fn uninstall_keeps_the_users_hooks_in_a_shared_group() {
+        let dir = temp("shared-group");
+        let file = dir.join("settings.json");
+        let user = json!({ "hooks": [ { "type": "command", "command": "say done" } ] });
+        let mine = json!({ "hooks": [ { "type": "command", "command": "noble hook stop" } ] });
+        let shared = json!({ "matcher": "Bash", "hooks": [
+            { "type": "command", "command": "say done" },
+            { "type": "command", "command": "noble hook stop" },
+        ] });
+        let settings = json!({ "hooks": {
+            "Stop": [ user.clone(), mine.clone(), shared ],
+            "Notification": [ mine ],
+        } });
+        std::fs::write(&file, settings.to_string()).unwrap();
+        uninstall(&file).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(
+            stop,
+            &vec![user, json!({ "matcher": "Bash", "hooks": [ { "type": "command", "command": "say done" } ] })]
+        );
+        assert!(v["hooks"].get("Notification").is_none(), "an empty list is removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backup cut short by an interrupted plain copy (an older build) is taken again from the settings file
+    /// while that file is still the original; the new backup is written in one step (no temp file left).
+    #[test]
+    fn a_truncated_backup_is_taken_again() {
+        let dir = temp("backup-repair");
+        let file = dir.join("settings.json");
+        let original = "{ \"model\": \"opus\" }";
+        std::fs::write(&file, original).unwrap();
+        std::fs::write(dir.join("settings.json.noble-bak"), "{ \"mo").unwrap();
+        install(&file, "noble").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.noble-bak")).unwrap(), original);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(left.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{left:?}");
+        // A good backup is never overwritten by a later write.
+        install(&file, "noble").unwrap();
+        uninstall(&file).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.noble-bak")).unwrap(), original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -145,21 +145,33 @@ pub fn roots_from(cfg: &ProjectsCfg) -> Vec<PathBuf> {
 /// `.git` may be a directory or a file containing `gitdir:` (for worktrees/submodules).
 pub fn git_dir(repo: &Path) -> Option<PathBuf> {
     let dot = repo.join(".git");
-    if dot.is_dir() {
-        return Some(dot);
-    }
-    if dot.is_file() {
-        let text = std::fs::read_to_string(&dot).ok()?;
+    let gd = if dot.is_dir() {
+        dot
+    } else if dot.is_file() {
+        // Capped like the task files: a repository file is not trusted to be small.
+        let text = read_small(&dot)?;
         let target = text.trim().strip_prefix("gitdir:")?.trim();
+        // Not followed to another machine: on Windows reading `\\server\share\HEAD` connects there and sends the
+        // user's credentials (NTLM). The repository is then treated as a plain folder.
+        if crate::term::pane::is_network_path(target) {
+            return None;
+        }
         let p = PathBuf::from(target);
-        return Some(if p.is_absolute() { p } else { repo.join(p) });
-    }
-    None
+        if p.is_absolute() { p } else { repo.join(p) }
+    } else {
+        return None;
+    };
+    // Git reads `commondir` (a linked worktree's shared folder) and `gitdir` (the worktree's own `.git` file) from
+    // the git directory itself, so a repository that names a network path there is not run either.
+    let names_share = ["commondir", "gitdir"]
+        .iter()
+        .any(|f| read_small(&gd.join(f)).is_some_and(|t| crate::term::pane::is_network_path(t.trim())));
+    (!names_share).then_some(gd)
 }
 
 /// Branch name from the `HEAD` file (short hash on a detached HEAD).
 pub fn read_branch(git_dir: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = read_small(&git_dir.join("HEAD"))?;
     let head = head.trim();
     if let Some(r) = head.strip_prefix("ref:") {
         let r = r.trim();
@@ -487,16 +499,66 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Runs `git -C <path> <args>` in the background: no optional locks (a status refresh must not take
 /// the index lock a foreground `git commit` needs), no credential prompts, killed after [`GIT_TIMEOUT`].
-/// `None` on failure or timeout; stdout is capped by `ai::run_command`.
-fn git_run(path: &Path, git: &Path, args: &[&str]) -> Option<String> {
+/// `overrides` are the `-c` settings from [`repo_program_overrides`]. `None` on failure or timeout;
+/// stdout is capped by `ai::run_command`.
+fn git_run(path: &Path, git: &Path, overrides: &[String], args: &[&str]) -> Option<String> {
     let mut cmd = util::command_for(git);
-    cmd.arg("--no-optional-locks")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("--no-optional-locks");
+    for setting in overrides {
+        cmd.arg("-c").arg(setting);
+    }
+    cmd.arg("-C").arg(path).args(args).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0");
     crate::ai::run_command(cmd, GIT_TIMEOUT).ok()
+}
+
+/// `git -c` settings that stop a background git from running programs the repository names itself: the
+/// `core.fsmonitor` hook (run on every status), `log.showSignature` (runs `gpg.program`) and the
+/// `filter.<driver>` clean, smudge and process commands (run when a file's `.gitattributes` names the
+/// driver). The driver names are read from the repository's own config (`.git/config` and
+/// `config.worktree`) only: the user's global and system filters (git-lfs, usually) stay active.
+/// Fails closed: `None` when that config cannot be read, so no status is shown instead of one that
+/// runs the repository's programs. A repository with no filters gets the first two settings only.
+fn repo_program_overrides(path: &Path, git: &Path) -> Option<Vec<String>> {
+    let mut drivers = std::collections::BTreeSet::new();
+    for scope in ["--local", "--worktree"] {
+        let mut cmd = util::command_for(git);
+        cmd.arg("--no-optional-locks").arg("-C").arg(path).args([
+            "config",
+            "--includes",
+            "--null",
+            "--name-only",
+            "--list",
+            scope,
+        ]);
+        let names = crate::ai::run_command(cmd, GIT_TIMEOUT).ok()?;
+        drivers.extend(filter_drivers(&names)?);
+    }
+    let mut settings = vec!["core.fsmonitor=false".to_string(), "log.showSignature=false".to_string()];
+    for driver in drivers {
+        for key in ["clean", "smudge", "process"] {
+            settings.push(format!("filter.{driver}.{key}="));
+        }
+        settings.push(format!("filter.{driver}.required=false"));
+    }
+    Some(settings)
+}
+
+/// The `filter.<driver>` names among `git config --name-only --null --list` output. `None` when a
+/// name holds a line break or `=`, which a `-c` setting cannot carry (the caller then fails closed).
+fn filter_drivers(names: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for name in names.split('\0') {
+        let Some(rest) = name.strip_prefix("filter.") else { continue };
+        let Some((driver, _key)) = rest.rsplit_once('.') else { continue };
+        if driver.is_empty() {
+            continue;
+        }
+        if driver.contains(['=', '\n', '\r']) {
+            return None;
+        }
+        out.push(driver.to_string());
+    }
+    Some(out)
 }
 
 /// Is `git` a working git? macOS: `/usr/bin/git` always exists, but without the Command Line Tools it is
@@ -514,12 +576,14 @@ fn git_is_real(git: &Path) -> bool {
 
 fn git_info(path: &Path, git: &Path) -> Option<GitInfo> {
     // A non-zero exit (not a repo) prints nothing useful; `git status` on a repo always prints the branch line.
-    let status = git_run(path, git, &["status", "--porcelain=v1", "-b", "--untracked-files=normal"])?;
+    let overrides = repo_program_overrides(path, git)?;
+    let status = git_run(path, git, &overrides, &["status", "--porcelain=v1", "-b", "--untracked-files=normal"])?;
     if status.trim().is_empty() {
         return None;
     }
     let mut info = parse_status(&status);
-    if let Some(log) = git_run(path, git, &["log", &format!("-{MAX_COMMITS}"), "--format=%h%x1f%ct%x1f%an%x1f%s"]) {
+    let log_args = ["log", &format!("-{MAX_COMMITS}"), "--format=%h%x1f%ct%x1f%an%x1f%s"];
+    if let Some(log) = git_run(path, git, &overrides, &log_args) {
         info.commits = parse_log(&log);
         if let Some(c) = info.commits.first() {
             info.last_commit = Some(c.time);
@@ -578,6 +642,30 @@ pub fn project_containing<'a>(list: &'a [Project], cwd: &Path) -> Option<&'a Pro
         .max_by_key(|p| p.path.as_os_str().len())
 }
 
+/// Takes the requests that queued up behind a rescan. Further rescans are the same scan, so they are dropped; a
+/// refresh is kept, in order, for after the scan. (`while let Ok(ProjectReq::Rescan) = req.try_recv()` used to take
+/// the first request that was not a rescan and throw it away.)
+fn drain_after_rescan(req: &std::sync::mpsc::Receiver<ProjectReq>, deferred: &mut Vec<PathBuf>) {
+    while let Ok(next) = req.try_recv() {
+        if let ProjectReq::Refresh(path) = next {
+            deferred.push(path);
+        }
+    }
+}
+
+/// Sends one repo's git status for `ProjectReq::Refresh`. A plain folder (added by hand) has no status; inside
+/// another repo `git status` would report that repo's instead. Returns false when the app is gone.
+fn refresh_one(path: PathBuf, git: Option<&Path>, tx: &Tx) -> bool {
+    if let Some(git) = git
+        && git_dir(&path).is_some()
+        && let Some(info) = git_info(&path, git)
+        && tx.send(AppEvent::Git(path, info)).is_err()
+    {
+        return false;
+    }
+    true
+}
+
 /// Scan + git status thread. Rescans when `Rescan` arrives or the interval is
 /// up; `Refresh` updates a single repo's status in between.
 pub fn spawn(
@@ -630,26 +718,26 @@ pub fn spawn(
                 }
             }
             let deadline = std::time::Instant::now() + RESCAN_EVERY;
+            let mut deferred: Vec<PathBuf> = Vec::new();
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 match req.recv_timeout(left) {
                     Ok(ProjectReq::Refresh(path)) => {
-                        // A plain folder (added by hand) has no status; inside another repo
-                        // `git status` would report that repo's instead.
-                        if let Some(git) = &git
-                            && git_dir(&path).is_some()
-                            && let Some(info) = git_info(&path, git)
-                            && tx.send(AppEvent::Git(path, info)).is_err()
-                        {
+                        if !refresh_one(path, git.as_deref(), &tx) {
                             return;
                         }
                     }
                     Ok(ProjectReq::Rescan) | Err(RecvTimeoutError::Timeout) => {
-                        // Swallow extra rescan requests arriving at the same time.
-                        while let Ok(ProjectReq::Rescan) = req.try_recv() {}
+                        drain_after_rescan(&req, &mut deferred);
                         break;
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            // Refreshes that queued up with a rescan run now, before that scan (the next pass of this loop).
+            for path in deferred.drain(..) {
+                if !refresh_one(path, git.as_deref(), &tx) {
+                    return;
                 }
             }
         }
@@ -723,6 +811,45 @@ mod tests {
         assert_eq!(alpha.branch.as_deref(), Some("main"));
         let beta = found.iter().find(|p| p.name == "beta").unwrap();
         assert_eq!(beta.branch.as_deref(), Some("0123456"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A `.git` file that points at a network path is not followed (Windows would connect to the server with the
+    /// user's credentials to read HEAD); a local target, absolute or relative, still names the repository.
+    #[test]
+    fn git_file_pointing_at_a_network_path_is_not_followed() {
+        let base = std::env::temp_dir().join(format!("noble-gitfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real/.git/worktrees/wt");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+        let local = base.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
+        let relative = base.join("relative");
+        std::fs::create_dir_all(&relative).unwrap();
+        std::fs::write(relative.join(".git"), "gitdir: ../real/.git/worktrees/wt\n").unwrap();
+        assert_eq!(git_dir(&local), Some(real.clone()));
+        assert_eq!(git_dir(&relative), Some(relative.join("../real/.git/worktrees/wt")));
+        for target in [r"\\attacker\share\x", "//attacker/share/x", r"\\?\UNC\attacker\share\x", r"\\.\pipe\x"] {
+            let bad = base.join(format!("bad-{}", target.len()));
+            std::fs::create_dir_all(&bad).unwrap();
+            std::fs::write(bad.join(".git"), format!("gitdir: {target}\n")).unwrap();
+            assert_eq!(git_dir(&bad), None, "{target}");
+            assert!(project_at(&bad).is_some_and(|p| !p.repo), "{target} is listed as a plain folder");
+        }
+        // Git reads `commondir` and a worktree's `gitdir` from the git directory: a network path there is refused too.
+        for (file, text) in [("commondir", r"\\attacker\share\x"), ("gitdir", "//attacker/share/x/.git")] {
+            let dir = base.join(format!("inside-{file}"));
+            let gd = dir.join(".git");
+            std::fs::create_dir_all(&gd).unwrap();
+            std::fs::write(gd.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+            std::fs::write(gd.join(file), format!("{text}\n")).unwrap();
+            assert_eq!(git_dir(&dir), None, "{file}");
+        }
+        // Scanning the folder finds the local repositories and not the ones that point at a share.
+        let found = scan(std::slice::from_ref(&base), 3, &[], 100);
+        assert!(found.iter().all(|p| !p.name.starts_with("bad-") && !p.name.starts_with("inside-")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -861,6 +988,104 @@ mod tests {
         assert_eq!(find("/code/apple/"), Some("/code/apple"));
         assert_eq!(find("/code/ap"), None);
     }
+
+    #[test]
+    fn filter_driver_names_from_config_names() {
+        let names = "core.bare\0filter.lfs.clean\0filter.lfs.process\0filter.a.b.smudge\0filter.broken\0filter.\0";
+        assert_eq!(filter_drivers(names), Some(vec!["lfs".to_string(), "lfs".into(), "a.b".into()]));
+        // A name a `-c` setting cannot carry fails closed.
+        assert_eq!(filter_drivers("filter.we=ird.clean\0"), None);
+        assert_eq!(filter_drivers("filter.a\nb.clean\0"), None);
+    }
+
+    /// Requests that queued up behind a rescan: the rescans collapse, and every refresh is kept in order. A refresh
+    /// that followed a rescan used to be dropped.
+    #[test]
+    fn refreshes_behind_a_rescan_are_kept() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (a, b, c) = (PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c"));
+        for req in
+            [ProjectReq::Rescan, ProjectReq::Refresh(a.clone()), ProjectReq::Rescan, ProjectReq::Refresh(b.clone())]
+        {
+            tx.send(req).unwrap();
+        }
+        tx.send(ProjectReq::Refresh(c.clone())).unwrap();
+        assert!(matches!(rx.recv(), Ok(ProjectReq::Rescan)));
+        let mut deferred = Vec::new();
+        drain_after_rescan(&rx, &mut deferred);
+        assert_eq!(deferred, vec![a, b, c]);
+        assert!(rx.try_recv().is_err(), "the queue is empty after the drain");
+    }
+
+    /// A background status must not run what the repository's own config names: `core.fsmonitor` (a hook
+    /// run on every status), and the clean and process filters of a driver the attributes give the files.
+    /// Each command touches its own marker. The control run (plain git) shows the commands do run; after
+    /// `git_info` none may have run.
+    #[test]
+    fn background_git_runs_no_program_from_the_repo_config() {
+        let _serial = crate::ai::SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let git = crate::util::which("git").expect("git on PATH");
+        let dir = std::env::temp_dir().join(format!("noble-hostile-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The setup reads no user or system git config (a signing key or an `include` there would change what the
+        // test does): the global config is an empty file, and the system config is off.
+        let empty_config = std::env::temp_dir().join(format!("noble-hostile-git-{}.gitconfig", std::process::id()));
+        std::fs::write(&empty_config, b"").unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new(&git)
+                .arg("-C")
+                .arg(&dir)
+                .env("GIT_CONFIG_GLOBAL", &empty_config)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["-c", "user.name=noble", "-c", "user.email=noble@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("tracked.txt"), "hi\n").unwrap();
+        std::fs::write(dir.join(".gitattributes"), "* filter=evil\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        // Same size, new content: git has to read the file, which runs the clean filter. The untracked
+        // file keeps the status output non-empty (`git_info` returns nothing for a clean tree).
+        std::fs::write(dir.join("tracked.txt"), "ho\n").unwrap();
+        std::fs::write(dir.join("untracked.txt"), "new\n").unwrap();
+        // Each command writes its marker with the shell's own redirection (git runs these through its `sh`, on
+        // Windows too), so no external program such as `touch` is needed. `#` turns the arguments git appends to the
+        // hook (protocol version and token) into a comment.
+        let marker = |name: &str| dir.join(name).to_string_lossy().replace('\\', "/");
+        run(&["config", "core.fsmonitor", &format!("echo x > \"{}\" #", marker("fsmonitor"))]);
+        run(&["config", "filter.evil.clean", &format!("echo x > \"{}\"; cat", marker("clean"))]);
+        run(&["config", "filter.evil.smudge", "cat"]);
+        run(&["config", "filter.evil.process", &format!("echo x > \"{}\"", marker("process"))]);
+        let names = ["fsmonitor", "clean", "process"];
+        let ran = |dir: &Path| names.into_iter().filter(|n| dir.join(n).exists()).collect::<Vec<_>>();
+
+        // The control's exit status does not matter: the hostile fsmonitor makes plain git fail, too.
+        let _ = std::process::Command::new(&git)
+            .arg("-C")
+            .arg(&dir)
+            .env("GIT_CONFIG_GLOBAL", &empty_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["status", "--porcelain=v1"])
+            .output();
+        let control_ran = ran(&dir);
+        for name in names {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let info = git_info(&dir, &git);
+        let guarded_ran = ran(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&empty_config);
+
+        assert!(control_ran.contains(&"fsmonitor"), "the control run should show the hazard: {control_ran:?}");
+        assert!(info.is_some(), "a background status still runs without the repo's programs");
+        assert!(guarded_ran.is_empty(), "the repository's own config ran {guarded_ran:?}");
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +1093,8 @@ mod live_tests {
     #[test]
     #[ignore]
     fn live_git_info() {
+        // Runs a real background command: see `ai::SPAWN_TESTS`.
+        let _serial = crate::ai::SPAWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let git = crate::util::which("git").expect("git");
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let info = super::git_info(&path, &git);

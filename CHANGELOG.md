@@ -64,6 +64,34 @@ All notable changes to NOBLE are documented here. The format is based on
   for it, the status bar says once which chord reaches that action (`alt+t went to the shell · NOBLE: ctrl+a t`;
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
 
+### Security
+- Background git (the project list and Home's status) no longer runs programs a repository's own `.git/config`
+  names: a `core.fsmonitor` hook, a `filter.*` clean, smudge or process command, or `log.showSignature`'s
+  `gpg.program`. Such a repository shows no git status instead of running them. Filters from your global config
+  (git-lfs, for one) still apply.
+- A path the terminal reports as a network path (`\\server\share`, `//server/share`) is never checked on disk: an
+  OSC 9;9 report of one is ignored (the pane keeps its start folder), and a Ctrl+click on one does not open or
+  check it. On Windows such a check connected to the server and sent the user's credentials.
+- A pane opened in a network folder no longer resolves a relative link against that folder on the share (ctrl+hover
+  and ctrl+click), and its prompts ask for no git status there. A repository whose `.git` file, `commondir` or
+  `gitdir` names a network path is listed as a plain folder: nothing is read from the share.
+- The link opener refuses more program types (Python scripts, `.msc`, `.jnlp`, `.scf`, `.gadget`, Windows Script
+  Host and installer types, `.library-ms`, `.settingcontent-ms` and others) and copies them instead of opening them.
+  Names Windows reads as a program with a trailing dot or space (`setup.exe.`) or as a stream
+  (`setup.py::$DATA`) are copied too.
+- `noble update` downloads only https addresses on GitHub, caps the download sizes, and refuses an archive with
+  absolute names, `..` parts or links before unpacking anything. A bad checksum now reads as a corrupted or
+  incomplete download. Redirects are followed by NOBLE itself, each address checked (GitHub's own download hosts
+  only), not by the HTTP client. `tar` is run by its full path, never found in the working folder.
+- NOBLE's data folder is created 0700 and its files 0600 on Unix (existing files keep their mode). Without a home
+  folder NOBLE stops with a message and asks for `NOBLE_HOME`, instead of writing to a `.noble` folder in the working
+  directory.
+- The `noble hook` command in `~/.claude/settings.json` is quoted for the shell on Unix (single quotes): a `$` or a
+  backtick in the install path no longer expands. An install from an older version gets the events it lacks in the
+  new form (its existing entries keep theirs until the hooks are turned off and on again).
+- Programs in a pane can set the clipboard with OSC 52 as before; Settings → "Clipboard from programs" (or
+  `osc52_write = false` under `[terminal]`) ignores those requests.
+
 ### Changed
 - Home's "/ search" label moved from the Projects panel's bottom button row to its top border, next to the
   count ("/ search · 6"); a click still starts the filter.
@@ -100,6 +128,58 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- A paste is no longer dropped in silence when it is bigger than the input a program has not read yet (8 MiB): the
+  part that fits is queued, bracketed paste still ends, and a toast says that the rest was not sent. Keys refused
+  the same way (the program is not reading its input) get a toast too, once while it shows.
+- The periodic session save no longer stalls the screen while another window holds the session lock: it tries once
+  (10 ms) and retries at the next check, instead of waiting up to a second on the UI thread each time. A panic on the
+  main thread waits at most half a second for that lock; when it is still held, the session is not saved then and the
+  file keeps the tabs saved last, so the exit is not held up and another window's tabs are not overwritten.
+- A verbatim local Windows path (`\\?\C:\...`, what `canonicalize` returns) is a local folder: it was taken for
+  a network share, so relative links and git status in such a folder were refused. `\\?\UNC\` paths stay network paths.
+- The ctrl+hover link highlight is drawn again at once when a layout change moves the link under the pointer, instead
+  of at the next event or idle tick (up to 2 s later).
+- A recent or saved directory on a slow network share or a spun-down disk is no longer skipped for the whole run: the
+  startup check of the recent list (0.5 s) only marks a directory that does not answer as slow, and the session and
+  workspace restore (2 s) still asks it, so its tabs open in that folder. A directory that is gone, or that gave no
+  answer within the restore's 2 s, is still not asked again in the run.
+- Scrollback search keeps up with streaming output without slowing it: while the search bar is open the matches are
+  recomputed at most every 100 ms (the output that arrives in between is counted when the interval has passed), and
+  a pane resize recomputes them through the same limit, after the frame is drawn. The matches are capped at the
+  newest 10,000, shown as "10000+" in the bar, so a common letter over a long scrollback no longer builds a huge
+  list. When the selected match falls out of that window, the selection stays on its line: the bar shows
+  "?/10000+" and the next step goes to the oldest kept match, instead of jumping to the newest one.
+- The ctrl+hover highlight of a link no longer sticks: it ends with the next key or mouse event that does not hold
+  ctrl (or a released ctrl, where the terminal reports it), and output that moves the link moves the highlight with
+  it. A ctrl+click opens the link that is highlighted.
+- Files NOBLE writes survive a power loss: the new content is flushed to disk before it replaces the old file
+  (and the folder is flushed on Linux and macOS), so a crash leaves the old or the new file, never a truncated one.
+  Write errors are no longer ignored before the rename. A symlinked file is still written through the link, and a dangling
+  link is reported instead of being replaced by a regular file. On Windows a save retries briefly when another
+  program has the file open.
+- A Settings change (theme, launcher, scheme, prefix key, roots) is refused while `config.toml` does not parse, with
+  a toast that opens the broken line; it used to rebuild the file from the defaults and wipe the `[[launchers]]`
+  blocks. A config file that is a link to a missing file is reported at startup.
+- Saved tabs that could not start at all (no pane could be spawned) are kept in the session file for the next start
+  instead of being replaced by the tabs that did open.
+- A periodic session save that cannot get the session lock (another window holds it) is retried later, instead of
+  writing without the lock and possibly losing another window's tabs. A stale lock is taken over safely, and a
+  window only removes its own lock.
+- Damaged-file copies rotate: past five copies the oldest is dropped, so a file that keeps coming back no longer
+  stops NOBLE from saving it.
+- `state.json`, `session.json` and workspace entries keep the fields a newer build wrote when an older build saves
+  them again.
+- Claude hooks: uninstall removes only NOBLE's hooks, and keeps the user's own hooks in a matcher group that also
+  holds one of NOBLE's. A backup cut short by an interrupted copy is taken again, and the backup is written in one
+  step.
+- Updating NOBLE on Linux and macOS replaces the binary in one step (no moved-aside copy that a kill could leave
+  without a `noble`).
+- Scrollback search no longer copies the whole scrollback on every keystroke, and only copies it again (holding the
+  terminal's lock) when the pane has new output or was resized.
+- A damaged `state.json`, `workspaces.json`, `session.json`, `recent.json` or `ai-history.json` no longer loses its data on the
+  next save: its bytes are kept in `<name>.corrupt` (then `.corrupt.2` … up to five copies; identical bytes are kept once)
+  before the write, and a toast names the copy. A file that cannot be read, or whose copy cannot be made, is left alone and
+  the change is not saved; an empty file is an empty state. A failed save is reported once per run.
 - A config error toast goes away when the file loads again, and opening the notification list clears the toasts on screen.
 - The key editor refuses direct ctrl+letter shortcuts (ctrl+c, ctrl+d, ctrl+r … belong to the shell), keeps CRLF line endings
   in `config.toml`, and adds a key before a comment that titles the next table. Reopening a tab says its launch commands run again.
@@ -131,6 +211,15 @@ All notable changes to NOBLE are documented here. The format is based on
 - A pane opened while another pane or window was writing NOBLE's shell scripts (the first start, or the
   first start after an update) could start without the shell integration: no directory tracking, no exit
   codes. The scripts are now replaced atomically.
+- Terminating a process (System's K or its dialog) checks that it is still the process that was listed (its start
+  time): when its pid has been reused by another process, nothing is terminated and a notice says so.
+- The codex usage check ends its whole process tree when it times out or fails (on Windows the npm `codex.cmd` shim
+  used to leave the CLI running), and it is ended on shutdown like the other background commands.
+- Quitting ends the background commands before it saves the session, and a crash on the main thread still saves the
+  session and ends them.
+- A dead folder in the recent list is checked once per run: each new tab no longer stalls up to half a second on it.
+- A git refresh that was requested while a project rescan was queued is no longer lost.
+- On Windows one slow background command kill no longer holds up every other background command.
 
 ## [1.9.0] - 2026-10-06
 

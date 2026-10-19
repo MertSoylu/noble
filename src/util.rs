@@ -1,6 +1,6 @@
 //! Small, pure helpers: formatting, fuzzy matching, PATH lookup.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -261,11 +261,17 @@ pub fn resolve_start_dir(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<P
     if path.is_dir() { Ok(path) } else { Err(format!("'{arg}' is not a directory")) }
 }
 
-/// Which of `dirs` pass `probe` within `timeout`; all are probed in parallel. A stat on a
-/// network share that stopped answering (SMB/UNC on Windows, NFS/SMB/sshfs mounts on Linux)
-/// can block for tens of seconds; a probe that does not answer in time counts as unusable and
-/// its thread is left to finish on its own.
+/// Which of `dirs` pass `probe` within `timeout`; a probe that does not answer in time counts as unusable
+/// (`dir_answers`).
 pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashSet<PathBuf> {
+    dir_answers(dirs, timeout, probe).into_iter().filter(|(_, answer)| *answer == Some(true)).map(|(d, _)| d).collect()
+}
+
+/// What `probe` answered for each of `dirs` within `timeout`; all are probed in parallel. `Some` for an answer in
+/// time, `None` for no answer. A stat on a network share that stopped answering (SMB/UNC on Windows,
+/// NFS/SMB/sshfs mounts on Linux) can block for tens of seconds; a probe that does not answer in time is
+/// `None`, and its thread is left to finish on its own.
+pub fn dir_answers(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool) -> HashMap<PathBuf, Option<bool>> {
     let (tx, rx) = std::sync::mpsc::channel();
     for dir in dirs {
         let (thread_tx, thread_dir) = (tx.clone(), dir.clone());
@@ -280,13 +286,11 @@ pub fn usable_dirs(dirs: &[PathBuf], timeout: Duration, probe: fn(&Path) -> bool
     }
     drop(tx);
     let deadline = std::time::Instant::now() + timeout;
-    let mut usable = HashSet::new();
+    let mut answers: HashMap<PathBuf, Option<bool>> = dirs.iter().map(|d| (d.clone(), None)).collect();
     while let Ok((dir, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
-        if ok {
-            usable.insert(dir);
-        }
+        answers.insert(dir, Some(ok));
     }
-    usable
+    answers
 }
 
 /// Is there a graphical session to open files, folders and URLs in? Not over SSH (the user sits at
@@ -341,13 +345,55 @@ pub fn over_ssh() -> bool {
     ["SSH_CONNECTION", "SSH_TTY"].iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
 }
 
+/// Creates a folder (and missing parents) for NOBLE's own files. Unix: a folder made here is 0700, so only
+/// the owner can list the session, the state or the agent records in it; an existing folder keeps its mode.
+/// Windows: nothing is set, the folder takes the ACL of the user profile it sits in (private to the user).
+pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    #[allow(unused_mut)]
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Options for creating one of NOBLE's files (with `create_new`, `create`, …). Unix: the file is 0600 from
+/// the moment it exists, so its text is never readable by others, even for a moment. Windows: a new file takes
+/// the ACL of its folder (the user profile), so nothing is set here.
+pub fn private_file_options() -> std::fs::OpenOptions {
+    #[allow(unused_mut)]
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
 /// Finds an executable on PATH (checks PATHEXT on Windows).
 pub fn which(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
         return candidate.exists().then(|| candidate.to_path_buf());
     }
-    let path = std::env::var_os("PATH")?;
+    find_in_path(name, &std::env::var_os("PATH")?)
+}
+
+/// The absolute directories of a PATH value, in order. An empty or relative entry (`""`, `.`, `bin`) is
+/// skipped: it would run a program from the folder NOBLE was started in, which the user did not choose.
+fn path_dirs(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path).filter(|dir| dir.is_absolute())
+}
+
+/// `which` for a bare program name, searching the absolute entries of `path` (see [`path_dirs`]).
+fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     let exts: Vec<String> = if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
         let mut v: Vec<String> = pathext.split(';').filter(|e| !e.is_empty()).map(|e| e.to_lowercase()).collect();
@@ -358,7 +404,7 @@ pub fn which(name: &str) -> Option<PathBuf> {
     } else {
         vec![String::new()]
     };
-    for dir in std::env::split_paths(&path) {
+    for dir in path_dirs(path) {
         for ext in &exts {
             let full = dir.join(format!("{name}{ext}"));
             if full.is_file() {
@@ -530,6 +576,53 @@ mod tests {
     /// A script shim gets a hostile argument (a file name full of shell syntax) as plain
     /// text: nothing in it runs. Windows checks a `.cmd` shim (run through cmd.exe), Unix
     /// an executable `sh` script.
+    /// NOBLE's folders and files are private on Unix (0700 / 0600) when they are created here.
+    #[test]
+    fn private_folders_and_files_are_owner_only() {
+        let base = std::env::temp_dir().join(format!("noble-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("data").join("agents");
+        create_private_dir(&dir).unwrap();
+        let file = dir.join("record.json");
+        {
+            use std::io::Write;
+            let mut f = private_file_options().write(true).create_new(true).open(&file).unwrap();
+            f.write_all(b"{}").unwrap();
+        }
+        // Unix: the modes are checked. Windows: the folder and file take the ACL of the profile, nothing to check.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn which_skips_empty_and_relative_path_entries() {
+        // Relative to the test's folder, which holds a program of this name: it must not be found through
+        // the relative entry, but is found through the absolute one.
+        let name = format!("noble-which-{}", std::process::id());
+        // Windows finds a program only through a PATHEXT extension (`.exe`), so the file carries one there;
+        // Unix runs any executable file, so the file keeps the bare name.
+        let file = if cfg!(windows) { format!("{name}.exe") } else { name.clone() };
+        let rel = Path::new("target").join(format!("which-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&rel).unwrap();
+        let program = rel.join(&file);
+        std::fs::write(&program, "").unwrap();
+        let abs = std::env::current_dir().unwrap().join(&rel);
+        let relative_only = std::env::join_paths([PathBuf::new(), rel.clone(), PathBuf::from(".")]).unwrap();
+        let with_abs = std::env::join_paths([PathBuf::new(), rel.clone(), abs.clone()]).unwrap();
+        let found_relative = find_in_path(&name, &relative_only);
+        let found_absolute = find_in_path(&name, &with_abs);
+        let _ = std::fs::remove_dir_all(&rel);
+        assert_eq!(found_relative, None);
+        assert_eq!(found_absolute, Some(abs.join(&file)));
+        let dirs: Vec<PathBuf> = path_dirs(&with_abs).collect();
+        assert_eq!(dirs, vec![abs]);
+    }
+
     #[test]
     fn command_for_passes_hostile_arguments_literally() {
         let dir = std::env::temp_dir().join(format!("noble-command-for-{}", std::process::id()));

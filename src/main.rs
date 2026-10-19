@@ -1,6 +1,7 @@
 //! NOBLE entry point: terminal setup, input thread and the frame loop.
 
 use std::io::{Write, stdout};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -48,6 +49,11 @@ fn restore_terminal() {
     let _ = out.flush();
 }
 
+/// Reported before the terminal is touched: without a home folder NOBLE has nowhere for its files.
+fn no_folder_error() -> anyhow::Error {
+    anyhow::anyhow!("no home folder for NOBLE's files: set NOBLE_HOME to the folder to use")
+}
+
 fn main() -> anyhow::Result<()> {
     // `noble hook <event>`: called from a Claude Code hook; it never touches the
     // terminal and always exits silently with success.
@@ -57,9 +63,10 @@ fn main() -> anyhow::Result<()> {
         let mut input = String::new();
         let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
         let event = argv.get(1).map(String::as_str).unwrap_or("");
-        let data = Paths::resolve(None).data;
+        // No folder for the files: nothing to record, and a hook never reports an error.
+        let Some(paths) = Paths::resolve(None) else { return Ok(()) };
         let (instance, pane) = (std::env::var("NOBLE_INSTANCE").ok(), std::env::var("NOBLE_PANE").ok());
-        noble::hooks::run_cli(event, &input, &data, instance.as_deref(), pane.as_deref());
+        noble::hooks::run_cli(event, &input, &paths.data, instance.as_deref(), pane.as_deref());
         return Ok(());
     }
     if argv.first().map(String::as_str) == Some("update") {
@@ -86,7 +93,7 @@ fn main() -> anyhow::Result<()> {
             },
             "--no-boot" => no_boot = true,
             "--paths" => {
-                let p = Paths::resolve(config_override.clone());
+                let p = Paths::resolve(config_override.clone()).ok_or_else(no_folder_error)?;
                 println!("config: {}\ndata:   {}", p.config.display(), p.data.display());
                 return Ok(());
             }
@@ -110,7 +117,7 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let paths = Paths::resolve(config_override);
+    let paths = Paths::resolve(config_override).ok_or_else(no_folder_error)?;
 
     enable_raw_mode()?;
     let mut out = stdout();
@@ -134,10 +141,14 @@ fn main() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().name() == Some("main") {
             restore_terminal();
+            // Background commands end now if the lock is free; otherwise the unwinding reaches `run`.
+            noble::ai::kill_background_children_if_free();
             default_hook(info);
         } else {
-            let _ = std::fs::create_dir_all(log_file.parent().unwrap_or(std::path::Path::new(".")));
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+            if let Some(dir) = log_file.parent() {
+                let _ = noble::util::create_private_dir(dir);
+            }
+            if let Ok(mut f) = noble::util::private_file_options().create(true).append(true).open(&log_file) {
                 let thread = std::thread::current().name().unwrap_or("?").to_string();
                 let _ = writeln!(f, "[{}] panic in thread '{thread}': {info}", chrono::Local::now().format("%F %T"));
             }
@@ -189,10 +200,31 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
         app.open_project_shell(dir);
     }
 
-    // Drawing happens in only two cases: when an event arrives that changed
-    // something visible (`pending`, at most at FRAME rate) or when the moment
-    // comes for something that changes over time (clock, animation, notification
-    // timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
+    // A panic on the main thread unwinds through the loop. The panic hook has restored the terminal already; here
+    // the session is saved and the commands are ended, then the panic goes on, so the exit stays the same.
+    let draw_error = match catch_unwind(AssertUnwindSafe(|| event_loop(&mut terminal, &mut app, &rx, colors_256))) {
+        Ok(draw_error) => draw_error,
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(|| app.shutdown_after_panic()));
+            resume_unwind(payload);
+        }
+    };
+    app.shutdown();
+    draw_error.map_or(Ok(()), |e| Err(e.into()))
+}
+
+/// The frame loop. Returns the error of a failed draw (the terminal is gone), `None` on a normal quit.
+///
+/// Drawing happens in only two cases: when an event arrives that changed
+/// something visible (`pending`, at most at FRAME rate) or when the moment
+/// comes for something that changes over time (clock, animation, notification
+/// timeout). Otherwise the process sleeps; an idle terminal draws once a minute.
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    rx: &mpsc::Receiver<AppEvent>,
+    colors_256: bool,
+) -> Option<std::io::Error> {
     let mut last_draw = Instant::now() - FRAME;
     let mut pending = true;
     let mut draw_error = None;
@@ -227,7 +259,7 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
         } else if due {
             // A failed draw (the terminal is gone) still ends through `shutdown`, which saves the session.
             if let Err(e) = terminal.draw(|f| {
-                noble::ui::draw(f, &mut app);
+                noble::ui::draw(f, app);
                 if colors_256 {
                     noble::ui::to_256_colors(f.buffer_mut());
                 }
@@ -251,9 +283,10 @@ fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Resul
                 let _ = out.flush();
             }
             last_draw = Instant::now();
-            pending = false;
+            // A draw can ask for one more frame (`relink_after_layout` re-finds the link under the pointer after a
+            // layout change): it is drawn at the frame limit, not only at the next event or idle tick.
+            pending = app.take_dirty();
         }
     }
-    app.shutdown();
-    draw_error.map_or(Ok(()), |e| Err(e.into()))
+    draw_error
 }

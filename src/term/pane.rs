@@ -2,8 +2,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
@@ -15,74 +15,14 @@ use crate::term::integration;
 use crate::term::layout::PaneId;
 use crate::util;
 
-/// vt100 callbacks: title, working directory, terminal query replies, clipboard.
-#[derive(Default)]
-pub struct Callbacks {
-    pub title: String,
-    pub cwd: Option<String>,
-    /// Replies the emulator must write back to the PTY (DSR, DA).
-    pub responses: Vec<u8>,
-    pub clipboard: Option<String>,
-    pub bell: bool,
-    /// The shell drew a new prompt (OSC 7 / 9;9 / 133): the previous command finished.
-    /// See `Callbacks::shell_prompt` for what else that resets.
-    pub prompt: bool,
-    /// Exit code of the command that just finished, from `OSC 133;D;<code>` (NOBLE's own hooks send it
-    /// before the directory report; cmd.exe cannot, so it stays `None` there). Taken with `prompt`.
-    /// The first code since the last take wins: NOBLE's hook reads the status before anything else
-    /// runs, and a user's prompt may send its own `133;D;<code>` right after with a different one.
-    pub exit: Option<i32>,
-    /// When the shell last said a command line starts running (`OSC 133;C`: bash's `PS0`, zsh
-    /// `preexec`, fish `fish_preexec`, PowerShell's read-line wrapper). It is not sent for an empty
-    /// line, so it tells a command that ran from an Enter that only brought the prompt back.
-    pub started: Option<std::time::Instant>,
-    /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
-    pub notice: Option<String>,
-    /// OSC 8 links (newest last, capped in number).
-    pub hyperlinks: std::collections::VecDeque<Hyperlink>,
-    /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
-    open_link: Option<(usize, u16, String)>,
-    /// The host named by the pane's first OSC 7 report (its own shell, before any `ssh`).
-    local_host: Option<String>,
-}
-
-impl Callbacks {
-    /// The shell is back at its prompt, so the program that ran before it has exited:
-    /// the window title it set no longer describes the pane (a shell that titles its
-    /// prompt sets a new one right after). Only shells emit these marks; agents such as
-    /// Claude Code set a title (OSC 0) and progress (OSC 9;4) but never OSC 7 / 9;9 / 133.
-    fn shell_prompt(&mut self) {
-        self.prompt = true;
-        self.title.clear();
-    }
-}
-
-/// An exit code as a shell prints it. PowerShell may report a Windows status such as `3221225786`
-/// (above `i32::MAX`): that is kept as the same 32 bits, the way `$LASTEXITCODE` shows it.
-fn parse_exit_code(raw: &[u8]) -> Option<i32> {
-    let text = std::str::from_utf8(raw).ok()?.trim();
-    text.parse::<i32>().ok().or_else(|| text.parse::<u32>().ok().map(|c| c as i32))
-}
-
-/// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
-///
-/// vt100 does not report how many lines scrolled out of a full scrollback, so `line` drifts once the
-/// scrollback is full. `text` (the marked cells when the link closed) lets a lookup discard a link
-/// whose line no longer holds that text instead of returning the wrong address.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Hyperlink {
-    pub line: usize,
-    pub from: u16,
-    pub to: u16,
-    pub url: String,
-    pub text: String,
-}
-
-/// Maximum number of OSC 8 links kept.
-const MAX_HYPERLINKS: usize = 1000;
+#[cfg(test)]
+use super::osc::same_host;
+pub use super::osc::{
+    Callbacks, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
+};
 
 /// Scrollback length (without disturbing the visible scroll position).
-fn history_len(screen: &mut vt100::Screen) -> usize {
+pub(super) fn history_len(screen: &mut vt100::Screen) -> usize {
     let current = screen.scrollback();
     screen.set_scrollback(usize::MAX);
     let len = screen.scrollback();
@@ -92,7 +32,7 @@ fn history_len(screen: &mut vt100::Screen) -> usize {
 
 /// Text of columns `from..to` on an absolute line (0 = oldest scrollback line), or `None` if the line
 /// is gone. The visible scroll position is preserved.
-fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: u16) -> Option<String> {
+pub(super) fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: u16) -> Option<String> {
     let current = screen.scrollback();
     screen.set_scrollback(usize::MAX);
     let history = screen.scrollback();
@@ -103,240 +43,12 @@ fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: u16) -> Opt
     text
 }
 
-impl vt100::Callbacks for Callbacks {
-    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.title = String::from_utf8_lossy(title).trim().to_string();
-    }
-
-    fn audible_bell(&mut self, _: &mut vt100::Screen) {
-        self.bell = true;
-    }
-
-    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
-        if let Some(bytes) = util::base64_decode(data) {
-            self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
-        }
-    }
-
-    fn unhandled_osc(&mut self, screen: &mut vt100::Screen, params: &[&[u8]]) {
-        let join = |parts: &[&[u8]]| {
-            parts.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect::<Vec<_>>().join(";")
-        };
-        match params {
-            // OSC 7: file://host/path
-            [b"7", rest @ ..] if !rest.is_empty() => {
-                let url = join(rest);
-                // A remote shell (`ssh` from the pane) reports its own host's path: still a prompt, but
-                // not a directory here (a split would open a missing or unrelated local folder).
-                let host = cwd_url_host(&url);
-                let local = host.as_deref().is_none_or(|h| {
-                    is_local_host(h) || self.local_host.as_deref().is_none_or(|first| same_host(first, h))
-                });
-                if let Some(h) = &host
-                    && self.local_host.is_none()
-                    && local
-                {
-                    self.local_host = Some(h.clone());
-                }
-                if local {
-                    let path = parse_cwd_url(&url);
-                    self.cwd = Some(if cfg!(windows) { windows_cwd(&path) } else { path });
-                }
-                self.shell_prompt();
-            }
-            // OSC 9;9: Windows Terminal's cwd report.
-            [b"9", b"9", rest @ ..] if !rest.is_empty() => {
-                self.cwd = Some(join(rest).trim_matches('"').to_string());
-                self.shell_prompt();
-            }
-            // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
-            // extensions such as 9;4 progress) are not notifications.
-            [b"9", rest @ ..] if !rest.is_empty() && !rest[0].iter().all(u8::is_ascii_digit) => {
-                self.set_notice(join(rest));
-            }
-            // OSC 777;notify;title;body (rxvt / Ghostty / WezTerm).
-            [b"777", b"notify", rest @ ..] => {
-                let parts: Vec<String> = rest.iter().map(|p| String::from_utf8_lossy(p).trim().to_string()).collect();
-                self.set_notice(parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · "));
-            }
-            // OSC 8;params;address … OSC 8;; — an empty address closes the link.
-            // The address may contain ";", so the remaining parts are joined.
-            [b"8", _params, uri @ ..] => {
-                let url = join(uri);
-                let (row, col) = screen.cursor_position();
-                let line = history_len(screen) + row as usize;
-                if let Some((l0, c0, open)) = self.open_link.take() {
-                    let cols = screen.size().1;
-                    // A span whose line already left the scrollback cannot be verified later: dropped.
-                    let mut span = |line: usize, from: u16, to: u16| {
-                        if let Some(text) = span_text(screen, line, from, to) {
-                            self.push_link(Hyperlink { line, from, to, url: open.clone(), text });
-                        }
-                    };
-                    if line == l0 {
-                        span(line, c0, col);
-                    } else {
-                        // Line-spanning link: end of the first line and start of the last.
-                        span(l0, c0, cols);
-                        span(line, 0, col);
-                    }
-                }
-                if !url.is_empty() {
-                    self.open_link = Some((line, col, url));
-                }
-            }
-            // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished,
-            // optionally with its exit code (`133;D;1`). A bare D keeps a code already reported, and
-            // so does a second code: the first one of a prompt is NOBLE's own (see `exit`).
-            [b"133", kind, rest @ ..] if matches!(kind.first(), Some(b'A' | b'D')) => {
-                if kind.first() == Some(&b'D')
-                    && let Some(code) = rest.first().and_then(|c| parse_exit_code(c))
-                {
-                    self.exit.get_or_insert(code);
-                }
-                self.shell_prompt();
-            }
-            // OSC 133;C: the command line typed at the prompt starts running.
-            [b"133", kind, ..] if kind.first() == Some(&b'C') => {
-                self.started = Some(std::time::Instant::now());
-            }
-            _ => {}
-        }
-    }
-
-    fn visual_bell(&mut self, _: &mut vt100::Screen) {
-        self.bell = true;
-    }
-
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut vt100::Screen,
-        i1: Option<u8>,
-        _i2: Option<u8>,
-        params: &[&[u16]],
-        c: char,
-    ) {
-        let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-        match (i1, c) {
-            // DSR: cursor position. ConPTY asks for this at startup and waits for the answer.
-            (None, 'n') if first == 6 => {
-                let (row, col) = screen.cursor_position();
-                self.responses.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
-            }
-            (None, 'n') if first == 5 => self.responses.extend_from_slice(b"\x1b[0n"),
-            // Primary device attributes.
-            (None, 'c') if first == 0 => self.responses.extend_from_slice(b"\x1b[?1;2c"),
-            // Secondary device attributes.
-            (Some(b'>'), 'c') => self.responses.extend_from_slice(b"\x1b[>0;10;1c"),
-            _ => {}
-        }
-    }
-}
-
-impl Callbacks {
-    fn push_link(&mut self, link: Hyperlink) {
-        if link.to > link.from && !link.url.is_empty() {
-            self.hyperlinks.push_back(link);
-            if self.hyperlinks.len() > MAX_HYPERLINKS {
-                self.hyperlinks.pop_front();
-            }
-        }
-    }
-
-    fn set_notice(&mut self, text: String) {
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !text.is_empty() {
-            self.notice = Some(util::truncate(&text, 120));
-        }
-    }
-}
-
-/// The bytes a paste sends. Inside bracketed paste every ESC is dropped: a pasted `ESC[201~` would
-/// otherwise end the paste early and run the rest as typed input (other terminals sanitize the same way).
-fn paste_payload(text: &str, bracketed: bool) -> String {
+/// The parts of a paste: the start and end markers (empty without bracketed paste) around the body. Inside
+/// bracketed paste every ESC is dropped: a pasted `ESC[201~` would otherwise end the paste early and run the
+/// rest as typed input (other terminals sanitize the same way).
+fn paste_parts(text: &str, bracketed: bool) -> (&'static str, String, &'static str) {
     let body = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed { format!("\x1b[200~{}\x1b[201~", body.replace('\x1b', "")) } else { body }
-}
-
-/// Turns an OSC 7 URL into a local path: `file://host/C:/x` → `C:/x`.
-pub fn parse_cwd_url(raw: &str) -> String {
-    let mut p = raw.trim().to_string();
-    if let Some(after) = p.strip_prefix("file://") {
-        p = match after.find('/') {
-            Some(i) => after[i..].to_string(),
-            None => after.to_string(),
-        };
-        p = percent_decode(&p);
-        let b = p.as_bytes();
-        if b.len() >= 3 && b[0] == b'/' && b[2] == b':' && b[1].is_ascii_alphabetic() {
-            p.remove(0);
-        }
-    }
-    p
-}
-
-/// The host of an OSC 7 `file://host/path` URL; `None` when there is none (`file:///x`, a bare path).
-pub fn cwd_url_host(raw: &str) -> Option<String> {
-    let after = raw.trim().strip_prefix("file://")?;
-    let host = &after[..after.find('/').unwrap_or(after.len())];
-    (!host.is_empty()).then(|| percent_decode(host))
-}
-
-/// Host names compare without case and by their first label (`box` and `box.lan` are one machine).
-fn same_host(a: &str, b: &str) -> bool {
-    let short = |h: &str| h.split('.').next().unwrap_or(h).to_ascii_lowercase();
-    short(a) == short(b)
-}
-
-/// Is `host` this machine? `localhost` always is; otherwise it is compared with the system host name.
-fn is_local_host(host: &str) -> bool {
-    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    NAME.get_or_init(sysinfo::System::host_name).as_deref().is_some_and(|name| same_host(name, host))
-}
-
-/// An OSC 7 path as a Windows directory: Git Bash's `/c/x` → `C:\x`, its `//server/share` → `\\server\share`,
-/// with backslashes throughout (explorer.exe and "copy path" want them).
-pub fn windows_cwd(path: &str) -> String {
-    let p = msys_to_windows(path);
-    let unc = p.starts_with("//") && !p.starts_with("///");
-    if !unc && !(p.len() >= 2 && p.as_bytes()[1] == b':') {
-        // Not a Windows path (a remote or unconverted MSYS path): left as reported.
-        return p;
-    }
-    p.replace('/', "\\")
-}
-
-/// Git Bash / MSYS2 report Windows directories as `/c/Users/me`; turns that into `C:/Users/me`.
-pub fn msys_to_windows(path: &str) -> String {
-    let b = path.as_bytes();
-    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
-        return format!("{}:/{}", (b[1] as char).to_ascii_uppercase(), path[2..].trim_start_matches('/'));
-    }
-    path.to_string()
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    let hex = |b: u8| (b as char).to_digit(16);
-    while i < bytes.len() {
-        // Works on bytes: slicing the `str` could split a multi-byte character ("%aé").
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
-        {
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    if bracketed { ("\x1b[200~", body.replace('\x1b', ""), "\x1b[201~") } else { ("", body, "") }
 }
 
 /// Pane title: the process name from the shell's OSC title. `C:\WINDOWS\system32\cmd.exe`
@@ -596,18 +308,19 @@ impl ShellSpec {
     }
 
     /// A command line that runs a program (given by full path) with its arguments
-    /// (paths with spaces are quoted per the shell).
-    pub fn invocation_of(&self, program: &Path, args: &str) -> String {
+    /// (paths with spaces are quoted per the shell). `None` when cmd.exe cannot take the path
+    /// safely (see `quote_arg`: a `%` or `!` in it would be expanded).
+    pub fn invocation_of(&self, program: &Path, args: &str) -> Option<String> {
         let path = program.display().to_string();
-        match self.kind() {
+        Some(match self.kind() {
             ShellKind::PowerShell => format!("& {} {args}", pwsh_quote(&path)),
-            ShellKind::Cmd => format!("\"{path}\" {args}"),
+            ShellKind::Cmd => format!("{} {args}", self.quote_arg(&path)?),
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish | ShellKind::Posix => {
                 format!("{} {args}", self.quote(&path))
             }
             // A Windows program from inside WSL: through its `/mnt/c/...` path (WSL interop runs it).
             ShellKind::Wsl => format!("\"$(wslpath {})\" {args}", self.quote(&path)),
-        }
+        })
     }
 
     /// Shell-specific environment variables: for cmd a directory-reporting PROMPT
@@ -798,18 +511,142 @@ pub fn word_range(row: &[char], col: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// Most input that may wait for a PTY whose program does not read it. Past this, input is refused (see
+/// `PtyInput::send`), so a program that never reads cannot make the queue grow without limit.
+const MAX_QUEUED_INPUT: usize = 8 * 1024 * 1024;
+/// The largest piece a write is handed to the writer thread in. The waiting count falls as each piece is
+/// written, so a big paste does not wait for one long write.
+const WRITE_CHUNK: usize = 64 * 1024;
+
+/// The bytes waiting for a pane's PTY writer thread, the only thread that writes to the PTY. Sending never
+/// blocks: the main thread (keys, paste) and the reader thread (DSR/DA answers) only enqueue, and the writer
+/// writes in the order they were queued, so a program that does not read its input cannot stall the UI or
+/// the output.
+#[derive(Clone)]
+struct PtyInput {
+    tx: Sender<Vec<u8>>,
+    /// Bytes queued and not yet written (added by `send`, taken off by the writer thread).
+    queued: Arc<AtomicUsize>,
+}
+
+impl PtyInput {
+    /// The queue and the receiver the writer thread takes its bytes from.
+    fn channel() -> (PtyInput, Receiver<Vec<u8>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (PtyInput { tx, queued: Arc::new(AtomicUsize::new(0)) }, rx)
+    }
+
+    /// Adds up to `want` bytes to the waiting count and returns how many were added (`0` when none fit). With
+    /// `partial` false it adds all of them or none. A compare-and-swap keeps the cap exact when the reader thread
+    /// queues its answers at the same time.
+    fn reserve(&self, want: usize, partial: bool) -> usize {
+        let mut cur = self.queued.load(Ordering::Acquire);
+        loop {
+            let room = MAX_QUEUED_INPUT.saturating_sub(cur);
+            let take = if partial {
+                want.min(room)
+            } else if want <= room {
+                want
+            } else {
+                0
+            };
+            if take == 0 {
+                return 0;
+            }
+            match self.queued.compare_exchange_weak(cur, cur + take, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return take,
+                Err(now) => cur = now,
+            }
+        }
+    }
+
+    /// Gives back `n` reserved bytes that will not be written.
+    fn release(&self, n: usize) {
+        if n > 0 {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+        }
+    }
+
+    /// Hands reserved `bytes` to the writer thread, `WRITE_CHUNK` at a time. `false` when the writer has ended:
+    /// the bytes not handed over are given back.
+    fn hand_over(&self, bytes: &[u8]) -> bool {
+        let mut left = bytes.len();
+        for piece in bytes.chunks(WRITE_CHUNK) {
+            if self.tx.send(piece.to_vec()).is_err() {
+                self.release(left);
+                return false;
+            }
+            left -= piece.len();
+        }
+        true
+    }
+
+    /// Queues `bytes` whole or not at all: keys and the DSR/DA answers, which must not be cut. `false` when they
+    /// were refused: more than `MAX_QUEUED_INPUT` is still waiting, or the writer thread has ended (the child
+    /// exited or the PTY closed).
+    fn send(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        self.reserve(bytes.len(), false) == bytes.len() && self.hand_over(bytes)
+    }
+
+    /// Queues a paste: `head`, then as much of `body` as fits (cut on a character boundary), then `tail`. The tail
+    /// is queued even when the body was cut, so a bracketed paste always ends. `true` only when all of the body
+    /// was queued; `false` when part of it was refused (too much is waiting, or the writer has ended), and then
+    /// nothing of the body is written past the cut.
+    fn send_paste(&self, head: &str, body: &str, tail: &str) -> bool {
+        let want = head.len() + body.len() + tail.len();
+        let got = self.reserve(want, true);
+        if got == want {
+            return self.hand_over(&[head, body, tail].concat().into_bytes());
+        }
+        let overhead = head.len() + tail.len();
+        if got < overhead {
+            self.release(got);
+            return false;
+        }
+        let mut cut = (got - overhead).min(body.len());
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 && !body.is_empty() {
+            self.release(got);
+            return false;
+        }
+        self.release(got - overhead - cut);
+        self.hand_over(&[head, &body[..cut], tail].concat().into_bytes());
+        false
+    }
+}
+
+/// What the pane knows about the folder the shell reported (`Pane::cwd`): the reported text the answer is for,
+/// and whether that folder answered the probe (`None` while it is pending).
+#[derive(Default)]
+struct CwdCheck {
+    raw: Option<String>,
+    usable: Option<bool>,
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Input and DSR/DA answers on their way to the PTY (`PtyInput`).
+    input: PtyInput,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Set by the wait thread once the child is reaped (see `kill_child`).
+    exited: Arc<AtomicBool>,
+    /// Sends the folder-check answers (`AppEvent::PaneCwd`) to the main loop.
+    events: Sender<AppEvent>,
     pub dirty: Arc<AtomicBool>,
+    /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
+    output_gen: Arc<AtomicU64>,
     /// (row, col)
     pub size: (u16, u16),
     pub start_cwd: PathBuf,
-    /// The last directory the shell reported, checked once (`cwd`): (reported text, usable path).
-    cwd_checked: Mutex<Option<(String, PathBuf)>>,
+    /// The last directory the shell reported and whether it is usable (`cwd`).
+    cwd_check: Mutex<CwdCheck>,
     pub shell_label: String,
     pub command: Option<String>,
     /// The quick-launch command (as configured, e.g. `claude`) this pane was opened with;
@@ -901,6 +738,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What the reader thread does with one chunk of a program's output: the emulator reads it, the output counter
+/// moves, and the answers the chunk asks for (DSR/DA) are queued to the writer like keys, so they keep their place
+/// among the input. Never blocks on the program.
+fn process_output(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, input: &PtyInput, chunk: &[u8]) {
+    let responses = {
+        let mut p = lock(parser);
+        // An emulator error must not kill the whole pane: skip this chunk.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(chunk)));
+        // Bumped under the same lock `scroll_text` reads it with: a new value means new output.
+        output_gen.fetch_add(1, Ordering::Release);
+        std::mem::take(&mut p.callbacks_mut().responses)
+    };
+    input.send(&responses);
+}
+
 impl Pane {
     pub fn spawn(id: PaneId, spec: SpawnSpec<'_>, tx: Sender<AppEvent>) -> Result<Pane> {
         let rows = spec.rows.max(2);
@@ -966,16 +818,34 @@ impl Pane {
         let pid = child.process_id();
         let killer = child.clone_killer();
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().context("pty writer")?));
+        let mut writer = pair.master.take_writer().context("pty writer")?;
+        let (input, queue) = PtyInput::channel();
         let parser =
             Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, spec.scrollback, Callbacks::default())));
         let dirty = Arc::new(AtomicBool::new(false));
+        let output_gen = Arc::new(AtomicU64::new(0));
+        let exited = Arc::new(AtomicBool::new(false));
 
+        // The writer thread is the only one that writes to the PTY, so a child that does not read its input
+        // blocks this thread alone. It ends when the queue closes (the pane and its reader are gone) or on the
+        // first write error (the child exited or the PTY closed).
+        {
+            let queued = input.queued.clone();
+            std::thread::Builder::new().name(format!("pty-write-{id}")).spawn(move || {
+                for bytes in queue {
+                    let ok = writer.write_all(&bytes).and_then(|()| writer.flush()).is_ok();
+                    queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+                    if !ok {
+                        break;
+                    }
+                }
+            })?;
+        }
         {
             let parser = parser.clone();
-            let writer = writer.clone();
+            let input = input.clone();
             let dirty = dirty.clone();
+            let output_gen = output_gen.clone();
             let tx = tx.clone();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
@@ -983,17 +853,7 @@ impl Pane {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let responses = {
-                                let mut p = lock(&parser);
-                                // An emulator error must not kill the whole pane: skip this chunk.
-                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(&buf[..n])));
-                                std::mem::take(&mut p.callbacks_mut().responses)
-                            };
-                            if !responses.is_empty() {
-                                let mut w = lock(&writer);
-                                let _ = w.write_all(&responses);
-                                let _ = w.flush();
-                            }
+                            process_output(&parser, &output_gen, &input, &buf[..n]);
                             if !dirty.swap(true, Ordering::AcqRel) && tx.send(AppEvent::PtyOutput).is_err() {
                                 break;
                             }
@@ -1004,8 +864,11 @@ impl Pane {
         }
         {
             let tx = tx.clone();
+            let exited = exited.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let _ = child.wait();
+                // The child is reaped: its pid may belong to another process from now on (`kill_child`).
+                exited.store(true, Ordering::Release);
                 let _ = tx.send(AppEvent::PtyExit(id));
             })?;
         }
@@ -1013,13 +876,16 @@ impl Pane {
         Ok(Pane {
             id,
             parser,
-            writer,
+            input,
             master: pair.master,
             killer,
+            exited,
+            events: tx,
             dirty,
+            output_gen,
             size: (rows, cols),
             start_cwd: cwd,
-            cwd_checked: Mutex::new(None),
+            cwd_check: Mutex::new(CwdCheck::default()),
             shell_label: spec.shell.label(),
             command: spec.command.map(str::to_string),
             launcher: None,
@@ -1037,31 +903,32 @@ impl Pane {
         })
     }
 
-    pub fn write(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        let mut w = lock(&self.writer);
-        let _ = w.write_all(bytes);
-        let _ = w.flush();
+    /// Queues `bytes` for the program and returns at once (see `PtyInput`). `false` when they were refused:
+    /// the program has not read more than `MAX_QUEUED_INPUT` already, or it has exited.
+    pub fn write(&self, bytes: &[u8]) -> bool {
+        self.input.send(bytes)
     }
 
-    /// Pastes text; wraps it in bracketed paste when the app wants that.
-    pub fn paste(&mut self, text: &str) {
+    /// Pastes text; wraps it in bracketed paste when the app wants that. `false` when part of the text was
+    /// refused (too much is waiting for the program, or it has exited): see `PtyInput::send_paste`.
+    pub fn paste(&mut self, text: &str) -> bool {
         self.edited = true;
         let bracketed = lock(&self.parser).screen().bracketed_paste();
-        self.write(paste_payload(text, bracketed).as_bytes());
+        let (head, body, tail) = paste_parts(text, bracketed);
+        self.input.send_paste(head, &body, tail)
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    /// Resizes the PTY and the emulator. `true` when the size changed.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> bool {
         let (rows, cols) = (rows.max(2), cols.max(4));
         if self.size == (rows, cols) {
-            return;
+            return false;
         }
         self.size = (rows, cols);
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        lock(&self.parser).screen_mut().set_size(rows, cols);
+        set_screen_size(&self.parser, &self.output_gen, rows, cols);
         self.selection = None;
+        true
     }
 
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<Callbacks>> {
@@ -1125,23 +992,59 @@ impl Pane {
         process_label(&p.callbacks().title, &self.shell_label)
     }
 
-    /// The directory the shell reported, or the start directory when it is not usable. Each newly
-    /// reported directory is checked once (time-limited, `util::usable_dirs`) and the answer is
-    /// kept, so drawing never touches the disk and a dead network share cannot freeze the UI.
+    /// The folder commands and the UI act on: the directory the shell reported when it is usable, otherwise the
+    /// start directory. Drawing never touches the disk, and nothing here waits for it: a reported directory is
+    /// checked once on a background thread (`util::usable_dirs`, time-limited, so a share that stopped answering
+    /// counts as unusable). Until that answers, and whenever the answer is no, this returns the start directory.
+    /// The answer comes back as `AppEvent::PaneCwd` and is stored with `set_cwd_usable`. A network path is never
+    /// checked: it is not a folder this pane acts on (`shown_cwd` shows it). The start folder can be a network path
+    /// (the pane was opened in a share): callers that touch the disk with it refuse that (`link::classify` resolves
+    /// no relative name against it, `app::git` asks for no git status there).
     pub fn cwd(&self) -> PathBuf {
-        let reported = lock(&self.parser).callbacks().cwd.clone();
-        let Some(reported) = reported else { return self.start_cwd.clone() };
-        let mut checked = lock(&self.cwd_checked);
-        if let Some((raw, path)) = checked.as_ref()
-            && *raw == reported
-        {
-            return path.clone();
+        let Some(reported) = lock(&self.parser).callbacks().cwd.clone() else { return self.start_cwd.clone() };
+        if is_network_path(&reported) {
+            return self.start_cwd.clone();
         }
-        let dir = PathBuf::from(&reported);
-        let usable = util::usable_dirs(std::slice::from_ref(&dir), CWD_PROBE_TIMEOUT, |p| p.is_dir()).contains(&dir);
-        let path = if usable { dir } else { self.start_cwd.clone() };
-        *checked = Some((reported, path.clone()));
-        path
+        let mut check = lock(&self.cwd_check);
+        if check.raw.as_deref() != Some(reported.as_str()) {
+            let dir = PathBuf::from(&reported);
+            let events = self.events.clone();
+            let id = self.id;
+            let probe_reported = reported.clone();
+            let probe = std::thread::Builder::new().name("cwd-probe".into()).spawn(move || {
+                let usable =
+                    util::usable_dirs(std::slice::from_ref(&dir), CWD_PROBE_TIMEOUT, |p| p.is_dir()).contains(&dir);
+                let _ = events.send(AppEvent::PaneCwd { pane: id, reported: probe_reported, usable });
+            });
+            check.raw = Some(reported);
+            // No thread to spare: the folder counts as unusable rather than being checked on this thread.
+            check.usable = if probe.is_ok() { None } else { Some(false) };
+        }
+        match (check.usable, check.raw.as_deref()) {
+            (Some(true), Some(raw)) => PathBuf::from(raw),
+            _ => self.start_cwd.clone(),
+        }
+    }
+
+    /// The folder as the title shows it: the reported text itself for a network path (shown, never touched),
+    /// otherwise `cwd`.
+    pub fn shown_cwd(&self) -> PathBuf {
+        let reported = lock(&self.parser).callbacks().cwd.clone();
+        match reported {
+            Some(reported) if is_network_path(&reported) => PathBuf::from(reported),
+            _ => self.cwd(),
+        }
+    }
+
+    /// Stores the answer of a folder check (`AppEvent::PaneCwd`). An answer for a folder the shell has since
+    /// left is ignored. `true` when it was stored.
+    pub fn set_cwd_usable(&self, reported: &str, usable: bool) -> bool {
+        let mut check = lock(&self.cwd_check);
+        if check.raw.as_deref() != Some(reported) || check.usable.is_some() {
+            return false;
+        }
+        check.usable = Some(usable);
+        true
     }
 
     /// Name of the folder the shell last reported (or started in). No file system access, so
@@ -1238,37 +1141,37 @@ impl Pane {
     }
 
     pub fn kill(&mut self) {
-        let _ = self.killer.kill();
+        self.kill_child();
+    }
+
+    /// Kills the child unless the wait thread has reaped it. Its pid is free for reuse from then on, so a signal
+    /// sent by pid could reach another process. The flag is set right after the reap: a kill in the instants
+    /// between the two is not excluded (closing that gap needs `waitid` with WNOWAIT, which portable-pty does not
+    /// expose), but a pane closed long after its child exited never signals a reused pid.
+    fn kill_child(&mut self) {
+        if !self.exited.load(Ordering::Acquire) {
+            let _ = self.killer.kill();
+        }
+    }
+
+    /// Whether the child has exited (its wait thread reaped it).
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
     }
 
     /// All lines including the scrollback (0 = oldest) and the scrollback length.
     /// The visible scroll position is preserved.
     pub fn all_lines(&self) -> (Vec<String>, usize) {
+        scrollback_lines(&mut lock(&self.parser))
+    }
+
+    /// The text search works on: `have` (the copy the caller holds) is returned as it is while the pane has
+    /// produced no output since it was read and kept its size, so a query typed without new output does not
+    /// read the whole scrollback again. Output or a resize reads it anew.
+    pub fn scroll_text(&self, have: Option<&ScrollText>) -> ScrollText {
         let mut p = lock(&self.parser);
-        let screen = p.screen_mut();
-        let original = screen.scrollback();
-        screen.set_scrollback(usize::MAX);
-        let history = screen.scrollback();
-        let (rows, cols) = screen.size();
-        let total = history + rows as usize;
-        let mut lines: Vec<String> = Vec::with_capacity(total);
-        let mut top = 0usize;
-        while top < total {
-            let offset = history.saturating_sub(top);
-            screen.set_scrollback(offset);
-            let start = history - offset;
-            for (i, row) in screen.rows(0, cols).enumerate() {
-                if start + i == lines.len() {
-                    lines.push(row);
-                }
-            }
-            top = start + rows as usize;
-            if offset == 0 {
-                break;
-            }
-        }
-        screen.set_scrollback(original);
-        (lines, history)
+        let generation = self.output_gen.load(Ordering::Acquire);
+        read_scroll_text(&mut p, generation, have)
     }
 
     /// Scrolls so the absolute line (0 = oldest) lands in the middle of the screen.
@@ -1302,6 +1205,67 @@ impl Pane {
     }
 }
 
+/// All lines including the scrollback (0 = oldest) and the scrollback length, read from `p`.
+/// The visible scroll position is preserved.
+fn scrollback_lines(p: &mut vt100::Parser<Callbacks>) -> (Vec<String>, usize) {
+    let screen = p.screen_mut();
+    let original = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let history = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let total = history + rows as usize;
+    let mut lines: Vec<String> = Vec::with_capacity(total);
+    let mut top = 0usize;
+    while top < total {
+        let offset = history.saturating_sub(top);
+        screen.set_scrollback(offset);
+        let start = history - offset;
+        for (i, row) in screen.rows(0, cols).enumerate() {
+            if start + i == lines.len() {
+                lines.push(row);
+            }
+        }
+        top = start + rows as usize;
+        if offset == 0 {
+            break;
+        }
+    }
+    screen.set_scrollback(original);
+    (lines, history)
+}
+
+/// The scrollback text search works on (`Pane::scroll_text`), with the output generation and screen size it
+/// was read at.
+#[derive(Clone, Debug)]
+pub struct ScrollText {
+    /// Every line, 0 = oldest. Shared, so a reused copy costs a pointer, not the lines.
+    pub lines: Arc<Vec<String>>,
+    /// Scrollback length (see `all_lines`).
+    pub history: usize,
+    generation: u64,
+    size: (u16, u16),
+}
+
+/// Resizes the emulator's screen and moves the output generation with it, under the lock `scroll_text` reads both
+/// with. Without the bump a copy taken before a resize stays valid after it, even when the size returns to the one
+/// it was read at (A → B → A with no output in between).
+fn set_screen_size(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, rows: u16, cols: u16) {
+    let mut p = lock(parser);
+    p.screen_mut().set_size(rows, cols);
+    output_gen.fetch_add(1, Ordering::Release);
+}
+
+/// The text of `p` at output generation `generation`: `have` itself when it was read at the same generation
+/// and size, otherwise read anew.
+fn read_scroll_text(p: &mut vt100::Parser<Callbacks>, generation: u64, have: Option<&ScrollText>) -> ScrollText {
+    let size = p.screen().size();
+    if let Some(text) = have.filter(|t| t.generation == generation && t.size == size) {
+        return text.clone();
+    }
+    let (lines, history) = scrollback_lines(p);
+    ScrollText { lines: Arc::new(lines), history, generation, size }
+}
+
 /// The OSC 8 link at on-screen (row, col): address and column span.
 fn hyperlink_in(p: &mut vt100::Parser<Callbacks>, row: u16, col: u16) -> Option<(String, u16, u16)> {
     let offset = p.screen().scrollback();
@@ -1329,26 +1293,35 @@ pub struct Match {
     pub width: u16,
 }
 
-/// Case-insensitive plain text search; columns are computed with display width.
-pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
+/// The most matches a search keeps (`find_matches`): the newest ones, when there are more.
+pub const MAX_MATCHES: usize = 10_000;
+
+/// Case-insensitive plain text search; columns are computed with display width. At most `MAX_MATCHES` matches
+/// come back, the newest ones; the flag says whether there were more. The lines are searched from the newest
+/// back, so a capped search stops early instead of scanning all of a long scrollback.
+pub fn find_matches(lines: &[String], query: &str) -> (Vec<Match>, bool) {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
     let q: Vec<char> = query.chars().map(fold).collect();
     if q.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
-    let mut out = Vec::new();
-    for (line_no, line) in lines.iter().enumerate() {
-        let chars: Vec<(char, u16)> =
-            line.chars().map(|c| (fold(c), unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)).collect();
+    // Newest first; the matches of one line are pushed in reverse too, so the whole list is reversed at the end.
+    let mut newest_first: Vec<Match> = Vec::new();
+    let mut line_matches = Vec::new();
+    let mut chars: Vec<(char, u16)> = Vec::new();
+    for (line_no, line) in lines.iter().enumerate().rev() {
+        chars.clear();
+        chars.extend(line.chars().map(|c| (fold(c), unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)));
         if chars.len() < q.len() {
             continue;
         }
+        line_matches.clear();
         let mut col = 0u16;
         let mut i = 0;
         while i + q.len() <= chars.len() {
             if chars[i..i + q.len()].iter().zip(&q).all(|((a, _), b)| a == b) {
                 let width = chars[i..i + q.len()].iter().map(|(_, w)| *w).sum();
-                out.push(Match { line: line_no, col, width });
+                line_matches.push(Match { line: line_no, col, width });
                 col += width;
                 i += q.len();
             } else {
@@ -1356,13 +1329,21 @@ pub fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
                 i += 1;
             }
         }
+        newest_first.extend(line_matches.iter().rev());
+        // One more than the cap is enough to know that there are more.
+        if newest_first.len() > MAX_MATCHES {
+            break;
+        }
     }
-    out
+    newest_first.reverse();
+    let capped = newest_first.len() > MAX_MATCHES;
+    newest_first.drain(..newest_first.len().saturating_sub(MAX_MATCHES));
+    (newest_first, capped)
 }
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        let _ = self.killer.kill();
+        self.kill_child();
     }
 }
 
@@ -1415,6 +1396,24 @@ mod tests {
         assert_eq!(cwd_url_host("file://box/home"), Some("box".into()));
         assert_eq!(cwd_url_host("file:///home"), None);
         assert!(same_host("Box", "box.lan") && !same_host("box", "other"));
+    }
+
+    /// OSC 9;9 (Windows Terminal's cwd report) never records a network path: the pane falls back to the folder
+    /// it started in and nothing probes the share (on Windows that would send the user's credentials to it).
+    #[test]
+    fn osc_9_9_refuses_network_paths() {
+        assert!(is_network_path(r"\\server\share") && is_network_path("//server/share"));
+        assert!(!is_network_path("/home/me") && !is_network_path(r"C:\x") && !is_network_path("/"));
+        // A verbatim local path is a local folder (`canonicalize` writes them); a verbatim UNC path is a share.
+        assert!(!is_network_path(r"\\?\C:\work") && !is_network_path("//?/c:/work") && !is_network_path(r"\\?\C:"));
+        assert!(is_network_path(r"\\?\UNC\server\share") && is_network_path(r"\\?\UNC\server\share\x"));
+        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        parser.process(b"\x1b]9;9;C:\\work\\proj\x1b\\");
+        assert_eq!(parser.callbacks().cwd.as_deref(), Some(r"C:\work\proj"));
+        for hostile in [r"\\attacker\share", r#""\\attacker\share""#, " //attacker/share", r"\\?\UNC\attacker\share"] {
+            parser.process(format!("\x1b]9;9;{hostile}\x1b\\").as_bytes());
+            assert_eq!(parser.callbacks().cwd, None, "{hostile}");
+        }
     }
 
     #[test]
@@ -1509,7 +1508,15 @@ mod tests {
         assert_eq!(sh.quote("it's"), r"'it'\''s'");
         let fish = ShellSpec::new("fish", vec![]);
         assert_eq!(fish.quote(r"a\b'c"), r"'a\\b\'c'");
-        assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y"), "'/opt/my tool/x' --y");
+        assert_eq!(sh.invocation_of(Path::new("/opt/my tool/x"), "--y").as_deref(), Some("'/opt/my tool/x' --y"));
+        // cmd.exe: the path is quoted as any argument is; a `%` or `!` in it is refused (cmd would expand it).
+        let cmd = ShellSpec::new("cmd.exe", vec![]);
+        assert_eq!(
+            cmd.invocation_of(Path::new(r"C:\Tools\noble.exe"), "update").as_deref(),
+            Some(r#""C:\Tools\noble.exe" update"#)
+        );
+        assert_eq!(cmd.invocation_of(Path::new(r"C:\50%\noble.exe"), "update"), None);
+        assert_eq!(cmd.invocation_of(Path::new(r"C:\hi!\noble.exe"), "update"), None);
     }
 
     /// Hostile file names are quoted so each shell takes them literally; what cmd.exe cannot
@@ -1641,10 +1648,14 @@ mod tests {
     #[test]
     fn bracketed_paste_drops_escape_characters() {
         // A pasted end marker must not close the paste early.
+        let payload = |text: &str, bracketed: bool| {
+            let (head, body, tail) = paste_parts(text, bracketed);
+            format!("{head}{body}{tail}")
+        };
         let evil = "ls\x1b[201~\nrm -rf x";
-        assert_eq!(paste_payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
-        assert_eq!(paste_payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
-        assert_eq!(paste_payload("a\r\nb\nc", false), "a\rb\rc");
+        assert_eq!(payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
+        assert_eq!(payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
+        assert_eq!(payload("a\r\nb\nc", false), "a\rb\rc");
     }
 
     #[test]
@@ -1750,7 +1761,7 @@ Claude needs your permission",
     #[test]
     fn search_is_case_insensitive_and_width_aware() {
         let lines = vec!["Error: x".to_string(), "日本 error error".to_string(), "none".to_string()];
-        let m = find_matches(&lines, "ERROR");
+        let (m, capped) = find_matches(&lines, "ERROR");
         assert_eq!(
             m,
             vec![
@@ -1759,7 +1770,28 @@ Claude needs your permission",
                 Match { line: 1, col: 11, width: 5 },
             ]
         );
-        assert!(find_matches(&lines, "").is_empty());
+        assert!(!capped);
+        assert!(find_matches(&lines, "").0.is_empty());
+    }
+
+    /// Past the cap the newest matches are kept, in order, and the flag says there were more; a cap that is
+    /// exactly reached is not reported as one that cut anything.
+    #[test]
+    fn search_keeps_the_newest_matches_up_to_the_cap() {
+        let lines: Vec<String> = (0..MAX_MATCHES + 5).map(|i| format!("x{i} x")).collect();
+        let (m, capped) = find_matches(&lines, "x");
+        assert!(capped);
+        assert_eq!(m.len(), MAX_MATCHES);
+        assert_eq!(m.last().unwrap().line, MAX_MATCHES + 4);
+        assert!(m.windows(2).all(|w| (w[0].line, w[0].col) < (w[1].line, w[1].col)), "in order");
+        let (m, capped) = find_matches(&["x".repeat(MAX_MATCHES)], "x");
+        assert!(!capped && m.len() == MAX_MATCHES, "exactly the cap cuts nothing");
+        // A single line over the cap is cut from its oldest match: the first match of the line goes.
+        let line = "ab".repeat(MAX_MATCHES + 1);
+        let (m, capped) = find_matches(&[line], "ab");
+        assert!(capped);
+        assert_eq!(m.len(), MAX_MATCHES);
+        assert_eq!((m[0].col, m.last().unwrap().col), (2, 2 * MAX_MATCHES as u16));
     }
 
     #[test]
@@ -1768,5 +1800,149 @@ Claude needs your permission",
         assert_eq!(s.ordered(), ((1, 2), (3, 5)));
         assert!(s.contains(2, 0));
         assert!(!s.contains(3, 6));
+    }
+
+    /// The copy of the scrollback is reused while neither output nor the size changed; new output or a
+    /// resize reads the lines anew, and the history follows.
+    #[test]
+    fn scroll_text_is_reused_until_output_or_resize() {
+        use std::sync::Arc;
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default());
+        for i in 0..10 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        let a = super::read_scroll_text(&mut p, 1, None);
+        assert!(a.history > 0 && a.lines.iter().any(|l| l.trim_end() == "line 0"));
+        let b = super::read_scroll_text(&mut p, 1, Some(&a));
+        assert!(Arc::ptr_eq(&a.lines, &b.lines), "same generation and size: the copy is reused");
+        // Scrolling the view back does not change the text, so the copy is still reused.
+        p.screen_mut().set_scrollback(3);
+        let c = super::read_scroll_text(&mut p, 1, Some(&b));
+        assert!(Arc::ptr_eq(&a.lines, &c.lines));
+        p.screen_mut().set_scrollback(0);
+        p.process(b"line 10\r\n");
+        let d = super::read_scroll_text(&mut p, 2, Some(&c));
+        assert!(!Arc::ptr_eq(&a.lines, &d.lines), "new output: fresh lines");
+        assert!(d.lines.iter().any(|l| l.trim_end() == "line 10"));
+        assert_eq!(d.history, a.history + 1);
+        p.screen_mut().set_size(4, 10);
+        let e = super::read_scroll_text(&mut p, 2, Some(&d));
+        assert!(!Arc::ptr_eq(&d.lines, &e.lines), "resize: fresh lines");
+        assert!(e.lines.iter().all(|l| l.chars().count() <= 10 || l.is_empty()));
+    }
+
+    /// A resize that returns the screen to the size the copy was read at must still read the lines anew: the
+    /// generation moves with every resize (`set_screen_size`), so A → B → A with no output reuses nothing.
+    #[test]
+    fn resize_back_to_the_same_size_reads_anew() {
+        use std::sync::Arc;
+        let parser = Mutex::new(vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default()));
+        let output_gen = AtomicU64::new(0);
+        for i in 0..10 {
+            lock(&parser).process(format!("line {i}\r\n").as_bytes());
+        }
+        let a = read_scroll_text(&mut lock(&parser), output_gen.load(Ordering::Acquire), None);
+        set_screen_size(&parser, &output_gen, 4, 10);
+        set_screen_size(&parser, &output_gen, 4, 20);
+        let b = read_scroll_text(&mut lock(&parser), output_gen.load(Ordering::Acquire), Some(&a));
+        assert!(!Arc::ptr_eq(&a.lines, &b.lines), "A to B to A: the copy from before the resizes is stale");
+        assert_eq!(b.lines.len(), a.lines.len());
+    }
+
+    /// The reader thread's step on one chunk of output (`process_output`): the answers a program asks for are queued
+    /// to the writer, in order, with nothing else. Runs on every OS: no PTY is needed to check the queue.
+    #[test]
+    fn query_answers_are_queued_to_the_writer() {
+        let parser = Mutex::new(vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default()));
+        let output = AtomicU64::new(0);
+        let (input, queue) = PtyInput::channel();
+        process_output(&parser, &output, &input, b"ab\x1b[6n");
+        process_output(&parser, &output, &input, b"plain text\r\n");
+        process_output(&parser, &output, &input, b"\x1b[c\x1b[5n");
+        let queued: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(queued, b"\x1b[1;3R\x1b[?1;2c\x1b[0n", "cursor position, primary DA, status");
+        assert_eq!(input.queued.load(Ordering::Acquire), queued.len());
+        assert_eq!(output.load(Ordering::Acquire), 3, "every chunk counts as output");
+        assert!(lock(&parser).callbacks().responses.is_empty(), "the answers were taken out of the emulator");
+    }
+
+    /// Input is written in the order it was queued, and nothing is queued past the cap: the program that does
+    /// not read it cannot grow the queue, and a sender after the writer is gone is refused at once.
+    #[test]
+    fn queued_input_keeps_order_and_is_capped() {
+        let (input, queue) = PtyInput::channel();
+        assert!(input.send(b"ab") && input.send(b"") && input.send(b"c"));
+        // The writer thread takes each chunk off the count once it is written.
+        for want in [&b"ab"[..], b"c"] {
+            let got = queue.recv().unwrap();
+            assert_eq!(got, want);
+            input.queued.fetch_sub(got.len(), Ordering::AcqRel);
+        }
+        assert!(input.send(&vec![0u8; MAX_QUEUED_INPUT]));
+        assert!(!input.send(b"x"), "past the cap");
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT, "the refused bytes are not counted");
+        drop(queue);
+        assert!(!input.send(b"y"), "the writer thread has ended");
+    }
+
+    /// A paste that fits is queued whole, in pieces of at most `WRITE_CHUNK`, with its markers around it.
+    #[test]
+    fn a_paste_is_queued_in_pieces_with_its_markers() {
+        let (input, queue) = PtyInput::channel();
+        let body = "x".repeat(WRITE_CHUNK * 2 + 5);
+        assert!(input.send_paste("\x1b[200~", &body, "\x1b[201~"));
+        let pieces: Vec<Vec<u8>> = queue.try_iter().collect();
+        assert!(pieces.iter().all(|p| p.len() <= WRITE_CHUNK), "{:?}", pieces.iter().map(Vec::len).collect::<Vec<_>>());
+        let all = pieces.concat();
+        assert_eq!(all, format!("\x1b[200~{body}\x1b[201~").into_bytes());
+        assert_eq!(input.queued.load(Ordering::Acquire), all.len());
+    }
+
+    /// A paste bigger than the queue keeps what fits, cut on a character boundary, and still gets its end marker: a
+    /// bracketed paste left open would swallow the input typed after it. The refusal is reported (`false`).
+    #[test]
+    fn a_paste_past_the_cap_is_cut_but_still_ends() {
+        let (input, queue) = PtyInput::channel();
+        let body = "\u{e9}".repeat(MAX_QUEUED_INPUT);
+        assert!(!input.send_paste("\x1b[200~", &body, "\x1b[201~"), "part of it was refused");
+        let all: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(all.len(), MAX_QUEUED_INPUT, "the queue is full and nothing past it is written");
+        assert!(all.starts_with(b"\x1b[200~") && all.ends_with(b"\x1b[201~"));
+        let text = std::str::from_utf8(&all[6..all.len() - 6]).expect("the cut keeps the characters whole");
+        assert!(text.chars().all(|c| c == '\u{e9}'));
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT);
+    }
+
+    /// A paste that finds no room at all is refused whole: no marker is sent without the text, and the count
+    /// does not change. Keys (`send`) are never cut: they are refused whole too.
+    #[test]
+    fn a_paste_without_room_is_refused_whole() {
+        let (input, queue) = PtyInput::channel();
+        assert!(input.send(&vec![0u8; MAX_QUEUED_INPUT]));
+        assert!(!input.send_paste("\x1b[200~", "abc", "\x1b[201~"));
+        assert!(!input.send(b"k"));
+        let all: Vec<u8> = queue.try_iter().flatten().collect();
+        assert_eq!(all, vec![0u8; MAX_QUEUED_INPUT], "only the first write is queued");
+        assert_eq!(input.queued.load(Ordering::Acquire), MAX_QUEUED_INPUT);
+    }
+
+    /// The wait thread records the exit before it reports `PtyExit`, so a pane closed afterwards never signals
+    /// the pid it reaped (`kill_child`).
+    #[test]
+    fn exit_is_recorded_before_pty_exit_is_sent() {
+        let (program, args) = if cfg!(windows) { ("cmd", vec!["/C", "exit 0"]) } else { ("sh", vec!["-c", "exit 0"]) };
+        let spec = ShellSpec::new(program, args.into_iter().map(String::from).collect());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd = std::env::temp_dir();
+        let spec_in = SpawnSpec { cwd: &cwd, command: None, shell: &spec, rows: 10, cols: 40, scrollback: 10 };
+        let pane = Pane::spawn(7, spec_in, tx).unwrap();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(AppEvent::PtyExit(7)) => break,
+                Ok(_) => {}
+                Err(e) => panic!("no PtyExit: {e}"),
+            }
+        }
+        assert!(pane.exited.load(Ordering::Acquire));
     }
 }

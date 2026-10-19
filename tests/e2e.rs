@@ -11,6 +11,24 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use noble::term::pane::Callbacks;
 
+/// The word the shell prints in `wait_shell_ready`. The command typed for it spells the word as `$((6*7))`, so
+/// the echo of the typed line never contains the word: only the shell's output does.
+const READY_WORD: &str = "e2e-ready-42";
+const READY_COMMAND: &[u8] = b"echo e2e-ready-$((6*7))\r";
+
+/// The screen as text, one line per row. `vt100::Screen::contents()` joins a row that wrapped onto the next one with
+/// no line break, so a shell's output can end up on one long line with the text around it (on Windows the whole
+/// screen was one such line in the failing run).
+fn screen_text(screen: &vt100::Screen) -> String {
+    let (_, cols) = screen.size();
+    screen.rows(0, cols).collect::<Vec<_>>().join("\n")
+}
+
+/// Whether `word` is a whole word of some line. Text stuck to it, such as a title's `├──word`, does not count.
+fn has_word(text: &str, word: &str) -> bool {
+    text.lines().any(|line| line.split_whitespace().any(|w| w == word))
+}
+
 struct Harness {
     parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -61,7 +79,7 @@ impl Harness {
     }
 
     fn screen(&self) -> String {
-        self.parser.lock().unwrap().screen().contents()
+        screen_text(self.parser.lock().unwrap().screen())
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -86,6 +104,22 @@ impl Harness {
         }
     }
 
+    /// Waits until the focused pane's shell runs what is typed: the word `echo` prints shows up as a word of its own
+    /// (the title and the typed line do not count). Input typed while the shell is still starting can be lost, so the
+    /// command is typed again every half second until it runs.
+    fn wait_shell_ready(&self, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            let s = self.screen();
+            if has_word(&s, READY_WORD) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the shell never ran a command; screen:\n{s}");
+            self.send(READY_COMMAND);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     fn wait_exit(&mut self, secs: u64) -> bool {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
@@ -104,6 +138,53 @@ impl Drop for Harness {
     }
 }
 
+/// A folder for one test's NOBLE home: emptied first, removed when the test ends (also on a panic). Declared
+/// before the harness, so the app is killed before its folder is removed.
+struct Home(PathBuf);
+
+impl Home {
+    fn new(name: &str) -> Home {
+        let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Home(path)
+    }
+}
+
+impl std::ops::Deref for Home {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The screen reading behind `wait_shell_ready`, checked without a shell: a row that wrapped onto the next one is
+/// still read as its own line, and neither the title nor the typed command counts as the output.
+#[test]
+fn ready_word_is_read_from_its_own_row() {
+    let read = |bytes: &[u8]| {
+        let mut parser = vt100::Parser::new(6, 20, 0);
+        parser.process(bytes);
+        (parser.screen().contents(), has_word(&screen_text(parser.screen()), READY_WORD))
+    };
+    // The first row fills all 20 columns and wraps: `contents()` glues the output to it on one line.
+    let (joined, found) = read(b"0123456789ABCDEFGHIJe2e-ready-42\r\n$ ");
+    assert!(!joined.lines().any(|l| l.trim() == READY_WORD), "the wrapped row was not joined: {joined:?}");
+    assert!(found, "the output on a wrapped row was not found");
+    let (_, found) = read(b"PS C:\\> echo e2e-ready-42\r\ne2e-ready-42\r\nPS C:\\> ");
+    assert!(found, "the output after the typed command was not found");
+    let (_, found) = read(b"PS C:\\> echo e2e-ready-$((6*7))\r\nPS C:\\> ");
+    assert!(!found, "the typed command counted as the output");
+    let (_, found) = read("├──e2e-ready-42\r\n".as_bytes());
+    assert!(!found, "the title counted as the output");
+}
+
 fn save(name: &str, text: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("audit");
     let _ = std::fs::create_dir_all(&dir);
@@ -112,9 +193,7 @@ fn save(name: &str, text: &str) {
 
 #[test]
 fn full_session_lifecycle() {
-    let home = std::env::temp_dir().join(format!("noble-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = Home::new("noble-e2e");
 
     let mut h = Harness::start(&home, 34, 120);
     // First launch: welcome card; esc dismisses it for good.
@@ -137,7 +216,7 @@ fn full_session_lifecycle() {
     // New tab + command.
     h.send(b"t");
     h.wait_for("right-click", 10);
-    std::thread::sleep(Duration::from_millis(1500));
+    h.wait_shell_ready(20);
     h.send(b"echo e2e-marker-$((6*7))\r");
     h.send(b"echo e2e-marker-42\r");
     let s = h.wait_for("e2e-marker-42", 20);
@@ -195,7 +274,6 @@ fn full_session_lifecycle() {
     h.send(b"y");
     assert!(h.wait_exit(15));
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Idle resource use: with the bridge open the average CPU must stay low.
@@ -221,9 +299,8 @@ fn measure(h: &Harness, secs: u64) -> (f64, u64) {
     (per_min, mem)
 }
 
-fn idle_home(tag: &str) -> PathBuf {
-    let home = std::env::temp_dir().join(format!("noble-idle-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&home).unwrap();
+fn idle_home(tag: &str) -> Home {
+    let home = Home::new(&format!("noble-idle-{tag}"));
     // A typical idle state is measured: the welcome card was already dismissed.
     std::fs::write(home.join("state.json"), r#"{"welcomed": true}"#).unwrap();
     home
@@ -241,7 +318,6 @@ fn idle_cpu_is_low() {
     println!("idle home: {ms:.0} ms CPU per minute ({:.2}% of one core) · rss {} MB", ms / 600.0, mem / 1024 / 1024);
     assert!(ms < 15_000.0, "idle CPU too high: {ms} ms/min");
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Idle terminal tab: the shell is waiting, NOBLE must do almost no work.
@@ -262,17 +338,20 @@ fn idle_terminal_cpu_is_low() {
     );
     assert!(ms < 15_000.0, "idle CPU too high: {ms} ms/min");
     drop(h);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// `noble <dir>` needs an existing folder: anything else prints an error and exits non-zero before the
 /// terminal is touched. A second folder and unknown options are refused too; `--help` describes the argument.
 #[test]
 fn folder_argument_is_validated() {
+    // Its own NOBLE home, and the isolation every e2e test uses (no AI credentials, no hooks, no update check).
+    let home = Home::new("noble-e2e-args");
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
             .args(args)
-            .env("NOBLE_HOME", std::env::temp_dir().join("noble-e2e-args"))
+            .env("NOBLE_HOME", &*home)
+            .env(noble::ai::ISOLATED_ENV, "1")
+            .env("NOBLE_NO_UPDATE_CHECK", "1")
             .output()
             .unwrap()
     };
@@ -306,9 +385,7 @@ fn termination_signals_save_the_session() {
         return;
     }
     for signal in ["TERM", "HUP"] {
-        let home = std::env::temp_dir().join(format!("noble-e2e-sig{signal}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
+        let home = Home::new(&format!("noble-e2e-sig{signal}"));
         let mut h = Harness::start(&home, 34, 120);
         h.wait_for("WELCOME TO NOBLE", 20);
         h.send(b"\x1b");
@@ -319,11 +396,68 @@ fn termination_signals_save_the_session() {
         let ok = std::process::Command::new("kill").arg(format!("-{signal}")).arg(pid.to_string()).status().unwrap();
         assert!(ok.success(), "kill -{signal}");
         assert!(h.wait_exit(15), "SIG{signal}: noble did not exit");
-        let session = std::fs::read_to_string(home.join("session.json")).unwrap_or_default();
-        assert!(session.contains("\"tabs\""), "SIG{signal}: session not saved: {session}");
+        // The one tab opened above is in the saved session (parsed, not matched as text).
+        let saved = noble::store::load_session(&home.join("session.json"))
+            .unwrap_or_else(|| panic!("SIG{signal}: no session file was saved"));
+        assert_eq!(saved.tabs.len(), 1, "SIG{signal}: the open tab is not in the session: {:?}", saved.tabs);
+        let single = matches!(saved.tabs[0].tab.layout, noble::term::layout::SavedNode::Leaf { .. });
+        assert!(single, "SIG{signal}: the tab is not one pane as it was opened: {:?}", saved.tabs[0].tab.layout);
         drop(h);
-        let _ = std::fs::remove_dir_all(&home);
     }
+}
+
+/// A window that is killed with SIGKILL (no shutdown, no save) leaves its split tab in the session file and
+/// its lock behind; the next launch restores the tab and releases the lock. Unix only: `kill -KILL` is how a
+/// test kills without a shutdown here. Windows has no such signal, and the same recovery (a crashed window and
+/// a stale lock) is checked in the render tests on every platform.
+#[test]
+fn a_killed_window_is_restored_on_the_next_launch() {
+    if cfg!(windows) {
+        return;
+    }
+    let home = Home::new("noble-e2e-kill");
+    let session = home.join("session.json");
+    let lock = home.join("session.json.lock");
+
+    let mut h = Harness::start(&home, 34, 120);
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    h.wait_for("Projects", 20);
+    h.send(b"t");
+    h.wait_for("right-click", 10);
+    h.wait_shell_ready(20);
+    h.send(b"\x01");
+    h.send(b"v");
+    h.wait_for("⤢", 10);
+    // The split is autosaved a couple of seconds after it happens; the kill must come after that.
+    let pid = h.child.process_id().expect("pid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let text = std::fs::read_to_string(&session).unwrap_or_default();
+        if text.contains("\"split\"") && text.contains(&format!("\"{pid}-")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the split was never autosaved: {text}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let killed = std::process::Command::new("kill").arg("-KILL").arg(pid.to_string()).status().unwrap();
+    assert!(killed.success(), "kill -KILL");
+    assert!(h.wait_exit(15), "noble survived SIGKILL");
+    drop(h);
+    // The dead window's lock, as a crash in the middle of a save would leave it.
+    std::fs::write(&lock, format!("{pid}-1")).unwrap();
+
+    let mut h = Harness::start(&home, 34, 120);
+    let s = h.wait_for("2 terminals open", 25);
+    save("killed-restored", &s);
+    assert!(!s.contains("WELCOME TO NOBLE"), "welcome shown again:\n{s}");
+    h.send(b"q");
+    h.wait_for("QUIT NOBLE", 5);
+    h.send(b"y");
+    assert!(h.wait_exit(15), "noble did not exit after the restore");
+    assert!(!lock.exists(), "the lock left by the killed window was not released");
+    drop(h);
 }
 
 /// Settings → Key bindings in the real app: a new prefix key is written to `config.toml` under its table
@@ -331,9 +465,7 @@ fn termination_signals_save_the_session() {
 /// editor's "saved" confirmation shows.
 #[test]
 fn key_bindings_are_saved_to_the_config() {
-    let home = std::env::temp_dir().join(format!("noble-e2e-keys-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = Home::new("noble-e2e-keys");
 
     let h = Harness::start(&home, 34, 120);
     h.wait_for("WELCOME TO NOBLE", 20);
@@ -376,5 +508,6 @@ fn key_bindings_are_saved_to_the_config() {
     // The old key is unbound now; the new one is what Split Pane Right answers to.
     h.send(b"\x01v");
     h.wait_for("ctrl+a v is not bound", 10);
-    let _ = std::fs::remove_dir_all(&home);
+    // The app goes first: while it runs it can still write to the folder.
+    drop(h);
 }

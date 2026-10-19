@@ -63,21 +63,26 @@ place with a rename, which Unix allows for a running binary.
 ## Tests
 
 ```sh
-cargo test                        # everything: unit, headless render, real PTY and end-to-end tests
+cargo test                        # everything: unit, headless render, real PTY, end-to-end and fuzz tests
 cargo test --lib <name>           # unit tests in src/
 cargo test --test render          # render + PTY tests; add a test name to run one
 cargo test --test e2e             # runs the compiled binary inside a pseudo-terminal
+cargo test --test fuzz            # random and hostile input to the parsers: must never panic
 cargo clippy --all-targets        # must stay warning-free (CI uses -D warnings)
 cargo fmt                         # rustfmt.toml: max_width = 120
 cargo deny check                  # advisories, licenses, sources (`cargo install cargo-deny`; deny.toml)
 ```
 
-- **`tests/render.rs`** draws every screen with a headless backend at seven terminal sizes, from 160×45 down to
+- **`tests/render/`** (one module per screen or concern, shared helpers in `common.rs`) draws every screen with a headless backend at seven terminal sizes, from 160×45 down to
   30×8, asserts nothing panics or overflows and writes text snapshots to `target/audit/*.txt`. After a UI change,
   open those files to review the layout at every size without launching the app. It also drives real shells:
   output, splits, zoom, `cd` tracking (PowerShell and cmd) and launchers.
 - **`tests/e2e.rs`** runs the real binary: open a tab, run a command, split, open the palette, quit and check
-  the session is restored on the next launch.
+  the session is restored on the next launch. On Unix a window killed with SIGKILL is restored too.
+- **`tests/fuzz.rs`** feeds random and hostile input to the parsers that read text or JSON from outside NOBLE (git
+  output, shell titles and OSC payloads, terminal lines, Windows Terminal settings, provider and GitHub API replies,
+  Claude hook payloads). Nothing may panic. The runs are deterministic: `NOBLE_FUZZ_SEED` picks another seed and
+  `NOBLE_FUZZ_SCALE` makes them longer.
 - **Performance checks** (ignored by default, run in release mode):
 
   ```sh
@@ -112,10 +117,14 @@ ratatui's `TestBackend`.
 ```
 src/
   main.rs            terminal setup, panic safety, event-driven frame loop
-  app/               state and input: mod.rs (events, notifications, agent state, config reload),
-                     input.rs (keys, mouse), menu.rs (context menus), ops.rs (tabs, panes, launchers,
-                     sessions), search.rs (scrollback search, links), palette.rs, settings.rs
+  app/               state and input: mod.rs (state types, event dispatch), notify.rs (toasts, PTY output
+                     notifications), redraw.rs, session.rs (auto-save, restore), power.rs (battery, clock),
+                     reload.rs (config reload), git.rs, input.rs (keys, mouse, clipboard), menu.rs (context
+                     menus), ops.rs (tabs, panes, launchers), search.rs (scrollback search, links),
+                     palette.rs, settings.rs, agents.rs, live.rs (Home ports and PR), fx.rs (effects),
+                     bindings.rs (key bindings), help.rs (help screen)
   term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
+                     osc.rs (vt100 callbacks, OSC parsing),
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
   ui/                hud.rs (bounds-safe drawing primitives), bridge.rs (Home), terminal.rs,
                      system.rs, settings.rs, overlay.rs, boot.rs

@@ -188,7 +188,13 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     ]
     .iter()
     .enumerate()
-    .map(|(i, (n, c, m))| ProcInfo { pid: 2400 + i as u32 * 37, name: n.to_string(), cpu: *c, mem: m << 20 })
+    .map(|(i, (n, c, m))| ProcInfo {
+        pid: 2400 + i as u32 * 37,
+        started: 0,
+        name: n.to_string(),
+        cpu: *c,
+        mem: m << 20,
+    })
     .collect();
     for i in 0..160 {
         let t = i as f32 / 9.0;

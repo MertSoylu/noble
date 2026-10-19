@@ -2,7 +2,7 @@
 //! user's own configuration first and then report, on every prompt, the last command's
 //! exit code (OSC 133;D;<code>) and the working directory (OSC 7). PowerShell and cmd are
 //! handled in `pane.rs`. The reports are also the "command finished" signal
-//! (`Callbacks::prompt`). Before a typed command line runs they send OSC 133;C (bash 4.4+
+//! (`Callbacks::prompt` in `term/osc.rs`). Before a typed command line runs they send OSC 133;C (bash 4.4+
 //! `PS0`, zsh `preexec`, fish `fish_preexec`): only that starts NOBLE's clock and records a
 //! result, never an empty line or a continuation line.
 //!
@@ -51,7 +51,7 @@ __noble_osc7() {
     case $p in
       /[a-zA-Z] | /[a-zA-Z]/*) ;;
       /cygdrive/*) p=${p#/cygdrive} ;;
-      # A network share (`//server/share`): NOBLE turns it into a UNC path.
+      # A network share (`//server/share`): NOBLE turns it into a UNC path, which Pane::cwd never checks or uses.
       //*) ;;
       /tmp | /tmp/*) p=/$__noble_tmp${p#/tmp} ;;
       /*) p=/${__noble_root%/}$p ;;
@@ -341,7 +341,8 @@ mod tests {
     #[test]
     fn scripts_use_bel_and_percent_encode() {
         // The OSC 7 report ends with BEL and percent-encodes the path so `parse_cwd_url`
-        // decodes it back (the real round trip runs in `tests/render.rs`).
+        // decodes it back (the real round trip runs in `tests/render/shells.rs`,
+        // `cwd_with_special_characters_is_tracked`).
         for script in [BASH, BASH_LOGIN, ZSHRC, FISH] {
             assert!(script.contains("]7;file://") && script.contains(r"\a'"), "{script}");
         }
@@ -356,7 +357,8 @@ mod tests {
     }
 
     /// Every script reports the last command's exit code (OSC 133;D;<code>) before the directory,
-    /// reading it before anything else runs. (`tests/render.rs` runs a failing command for real.)
+    /// reading it before anything else runs. (`tests/render/pty.rs`, `failing_command_shows_its_exit_code`,
+    /// runs a failing command for real.)
     #[test]
     fn scripts_report_the_exit_code_first() {
         for script in [BASH, BASH_LOGIN, ZSHRC, FISH] {
@@ -378,7 +380,8 @@ mod tests {
     }
 
     /// Every script marks a typed command's start (OSC 133;C) from a hook that only runs for a
-    /// command line that is not empty. (`tests/render.rs` checks it for real where the shell exists.)
+    /// command line that is not empty. (`tests/render/pty.rs`, `command_start_marks_decide_what_ran`, checks it
+    /// for real where the shell exists.)
     #[test]
     fn scripts_mark_command_starts() {
         for script in [BASH, BASH_LOGIN] {

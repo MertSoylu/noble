@@ -49,13 +49,39 @@ pub struct Release {
     pub assets: Vec<(String, String)>,
 }
 
+/// Hosts a release's files come from: GitHub, and the storage its download links redirect to.
+const DOWNLOAD_HOSTS: [&str; 3] =
+    ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+
+/// Largest archive a download may be (a NOBLE binary is a few MB) and largest checksum file (a few lines).
+const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
+const MAX_SUMS: u64 = 64 * 1024;
+
+/// An agent for the GitHub API (https only).
 fn agent(timeout: Duration) -> ureq::Agent {
+    agent_with(timeout, true)
+}
+
+/// An agent; `https_only` is off only for the local test server of the download tests. Redirects are not
+/// followed by ureq (`get_following` does it, checking each address).
+fn agent_with(timeout: Duration, https_only: bool) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .https_only(https_only)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .http_status_as_error(false)
         .user_agent(concat!("noble/", env!("CARGO_PKG_VERSION")))
         .build();
     ureq::Agent::new_with_config(config)
+}
+
+/// Is `url` an https address on one of `DOWNLOAD_HOSTS`, with no user info or port? The asset list comes from
+/// the API response, so each address in it is checked before anything is fetched from it.
+pub fn is_release_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    DOWNLOAD_HOSTS.iter().any(|known| host.eq_ignore_ascii_case(known))
 }
 
 fn net_error(e: ureq::Error) -> String {
@@ -86,13 +112,47 @@ pub fn parse_release(v: &Value) -> Option<Release> {
     Some(Release { version: tag.trim_start_matches(['v', 'V']).to_string(), assets })
 }
 
+/// Redirects one request may follow (GitHub's asset links take one or two hops).
+const MAX_REDIRECTS: usize = 5;
+
+/// Is `url` the GitHub API (https, `api.github.com`)?
+fn is_api_url(url: &str) -> bool {
+    url.strip_prefix("https://").is_some_and(|rest| rest.starts_with("api.github.com/"))
+}
+
+/// GETs `url` and follows its redirects by hand, at most `MAX_REDIRECTS`. ureq would follow them without looking
+/// at the hosts, and a redirect is how a download leaves GitHub: the address and every `Location` must pass
+/// `allowed` before it is requested. The status of the last response is left to the caller.
+fn get_following(
+    agent: &ureq::Agent,
+    url: &str,
+    allowed: fn(&str) -> bool,
+    accept: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let mut next = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        if !allowed(&next) {
+            return Err(format!("{next} is not an address NOBLE may fetch from"));
+        }
+        let resp = agent.get(next.as_str()).header("Accept", accept).call().map_err(net_error)?;
+        let status = resp.status().as_u16();
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(resp);
+        }
+        next = resp
+            .headers()
+            .get(ureq::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| format!("HTTP {status} without a location"))?
+            .to_string();
+    }
+    Err("too many redirects".into())
+}
+
 /// Reads the latest published release from GitHub.
 pub fn fetch_latest() -> Result<Release, String> {
-    let mut resp = agent(Duration::from_secs(10))
-        .get(LATEST_URL)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(net_error)?;
+    let mut resp =
+        get_following(&agent(Duration::from_secs(10)), LATEST_URL, is_api_url, "application/vnd.github+json")?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().read_to_string().unwrap_or_default();
     match status {
@@ -170,8 +230,8 @@ fn verify(archive: &Path, name: &str, sums: &str) -> Result<(), String> {
     let actual = sha256_file(archive)?;
     if actual != expected {
         return Err(format!(
-            "checksum mismatch for {name} (expected {expected}, got {actual}); the download is damaged or was \
-             tampered with, nothing was installed"
+            "checksum mismatch for {name} (expected {expected}, got {actual}): the download is corrupted or \
+             incomplete, nothing was installed"
         ));
     }
     Ok(())
@@ -215,19 +275,60 @@ fn old_paths(exe: &Path) -> impl Iterator<Item = PathBuf> {
     })
 }
 
-/// The system `tar` (Windows 10+ `tar.exe` opens zips too).
-fn tar_program() -> PathBuf {
-    // Windows: Git Bash's GNU tar cannot open zips, so System32's bsdtar is preferred.
-    // Linux and macOS: whatever `tar` is on PATH (bsdtar on macOS, which reads .tar.gz as well).
+/// The `tar` that unpacks archives, by full path. Windows 10+ `tar.exe` opens zips too, and System32's is taken
+/// because Git Bash's GNU tar cannot open zips. Linux and macOS have no System32 and use `tar` from PATH (bsdtar
+/// on macOS, which reads .tar.gz as well). Every other case searches PATH with `util::which`, which takes only
+/// absolute PATH folders: a bare `tar` would run one from the working folder (Windows searches it first) or from
+/// a relative PATH entry.
+fn tar_program() -> Result<PathBuf, String> {
     std::env::var_os("SystemRoot")
         .filter(|_| cfg!(windows))
         .map(|r| PathBuf::from(r).join("System32").join("tar.exe"))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("tar"))
+        .or_else(|| crate::util::which("tar"))
+        .ok_or_else(|| "tar was not found on PATH, so the archive cannot be unpacked".to_string())
 }
 
-/// Extracts the archive with `tar`.
+/// Checks what `tar` would write before it writes anything: `names` is `tar -tf`, `verbose` is `tar -tvf` (the
+/// same entries in the same order). Refused: an absolute name, a `..` part (both would leave the work folder),
+/// and a link (a symlink or a hard link can point anywhere). Only regular files and folders are unpacked.
+fn check_listing(names: &str, verbose: &str) -> Result<(), String> {
+    let names: Vec<&str> = names.lines().collect();
+    let kinds: Vec<&str> = verbose.lines().collect();
+    if names.len() != kinds.len() {
+        return Err("the archive listing does not match its entries, nothing was unpacked".into());
+    }
+    for (name, line) in names.iter().zip(&kinds) {
+        let absolute = name.starts_with(['/', '\\']) || name.as_bytes().get(1) == Some(&b':');
+        let escapes = name.split(['/', '\\']).any(|part| part == "..");
+        let plain = matches!(line.as_bytes().first(), Some(b'-' | b'd')) && !line.contains(" link to ");
+        if absolute || escapes || !plain {
+            return Err(format!("the archive has an unsafe entry ({name}), nothing was unpacked"));
+        }
+    }
+    Ok(())
+}
+
+/// The entries of an archive, from `tar` (names, then verbose lines for the entry types).
+fn list_archive(tar: &Path, archive: &Path) -> Result<(String, String), String> {
+    let list = |flag: &str| -> Result<String, String> {
+        let out = std::process::Command::new(tar)
+            .arg(flag)
+            .arg(archive)
+            .output()
+            .map_err(|e| format!("could not run tar: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("could not read the archive: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    Ok((list("-tf")?, list("-tvf")?))
+}
+
+/// Unpacks the archive with `tar` into `dest`, after `check_listing` has passed every entry.
 fn extract(tar: &Path, archive: &Path, dest: &Path) -> Result<(), String> {
+    let (names, verbose) = list_archive(tar, archive)?;
+    check_listing(&names, &verbose)?;
     let out = std::process::Command::new(tar)
         .arg("-xf")
         .arg(archive)
@@ -241,14 +342,31 @@ fn extract(tar: &Path, archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn download(url: &str, to: &Path) -> Result<(), String> {
-    let resp = agent(Duration::from_secs(300)).get(url).call().map_err(net_error)?;
+/// Copies at most `max` bytes from `from` to `to`. More than that is refused (the copy stops at `max + 1`),
+/// so a runaway download cannot fill the disk.
+fn copy_capped(from: &mut impl std::io::Read, to: &mut impl std::io::Write, max: u64) -> Result<(), String> {
+    let mut limited = std::io::Read::take(from, max + 1);
+    let copied = std::io::copy(&mut limited, to).map_err(|e| format!("download failed: {e}"))?;
+    if copied > max {
+        return Err(format!("the download is larger than {max} bytes, nothing was installed"));
+    }
+    Ok(())
+}
+
+/// Downloads `url` into `to`, at most `max` bytes.
+fn download(url: &str, to: &Path, max: u64) -> Result<(), String> {
+    download_via(&agent(Duration::from_secs(300)), url, to, max, is_release_url)
+}
+
+/// `download` with the agent and the address check passed in: the tests download from a local server.
+fn download_via(agent: &ureq::Agent, url: &str, to: &Path, max: u64, allowed: fn(&str) -> bool) -> Result<(), String> {
+    let resp = get_following(agent, url, allowed, "*/*")?;
     let status = resp.status().as_u16();
     if status != 200 {
         return Err(format!("download failed: HTTP {status}"));
     }
     let mut file = std::fs::File::create(to).map_err(|e| format!("could not write {}: {e}", to.display()))?;
-    std::io::copy(&mut resp.into_body().into_reader(), &mut file).map_err(|e| format!("download failed: {e}"))?;
+    copy_capped(&mut resp.into_body().into_reader(), &mut file, max)?;
     file.flush().map_err(|e| e.to_string())
 }
 
@@ -262,8 +380,10 @@ fn free_old_path(exe: &Path) -> Option<PathBuf> {
 }
 
 /// Puts the new binary in place of the running one. The copy (slow, may fail half way) goes to a
-/// staging file next to it first; then the running binary is moved aside (it cannot be overwritten on
-/// Windows but it can be renamed) and the staged one renamed into place. Any failure leaves the
+/// staging file next to it first, so the rename below stays on one file system. Unix: one rename replaces
+/// the binary in a single step (the running process keeps the old inode), so a kill at any moment leaves
+/// either the old or the new binary. Windows: the running binary cannot be overwritten but it can be
+/// renamed, so it is moved aside first and the staged one renamed into place. Any failure leaves the
 /// installed binary where it was.
 fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
     let mut staged = exe.as_os_str().to_os_string();
@@ -280,6 +400,14 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     }
+    if cfg!(unix) {
+        // Unix: the binary is replaced in one step; the old one needs no clean-up.
+        return std::fs::rename(&staged, exe).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            format!("could not install the new binary: {e}")
+        });
+    }
+    // Windows: move the running binary aside first (`.old`, `.old2` …), then rename the staged one into place.
     let aside = free_old_path(exe)
         .ok_or_else(|| format!("could not move {} aside: no free .old name", exe.display()))
         .and_then(|old| {
@@ -303,10 +431,7 @@ fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
             )),
         };
     }
-    // Linux and macOS: it can be deleted right away (the new binary is a new file, so macOS never
-    // sees a signed binary change in place). Windows: the running binary cannot, `cleanup_old` does it
-    // on the next start.
-    let _ = std::fs::remove_file(&old);
+    // Windows: the running binary cannot be deleted; `cleanup_old` does it on the next start.
     Ok(())
 }
 
@@ -348,14 +473,15 @@ fn private_work_dir() -> Result<PathBuf, String> {
 
 /// Downloads the release's archive for this platform and puts it in place of `exe`.
 pub fn install(release: &Release, exe: &Path) -> Result<(), String> {
-    install_with(release, exe, &download, &tar_program())
+    install_with(release, exe, &download, &tar_program()?)
 }
 
 /// `install` with the downloader and `tar` passed in (tests use a local fetcher, never the network).
+/// `fetch` gets the address, the file to write and the most bytes it may write.
 fn install_with(
     release: &Release,
     exe: &Path,
-    fetch: &dyn Fn(&str, &Path) -> Result<(), String>,
+    fetch: &dyn Fn(&str, &Path, u64) -> Result<(), String>,
     tar: &Path,
 ) -> Result<(), String> {
     let name = asset_name().ok_or("no prebuilt binary for this platform; update with `cargo install noble`")?;
@@ -370,15 +496,20 @@ fn install_with(
     let sum_url = release.assets.iter().find(|(n, _)| *n == sum_name).map(|(_, u)| u.clone()).ok_or_else(|| {
         format!("release {} publishes no checksum ({sum_name}), so the download cannot be verified", release.version)
     })?;
+    for address in [&url, &sum_url] {
+        if !is_release_url(address) {
+            return Err(format!("{address} is not an https address on GitHub, nothing was downloaded"));
+        }
+    }
     let work = private_work_dir()?;
     let result = (|| {
         // The checksum first: small, and a release without a usable one is refused before the big download.
         let sums_path = work.join(&sum_name);
-        fetch(&sum_url, &sums_path)?;
+        fetch(&sum_url, &sums_path, MAX_SUMS)?;
         let sums = std::fs::read_to_string(&sums_path).map_err(|_| format!("{sum_name} is not a checksum file"))?;
         let archive = work.join(name);
         println!("Downloading {name}…");
-        fetch(&url, &archive)?;
+        fetch(&url, &archive, MAX_ARCHIVE)?;
         verify(&archive, name, &sums)?;
         println!("Checksum verified (SHA-256).");
         extract(tar, &archive, &work)?;
@@ -531,8 +662,52 @@ mod tests {
         let name = asset_name()?;
         Some(Release {
             version: "9.9.9".into(),
-            assets: vec![(name.into(), "http://fake/asset".into()), (checksum_name(name), "http://fake/sum".into())],
+            assets: vec![
+                (name.into(), "https://github.com/MertSoylu/noble/releases/download/v9.9.9/archive".into()),
+                (checksum_name(name), "https://github.com/MertSoylu/noble/releases/download/v9.9.9/sums".into()),
+            ],
         })
+    }
+
+    /// The `tar` the install tests unpack with (they all need one; `tar_program` names the case of a missing one).
+    fn tar() -> PathBuf {
+        tar_program().expect("a tar program")
+    }
+
+    /// A local server for the download tests: answers each connection with the next of `replies(port)`, then ends.
+    /// The thread gives back how many requests it answered. It stops after `replies` or after 10 s without a
+    /// connection, so a client that asks for fewer requests than scripted cannot hang the test: the caller joins
+    /// it and asserts the count.
+    fn local_server(replies: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<usize>) {
+        use std::io::{ErrorKind, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let replies = replies(port);
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut served = 0;
+            for reply in replies {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return served,
+                    }
+                };
+                // The accepted socket may inherit the listener's non-blocking mode (Windows, macOS).
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply.as_bytes());
+                served += 1;
+            }
+            served
+        });
+        (port, handle)
     }
 
     /// A real archive for this platform holding `binary_name()` with `content`, built with the system tar
@@ -543,7 +718,7 @@ mod tests {
         std::fs::write(src.join(binary_name()), content).unwrap();
         let out = dir.join(asset_name()?);
         let mode = if cfg!(windows) { "-acf" } else { "-czf" };
-        let ok = std::process::Command::new(tar_program())
+        let ok = std::process::Command::new(tar_program().ok()?)
             .arg(mode)
             .arg(&out)
             .arg("-C")
@@ -557,26 +732,28 @@ mod tests {
 
     /// SHA-256 of bytes, lower-case hex (through the same code path as a download).
     fn sha256_hex(bytes: &[u8]) -> String {
-        let dir = std::env::temp_dir().join(format!("noble-sha-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A folder of its own per call (tests run in parallel), removed with its file.
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let f = dir.join(SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("noble-sha-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("bytes");
         std::fs::write(&f, bytes).unwrap();
         let hex = sha256_file(&f).unwrap();
-        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&dir);
         hex
     }
 
     /// A fetcher that "downloads" the archive `bytes` and the checksum file `sums`, never touching the network.
-    fn serve_with(bytes: Vec<u8>, sums: String) -> impl Fn(&str, &Path) -> Result<(), String> {
-        move |url, to| {
-            let body = if url.ends_with("/sum") { sums.as_bytes() } else { &bytes[..] };
+    fn serve_with(bytes: Vec<u8>, sums: String) -> impl Fn(&str, &Path, u64) -> Result<(), String> {
+        move |url, to, _max| {
+            let body = if url.ends_with("/sums") { sums.as_bytes() } else { &bytes[..] };
             std::fs::write(to, body).map_err(|e| e.to_string())
         }
     }
 
     /// Serves `bytes` with its correct checksum file (`sha256sum` format).
-    fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path) -> Result<(), String> {
+    fn serve(bytes: Vec<u8>) -> impl Fn(&str, &Path, u64) -> Result<(), String> {
         let sums = format!("{}  {}\n", sha256_hex(&bytes), asset_name().unwrap_or("archive"));
         serve_with(bytes, sums)
     }
@@ -619,12 +796,12 @@ mod tests {
         let Some(archive) = make_archive(&dir, b"new") else { return };
         let name = asset_name().unwrap();
         let wrong = format!("{}  {name}\n", sha256_hex(b"something else"));
-        let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar_program()).unwrap_err();
-        assert!(err.contains("checksum mismatch"), "{err}");
+        let err = install_with(&release, &exe, &serve_with(archive.clone(), wrong), &tar()).unwrap_err();
+        assert!(err.contains("checksum mismatch") && err.contains("corrupted"), "{err}");
         assert_intact(&exe);
         // A checksum file that does not name this archive (or is an error page) is refused too.
         let page = "<html>rate limited</html>".to_string();
-        let err = install_with(&release, &exe, &serve_with(archive, page), &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &serve_with(archive, page), &tar()).unwrap_err();
         assert!(err.contains("no SHA-256"), "{err}");
         assert_intact(&exe);
         let _ = std::fs::remove_dir_all(&dir);
@@ -636,14 +813,30 @@ mod tests {
         release.assets.retain(|(n, _)| !n.ends_with(".sha256"));
         let (dir, exe) = scratch("nosum");
         let fetched = std::cell::Cell::new(false);
-        let fetch = |_: &str, _: &Path| -> Result<(), String> {
+        let fetch = |_: &str, _: &Path, _: u64| -> Result<(), String> {
             fetched.set(true);
             Err("no network in tests".into())
         };
-        let err = install_with(&release, &exe, &fetch, &tar_program()).unwrap_err();
+        let err = install_with(&release, &exe, &fetch, &tar()).unwrap_err();
         assert!(err.contains("no checksum"), "{err}");
         assert!(!fetched.get(), "downloaded an archive that cannot be verified");
         assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unix: the new binary takes the old one's place in a single rename, so no `.old` file is made and no
+    /// staging file is left (a kill during the update never leaves the path without a binary).
+    #[cfg(unix)]
+    #[test]
+    fn unix_update_replaces_the_binary_in_one_step() {
+        let Some(release) = release_for_this_platform() else { return };
+        let (dir, exe) = scratch("onestep");
+        let Some(archive) = make_archive(&dir, b"new") else { return };
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert!(!old_path(&exe).exists(), "no old binary is kept on Unix");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".new")), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -652,7 +845,7 @@ mod tests {
         let Some(release) = release_for_this_platform() else { return };
         let (dir, exe) = scratch("verified");
         let Some(archive) = make_archive(&dir, b"new") else { return };
-        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         cleanup_old_at(&exe);
         let _ = std::fs::remove_dir_all(&dir);
@@ -666,12 +859,12 @@ mod tests {
     fn corrupt_download_keeps_the_installed_binary() {
         let Some(release) = release_for_this_platform() else { return }; // no prebuilt archive here
         let (dir, exe) = scratch("corrupt");
-        let err = install_with(&release, &exe, &serve(b"<html>captive portal</html>".to_vec()), &tar_program());
+        let err = install_with(&release, &exe, &serve(b"<html>captive portal</html>".to_vec()), &tar());
         assert!(err.is_err());
         assert_intact(&exe);
         // A valid archive whose binary is empty (a broken release) is refused too.
         if let Some(empty) = make_archive(&dir, b"") {
-            assert!(install_with(&release, &exe, &serve(empty), &tar_program()).is_err());
+            assert!(install_with(&release, &exe, &serve(empty), &tar()).is_err());
             assert_intact(&exe);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -696,7 +889,7 @@ mod tests {
         // A directory cannot be removed with remove_file nor replaced by a rename, on either platform —
         // like a previous `noble.exe.old` still running in another NOBLE window on Windows.
         std::fs::create_dir_all(old_path(&exe).join("busy")).unwrap();
-        install_with(&release, &exe, &serve(archive), &tar_program()).expect("update");
+        install_with(&release, &exe, &serve(archive), &tar()).expect("update");
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         let mut staged = exe.as_os_str().to_os_string();
         staged.push(".new");
@@ -726,7 +919,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&dir);
                 return;
             }
-            let err = install_with(&release, &exe_ro, &serve(archive), &tar_program()).unwrap_err();
+            let err = install_with(&release, &exe_ro, &serve(archive), &tar()).unwrap_err();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(!err.is_empty());
             assert_intact(&exe_ro);
@@ -740,22 +933,178 @@ mod tests {
     /// A local server that promises more bytes than it sends, then hangs up.
     #[test]
     fn partial_download_is_an_error() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial");
+        let (port, server) = local_server(|_| {
+            vec!["HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial".into()]
         });
         let dir = std::env::temp_dir().join(format!("noble-update-partial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("archive");
-        let res = download(&format!("http://127.0.0.1:{port}/asset"), &to);
-        server.join().unwrap();
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = download_via(&local, &format!("http://127.0.0.1:{port}/asset"), &to, MAX_ARCHIVE, |_| true);
+        assert_eq!(server.join().unwrap(), 1, "the download did not ask the server");
         assert!(res.is_err(), "a truncated download was accepted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A redirect is followed by hand: the `Location` of each hop is checked, and the final answer is what it is.
+    #[test]
+    fn redirects_are_followed_to_allowed_addresses() {
+        let (port, server) = local_server(|p| {
+            vec![
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{p}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload".to_string(),
+            ]
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = get_following(
+            &local,
+            &format!("http://127.0.0.1:{port}/asset"),
+            |u| u.starts_with("http://127.0.0.1:"),
+            "*/*",
+        );
+        assert_eq!(server.join().unwrap(), 2, "the redirect target was not requested");
+        let mut resp = res.expect("the redirect was not followed");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.body_mut().read_to_string().unwrap(), "payload");
+    }
+
+    /// A redirect to another host is refused before that host is asked: the server below answers one request only,
+    /// and the second address (a TEST-NET address that would hang) is never connected to.
+    #[test]
+    fn redirect_to_another_host_is_refused_before_it_is_requested() {
+        let (port, server) = local_server(|_| {
+            vec![
+                "HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .into(),
+            ]
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res =
+            get_following(&local, &format!("http://127.0.0.1:{port}/a"), |u| u.starts_with("http://127.0.0.1:"), "*/*");
+        assert_eq!(server.join().unwrap(), 1, "only the first address may be asked");
+        let err = res.expect_err("a redirect to another host was followed");
+        assert!(err.contains("192.0.2.1") && err.contains("may fetch from"), "{err}");
+    }
+
+    /// A redirect loop ends at `MAX_REDIRECTS`: the server answers the first request and each redirect followed.
+    #[test]
+    fn redirects_stop_after_the_limit() {
+        let (port, server) = local_server(|p| {
+            (0..=MAX_REDIRECTS)
+                .map(|_| format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{p}/again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+                .collect()
+        });
+        let local = agent_with(Duration::from_secs(10), false);
+        let res = get_following(
+            &local,
+            &format!("http://127.0.0.1:{port}/loop"),
+            |u| u.starts_with("http://127.0.0.1:"),
+            "*/*",
+        );
+        // The first request and each of the `MAX_REDIRECTS` followed redirects: nothing more is asked.
+        assert_eq!(server.join().unwrap(), MAX_REDIRECTS + 1, "the redirects were not all followed");
+        assert_eq!(res.err().as_deref(), Some("too many redirects"));
+    }
+
+    /// The download and the update check only ever ask GitHub: its API for the release, its download hosts for files.
+    #[test]
+    fn update_requests_go_to_github_only() {
+        assert!(is_api_url("https://api.github.com/repos/MertSoylu/noble/releases/latest"));
+        assert!(!is_api_url("http://api.github.com/x"));
+        assert!(!is_api_url("https://api.github.com.evil.example/x"));
+        assert!(!is_api_url("https://evil.example/api.github.com/x"));
+        assert!(is_release_url("https://objects.githubusercontent.com/x"));
+        assert!(!is_release_url("https://evil.example/x"));
+    }
+
+    /// The unpacking `tar` is found through PATH's absolute folders (or System32), by its full path.
+    #[test]
+    fn tar_is_found_by_its_full_path() {
+        // No `tar` on this system: `tar_program` names the case in its error, and the install tests cannot run.
+        if let Ok(tar) = tar_program() {
+            assert!(tar.is_absolute(), "{}", tar.display());
+            assert!(tar.is_file(), "{}", tar.display());
+        }
+    }
+
+    #[test]
+    fn only_github_https_addresses_are_downloaded() {
+        assert!(is_release_url("https://github.com/MertSoylu/noble/releases/download/v1/a.tar.gz"));
+        assert!(is_release_url("https://objects.githubusercontent.com/github-production-release-asset/x"));
+        assert!(is_release_url("https://release-assets.githubusercontent.com/x?sig=1"));
+        for url in [
+            "http://github.com/a",
+            "https://github.com.evil.example/a",
+            "https://user@github.com/a",
+            "https://github.com:8443/a",
+            "https://evil.example/github.com/a",
+            "https:/github.com/a",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert!(!is_release_url(url), "{url}");
+        }
+    }
+
+    /// A release whose asset addresses are not GitHub's is refused before anything is fetched.
+    #[test]
+    fn foreign_download_address_is_refused_before_fetching() {
+        let Some(mut release) = release_for_this_platform() else { return };
+        let name = asset_name().unwrap_or("archive");
+        release.assets = vec![
+            (name.into(), "https://evil.example/archive".into()),
+            (checksum_name(name), "https://evil.example/sums".into()),
+        ];
+        let (dir, exe) = scratch("foreign");
+        let fetched = std::cell::Cell::new(false);
+        let fetch = |_: &str, _: &Path, _: u64| -> Result<(), String> {
+            fetched.set(true);
+            Ok(())
+        };
+        let err = install_with(&release, &exe, &fetch, &tar()).unwrap_err();
+        assert!(err.contains("not an https address on GitHub"), "{err}");
+        assert!(!fetched.get());
+        assert_intact(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_entries_that_escape_or_link_are_refused() {
+        // Plain files and folders pass (names as `tar -tf`, types as `tar -tvf`, GNU and bsdtar alike).
+        let names = "noble\n./\n./noble\nsrc/main.rs\n";
+        let kinds = "-rwxr-xr-x user/group 12 2026-01-01 00:00 noble\ndrwxr-xr-x u/g 0 2026-01-01 00:00 ./\n\
+            -rwxr-xr-x u/g 1 2026-01-01 00:00 src/main.rs\n-rw-r--r-- u/g 1 2026-01-01 00:00 ./noble\n";
+        assert!(check_listing(names, kinds).is_ok());
+        // Each unsafe entry is refused by its own rule: absolute, `..`, a symlink, a hard link, a device.
+        let cases = [
+            ("/etc/cron.d/x", "-rw-r--r-- u/g 1 d x"),
+            ("C:/Windows/x", "-rw-r--r-- u/g 1 d x"),
+            (r"\\server\share\x", "-rw-r--r-- u/g 1 d x"),
+            ("../../.bashrc", "-rw-r--r-- u/g 1 d x"),
+            ("src/../../x", "-rw-r--r-- u/g 1 d x"),
+            ("noble", "lrwxrwxrwx u/g 0 d noble -> /etc/passwd"),
+            ("noble", "hrw-r--r-- u/g 0 d noble link to /etc/passwd"),
+            ("noble", "-rw-r--r-- u/g 0 d noble link to /etc/passwd"),
+            ("dev", "crw-r--r-- u/g 1, 3 d dev"),
+        ];
+        for (name, kind) in cases {
+            assert!(check_listing(name, kind).is_err(), "{name} / {kind}");
+        }
+        // A listing whose two views disagree is refused too.
+        assert!(check_listing("a\nb\n", "-rw-r--r-- u/g 1 d a\n").is_err());
+    }
+
+    #[test]
+    fn copies_stop_at_the_size_cap() {
+        let mut out = Vec::new();
+        assert!(copy_capped(&mut std::io::Cursor::new(vec![7u8; 10]), &mut out, 10).is_ok());
+        assert_eq!(out.len(), 10);
+        let mut out = Vec::new();
+        let err = copy_capped(&mut std::io::Cursor::new(vec![7u8; 11]), &mut out, 10).unwrap_err();
+        assert!(err.contains("larger than 10 bytes"), "{err}");
+        assert!(out.len() <= 11, "the copy did not stop at the cap");
     }
 
     #[test]

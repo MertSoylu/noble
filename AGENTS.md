@@ -16,6 +16,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - `cargo test --test render` — render/PTY tests only; `cargo test --test render <fn_name>` for a single test
 - `cargo test --lib <module_or_test_name>` — unit tests inside `src/` only
 - `cargo test --test e2e` — runs the compiled binary end to end inside a pseudo-terminal
+- `cargo test --test fuzz` — random and hostile input to the outside-data parsers (deterministic; `NOBLE_FUZZ_SEED`, `NOBLE_FUZZ_SCALE`)
 - `cargo test --release --test e2e idle -- --ignored --nocapture` — idle CPU/RAM measurement (`#[ignore]`)
 - `cargo test --release --test render heavy_output -- --ignored --nocapture` — 50k-line output throughput
 - `cargo clippy --all-targets` — kept warning-free
@@ -65,7 +66,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `buf.cell_mut(..)` (as in `ui/mod.rs`, `ui/overlay.rs`); never index it. `ui::draw` also updates layout state
   (`sync_layout`, `hits`, the slide animation), so it is not a pure function of `App`.
 - State only changes on the main thread; background jobs send an `AppEvent`. The one deliberate exception:
-  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself.
+  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself
+  (queued to the pane's writer thread, like keys).
 - Network/CLI errors never panic: providers return `Err(String)`, the UI shows the cache with "~".
 
 ## Architecture (parts that span several files)
@@ -75,6 +77,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Event flow:** input, sensors, project scan, git, the AI collector and a reader/waiter thread per shell send
   `event::AppEvent` over a single `mpsc` channel; `App` (`app/mod.rs`) handles them in the main loop.
   New background job = new `AppEvent` variant + a matching branch in `App`.
+- **App submodules:** `app/mod.rs` holds the state types and the event dispatch (`App::handle`, `apply`, `tick`);
+  `notify.rs` (toasts, notices, the update notice, PTY output → notifications), `redraw.rs` (animations and the
+  next wake-up), `session.rs` (auto-save, restore, shutdown), `power.rs` (battery, clock, sensor rate), `reload.rs`
+  (live config reload) and `git.rs` (git status requests) hold the methods on `App`.
 - **Redraw (battery-friendly):** there is no fixed frame rate. `App::handle` returns `true` if the event changed
   something visible (e.g. a sensor event while in a terminal returns `false`); anything that changes over time
   (clock, animation, spinner, toast timeout, cursor blink) must be added to `App::redraw_after`, otherwise it
@@ -86,7 +92,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   last fetch is older than 30 s, `AiReq::Refresh` — config change, R key — fetches even while Home is hidden).
   Listening ports (every 10 s, 30 s on battery) and the selected project's PR/CI state (60 s, 180 s on battery,
   or at once when its branch changed) are requested only while Home is open (`app/live.rs`).
-  The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`) the Home clock has no
+  The process list refreshes at most every ~1.9 s. On battery (`App::on_battery`, `app/power.rs`) the Home clock has no
   seconds and does not blink.
   When adding periodic work, run it only while the relevant screen is open; measure with
   `cargo test --release --test e2e idle -- --ignored --nocapture` (CPU ms per minute).
@@ -99,7 +105,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
-  shell integration (cwd tracking via OSC 7 / OSC 9;9), `term/input.rs` xterm key/mouse encoding and AltGr
+  shell integration (cwd tracking via OSC 7 / OSC 9;9; the pane's writer thread is the only writer to the PTY
+  (`PtyInput`), so `Pane::write` never blocks on a program that does not read; `Pane::cwd` checks a reported folder
+  on a background thread (`AppEvent::PaneCwd`), and a network path is shown (`shown_cwd`) but never checked or used),
+  `term/osc.rs` the vt100 `Callbacks` (OSC parsing, hyperlinks), `term/input.rs` xterm key/mouse encoding and AltGr
   handling.
 - **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT` (only when
   `PROMPT` is not already set in NOBLE's environment); bash (`--rcfile`; login arguments use the separate
@@ -109,8 +118,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   that replace the config (`--norc`, `-f`, `-N`, `--rcfile`, `-c` …) disable the integration.
 - **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
   owning process); without a system clipboard copied text goes out as OSC 52.
-- **Prompt signal:** `term/pane.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
-  `App::on_pty_output` treats it as "command finished" → that repo's git status is refreshed with
+- **Prompt signal:** `term/osc.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
+  `App::on_pty_output` (`app/notify.rs`) treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).
   OSC 9 text / OSC 777 and the bell put an `alert` (◆) on the tab the same way.
   NOBLE's hooks send `OSC 133;D;<exit code>` before the directory (cmd.exe cannot; the first code of a prompt
@@ -122,13 +131,34 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); the state types stay in `app/mod.rs`.
 - **Session auto-save / termination:** `App::tick` compares the tabs with the last saved session and writes a
-  change that lasted 2 s (short lock wait). `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
+  change that lasted 2 s, only while it gets the session lock (`session_save_waiting`, 1 s wait); otherwise the
+  save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
+  fallback (`session_save`, `session_begin`). Saved tabs that could not start stay in the file (`App::unrestored`).
+  `App::shutdown` ends the background commands before it saves; `main.rs` runs the frame loop under `catch_unwind`,
+  so a main-thread panic saves (only when the session lock is had within 500 ms; otherwise the last saved file stays) and ends them as well (the panic hook uses `ai::kill_background_children_if_free`,
+  which never waits for the registry lock).
+  `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
 - **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
   skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
   (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
-  no prompts, timeout via `ai::run_command`).
+  no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
+  commands still running with `ai::kill_background_children`, which also closes the registry so none starts after
+  it). The codex RPC child (`ai::stdio_rpc`) starts the same way (`ai::spawn_tracked`: group, registry, `Tracked`
+  guard). Its `-c` overrides
+  (`projects::repo_program_overrides`) turn off `core.fsmonitor`, `log.showSignature` and the repository's own
+  `filter.*` commands (read from its `--local`/`--worktree` config only); when that config cannot be read no status is
+  shown (fail closed).
+- **Untrusted paths:** text from the terminal is never looked at as a network path: `term/osc.rs`
+  `is_network_path` (`\\`, `//`) drops an OSC 9;9 report and `term/link.rs` `classify` refuses such tokens before any
+  file system call (on Windows that connects and sends NTLM). An OSC 7 `//server/share` (Git Bash) becomes
+  `\\server\share` (`osc::windows_cwd`) and is stored, but `Pane::cwd` refuses it like a 9;9 report: the probe never
+  sees it, the pane keeps its start folder and `shown_cwd` shows the share. A pane opened in a share keeps it as its
+  start folder, so `classify` resolves no relative name against it and git refresh asks for none there.
+  `projects::git_dir` does not follow a `.git` file, nor a `commondir` or `gitdir` file in the git directory, that
+  names a network path (git itself would read it when it runs in the repository). OSC 52 writes are dropped when
+  `terminal.osc52_write` is off (`app/notify.rs`).
 - **Search/links:** `app/search.rs` (scrollback search bar, ctrl+click), `term/link.rs` (URL and `file:line`
   detection). Matches store absolute line numbers (0 = oldest scrollback line).
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme
@@ -149,12 +179,19 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   turns off the hooks settings path and AI credential detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
+- **Private files:** on Unix NOBLE's folders are 0700 and new files 0600 (`util::create_private_dir`,
+  `util::private_file_options`, `store::write_text`); existing files keep their mode. Windows: the profile's ACL applies.
+  `Paths::resolve` returns `None` without a home folder (never a relative `.noble`); `main` reports it.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (`App::tick` polls its mtime every 2 s; error =
   toast, never a crash); `store.rs` stores recent dirs, the session, workspaces, AI usage history and UI state
   (`state.json`: welcome seen, pinned, hidden and manually added projects — the scan thread gets the last two as
-  `projects::Manual`) with atomic JSON writes (`store::write_json`, also used for `ai-cache.json`). The session file is shared by every window of a build: each window (`store::instance_id`)
-  merges only its own tabs in (`session_save`, under a `.lock` file), and only the first window of a run
-  restores (`session_begin`, liveness via pid + process start time).
+  `projects::Manual`) with atomic writes (`store::write_bytes`: temp file, `sync_all`, rename, folder fsync on Unix;
+  `store::write_json` for JSON, also used for `ai-cache.json`; Windows retries a rename over an open file
+  briefly, `store::replace_file`). Unknown top-level fields of `state.json`/`session.json` and workspace entries
+  are kept (`extra`). The session file is shared by every window of a build: each window
+  (`store::instance_id`) merges only its own tabs in (`session_save`, under a `.lock` file that is removed only
+  by its owner), and only the first window of a run restores (`session_begin`, liveness via pid + process start
+  time). Settings rewrites of `config.toml` are refused while it does not parse (`config::read_for_settings`).
 - **Project live data:** `ports.rs` lists the TCP ports of processes whose current folder is inside a project
   (Linux reads `/proc`; macOS filters with sysinfo and runs `lsof` only for those pids; Windows reads
   `GetExtendedTcpTable` and takes the folders from sysinfo). `pr.rs` runs `gh pr view --json` through
@@ -167,9 +204,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running
   `noble update`). `noble update` downloads the `release.yml` archive for the platform and its `.sha256`,
   verifies the SHA-256 (a missing checksum file or a mismatch aborts before anything is unpacked, so releases
-  without checksums are refused), unpacks it with the system `tar` and swaps the binary (the running one is
-  renamed to `*.old`, falling back to `.old2` … `.old9` when one cannot be deleted). Linux/macOS delete the
-  old binary right after the swap; only Windows leaves it, `update::cleanup_old` removes it on the next launch.
+  without checksums are refused). Only https addresses on GitHub hosts are fetched (`is_release_url`): ureq's own
+  redirects are off, `get_following` requests each `Location` itself and checks it, sizes are capped
+  (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
+  before `tar` unpacks it. `tar` is run by its full path (`tar_program`: System32 on Windows, else `util::which`). It then swaps the binary: on Linux/macOS one rename over the running binary (no old
+  copy is kept); on Windows the running one is renamed to `*.old`, falling back to `.old2` … `.old9` when one
+  cannot be deleted, and `update::cleanup_old` removes it on the next launch.
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, a fixed-size array whose length must be bumped,
