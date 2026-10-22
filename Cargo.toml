@@ -39,7 +39,7 @@ sysinfo = "0.39.6"
 toml = "1.1.6"
 unicode-width = "0.2.2"
 ureq = "3.4.2"
-vt100 = "0.16.2"
+vt100 = "0.18.1"
 
 # The OS asking NOBLE to end (`termination.rs`): signals on Unix, console control events on Windows.
 [target.'cfg(unix)'.dependencies]
