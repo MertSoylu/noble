@@ -39,6 +39,11 @@ impl App {
 
     pub fn apply_config(&mut self, cfg: Config) {
         let old = std::mem::replace(&mut self.cfg, cfg);
+        // The running flag follows the file only when the file's own value changed (prefix f may have set
+        // it since then).
+        if old.terminal.focus_mode != self.cfg.terminal.focus_mode {
+            self.focus_mode = self.cfg.terminal.focus_mode;
+        }
         self.theme = Theme::by_name(&self.cfg.general.theme, self.cfg.general.transparent);
         self.keymap = Keymap::from_config(&self.cfg.keys);
         self.shell = resolve_shell(&self.cfg.terminal, &self.paths.data);

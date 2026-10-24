@@ -54,6 +54,9 @@ how the last command ended (`✓ 2.4s`, `✗ 1 · 12s`) and a live timer while o
 position bar with the search matches on it and a `↓ live · 12` chip counting the new lines below. The focused
 or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
 In a split tab the panes without the focus fade a little (`dim_inactive`), so the focused one stands out.
+Focus mode (`prefix f`, or `focus_mode` in the config) hides the top and bottom bars on a terminal tab, so its panes
+get the whole screen: the bars come back while the prefix is armed or the pointer rests on the top or bottom row, and a
+`◆ 2` chip on the bottom row shows the markers of the other tabs.
 
 </td>
 <td width="50%" valign="top">
@@ -246,7 +249,8 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
 | `alt+.` / `alt+,`\* | next / previous tab | `n` `p` `1…9` `0` `b` | tabs · Home |
-| `shift+pgup/pgdn` | scrollback | `/` `f` | search scrollback |
+| `shift+pgup/pgdn` | scrollback | `/` | search scrollback |
+| | | `f` | focus mode: hide the top and bottom bars on a terminal tab |
 | | | `pgup` `pgdn` `[` `]` | scroll up / down (page) |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass keys to the app (lock / next key) |
@@ -335,6 +339,7 @@ foreground = ""          # override the scheme's text color
 notify = true            # toast + bell when a background tab needs attention
 notify_after = 10        # report background commands that ran at least this many seconds (0 = off)
 dim_inactive = true      # in a split tab, fade the text of the panes without the focus
+focus_mode = false       # hide NOBLE's top and bottom bars on terminal tabs (prefix f toggles it)
 
 [keys]
 prefix = "ctrl+a"
@@ -369,7 +374,7 @@ show = true              # false hides it from Home (Settings → Quick launch)
 **Actions** for bindings: `bridge system settings new_tab close_tab reopen_tab next_tab prev_tab tab_1…tab_9 move_tab_left
 move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
-refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search add_project_folder add_project
+refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
 dismiss_hooks_offer notifications`.
 

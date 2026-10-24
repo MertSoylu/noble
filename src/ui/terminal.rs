@@ -586,7 +586,7 @@ fn pane_content(
     hud::fill(buf, inner, Style::default().bg(pal.bg).fg(pal.fg));
     let parser = pane.parser();
     let screen = parser.screen();
-    let (rows, cols) = screen.size();
+    let (rows, cols) = crate::term::screen_size(screen);
     let selection = pane.selection;
     let default_bg = pal.bg;
     // Matches in the visible rows: (screen row, start, end, selected).

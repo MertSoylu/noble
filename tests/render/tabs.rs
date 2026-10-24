@@ -224,8 +224,17 @@ fn closed_tab_reopens_with_its_panes() {
 fn tab_menu_and_prompt_survive_tabs_closing() {
     use noble::app::{MenuCmd, Overlay};
     let mut app = demo_app(110, 30);
+    // A shell can fail to start on a loaded CI runner (macOS once): it is tried again rather than leaving fewer tabs.
     for name in ["first", "second", "third"] {
-        app.new_tab(std::env::temp_dir(), None, Some(name.into()));
+        let want = app.tabs.len() + 1;
+        for _ in 0..5 {
+            app.new_tab(std::env::temp_dir(), None, Some(name.into()));
+            if app.tabs.len() == want {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(app.tabs.len(), want, "the {name} tab did not start: {:?}", toast_texts(&app));
     }
     let first = app.tabs[0].focus;
     let menu_cmd = |app: &App, label: &str| match &app.overlay {

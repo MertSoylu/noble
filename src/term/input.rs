@@ -18,9 +18,31 @@ fn modifier_param(mods: KeyModifiers) -> u8 {
     m
 }
 
-/// A non-letter character arriving with Ctrl+Alt was produced by AltGr.
+/// A non-letter character arriving with Ctrl+Alt was produced by AltGr, and so is a letter the keyboard layout
+/// types with AltGr (Turkish Q: AltGr+I is "i").
 pub fn is_altgr_char(mods: KeyModifiers, c: char) -> bool {
-    mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_ascii_alphabetic()
+    mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) && (!c.is_ascii_alphabetic() || layout_altgr_letter(c))
+}
+
+/// Windows: whether the keyboard layout types `c` with AltGr. ConPTY turns text it is given (SSH, a paste without
+/// bracketed paste, NOBLE inside NOBLE) into key presses the same way, so on Turkish Q a plain "i" arrives as
+/// Ctrl+Alt+I. Linux and macOS terminals send the character AltGr/Option produced, never Ctrl+Alt: always false.
+fn layout_altgr_letter(c: char) -> bool {
+    #[cfg(windows)]
+    {
+        let mut utf16 = [0u16; 2];
+        let &mut [unit] = c.encode_utf16(&mut utf16) else { return false };
+        // SAFETY: VkKeyScanW only reads its argument.
+        let scan = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW(unit) };
+        // Low byte: the virtual key, high byte: the shift state (1 shift, 2 ctrl, 4 alt); -1 when no key types it.
+        let shift = (scan as u16 >> 8) as u8;
+        scan != -1 && shift & 6 == 6
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = c;
+        false
+    }
 }
 
 /// Encodes a key event into bytes. `app_cursor`: DECCKM (application cursor mode).

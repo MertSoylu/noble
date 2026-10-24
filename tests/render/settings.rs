@@ -294,6 +294,20 @@ fn settings_filter_narrows_rows() {
     assert_ne!(app.view, View::Settings);
 }
 
+/// A symbol typed with AltGr (Ctrl+Alt on Windows) is text in the Settings and key bindings filters, like
+/// in the other text fields; a real alt+letter is not.
+#[test]
+fn altgr_symbols_type_into_the_filters() {
+    let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('@'), altgr));
+    app.on_key(KeyEvent::new(KeyCode::Char('{'), altgr));
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
+    assert_eq!(app.settings_filter, "@{");
+}
+
 /// Settings on a wide terminal (140+ columns): the page is 130 columns, its list keeps the first 80
 /// and a description panel on the right shows the selected label in bold with its description wrapped.
 /// The bottom row no longer carries the description.

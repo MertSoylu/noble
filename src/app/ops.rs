@@ -112,6 +112,7 @@ impl App {
             Action::ScrollUp => self.scroll_page(1),
             Action::ScrollDown => self.scroll_page(-1),
             Action::Search => self.open_search(),
+            Action::FocusMode => self.toggle_focus_mode(),
             Action::AddProjectFolder => self.open_add_prompt(AddMode::Auto),
             Action::AddProject => self.open_add_prompt(AddMode::Project),
             Action::RemoveProject => match self.selected_project().map(|p| p.path.clone()) {

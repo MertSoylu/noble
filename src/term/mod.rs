@@ -7,9 +7,21 @@ pub mod link;
 mod osc;
 pub mod pane;
 
+use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use layout::{Node, PaneId};
+
+/// A screen dimension for vt100, which takes `NonZeroU16`: 0 rows or columns become 1.
+pub fn vt_size(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
+}
+
+/// The emulator screen's (rows, cols) as plain numbers.
+pub fn screen_size(screen: &vt100::Screen) -> (u16, u16) {
+    let (rows, cols) = screen.size();
+    (rows.get(), cols.get())
+}
 
 /// Stable identity of a tab for the whole run: unlike an index it survives tabs closing or moving,
 /// and unlike a pane id it survives the tab's panes closing.

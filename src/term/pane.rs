@@ -820,8 +820,12 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let mut writer = pair.master.take_writer().context("pty writer")?;
         let (input, queue) = PtyInput::channel();
-        let parser =
-            Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, spec.scrollback, Callbacks::default())));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(rows),
+            crate::term::vt_size(cols),
+            spec.scrollback,
+            Callbacks::default(),
+        )));
         let dirty = Arc::new(AtomicBool::new(false));
         let output_gen = Arc::new(AtomicU64::new(0));
         let exited = Arc::new(AtomicBool::new(false));
@@ -1099,7 +1103,7 @@ impl Pane {
     fn row_chars(&self, row: u16) -> Vec<char> {
         let p = lock(&self.parser);
         let screen = p.screen();
-        let (_, cols) = screen.size();
+        let (_, cols) = crate::term::screen_size(screen);
         (0..cols)
             .map(|c| match screen.cell(row, c) {
                 Some(cell) if cell.is_wide_continuation() => '\0',
@@ -1131,7 +1135,7 @@ impl Pane {
         let p = lock(&self.parser);
         // The pane can be drawn larger than its screen for a moment (the PTY is resized only when a
         // divider drag ends); vt100 panics on columns past the screen, so the selection is kept inside.
-        let (rows, cols) = p.screen().size();
+        let (rows, cols) = crate::term::screen_size(p.screen());
         let (r0, r1) = (r0.min(rows.saturating_sub(1)), r1.min(rows.saturating_sub(1)));
         let (c0, c1) = (c0.min(cols), c1.saturating_add(1).min(cols));
         let text = p.screen().contents_between(r0, c0, r1, c1);
@@ -1200,7 +1204,7 @@ impl Pane {
     /// Visible line text (for link detection).
     pub fn visible_row(&self, row: u16) -> Option<String> {
         let p = lock(&self.parser);
-        let cols = p.screen().size().1;
+        let cols = crate::term::screen_size(p.screen()).1;
         p.screen().rows(0, cols).nth(row as usize)
     }
 }
@@ -1212,7 +1216,7 @@ fn scrollback_lines(p: &mut vt100::Parser<Callbacks>) -> (Vec<String>, usize) {
     let original = screen.scrollback();
     screen.set_scrollback(usize::MAX);
     let history = screen.scrollback();
-    let (rows, cols) = screen.size();
+    let (rows, cols) = crate::term::screen_size(screen);
     let total = history + rows as usize;
     let mut lines: Vec<String> = Vec::with_capacity(total);
     let mut top = 0usize;
@@ -1251,14 +1255,17 @@ pub struct ScrollText {
 /// it was read at (A → B → A with no output in between).
 fn set_screen_size(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, rows: u16, cols: u16) {
     let mut p = lock(parser);
-    p.screen_mut().set_size(rows, cols);
+    // vt100 returns to the live screen on a resize (as xterm does); a pane scrolled back stays where it was.
+    let offset = p.screen().scrollback();
+    p.screen_mut().set_size(crate::term::vt_size(rows), crate::term::vt_size(cols));
+    p.screen_mut().set_scrollback(offset);
     output_gen.fetch_add(1, Ordering::Release);
 }
 
 /// The text of `p` at output generation `generation`: `have` itself when it was read at the same generation
 /// and size, otherwise read anew.
 fn read_scroll_text(p: &mut vt100::Parser<Callbacks>, generation: u64, have: Option<&ScrollText>) -> ScrollText {
-    let size = p.screen().size();
+    let size = crate::term::screen_size(p.screen());
     if let Some(text) = have.filter(|t| t.generation == generation && t.size == size) {
         return text.clone();
     }
@@ -1363,6 +1370,16 @@ mod tests {
 
     use super::*;
 
+    /// An emulator of `rows` x `cols` with `scrollback` lines and NOBLE's callbacks.
+    fn test_parser(rows: u16, cols: u16, scrollback: usize) -> vt100::Parser<Callbacks> {
+        vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(rows),
+            crate::term::vt_size(cols),
+            scrollback,
+            Callbacks::default(),
+        )
+    }
+
     #[test]
     fn labels() {
         assert_eq!(process_label("C:\\WINDOWS\\system32\\cmd.exe", "x"), "cmd");
@@ -1407,7 +1424,7 @@ mod tests {
         // A verbatim local path is a local folder (`canonicalize` writes them); a verbatim UNC path is a share.
         assert!(!is_network_path(r"\\?\C:\work") && !is_network_path("//?/c:/work") && !is_network_path(r"\\?\C:"));
         assert!(is_network_path(r"\\?\UNC\server\share") && is_network_path(r"\\?\UNC\server\share\x"));
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         parser.process(b"\x1b]9;9;C:\\work\\proj\x1b\\");
         assert_eq!(parser.callbacks().cwd.as_deref(), Some(r"C:\work\proj"));
         for hostile in [r"\\attacker\share", r#""\\attacker\share""#, " //attacker/share", r"\\?\UNC\attacker\share"] {
@@ -1584,7 +1601,7 @@ mod tests {
     #[test]
     fn prompt_signal_drops_the_finished_programs_title() {
         for mark in [&b"\x1b]7;file://h/tmp\x07"[..], b"\x1b]9;9;C:\\x\x1b\\", b"\x1b]133;A\x07", b"\x1b]133;D;0\x07"] {
-            let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+            let mut parser = test_parser(10, 40, 0);
             parser.process("\x1b]0;\u{2733} Claude Code\x07".as_bytes());
             assert_eq!(parser.callbacks().title, "\u{2733} Claude Code");
             // Agent progress (OSC 9;4) and notifications are not prompt marks.
@@ -1601,7 +1618,7 @@ mod tests {
 
     #[test]
     fn callbacks_answer_queries() {
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         parser.process(b"abc\x1b[6n\x1b]7;file://h/tmp/x\x07\x1b]0;C:\\bin\\cmd.exe\x07");
         let cb = parser.callbacks();
         assert_eq!(cb.responses, b"\x1b[1;4R");
@@ -1612,7 +1629,7 @@ mod tests {
 
     #[test]
     fn osc8_hyperlinks_are_tracked() {
-        let mut parser = vt100::Parser::new_with_callbacks(5, 40, 100, Callbacks::default());
+        let mut parser = test_parser(5, 40, 100);
         parser.process(b"see \x1b]8;id=1;https://example.com/a;b\x1b\\docs\x1b]8;;\x1b\\ now");
         let links = &parser.callbacks().hyperlinks;
         assert_eq!(links.len(), 1);
@@ -1631,7 +1648,7 @@ mod tests {
     /// absolute line drifts: the link must not answer for text that is no longer there.
     #[test]
     fn osc8_hyperlink_is_not_returned_after_the_scrollback_drifts() {
-        let mut parser = vt100::Parser::new_with_callbacks(4, 40, 3, Callbacks::default());
+        let mut parser = test_parser(4, 40, 3);
         // Fill the scrollback (3 lines) first, then write a link on the bottom row.
         parser.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
         parser.process(b"\x1b]8;;https://a.example/\x1b\\alpha\x1b]8;;\x1b\\");
@@ -1660,7 +1677,7 @@ mod tests {
 
     #[test]
     fn notifications_and_prompt_marks() {
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         // A progress bar (9;4) is not a notification.
         parser.process(b"]9;4;1;50");
         assert_eq!(parser.callbacks().notice, None);
@@ -1681,7 +1698,7 @@ Claude needs your permission",
     /// prompt without one and does not wipe a code that came just before it.
     #[test]
     fn exit_codes_from_prompt_marks() {
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         parser.process(b"\x1b]133;D;2\x07\x1b]7;file://h/tmp\x07");
         assert!(parser.callbacks().prompt);
         assert_eq!(parser.callbacks().exit, Some(2));
@@ -1709,7 +1726,7 @@ Claude needs your permission",
     /// Terminal snippet, oh-my-posh) cannot hide the real code: the first one of a prompt wins.
     #[test]
     fn first_exit_code_of_a_prompt_wins() {
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         parser.process(b"\x1b]133;D;3\x07\x1b]9;9;C:/x\x1b\\\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
         assert_eq!(parser.callbacks().exit, Some(3));
         let cb = parser.callbacks_mut();
@@ -1724,7 +1741,7 @@ Claude needs your permission",
     /// `133;C` marks a command's start without being a prompt signal.
     #[test]
     fn command_start_mark() {
-        let mut parser = vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default());
+        let mut parser = test_parser(10, 40, 0);
         parser.process(b"ls\r\n\x1b]133;C\x07out\r\n");
         assert!(parser.callbacks().started.is_some());
         assert!(!parser.callbacks().prompt);
@@ -1807,7 +1824,7 @@ Claude needs your permission",
     #[test]
     fn scroll_text_is_reused_until_output_or_resize() {
         use std::sync::Arc;
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default());
+        let mut p = test_parser(4, 20, 100);
         for i in 0..10 {
             p.process(format!("line {i}\r\n").as_bytes());
         }
@@ -1825,7 +1842,7 @@ Claude needs your permission",
         assert!(!Arc::ptr_eq(&a.lines, &d.lines), "new output: fresh lines");
         assert!(d.lines.iter().any(|l| l.trim_end() == "line 10"));
         assert_eq!(d.history, a.history + 1);
-        p.screen_mut().set_size(4, 10);
+        p.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(10));
         let e = super::read_scroll_text(&mut p, 2, Some(&d));
         assert!(!Arc::ptr_eq(&d.lines, &e.lines), "resize: fresh lines");
         assert!(e.lines.iter().all(|l| l.chars().count() <= 10 || l.is_empty()));
@@ -1836,7 +1853,7 @@ Claude needs your permission",
     #[test]
     fn resize_back_to_the_same_size_reads_anew() {
         use std::sync::Arc;
-        let parser = Mutex::new(vt100::Parser::new_with_callbacks(4, 20, 100, super::Callbacks::default()));
+        let parser = Mutex::new(test_parser(4, 20, 100));
         let output_gen = AtomicU64::new(0);
         for i in 0..10 {
             lock(&parser).process(format!("line {i}\r\n").as_bytes());
@@ -1849,11 +1866,24 @@ Claude needs your permission",
         assert_eq!(b.lines.len(), a.lines.len());
     }
 
+    /// A resize keeps a pane that is scrolled back where it was (vt100 alone returns to the live screen).
+    #[test]
+    fn resize_keeps_the_scroll_position() {
+        let parser = Mutex::new(test_parser(4, 20, 100));
+        let output_gen = AtomicU64::new(0);
+        for i in 0..30 {
+            lock(&parser).process(format!("line {i}\r\n").as_bytes());
+        }
+        lock(&parser).screen_mut().set_scrollback(5);
+        set_screen_size(&parser, &output_gen, 4, 10);
+        assert_eq!(lock(&parser).screen().scrollback(), 5);
+    }
+
     /// The reader thread's step on one chunk of output (`process_output`): the answers a program asks for are queued
     /// to the writer, in order, with nothing else. Runs on every OS: no PTY is needed to check the queue.
     #[test]
     fn query_answers_are_queued_to_the_writer() {
-        let parser = Mutex::new(vt100::Parser::new_with_callbacks(10, 40, 0, Callbacks::default()));
+        let parser = Mutex::new(test_parser(10, 40, 0));
         let output = AtomicU64::new(0);
         let (input, queue) = PtyInput::channel();
         process_output(&parser, &output, &input, b"ab\x1b[6n");

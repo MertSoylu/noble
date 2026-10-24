@@ -251,10 +251,11 @@ pub enum Action {
     EnableHooks,
     DismissHooksOffer,
     Notifications,
+    FocusMode,
 }
 
 impl Action {
-    pub const ALL: [Action; 58] = [
+    pub const ALL: [Action; 59] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -313,6 +314,7 @@ impl Action {
         Action::EnableHooks,
         Action::DismissHooksOffer,
         Action::Notifications,
+        Action::FocusMode,
     ];
 
     pub fn id(&self) -> String {
@@ -369,6 +371,7 @@ impl Action {
                     Action::EnableHooks => "enable_hooks",
                     Action::DismissHooksOffer => "dismiss_hooks_offer",
                     Action::Notifications => "notifications",
+                    Action::FocusMode => "focus_mode",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -434,6 +437,7 @@ impl Action {
             Action::EnableHooks => "Enable Claude Status Hooks".into(),
             Action::DismissHooksOffer => "Dismiss Claude Status Offer".into(),
             Action::Notifications => "Show Notifications".into(),
+            Action::FocusMode => "Toggle Focus Mode".into(),
         }
     }
 
@@ -472,6 +476,7 @@ impl Action {
             | Action::ScrollUp
             | Action::ScrollDown
             | Action::Search
+            | Action::FocusMode
             | Action::SendPrefix
             | Action::PaneMenu
             | Action::Passthrough
@@ -546,7 +551,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("pgdn"), Action::ScrollDown),
         (c("]"), Action::ScrollDown),
         (c("/"), Action::Search),
-        (c("f"), Action::Search),
+        (c("f"), Action::FocusMode),
         (c("i"), Action::Passthrough),
         (c("a"), Action::JumpToAgent),
         (c("u"), Action::OpenLink),

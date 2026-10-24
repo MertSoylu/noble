@@ -1,6 +1,6 @@
 //! Settings tab: selectable items, value changes and persistent writes to the config.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,7 @@ pub enum SettingKey {
     Osc52Write,
     TabFollowsCwd,
     DimInactive,
+    FocusMode,
     TermColors,
     Notify,
     Prefix,
@@ -96,6 +97,7 @@ impl SettingKey {
             SettingKey::Osc52Write => "Clipboard from programs",
             SettingKey::TabFollowsCwd => "Tab name follows the folder",
             SettingKey::DimInactive => "Dim inactive panes",
+            SettingKey::FocusMode => "Focus mode",
             SettingKey::Notify => "Notify from background tabs",
             SettingKey::TermColors => "Terminal colors",
             SettingKey::Prefix => "Prefix key",
@@ -134,6 +136,7 @@ impl SettingKey {
             SettingKey::Osc52Write => "Let programs in a pane set the clipboard (OSC 52, e.g. over SSH)",
             SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
             SettingKey::DimInactive => "Fade the text of the split panes without the focus",
+            SettingKey::FocusMode => "Hide the top and bottom bars on terminal tabs",
             SettingKey::Notify => "Alert when a long command ends in a background tab",
             SettingKey::TermColors => "Color scheme used inside terminal panes",
             SettingKey::Prefix => "Key that starts NOBLE's command chords",
@@ -260,6 +263,7 @@ impl App {
             Osc52Write,
             TabFollowsCwd,
             DimInactive,
+            FocusMode,
             Notify,
             QuickLaunch,
         ]);
@@ -339,6 +343,7 @@ impl App {
             SettingKey::Osc52Write => c.terminal.osc52_write,
             SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
             SettingKey::DimInactive => c.terminal.dim_inactive,
+            SettingKey::FocusMode => c.terminal.focus_mode,
             SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
             SettingKey::ClaudeHooks => self.hooks_installed,
@@ -536,6 +541,10 @@ impl App {
                         c.terminal.dim_inactive ^= true;
                         ("terminal", "dim_inactive", c.terminal.dim_inactive.to_string())
                     }
+                    SettingKey::FocusMode => {
+                        c.terminal.focus_mode ^= true;
+                        ("terminal", "focus_mode", c.terminal.focus_mode.to_string())
+                    }
                     // Written to Claude's own settings file, not the config (handled above).
                     SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),
                     SettingKey::TermColors => {
@@ -604,6 +613,10 @@ impl App {
                     }
                 };
                 self.apply_config(c);
+                // The Settings row sets the running flag too (prefix f may have changed it since the file was read).
+                if key == SettingKey::FocusMode {
+                    self.focus_mode = self.cfg.terminal.focus_mode;
+                }
                 self.persist(section, name, &value);
                 if key == SettingKey::Shell {
                     self.toast(ToastLevel::Info, "shell applies to new tabs");
@@ -1113,7 +1126,7 @@ impl App {
                 }
                 self.settings_sel = 0;
             }
-            KeyCode::Char(c) if !super::input::ctrl_held(&k) && !k.modifiers.contains(KeyModifiers::ALT) => {
+            KeyCode::Char(c) if !super::input::ctrl_held(&k) && !super::input::alt_held(&k) => {
                 self.settings_filter.push(c);
                 self.settings_sel = 0;
             }

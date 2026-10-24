@@ -136,7 +136,7 @@ impl vt100::Callbacks for Callbacks {
                 let (row, col) = screen.cursor_position();
                 let line = history_len(screen) + row as usize;
                 if let Some((l0, c0, open)) = self.open_link.take() {
-                    let cols = screen.size().1;
+                    let cols = crate::term::screen_size(screen).1;
                     // A span whose line already left the scrollback cannot be verified later: dropped.
                     let mut span = |line: usize, from: u16, to: u16| {
                         if let Some(text) = span_text(screen, line, from, to) {

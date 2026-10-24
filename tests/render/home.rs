@@ -933,6 +933,9 @@ fn home_search_label_starts_the_filter() {
 fn open_folder_without_a_project_says_so() {
     use noble::app::Hit;
     let mut app = demo_app(110, 30);
+    // Without the launchers detected on this machine: their buttons come first and, with enough of them
+    // installed, leave no room on the row for "Folder".
+    app.launchers.clear();
     app.handle(AppEvent::Projects(Vec::new()));
     assert!(app.selected_project().is_none());
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));

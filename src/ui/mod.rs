@@ -54,7 +54,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     app.fx.observe_home(app.view == View::Bridge);
-    top_bar(buf, Rect::new(0, 0, area.width, 1.min(area.height)), app, &mut hits);
+    // Focus mode on a terminal tab hides both bars; they are drawn over the content when revealed
+    // (`App::focus_reveal`), after the panes, so the panes keep their size.
+    let focus = app.focus_mode_active();
+    let (reveal_top, reveal_bottom) = app.focus_reveal();
+    if !focus {
+        top_bar(buf, Rect::new(0, 0, area.width, 1.min(area.height)), app, &mut hits);
+    }
     let body = app.body();
     let cursor = match app.view {
         View::Bridge => {
@@ -73,10 +79,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Term(i) => terminal::draw(buf, body, app, i, &mut hits),
     };
     let cursor = slide(buf, body, app).then_some(cursor).flatten();
-    if area.height >= 2 {
+    // A revealed bar in focus mode is a blocker first: its empty cells must not reach the pane hits under it.
+    if focus && reveal_top && area.height >= 1 {
+        hits.push((Rect::new(0, 0, area.width, 1), Hit::Bar));
+        top_bar(buf, Rect::new(0, 0, area.width, 1), app, &mut hits);
+    }
+    if reveal_bottom && area.height >= 2 {
+        if focus {
+            hits.push((Rect::new(0, area.height - 1, area.width, 1), Hit::Bar));
+        }
         status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &mut hits);
     }
-    update_notice(buf, area, app, &mut hits);
+    if focus && !reveal_top && !reveal_bottom {
+        focus_alert(buf, area, app, &mut hits);
+    }
+    update_notice(buf, area, app, &mut hits, reveal_bottom);
     toasts(buf, area, app, &mut hits);
     app.fx.observe_overlay(app.overlay.is_some());
     overlay::draw(buf, area, app, &mut hits);
@@ -174,7 +191,7 @@ fn hover(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
     let th = &app.theme;
     let mix = crate::theme::Theme::mix;
     match hit {
-        Hit::Backdrop | Hit::Inert | Hit::Pane { .. } | Hit::PaneTitle(_) | Hit::ScrollTrack { .. } => {}
+        Hit::Backdrop | Hit::Inert | Hit::Bar | Hit::Pane { .. } | Hit::PaneTitle(_) | Hit::ScrollTrack { .. } => {}
         Hit::Divider { .. } => {
             // Draggable edge: highlight the shared frame line (not the title text on it).
             hud::tint_frame(buf, hud::Outline::closed(*rect), th.accent);
@@ -616,6 +633,7 @@ fn prefix_hints(app: &App) -> Vec<(String, String)> {
         add(&mut v, Action::SplitDown, "split down");
         add(&mut v, Action::ClosePane, "close");
         add(&mut v, Action::Zoom, "zoom");
+        add(&mut v, Action::FocusMode, "focus mode");
         // The four focus keys share one chip when they are the arrows.
         let arrows = [Action::FocusLeft, Action::FocusRight, Action::FocusUp, Action::FocusDown]
             .iter()
@@ -745,6 +763,9 @@ fn tips(app: &App) -> Vec<String> {
             });
             if let Some(k) = km.term_hint(Action::Search, false) {
                 v.push(format!("{k} searches a terminal's scrollback"));
+            }
+            if let Some(k) = km.term_hint(Action::FocusMode, false) {
+                v.push(format!("{k} toggles focus mode (the bars hide; the pointer on an edge shows them)"));
             }
             v.push(match km.term_hint(Action::Zoom, false) {
                 Some(k) => format!("{k} or a double-click on its title zooms a pane"),
@@ -935,12 +956,43 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
     }
 }
 
+/// Focus mode's alert chip on the bottom row (" ◆ 2 "): the most urgent marker of the other terminal
+/// tabs and how many of them have one. The top bar, where these show, is hidden; a click goes to the tab
+/// with that marker. Not drawn when the window is too narrow.
+fn focus_alert(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
+    const MIN_WIDTH: u16 = 20;
+    let View::Term(current) = app.view else { return };
+    let th = &app.theme;
+    let mut count = 0usize;
+    // The most urgent marker; the first tab wins a tie.
+    let mut best: Option<(usize, u8, &'static str, Style)> = None;
+    for i in (0..app.tabs.len()).filter(|i| *i != current) {
+        let Some((rank, glyph, style)) = tab_marker(&app.tabs[i], th) else { continue };
+        count += 1;
+        if best.is_none_or(|(_, r, _, _)| rank > r) {
+            best = Some((i, rank, glyph, style));
+        }
+    }
+    let Some((tab, _, glyph, style)) = best else { return };
+    if area.width < MIN_WIDTH || area.height == 0 {
+        return;
+    }
+    let y = area.bottom() - 1;
+    let base = th.dim().bg(th.raised);
+    let count = format!(" {count} ");
+    let w = (1 + util::width(glyph) + util::width(&count)) as u16;
+    let x = area.right().saturating_sub(w + 1);
+    let end = hud::put_spans(buf, x, y, &[(" ", base), (glyph, style.bg(th.raised)), (count.as_str(), base)], w);
+    hits.push((Rect::new(x, y, end - x, 1), Hit::FocusAlert(tab)));
+}
+
 /// New version notice: bottom right, just above the status bar. On terminal tabs
-/// it drops to the right of the status bar (which leaves room for it).
-fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
+/// it drops to the right of the status bar (which leaves room for it). `show` is false while
+/// focus mode hides the status bar (the notice is drawn with it).
+fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>, show: bool) {
     let plan = notice_plan(app, area);
     app.fx.observe_notice(plan.is_some());
-    let Some(plan) = plan else { return };
+    let Some(plan) = plan.filter(|_| show) else { return };
     let th = &app.theme;
     // When it appears the button pulses a few times to catch the eye.
     let button_bg = crate::theme::Theme::mix(th.accent2, th.fg, 0.45 * app.fx.notice_pulse());

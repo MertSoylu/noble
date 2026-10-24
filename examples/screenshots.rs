@@ -353,7 +353,7 @@ fn terminals(app: &mut App) {
     // Claude Code in the left pane, Codex on the right: content is drawn to the pane's real size.
     let screens: [(&str, Screen); 2] = [("claude", claude_screen), ("codex", codex_screen)];
     for (id, (title, screen)) in ids.iter().zip(screens) {
-        let (rows, cols) = app.panes[id].parser().screen().size();
+        let (rows, cols) = noble::term::screen_size(app.panes[id].parser().screen());
         let body = screen(rows, cols);
         let seq = format!("\x1b]0;{title}\x07\x1b[2J\x1b[H{body}");
         app.panes[id].parser().process(seq.as_bytes());

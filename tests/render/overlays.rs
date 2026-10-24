@@ -110,14 +110,14 @@ fn help_has_columns_a_filter_and_runs_rows() {
     // Three columns (from 170) hold the whole list at 170x45.
     let mut wide = demo_app(170, 45);
     wide.run(Action::Help);
-    render(&mut wide, 170, 45);
+    let wide_text = render(&mut wide, 170, 45);
     let geo = wide.help_geometry("").expect("fits");
     assert_eq!(geo.columns.len(), 3);
     assert_eq!(geo.max_scroll(), 0, "three columns need no scrolling at 170x45");
     for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
-        assert!(text.contains(name), "{name} is drawn:\n{text}");
+        assert!(wide_text.contains(name), "{name} is drawn:\n{wide_text}");
     }
-    assert!(text.contains("type to filter · ⏎ run · esc close"), "{text}");
+    assert!(wide_text.contains("type to filter · ⏎ run · esc close"), "{wide_text}");
 
     // A narrow screen keeps one column, and it scrolls with the selection.
     let mut narrow = demo_app(110, 30);

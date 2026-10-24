@@ -563,7 +563,7 @@ mod tests {
             "\u{1F600} [d](https://x.dev) y",
         ];
         for line in lines {
-            let mut parser = vt100::Parser::new(2, 80, 0);
+            let mut parser = vt100::Parser::new(crate::term::vt_size(2), crate::term::vt_size(80), 0);
             parser.process(line.as_bytes());
             let screen = parser.screen();
             let row = screen.rows(0, 80).next().unwrap();
