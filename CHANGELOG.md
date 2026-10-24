@@ -118,7 +118,8 @@ All notable changes to NOBLE are documented here. The format is based on
   `general.boot_animation = true` keeps that behavior, `false` turns it off for good; `--no-boot` still skips it.
 - The status bar tips fit the screen: terminal tips in a terminal, Home's on Home, process list tips on System, none
   on Settings. A tip changes when the screen changes instead of every 20 seconds.
-- The terminal hint "drag border resize" appears only on a tab with more than one pane.
+- The terminal hint "drag border resize" appears only on a tab with more than one pane, and "right-click paste"
+  is no longer a status bar hint (the pane menu and the `?` reference still name it).
 - Error notifications stay until they are clicked away; the others leave after 3 s (4 s for warnings). The pointer
   on a notification pauses its countdown, and a click dismisses it.
 - A config error gives its line and column (`config line 5, column 11: …`), and clicking that notification opens

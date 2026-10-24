@@ -742,7 +742,6 @@ fn hints(app: &App) -> Vec<(String, String)> {
             if app.tabs.get(i).is_some_and(|t| t.root.leaves().len() > 1) {
                 v.push(h("drag border", "resize"));
             }
-            v.push(h("right-click", "paste"));
             v
         }
     }
