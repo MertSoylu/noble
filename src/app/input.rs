@@ -21,6 +21,12 @@ pub(super) fn ctrl_held(k: &KeyEvent) -> bool {
         && !matches!(k.code, KeyCode::Char(c) if crate::term::input::is_altgr_char(k.modifiers, c))
 }
 
+/// Alt held as a shortcut modifier, not as the Alt half of AltGr.
+pub(super) fn alt_held(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::ALT)
+        && !matches!(k.code, KeyCode::Char(c) if crate::term::input::is_altgr_char(k.modifiers, c))
+}
+
 impl App {
     /// Filtered and sorted process list.
     pub fn visible_procs(&self) -> Vec<ProcInfo> {
@@ -61,6 +67,7 @@ impl App {
             Event::FocusGained => self.window_focused = Some(true),
             Event::FocusLost => {
                 self.window_focused = Some(false);
+                self.focus_edge = None;
                 self.update_link_hover(None, KeyModifiers::NONE);
             }
         }
@@ -628,7 +635,7 @@ impl App {
             _ => {}
         }
         let launcher = match k.code {
-            KeyCode::Char(c) if !ctrl && !k.modifiers.contains(KeyModifiers::ALT) => {
+            KeyCode::Char(c) if !ctrl && !alt_held(&k) => {
                 self.quick_launchers().find(|(_, l)| l.key.starts_with(c)).map(|(i, _)| i)
             }
             _ => None,
@@ -641,7 +648,7 @@ impl App {
         // `T` lists the selected project's tasks, when it has any. A launcher on `T` keeps the key
         // (launchers are checked first) and the hint is left out while one holds it.
         let has_tasks = self.selected_project().is_some_and(|p| !p.tasks.is_empty());
-        if k.code == KeyCode::Char('T') && has_tasks && !ctrl && !k.modifiers.contains(KeyModifiers::ALT) {
+        if k.code == KeyCode::Char('T') && has_tasks && !ctrl && !alt_held(&k) {
             self.open_task_list();
             return;
         }
@@ -849,6 +856,7 @@ impl App {
 
     fn on_mouse(&mut self, m: MouseEvent) {
         self.hover = Some((m.column, m.row));
+        self.track_focus_edge(m.row);
         self.hold_toasts(m.column, m.row);
         if self.boot.is_some() {
             if matches!(m.kind, MouseEventKind::Down(_)) {
@@ -931,7 +939,8 @@ impl App {
                     self.cancel_picker(&ov);
                 }
             }
-            Hit::Inert => {}
+            // Inert: an overlay box, or a revealed focus-mode bar's empty cells (`Hit::Bar`): nothing happens.
+            Hit::Inert | Hit::Bar => {}
             Hit::TabBridge => self.view = View::Bridge,
             Hit::TabSystem => self.view = View::System,
             Hit::TabSettings => self.open_settings(),
@@ -991,6 +1000,7 @@ impl App {
             Hit::NewTab => self.run(Action::NewTab),
             Hit::Palette => self.run(Action::Palette),
             Hit::HiddenTabs => self.open_tab_list(),
+            Hit::FocusAlert(i) => self.go_tab(i + 1),
             Hit::Pane { pane, inner } => {
                 if let Some(ti) = self.tab_of(pane) {
                     self.tabs[ti].focus = pane;

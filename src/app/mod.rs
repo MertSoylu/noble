@@ -3,6 +3,7 @@
 
 mod agents;
 pub mod bindings;
+mod focus;
 pub mod fx;
 mod git;
 pub mod help;
@@ -467,6 +468,12 @@ pub enum Hit {
     HooksOfferDismiss,
     /// "+N" chip of the tab bar: opens the command palette listing the hidden tabs.
     HiddenTabs,
+    /// The alert chip on the bottom row in focus mode: goes to this tab (the one with the most urgent marker).
+    FocusAlert(usize),
+    /// A bar revealed over the terminal in focus mode (top or bottom row): an inert blocker pushed before the
+    /// bar, so a click on its empty cells does not reach the pane hits underneath. The bar's own hits come later
+    /// and take priority.
+    Bar,
     /// System: "/ Filter" button of the Processes panel (as the "/" key).
     SystemFilter,
     /// System: "K Terminate" button of the Processes panel (as the "K" key, asks first).
@@ -734,6 +741,11 @@ pub struct App {
     pub hits: Vec<(Rect, Hit)>,
     /// Mouse cursor position (for hover effects).
     pub hover: Option<(u16, u16)>,
+    /// Focus mode (see `focus.rs`): terminal tabs show neither the top nor the bottom bar. Starts from
+    /// `terminal.focus_mode`; prefix f toggles it for the run.
+    pub focus_mode: bool,
+    /// The screen edge the pointer rests on in focus mode, and since when (see `focus.rs`).
+    pub(crate) focus_edge: Option<(focus::FocusEdge, Instant)>,
     pub slide: Option<Slide>,
     pub zoom_anim: Option<ZoomAnim>,
     /// Short UI effects (fades, flashes, glides, tweens); see `fx`.
@@ -1043,6 +1055,8 @@ impl App {
             boot: None,
             hits: Vec::new(),
             hover: None,
+            focus_mode: cfg.terminal.focus_mode,
+            focus_edge: None,
             slide: None,
             zoom_anim: None,
             fx: fx::Effects::default(),
@@ -1108,9 +1122,14 @@ impl App {
         }
     }
 
-    /// Terminal body: the area between the top strip and the status bar.
+    /// Terminal body: the area between the top strip and the status bar. In focus mode on a terminal tab
+    /// it is the whole screen (the bars are hidden, see `focus.rs`).
     pub fn body(&self) -> Rect {
-        Rect::new(0, 1, self.size.0, self.size.1.saturating_sub(2))
+        if self.focus_mode_active() {
+            Rect::new(0, 0, self.size.0, self.size.1)
+        } else {
+            Rect::new(0, 1, self.size.0, self.size.1.saturating_sub(2))
+        }
     }
 
     /// Handles the event; `true` when something visible changed (redraw).

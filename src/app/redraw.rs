@@ -71,6 +71,10 @@ impl App {
         if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
         }
+        // Focus mode: the bar of an edge the pointer rests on appears when its dwell is over.
+        if let Some(d) = self.focus_dwell_due() {
+            want(d);
+        }
         // Search matches that output made stale: recomputed when the refresh interval has passed.
         if let Some(s) = self.search.as_ref().filter(|s| s.stale) {
             want(s.refreshed.map_or(Duration::ZERO, |t| search::SEARCH_REFRESH.saturating_sub(t.elapsed())));

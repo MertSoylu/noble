@@ -20,7 +20,7 @@ const READY_COMMAND: &[u8] = b"echo e2e-ready-$((6*7))\r";
 /// no line break, so a shell's output can end up on one long line with the text around it (on Windows the whole
 /// screen was one such line in the failing run).
 fn screen_text(screen: &vt100::Screen) -> String {
-    let (_, cols) = screen.size();
+    let (_, cols) = noble::term::screen_size(screen);
     screen.rows(0, cols).collect::<Vec<_>>().join("\n")
 }
 
@@ -52,7 +52,12 @@ impl Harness {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, 0, Callbacks::default())));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+            noble::term::vt_size(rows),
+            noble::term::vt_size(cols),
+            0,
+            Callbacks::default(),
+        )));
         {
             let parser = parser.clone();
             let writer = writer.clone();
@@ -169,7 +174,7 @@ impl Drop for Home {
 #[test]
 fn ready_word_is_read_from_its_own_row() {
     let read = |bytes: &[u8]| {
-        let mut parser = vt100::Parser::new(6, 20, 0);
+        let mut parser = vt100::Parser::new(noble::term::vt_size(6), noble::term::vt_size(20), 0);
         parser.process(bytes);
         (parser.screen().contents(), has_word(&screen_text(parser.screen()), READY_WORD))
     };
@@ -215,7 +220,7 @@ fn full_session_lifecycle() {
 
     // New tab + command.
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     h.wait_shell_ready(20);
     h.send(b"echo e2e-marker-$((6*7))\r");
     h.send(b"echo e2e-marker-42\r");
@@ -328,7 +333,7 @@ fn idle_terminal_cpu_is_low() {
     let h = Harness::start(&home, 34, 120);
     h.wait_for("Projects", 20);
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     std::thread::sleep(Duration::from_secs(4));
     let (ms, mem) = measure(&h, 20);
     println!(
@@ -391,7 +396,7 @@ fn termination_signals_save_the_session() {
         h.send(b"\x1b");
         h.wait_for("Projects", 20);
         h.send(b"t");
-        h.wait_for("right-click", 10);
+        h.wait_for("ctrl+a menu", 10);
         let pid = h.child.process_id().expect("pid");
         let ok = std::process::Command::new("kill").arg(format!("-{signal}")).arg(pid.to_string()).status().unwrap();
         assert!(ok.success(), "kill -{signal}");
@@ -424,7 +429,7 @@ fn a_killed_window_is_restored_on_the_next_launch() {
     h.send(b"\x1b");
     h.wait_for("Projects", 20);
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     h.wait_shell_ready(20);
     h.send(b"\x01");
     h.send(b"v");

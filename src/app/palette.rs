@@ -157,6 +157,7 @@ impl App {
                 | Action::PaneMenu
                 | Action::OpenLink
                 | Action::Search
+                | Action::FocusMode
                 | Action::Passthrough => in_term,
                 Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
                 Action::ReopenTab => !self.closed_tabs.is_empty(),

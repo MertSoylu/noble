@@ -63,6 +63,12 @@ All notable changes to NOBLE are documented here. The format is based on
 - The first time a shell key (`alt+t`, `alt+p` …) goes to the shell in a terminal although NOBLE has a shortcut
   for it, the status bar says once which chord reaches that action (`alt+t went to the shell · NOBLE: ctrl+a t`;
   when the action has no prefix chord, it points at Settings → Leave shell keys to the shell).
+- Focus mode (`prefix f`, action `focus_mode`, palette "Toggle Focus Mode", Settings → Terminal → Focus mode, and
+  `terminal.focus_mode` in the config as the starting value): a terminal tab hides NOBLE's top and bottom bars, so its
+  panes get the whole screen (two more PTY rows). The bars come back over the content, without resizing the panes,
+  while the prefix is armed or the pointer rests on the top or bottom row for 0.4 s; a `◆ 2` chip on the bottom row
+  shows the most urgent marker of the other tabs and a click goes to that tab. Home, System and Settings keep their
+  bars. A config reload follows the file only when its `focus_mode` value changed.
 
 ### Security
 - Background git (the project list and Home's status) no longer runs programs a repository's own `.git/config`
@@ -91,8 +97,13 @@ All notable changes to NOBLE are documented here. The format is based on
   new form (its existing entries keep theirs until the hooks are turned off and on again).
 - Programs in a pane can set the clipboard with OSC 52 as before; Settings → "Clipboard from programs" (or
   `osc52_write = false` under `[terminal]`) ignores those requests.
+- `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11 (RUSTSEC-2026-0381, RUSTSEC-2026-0382: distrusted emSign
+  intermediates were accepted by the update check's TLS); the yanked `clipboard-win` 5.4.1 is replaced by 5.4.3.
 
 ### Changed
+- The terminal emulator is `vt100` 0.18 (spec-compliant line insert/delete outside the scroll region, faster
+  multi-row edits); `arboard` 3.7 and `libc` 0.2.191.
+- Prefix `f` now toggles focus mode (see Added); the scrollback search keeps prefix `/` only.
 - Home's "/ search" label moved from the Projects panel's bottom button row to its top border, next to the
   count ("/ search · 6"); a click still starts the filter.
 - The add prompt replaces the separate `a` (folder to scan) and `A` (one project) choices: the status bar shows
@@ -107,7 +118,8 @@ All notable changes to NOBLE are documented here. The format is based on
   `general.boot_animation = true` keeps that behavior, `false` turns it off for good; `--no-boot` still skips it.
 - The status bar tips fit the screen: terminal tips in a terminal, Home's on Home, process list tips on System, none
   on Settings. A tip changes when the screen changes instead of every 20 seconds.
-- The terminal hint "drag border resize" appears only on a tab with more than one pane.
+- The terminal hint "drag border resize" appears only on a tab with more than one pane, and "right-click paste"
+  is no longer a status bar hint (the pane menu and the `?` reference still name it).
 - Error notifications stay until they are clicked away; the others leave after 3 s (4 s for warnings). The pointer
   on a notification pauses its countdown, and a click dismisses it.
 - A config error gives its line and column (`config line 5, column 11: …`), and clicking that notification opens
@@ -128,6 +140,10 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Windows: a letter the keyboard layout types with AltGr is text, not a Ctrl+Alt shortcut. On Turkish Q, text that
+  reaches NOBLE through ConPTY (SSH, NOBLE inside NOBLE) carries "i" as AltGr+I, and it was dropped from the
+  Settings and key bindings filters and sent to a pane as Ctrl+Alt+I. Symbols typed with AltGr (`@`, `{`, `\` …)
+  now go into those two filters as well.
 - A paste is no longer dropped in silence when it is bigger than the input a program has not read yet (8 MiB): the
   part that fits is queued, bracketed paste still ends, and a toast says that the rest was not sent. Keys refused
   the same way (the program is not reading its input) get a toast too, once while it shows.

@@ -163,14 +163,15 @@ fn split_panes_share_joined_borders() {
     app.run(Action::CloseTab);
 }
 
-/// In a terminal, "drag border resize" is offered only for a tab with more than one pane.
+/// In a terminal, "drag border resize" is offered only for a tab with more than one pane; right-click paste is
+/// not a hint (the pane menu and the keyboard reference name it).
 #[test]
 fn terminal_hints_offer_drag_only_with_a_split() {
     let mut app = demo_app(200, 40);
     app.new_tab(std::env::temp_dir(), None, Some("split".into()));
     let text = render(&mut app, 200, 40);
     let bar = text.lines().last().unwrap();
-    assert!(bar.contains("right-click") && !bar.contains("drag border"), "{text}");
+    assert!(bar.contains("menu") && !bar.contains("drag border") && !bar.contains("right-click"), "{text}");
     app.run(Action::SplitRight);
     let text = render(&mut app, 200, 40);
     assert!(text.lines().last().unwrap().contains("drag border resize"), "{text}");

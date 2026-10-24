@@ -101,6 +101,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `fx.busy()` keeps `App::animating` true until the final frame is drawn. They play only while
   `App::anim_on` (the `animations` setting, and `animations_on_battery` on battery); off, every query
   returns the final state, so render tests turn animations off.
+- **Focus mode:** `app/focus.rs`. On a terminal tab with the flag on (`terminal.focus_mode`, prefix f, Settings),
+  `App::body()` is the whole screen and `ui::draw` skips both bars. `App::focus_reveal` draws them over the panes
+  without a resize: while the prefix is armed, or once the pointer has rested on row 0 or the last row for
+  `EDGE_DWELL` (`track_focus_edge` runs on every mouse event, `redraw_after` wakes for it). Other tabs' markers show
+  as the `Hit::FocusAlert` chip on the bottom row. A config reload changes the flag only when the file's value changed.
 - **Mouse/hit-test:** `ui/*` drawing functions fill `hits: Vec<(Rect, Hit)>` while drawing; `app/input.rs`
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.

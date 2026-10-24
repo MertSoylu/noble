@@ -266,7 +266,7 @@ impl App {
         st.selected = st.selected.min(last);
         let sel = rows.get(st.selected).copied();
         // Letters are actions only here; while the filter takes text (`/`) they are typed.
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let alt = super::input::alt_held(&k);
         match k.code {
             KeyCode::Esc => {
                 if st.query.is_empty() {
@@ -316,7 +316,7 @@ impl App {
     /// Keys while the filter takes text: letters narrow the rows, ↑↓ move, ⏎ keeps the filter and goes
     /// back to the rows, esc clears it.
     fn filter_key(&mut self, st: &mut BindingsState, k: KeyEvent) {
-        let ctrl_or_alt = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let ctrl_or_alt = super::input::ctrl_held(&k) || super::input::alt_held(&k);
         match k.code {
             KeyCode::Esc => {
                 st.filtering = false;

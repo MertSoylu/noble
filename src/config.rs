@@ -63,6 +63,10 @@ pub struct TerminalCfg {
     pub notify_after: u64,
     /// In a split tab, the unfocused panes are drawn toward their background (their text fades).
     pub dim_inactive: bool,
+    /// Terminal tabs show neither the top nor the bottom bar. This is the default preference; prefix f
+    /// (and the Settings row) toggles the running app's own flag, which a config reload resets only when
+    /// this value changes.
+    pub focus_mode: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -146,6 +150,7 @@ impl Default for TerminalCfg {
             notify: true,
             notify_after: 10,
             dim_inactive: true,
+            focus_mode: false,
         }
     }
 }
@@ -256,6 +261,7 @@ foreground = ""          # override the scheme text color, e.g. '#2e2e2e'
 notify = true            # notify when a background tab needs attention (bell, app notification)
 notify_after = 10        # report the end of a background command that took at least this many seconds (0 = off)
 dim_inactive = true      # in a split tab, fade the text of the panes that do not have the focus
+focus_mode = false       # hide NOBLE's top and bottom bars on terminal tabs (prefix f toggles it)
 
 [keys]
 prefix = "ctrl+a"        # prefix key; pressed twice it is sent to the shell
