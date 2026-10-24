@@ -220,7 +220,7 @@ fn full_session_lifecycle() {
 
     // New tab + command.
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     h.wait_shell_ready(20);
     h.send(b"echo e2e-marker-$((6*7))\r");
     h.send(b"echo e2e-marker-42\r");
@@ -333,7 +333,7 @@ fn idle_terminal_cpu_is_low() {
     let h = Harness::start(&home, 34, 120);
     h.wait_for("Projects", 20);
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     std::thread::sleep(Duration::from_secs(4));
     let (ms, mem) = measure(&h, 20);
     println!(
@@ -396,7 +396,7 @@ fn termination_signals_save_the_session() {
         h.send(b"\x1b");
         h.wait_for("Projects", 20);
         h.send(b"t");
-        h.wait_for("right-click", 10);
+        h.wait_for("ctrl+a menu", 10);
         let pid = h.child.process_id().expect("pid");
         let ok = std::process::Command::new("kill").arg(format!("-{signal}")).arg(pid.to_string()).status().unwrap();
         assert!(ok.success(), "kill -{signal}");
@@ -429,7 +429,7 @@ fn a_killed_window_is_restored_on_the_next_launch() {
     h.send(b"\x1b");
     h.wait_for("Projects", 20);
     h.send(b"t");
-    h.wait_for("right-click", 10);
+    h.wait_for("ctrl+a menu", 10);
     h.wait_shell_ready(20);
     h.send(b"\x01");
     h.send(b"v");
