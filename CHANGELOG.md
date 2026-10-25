@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-25
+
 ### Added
 - Settings → Key bindings (in the Keys section) edits every shortcut from the screen: a list of all actions with
   their prefix and direct keys, ↑↓ to select, `/` to filter, `⏎` to rebind the prefix key, `d` for the direct chord,
@@ -636,7 +638,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/MertSoylu/noble/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/MertSoylu/noble/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/MertSoylu/noble/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/MertSoylu/noble/compare/v1.6.0...v1.7.0
