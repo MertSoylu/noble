@@ -279,3 +279,114 @@ fn check_resize_roundtrip(shell: &str) {
     }
     app.run(Action::CloseTab);
 }
+
+/// Numbered lines and a long line printed in a real shell, then the pane is made narrow, wide, short and tall again:
+/// over the scrollback and the screen every line appears exactly once and the long one whole (joined over the soft
+/// wraps). On Windows ConPTY repaints its own reflowed viewport after each resize on top of the emulator's reflow, which
+/// could duplicate or lose lines; Linux and macOS have no repaint, so the test only guards the emulator's reflow there.
+#[test]
+fn numbered_lines_survive_pane_resizes_exactly_once() {
+    let mut checked = vec!["default"];
+    check_numbered_roundtrip("");
+    if cfg!(windows) {
+        check_numbered_roundtrip("cmd.exe");
+        checked.push("cmd.exe");
+        if let Some(ps) = noble::util::which("powershell") {
+            check_numbered_roundtrip(&ps.display().to_string());
+            checked.push("powershell");
+        }
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_numbered_roundtrip(&git_bash.display().to_string());
+            checked.push("git bash");
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_numbered_roundtrip(&path.display().to_string());
+                checked.push(shell);
+            }
+        }
+    }
+    assert_checked(&checked, "numbered_lines_survive_pane_resizes_exactly_once");
+}
+
+/// The text of the scrollback and the screen, rows joined without a separator (a soft-wrapped row is full width, so
+/// the pieces of a wrapped line meet again) and the rows apart.
+fn history_text(app: &App, id: PaneId) -> (Vec<String>, String) {
+    let (lines, _) = app.panes[&id].all_lines();
+    let joined = lines.iter().map(|l| l.trim_end()).collect::<String>();
+    (lines, joined)
+}
+
+fn check_numbered_roundtrip(shell: &str) {
+    let mut app = demo_app(110, 30);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let kind = app.shell.label().to_lowercase();
+    app.new_tab(std::env::temp_dir(), None, Some("numbered".into()));
+    let id = app.tabs[0].focus;
+    pump_until(&mut app, &format!("{kind}: first prompt"), |a| a.panes[&id].prompted);
+    wait_idle(&mut app, id);
+    app.panes.get_mut(&id).unwrap().resize(10, 40);
+    // The shell redraws its prompt for the new size; a key typed while it does is lost (Git Bash).
+    run_for(&mut app, Duration::from_millis(1500));
+    wait_idle(&mut app, id);
+    // A first Enter lets the line editor settle after the resize (Git Bash lost the first key typed after it).
+    app.panes[&id].write(b"\r");
+    run_for(&mut app, Duration::from_millis(1000));
+    wait_idle(&mut app, id);
+
+    let long = format!("LONG{}ENDING", "0123456789".repeat(8));
+    assert_eq!(long.len(), 90);
+    let (head, tail) = long.split_at(40);
+    let command = if kind.contains("powershell") || kind.contains("pwsh") {
+        format!("1..15|%{{\"LINE $_\"}}; ('{head}'+'{tail}')")
+    } else if kind.contains("cmd") {
+        format!("(for /L %i in (1,1,15) do @echo LINE %i) & echo {head}^{tail}")
+    } else {
+        format!("for i in $(seq 1 15); do echo LINE $i; done; echo \"{head}\"\"{tail}\"")
+    };
+    app.panes[&id].write(format!("{command}\r").as_bytes());
+    pump_until(&mut app, &format!("{kind}: output printed"), |a| history_text(a, id).1.contains(&long));
+    wait_idle(&mut app, id);
+
+    let prompt_rows =
+        |lines: &[String]| lines.iter().filter(|l| l.trim_end().ends_with('>') || l.trim_end().ends_with('$')).count();
+    let baseline_prompts = prompt_rows(&history_text(&app, id).0);
+    let steps = [(10u16, 40u16), (5, 20), (10, 100), (10, 40), (5, 40), (10, 40)];
+    let mut report = String::new();
+    for (i, (rows, cols)) in steps.into_iter().enumerate() {
+        let (r, c) = app.panes[&id].size;
+        if (r, c) != (rows, cols) {
+            app.panes.get_mut(&id).unwrap().resize(rows, cols);
+        }
+        // ConPTY's repaint arrives some time after the resize.
+        run_for(&mut app, Duration::from_millis(2500));
+        let (lines, joined) = history_text(&app, id);
+        let mut problems = Vec::new();
+        for n in 1..=15 {
+            let want = format!("LINE {n}");
+            let count = lines.iter().filter(|l| l.trim() == want).count();
+            if count != 1 {
+                problems.push(format!("{want} x{count}"));
+            }
+        }
+        let whole = joined.matches(&long).count();
+        if whole != 1 {
+            problems.push(format!("long line x{whole}"));
+        }
+        let prompts = prompt_rows(&lines);
+        report.push_str(&format!(
+            "step {i} {rows}x{cols}: prompts {prompts} (baseline {baseline_prompts}), problems {problems:?}\n"
+        ));
+        if !problems.is_empty() || prompts > baseline_prompts + 1 {
+            panic!("{kind}: {report}\n{}", lines.join("\n"));
+        }
+    }
+    eprintln!("{kind}:\n{report}");
+    app.run(Action::CloseTab);
+}

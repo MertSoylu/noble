@@ -16,6 +16,11 @@ All notable changes to NOBLE are documented here. The format is based on
   output scrolls, a full scrollback included, and after a reflow (matches are searched again, links of the old
   wrapping are dropped).
 
+- Windows: resizing a pane that shows several lines (rows and columns at once, for example zoom or a window
+  edge drag) no longer loses or doubles lines. The emulator is resized before the pseudoconsole, so conhost's
+  repaint of its viewport cannot land on rows that are reflowed a moment later, and a wider screen keeps its first
+  row apart from the history above it, as conhost does.
+
 ### Changed
 - The `vt100` terminal emulator is now part of the crate (`src/vt100`, based on vt100 0.18.1 by Jesse Luehrs,
   MIT licence kept in `src/vt100/LICENSE-MIT`), because upstream has no reflow. It adds reflow, a count of lines

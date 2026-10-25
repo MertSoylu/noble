@@ -635,6 +635,27 @@ fn a_taller_screen_is_not_filled_from_the_history_when_pulling_is_off() {
     }
 }
 
+/// With `pull_history` off (Windows panes) a wider screen starts a line of its own at its first row: ConPTY repaints
+/// that row with the rest of a line whose head is in the scrollback, which must not be joined to it (the repaint
+/// would write over the joined line and lose its head). With pulling on, the line is joined as in any terminal.
+#[test]
+fn a_wider_screen_does_not_join_its_first_row_to_the_history_when_pulling_is_off() {
+    for pull in [false, true] {
+        let mut parser = Parser::new(nz(2), nz(10), 100);
+        parser.screen_mut().set_pull_history(pull);
+        // One 25-character line: 10 + 10 + 5; its last two rows are on the screen, the first one in the scrollback.
+        parser.process(b"0123456789abcdefghijKLMNO");
+        assert_eq!(parser.screen().scrollback_len(), 1);
+        parser.set_size(nz(2), nz(30));
+        let rows: Vec<String> = all_rows(&mut parser).into_iter().map(|r| r.text).collect();
+        if pull {
+            assert_eq!(rows, ["0123456789abcdefghijKLMNO"], "joined");
+        } else {
+            assert_eq!(rows, ["0123456789", "abcdefghijKLMNO"], "the screen's first row stays apart");
+        }
+    }
+}
+
 /// A full reset keeps what the embedding program set.
 #[test]
 fn a_full_reset_keeps_the_resize_settings() {
