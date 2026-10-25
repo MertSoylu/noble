@@ -659,14 +659,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(130));
         assert!(!p.callbacks().sync_open());
         assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;1$y");
-        // Its next `h` opens a new block; an `h` inside an open block keeps the first one's time.
-        p.process(b"\x1b[?2026h");
+        // Its next `h` opens a new block; an `h` inside an open block keeps the first one's time. The limit is long
+        // here so a sleep that overshoots on a loaded machine can never end the block before the second `h`.
+        p.callbacks_mut().set_sync_timeout(Some(Duration::from_secs(10)));
+        p.process(b"[?2026h");
         assert!(p.callbacks().sync_open());
         let opened = Instant::now();
         std::thread::sleep(Duration::from_millis(60));
-        p.process(b"\x1b[?2026h");
+        p.process(b"[?2026h");
+        // The block began before `opened`, so at least 60 ms are used up; a restart would leave about 10 s.
         let left = p.callbacks().sync_left_at(opened + Duration::from_millis(60)).expect("still open");
-        assert!(left <= Duration::from_millis(40), "the second h did not start the time over: {left:?}");
+        assert!(left <= Duration::from_millis(9_940), "the second h did not start the time over: {left:?}");
         // Without an override the limit is `SYNC_TIMEOUT`.
         p.callbacks_mut().set_sync_timeout(None);
         p.process(b"\x1b[?2026l\x1b[?2026h");
