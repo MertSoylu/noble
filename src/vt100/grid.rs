@@ -274,8 +274,12 @@ impl Grid {
 
         let mut out: Vec<crate::vt100::row::Row> = Vec::with_capacity(total);
         let mut group: Vec<crate::vt100::row::Row> = Vec::new();
+        // Without `pull_history` (Windows: ConPTY) a wider screen is repainted by conhost from its first row, which
+        // conhost does not join to the history above it. The repaint starts with the rest of a line whose head is in
+        // the scrollback and would write over the joined line, so the screen's first row begins a line of its own.
+        let split_at_screen = !self.pull_history && size.cols() > old_cols && sb_len > 0;
         for (idx, row) in old.into_iter().enumerate() {
-            let wrapped = row.wrapped();
+            let wrapped = row.wrapped() && !(split_at_screen && idx + 1 == sb_len);
             group.push(row);
             if wrapped && idx + 1 < total {
                 continue;

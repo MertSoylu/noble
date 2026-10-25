@@ -113,8 +113,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   it does not follow upstream). `Screen::set_reflow(true)` (set in `Pane::spawn` on every platform) makes
   `Grid::set_size` rewrap the primary grid and its scrollback on a column change (`reflow.rs`; rows carry a `wrapped`
   flag, a wide character moved by the edge leaves a leading spacer); the alternate screen still truncates and pads.
-  `set_pull_history(false)` on Windows: ConPTY repaints from its own viewport top, so a taller pane adds blank rows
-  at the bottom instead of pulling history down. `Screen::history_dropped()` counts lines that scrolled out and
+  `set_pull_history(false)` on Windows: ConPTY repaints from its own viewport top (and does not join it to the
+  history above), so a taller pane adds blank rows at the bottom instead of pulling history down, a wider screen
+  starts a line of its own at its first row, and `Pane::resize` resizes the emulator before the PTY so the repaint
+  lands on the reflowed rows. `Screen::history_dropped()` counts lines that scrolled out and
   `reflow_epoch()` changes whenever lines are renumbered; `pane::screen_base` (`history_dropped + scrollback_len`)
   gives a line its stable number, which search matches (`SearchState`, `ScrollText`), OSC 8 spans and
   `scroll_mark` use. On an epoch change search is redone and OSC 8 links are dropped. Reflow is eager (about 100 ms

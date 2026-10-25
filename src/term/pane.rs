@@ -896,10 +896,13 @@ impl Pane {
             Callbacks::with_colors(spec.colors.clone()),
         )));
         // Every platform reflows the rows on a width change (measured with cmd, PowerShell and Git Bash: without it a
-        // line that was wrapped at the old width stays cut when ConPTY does not repaint it). Windows: ConPTY also
-        // keeps the top row of its viewport where it was when the pane gets taller and repaints from there, so the
-        // history is not pulled down on a taller pane (the repaint would write over the pulled rows); the rows are
-        // added at the bottom. Linux and macOS: the kernel PTY repaints nothing and the screen stays bottom-anchored.
+        // line that was wrapped at the old width stays cut when ConPTY does not repaint it). Windows: ConPTY answers
+        // every resize with a repaint of its own viewport from the top row, which it does not join to the history
+        // above it, so the history is not pulled down on a taller pane (the rows are added at the bottom) and a wider
+        // screen keeps its first row apart from the scrollback (`Grid::reflow_rows`); `Pane::resize` also resizes the
+        // emulator before the PTY. Measured with real ConPTY (`numbered_lines_survive_pane_resizes_exactly_once`):
+        // without these, rows were lost and doubled. Linux and macOS: the kernel PTY repaints nothing and the screen
+        // stays bottom-anchored, so history is pulled down and wrapped lines are joined across the screen's top.
         if let Ok(mut p) = parser.lock() {
             p.screen_mut().set_reflow(true);
             p.screen_mut().set_pull_history(!cfg!(windows));
@@ -1021,9 +1024,12 @@ impl Pane {
             return false;
         }
         self.size = (rows, cols);
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         let epoch = lock(&self.parser).screen().reflow_epoch();
+        // The emulator is resized before the PTY: ConPTY answers a resize with a repaint of its viewport that the
+        // reader thread feeds to the emulator at once; at the old size it would write over rows that are reflowed a
+        // moment later (lost and doubled lines). Unix kernels repaint nothing, so the order does not matter there.
         set_screen_size(&self.parser, &self.output_gen, rows, cols);
+        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         self.selection = None;
         if lock(&self.parser).screen().reflow_epoch() != epoch {
             // The lines were renumbered: the count of lines that arrived while scrolled back starts over.
