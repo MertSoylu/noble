@@ -140,6 +140,8 @@ All notable changes to NOBLE are documented here. The format is based on
   there), and under 80 columns Home and System are single glyphs (⌂ and ▤) to make room for tabs.
 
 ### Fixed
+- Focus mode: resting the pointer on a pane's split, zoom or close button no longer reveals the top bar over it, so
+  the buttons stay clickable.
 - Windows: a letter the keyboard layout types with AltGr is text, not a Ctrl+Alt shortcut. On Turkish Q, text that
   reaches NOBLE through ConPTY (SSH, NOBLE inside NOBLE) carries "i" as AltGr+I, and it was dropped from the
   Settings and key bindings filters and sent to a pane as Ctrl+Alt+I. Symbols typed with AltGr (`@`, `{`, `\` …)
