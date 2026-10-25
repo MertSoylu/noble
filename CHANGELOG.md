@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-25
+
 ### Added
 - Agent status hooks for Codex, Copilot CLI and OpenCode, next to Claude Code. Each agent's tab dot, pane title,
   "needs you" (prefix `a`), notifications and the Home session list show its real state. Codex, Copilot CLI and
@@ -720,7 +722,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.2...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/MertSoylu/noble/compare/v1.10.2...v1.11.0
 [1.10.2]: https://github.com/MertSoylu/noble/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/MertSoylu/noble/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/MertSoylu/noble/compare/v1.9.0...v1.10.0
