@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-25
+
 ### Added
 - Synchronized output (`CSI ? 2026 h` / `l`): a program that draws a frame inside a block (Claude Code and other AI
   CLIs do) no longer shows it half-written. NOBLE holds back the redraw until the block ends, for at most 150 ms,
@@ -667,7 +669,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.1...HEAD
+[1.10.1]: https://github.com/MertSoylu/noble/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/MertSoylu/noble/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/MertSoylu/noble/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/MertSoylu/noble/compare/v1.7.0...v1.8.0
