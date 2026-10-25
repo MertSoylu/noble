@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-10-25
+
 ### Fixed
 - Resizing or zooming a pane no longer cuts lines for good. The terminal now reflows the lines that were wrapped
   by the screen width: shrinking a pane and restoring it (zoom in, zoom out; focus mode; dragging a window edge)
@@ -691,7 +693,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.1...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.10.2...HEAD
+[1.10.2]: https://github.com/MertSoylu/noble/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/MertSoylu/noble/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/MertSoylu/noble/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/MertSoylu/noble/compare/v1.8.0...v1.9.0
