@@ -204,7 +204,14 @@ fn json_consumers_never_panic() {
             let _ = noble::update::parse_release(&v);
         }
         // Claude hook payload from stdin, then read back as the app does.
-        noble::hooks::run_cli("Notification", &text, &dir, Some("7"), Some(&i.to_string()));
+        noble::hooks::run_cli(
+            noble::hooks::Agent::Claude,
+            "notification",
+            &text,
+            &dir,
+            Some("7"),
+            Some(&i.to_string()),
+        );
     }
     let _ = noble::hooks::read_records(&dir, 7);
     let _ = std::fs::remove_dir_all(&dir);

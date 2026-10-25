@@ -434,8 +434,8 @@ impl Action {
             Action::Passthrough => "Pass Keys to the App".into(),
             Action::JumpToAgent => "Jump to Waiting Agent".into(),
             Action::OpenLink => "Open Link on Screen".into(),
-            Action::EnableHooks => "Enable Claude Status Hooks".into(),
-            Action::DismissHooksOffer => "Dismiss Claude Status Offer".into(),
+            Action::EnableHooks => "Enable Agent Status Hooks".into(),
+            Action::DismissHooksOffer => "Dismiss Agent Status Offer".into(),
             Action::Notifications => "Show Notifications".into(),
             Action::FocusMode => "Toggle Focus Mode".into(),
         }

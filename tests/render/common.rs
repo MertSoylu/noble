@@ -444,6 +444,7 @@ pub(crate) fn hook_rec(event: &str, ts: i64, subagents: usize) -> noble::hooks::
         event: event.into(),
         message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
         ts,
+        agent: None,
         subagents,
     }
 }

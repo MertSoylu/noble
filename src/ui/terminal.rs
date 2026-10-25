@@ -159,6 +159,7 @@ pub fn agent_glyph(state: AgentState, working: &'static str, th: &Theme) -> (&'s
     match state {
         AgentState::NeedsYou => ("◆", Style::default().fg(th.warn).add_modifier(Modifier::BOLD)),
         AgentState::Idle => ("●", Style::default().fg(th.ok).add_modifier(Modifier::BOLD)),
+        AgentState::Error => ("✗", Style::default().fg(th.crit).add_modifier(Modifier::BOLD)),
         AgentState::Working => (working, Style::default().fg(th.accent2).add_modifier(Modifier::BOLD)),
         AgentState::Running => ("○", th.dim()),
     }
@@ -190,6 +191,7 @@ pub fn agent_title(
     let (kind_style, state_style) = match b.state {
         AgentState::NeedsYou => (title, th.text().add_modifier(Modifier::BOLD)),
         AgentState::Idle => (title, th.text()),
+        AgentState::Error => (title, th.text().add_modifier(Modifier::BOLD)),
         AgentState::Working => (title, Style::default().fg(th.accent2)),
         AgentState::Running => (th.dim(), th.dim()),
     };
@@ -1057,6 +1059,8 @@ mod tests {
         let (glyph, state) = (&spans[0][0].1, &spans[0][spans[0].len() - 1].1);
         assert!(glyph.add_modifier.contains(Modifier::BOLD) && state.add_modifier.contains(Modifier::BOLD));
         assert!(spans[0][1..].iter().all(|(_, s)| s.fg == Some(th.fg)), "{:?}", spans[0]);
+        let failed = titles(badge("claude", AgentState::Error, None, 0), "⠋");
+        assert_eq!(failed, ["✗ claude · error", "✗ claude", "✗"]);
         let idle = agent_title(&badge("claude", AgentState::Idle, None, 0), "⠋", now, th.text(), &th);
         assert_eq!(idle[0][0].1.fg, Some(th.ok));
         assert!(idle[0][1..].iter().all(|(_, s)| s.fg != Some(th.ok)), "{:?}", idle[0]);

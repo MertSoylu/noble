@@ -23,6 +23,7 @@ fn claude_hook_states_drive_sessions() {
         event: event.into(),
         message: msg.map(str::to_string),
         ts: chrono::Utc::now().timestamp(),
+        agent: None,
         subagents: 0,
     };
     app.apply_hook_records([(pane, rec("prompt", None))].into_iter().collect());
@@ -69,6 +70,7 @@ fn claude_subagents_keep_the_session_working() {
         event: event.into(),
         message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
         ts,
+        agent: None,
         subagents,
     };
     // Each step returns the state and the notices that step raised.
@@ -280,7 +282,7 @@ fn agent_state_change_marks_the_frame_dirty() {
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
     let pane = app.tabs[0].focus;
-    let rec = |event: &str, ts: i64| HookRecord { event: event.into(), message: None, ts, subagents: 0 };
+    let rec = |event: &str, ts: i64| HookRecord { event: event.into(), message: None, ts, agent: None, subagents: 0 };
     let now = chrono::Utc::now().timestamp();
 
     // In the terminal the state shows in the pane title and the tab's dot.
@@ -450,17 +452,18 @@ fn jump_to_waiting_agent() {
     }
 }
 
-/// The one-time "Show Claude status in NOBLE?" notice: bottom right, click enables (same path as Settings;
+/// The one-time "Show agent status in NOBLE?" notice: bottom right, click enables (same path as Settings;
 /// headless only toasts), the x dismisses. An available update takes the slot first.
 #[test]
 fn hooks_offer_notice() {
     use noble::app::Hit;
     let mut app = demo_app(120, 32);
-    assert!(!render(&mut app, 120, 32).contains("Show Claude status"));
+    assert!(!render(&mut app, 120, 32).contains("Show agent status"));
     app.hooks_offer = true;
+    app.agents_found = vec![noble::hooks::Agent::Claude];
     let text = render(&mut app, 120, 32);
     save("hooks-offer-120x32", &text);
-    assert!(text.lines().nth(30).unwrap().contains("Show Claude status in NOBLE?"), "{text}");
+    assert!(text.lines().nth(30).unwrap().contains("Show agent status in NOBLE?"), "{text}");
     for (w, h) in [(80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }
@@ -469,16 +472,158 @@ fn hooks_offer_notice() {
     let enable = find_hit(&app, |h| *h == Hit::HooksOffer).expect("enable hit");
     click(&mut app, enable.x + 1, enable.y);
     assert!(!app.hooks_offer, "clicking answers the offer");
-    assert!(!app.hooks_installed, "headless never touches ~/.claude");
-    assert!(!render(&mut app, 120, 32).contains("Show Claude status in NOBLE?"));
+    assert!(app.hooks_on.is_empty(), "headless never touches ~/.claude");
+    assert!(!render(&mut app, 120, 32).contains("Show agent status in NOBLE?"));
 
     app.hooks_offer = true;
+    app.agents_found = vec![noble::hooks::Agent::Claude];
     app.handle(AppEvent::Update(Ok("99.0.0".into())));
     let text = render(&mut app, 120, 32);
-    assert!(text.contains("99.0.0") && !text.contains("Show Claude status"), "{text}");
+    assert!(text.contains("99.0.0") && !text.contains("Show agent status"), "{text}");
     app.dismiss_update();
     render(&mut app, 120, 32);
     let close = find_hit(&app, |h| *h == Hit::HooksOfferDismiss).expect("dismiss hit");
     click(&mut app, close.x, close.y);
     assert!(!app.hooks_offer);
+}
+
+/// A permission request needs you at once and is announced once: the notification that Claude sends for the same
+/// prompt is not a second question. A failed turn is an error, shown in the pane title and announced from a
+/// background tab; the next prompt clears it.
+#[test]
+fn permission_request_and_failed_turn() {
+    use noble::app::AgentState;
+    use noble::hooks::HookRecord;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    // The agent's tab is in the background while its hook events arrive.
+    app.new_tab(std::env::temp_dir(), None, Some("other".into()));
+    app.toasts.clear();
+    let rec = |event: &str, message: Option<&str>| HookRecord {
+        event: event.into(),
+        message: message.map(str::to_string),
+        ts: chrono::Utc::now().timestamp(),
+        agent: None,
+        subagents: 0,
+    };
+    let texts = |app: &noble::app::App| app.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+
+    app.apply_hook_records([(pane, rec("permission-request", Some("Claude asks to run Bash")))].into());
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)), "at once");
+    let asked = texts(&app);
+    assert!(asked.len() == 1 && asked[0].contains("asks to run Bash"), "{asked:?}");
+
+    app.toasts.clear();
+    app.apply_hook_records([(pane, rec("notification", Some("Claude asks to run Bash")))].into());
+    assert!(texts(&app).is_empty(), "the notification of the same prompt is not announced again: {:?}", texts(&app));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
+
+    app.apply_hook_records([(pane, rec("stop-failure", Some("Claude stopped with an error: rate_limit")))].into());
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Error)));
+    let failed = texts(&app);
+    assert!(failed.iter().any(|t| t.contains("stopped with an error")), "{failed:?}");
+    assert!(app.tabs[0].alert.is_some(), "the tab is marked");
+
+    app.view = View::Term(0);
+    let text = render(&mut app, 110, 30);
+    save("pane-agent-error-110x30", &text);
+    let row = text.lines().find(|l| l.contains('✕')).unwrap_or_default().to_string();
+    assert!(row.contains("✗ claude · error"), "{row}");
+
+    app.apply_hook_records([(pane, rec("prompt", None))].into());
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)), "a new prompt clears the error");
+}
+
+/// A record written by another agent's hook shows under that agent's name in the pane title.
+#[test]
+fn another_agents_record_shows_under_its_name() {
+    use noble::app::AgentState;
+    use noble::hooks::{Agent, HookRecord};
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    app.view = View::Term(0);
+    let record = HookRecord {
+        event: "notification".into(),
+        message: Some("Codex needs your approval".into()),
+        ts: chrono::Utc::now().timestamp(),
+        agent: Some(Agent::Codex),
+        subagents: 0,
+    };
+    app.apply_hook_records([(pane, record)].into());
+    assert_eq!(app.agent_state(pane), Some(("codex", AgentState::NeedsYou)));
+    let text = render(&mut app, 110, 30);
+    let row = text.lines().find(|l| l.contains('✕')).unwrap_or_default().to_string();
+    assert!(row.contains("◆ codex · needs you"), "{row}");
+}
+
+/// `noble hook <event> --agent <id>`: the record names that agent; without the flag it is Claude's; an unknown
+/// agent records nothing. The real binary, inside a pane's environment.
+#[test]
+fn hook_cli_names_the_agent_it_runs_for() {
+    use noble::hooks::Agent;
+    use std::io::Write as _;
+    let home = std::env::temp_dir().join(format!("noble-cli-agent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let cases: [(&[&str], Option<Agent>); 3] = [
+        (&["hook", "prompt", "--agent", "codex"], Some(Agent::Codex)),
+        (&["hook", "prompt", "--agent", "cursor"], None),
+        (&["hook", "stop"], Some(Agent::Claude)),
+    ];
+    for (args, want) in cases {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+            .args(args)
+            .env("NOBLE_HOME", &home)
+            .env("NOBLE_INSTANCE", "42")
+            .env("NOBLE_PANE", "3")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("noble hook");
+        // An unknown agent exits before reading stdin, so the write may fail: that is fine.
+        let _ = child.stdin.take().unwrap().write_all(b"{}");
+        assert!(child.wait().unwrap().success(), "{args:?}");
+        let got = noble::hooks::read_records(&home, 42).get(&3).map(|r| r.agent());
+        assert_eq!(got, want, "{args:?}");
+        noble::hooks::remove_record(&home, 42, 3);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The "Agent status hooks" popup from its Settings row: one line per agent with its state word (on, off, or not
+/// found here), drawn at every size down to 30x8. A click on a row selects it and toggles it; headless apps only
+/// toast and never write an agent's settings file.
+#[test]
+fn agent_hooks_popup_lists_every_agent() {
+    use noble::app::{Hit, Overlay, SettingItem, SettingKey};
+    use noble::hooks::Agent;
+    let mut app = demo_app(160, 45);
+    app.agents_found = vec![Agent::Claude, Agent::Codex];
+    app.hooks_on = vec![Agent::Claude];
+    app.open_settings();
+    let page = render(&mut app, 160, 45);
+    save("agent-hooks-settings-160x45", &page);
+    assert!(page.contains("Agent status hooks") && page.contains("1 of 2 on"), "{page}");
+    app.close_settings();
+    app.activate_setting(SettingItem::Setting(SettingKey::AgentHooks), 1);
+    assert!(matches!(app.overlay, Some(Overlay::AgentHooks { selected: 0 })));
+    let text = render(&mut app, 160, 45);
+    save("agent-hooks-160x45", &text);
+    for name in ["Claude Code", "Codex", "GitHub Copilot", "OpenCode"] {
+        assert!(text.contains(name), "{text}");
+    }
+    assert!(text.contains("not found") && text.contains(" on") && text.contains(" off"), "{text}");
+    for (w, h) in [(80, 24), (40, 12), (30, 8)] {
+        let small = render(&mut app, w, h);
+        save(&format!("agent-hooks-{w}x{h}"), &small);
+        assert_no_doubled_frame(&small);
+    }
+    render(&mut app, 160, 45);
+    let codex = find_hit(&app, |h| *h == Hit::AgentHook(1)).expect("codex row");
+    click(&mut app, codex.x + 1, codex.y);
+    assert!(!app.hooks_on(Agent::Codex), "headless never touches the agent files");
+    assert!(matches!(app.overlay, Some(Overlay::AgentHooks { selected: 1 })), "the clicked row is selected");
 }

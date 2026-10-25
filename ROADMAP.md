@@ -66,36 +66,35 @@ v1.10.0 shipped as a minor release.
 
 ## 3 · AI integration: NOBLE hosts agents, it does not run one
 
-### A1 · Real state for every agent (the biggest win)
+### A1 · Real state for every agent (done; Antigravity and Cursor later)
 
 Other agent CLIs now have hook systems like Claude Code's:
 
-- **Codex:** `~/.codex/hooks.json`, with `UserPromptSubmit`, `PermissionRequest`, `Stop`, `Interrupt`,
+- **Codex (done):** `~/.codex/hooks.json`, with `UserPromptSubmit`, `PermissionRequest`, `Stop`, `Interrupt`,
   `SessionEnd` and `SubagentStart` / `SubagentStop`. User-level hooks also need a one-time trust in Codex
-  (`/hooks`): NOBLE says so once after installing them.
-- **Copilot CLI:** `~/.copilot/hooks/` (`$COPILOT_HOME/hooks/` when set). NOBLE writes its own `noble.json` there,
+  (`/hooks`): accepted, NOBLE says so once after installing them.
+- **Copilot CLI (done):** `~/.copilot/hooks/` (`$COPILOT_HOME/hooks/` when set). NOBLE writes its own `noble.json` there,
   so removing the integration is deleting one file. Events: `userPromptSubmitted`, `agentStop`, `notification`
   (`permission_prompt`, `elicitation_dialog`).
-- **OpenCode:** a plugin at `~/.config/opencode/plugins/noble.js` that passes `session.status` / `session.idle`,
-  `permission.asked` and `session.error` to `noble hook`.
-- **Antigravity (`agy`):** hooks in `~/.gemini/settings.json` (event names to be verified). Cursor CLI's hook
+- **OpenCode (done):** a plugin at `~/.config/opencode/plugins/noble.js` (`$XDG_CONFIG_HOME/opencode` when set) that
+  passes session status and idle, permission requests and session errors to `noble hook --agent opencode`.
+- **Antigravity (`agy`), later:** hooks in `~/.gemini/settings.json` (event names to be verified). Cursor CLI's hook
   support is partial: later.
 
-Design: split `hooks.rs` into one module per agent (installed or not, install / uninstall / upgrade, event → state
+Design (done): one module per agent in `src/hooks/` (installed or not, install / uninstall / upgrade, event → state
 map); `noble hook <event> --agent codex`; `HookRecord` gets an `agent` field (records without one are Claude's).
-The Settings row "Claude Code status hooks" becomes a popup like Quick launch ("Agent status hooks · 2 of 4"), and
-the one-time offer covers every agent. Tests: install / uninstall / upgrade per agent, idempotent and keeping the
-user's own hooks; the e2e tests stay isolated (`NOBLE_NO_SYSTEM_INTEGRATIONS`).
+The Settings row "Claude Code status hooks" became a popup like Quick launch ("Agent status hooks", one row per
+agent found here), and the one-time offer covers every agent. Tests: install / uninstall / upgrade per agent,
+idempotent and keeping the user's own hooks; the e2e tests stay isolated (`NOBLE_NO_SYSTEM_INTEGRATIONS`).
 
 Result: the tab dots, "needs you", prefix `a`, the notifications and the session list on Home show the real state
 of every agent. No new UI.
 
-### A2 · Finer Claude states
+### A2 · Finer Claude states (done)
 
-- `StopFailure` (an API error, a rate limit) → a `✗ claude · error` state and a notification. Today such a turn
-  stays "working" until the next prompt.
+- `StopFailure` (an API error, a rate limit) → a `✗ claude · error` state and a notification.
 - `PermissionRequest` → "needs you" at once.
-- Clearer notification texts from `notification_type` ("asks to run Bash", "asks a question").
+- Clearer notification texts from `notification_type` and the tool name ("asks to run Bash", "asks a question").
 
 ### A3 · Conversations come back
 
@@ -165,7 +164,7 @@ Installing is the biggest barrier for new users:
 1. **Stage 1**
    - Focus: v1.10.0, section 1 bugs, T1–T4, notification → pane, `noble doctor`
    - Release: v1.10.0, v1.10.1
-2. **Stage 2**
+2. **Stage 2 (done)**
    - Focus: A1 (Codex and Copilot first, then OpenCode), A2
    - Release: v1.11.0
 3. **Stage 3**
@@ -197,10 +196,9 @@ reflow implementation wait for a later stage.
 
 ## Open decisions
 
-1. Is Codex's one-time `/hooks` trust step acceptable?
-2. Resume agent conversations on by default?
-3. A7 (background Claude sessions on Home): yes or no?
-4. Which package managers: winget, Scoop, Homebrew, AUR?
+1. Resume agent conversations on by default?
+2. A7 (background Claude sessions on Home): yes or no?
+3. Which package managers: winget, Scoop, Homebrew, AUR?
 
 ## References
 

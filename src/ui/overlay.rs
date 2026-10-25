@@ -28,6 +28,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Schemes(p) => schemes(buf, area, app, p, hits),
         Overlay::Themes(p) => themes(buf, area, app, p, hits),
         Overlay::Launchers { selected } => launchers(buf, area, app, *selected, hits),
+        Overlay::AgentHooks { selected } => agent_hooks(buf, area, app, *selected, hits),
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
         Overlay::Help(st) => help(buf, area, app, st, hits),
         Overlay::Bindings(st) => key_bindings(buf, area, app, st, hits),
@@ -617,6 +618,67 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
     }
     let by = inner.bottom() - 1;
     let hint = ["space show/hide · ←→ shortcut · esc close", "space show · ←→ key · esc", "esc close"]
+        .into_iter()
+        .find(|h| util::width(h) as u16 <= iw);
+    if let Some(hint) = hint {
+        hud::put_right(buf, x + iw, by, hint, th.dim());
+    }
+}
+
+/// Agent status hooks popup: one row per agent (`Agent::ALL`) with its hooks on, off, or not found on this
+/// machine. Clicking a row, or ⏎ / space on it, turns that agent's hooks on or off.
+fn agent_hooks(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mut Vec<(Rect, Hit)>) {
+    let th = &app.theme;
+    let agents = crate::hooks::Agent::ALL;
+    let w = 46.min(area.width.saturating_sub(2));
+    let h = (agents.len() as u16 + 5).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    hits.push((rect, Hit::Inert));
+    let inner = boxed(buf, rect, "AGENT STATUS HOOKS", th, th.accent);
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+    let x = inner.x + 1;
+    let iw = inner.width.saturating_sub(2);
+    let list_h = inner.height.saturating_sub(2) as usize;
+    let selected = selected.min(agents.len() - 1);
+    let offset = (selected + 1).saturating_sub(list_h);
+    let glide = app.fx.glide("agent-hooks", selected);
+    for (row, (n, &agent)) in agents.iter().enumerate().skip(offset).take(list_h).enumerate() {
+        let y = inner.y + row as u16;
+        let line = Rect::new(inner.x, y, inner.width, 1);
+        let bg = glide.bg(n, th.raised, th.sel_bg);
+        hud::fill(buf, line, Style::default().bg(bg));
+        if n == selected {
+            hud::put(buf, inner.x, y, "▌", Style::default().fg(th.accent).bg(bg), 1);
+        }
+        let on = app.hooks_on(agent);
+        let found = app.agents_found.contains(&agent);
+        let (mark, mark_st) = if on {
+            ("●", Style::default().fg(th.accent).bg(bg))
+        } else {
+            ("○", Style::default().fg(th.dim).bg(bg))
+        };
+        let cx = hud::put(buf, x, y, mark, mark_st, 1) + 1;
+        // The state word sits at the right edge; the name fills what is left.
+        let (state, state_st) = if on {
+            ("on", Style::default().fg(th.accent).bg(bg))
+        } else if found {
+            ("off", th.dim().bg(bg))
+        } else {
+            ("not found", th.dim().bg(bg))
+        };
+        let state_text = format!(" {state}");
+        let state_w = util::width(&state_text) as u16;
+        let state_x = (x + iw).saturating_sub(state_w);
+        let name_w = 18.min(state_x.saturating_sub(cx + 1));
+        let name_st = if found { th.text().bg(bg) } else { th.dim().bg(bg) };
+        hud::put(buf, cx, y, &util::truncate(agent.name(), name_w as usize), name_st, name_w);
+        hud::put(buf, state_x, y, &state_text, state_st, state_w);
+        hits.push((line, Hit::AgentHook(n)));
+    }
+    let by = inner.bottom() - 1;
+    let hint = ["space on/off · esc close", "space on/off · esc", "esc close"]
         .into_iter()
         .find(|h| util::width(h) as u16 <= iw);
     if let Some(hint) = hint {

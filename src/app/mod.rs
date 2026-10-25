@@ -1,6 +1,7 @@
 //! Application state and event dispatch. Drawing lives in the `ui` module;
 //! everything here mutates state and nothing writes to the screen directly.
 
+mod agent_hooks;
 mod agents;
 pub mod bindings;
 mod focus;
@@ -312,6 +313,10 @@ pub enum Overlay {
     Launchers {
         selected: usize,
     },
+    /// Agent status hooks popup: `selected` is the row in `Agent::ALL` order.
+    AgentHooks {
+        selected: usize,
+    },
     Menu(Menu),
     /// The keyboard reference (`?`): its filter, selection and scroll.
     Help(HelpState),
@@ -445,6 +450,8 @@ pub enum Hit {
     /// Quick launch popup: show/hide and shortcut (`launchers` order).
     LaunchShow(usize),
     LaunchKey(usize),
+    /// Agent status hooks popup: toggles this agent (`Agent::ALL` order).
+    AgentHook(usize),
     OpenFiles,
     Proc(u32),
     SortCol(SortKey),
@@ -470,7 +477,7 @@ pub enum Hit {
     /// Update notice at the bottom right: update / dismiss.
     Update,
     UpdateDismiss,
-    /// One-time offer to enable the Claude status hooks: enable / dismiss.
+    /// One-time offer to enable the agent status hooks: enable / dismiss.
     HooksOffer,
     HooksOfferDismiss,
     /// "+N" chip of the tab bar: opens the command palette listing the hidden tabs.
@@ -600,7 +607,7 @@ pub fn ease(started: Instant, dur: Duration) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// State of an AI session. With the hook installed it comes from Claude's own
+/// State of an AI session. With the hook installed it comes from the agent's own
 /// events, otherwise it is guessed from the pane title/command (`Running`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentState {
@@ -610,6 +617,8 @@ pub enum AgentState {
     NeedsYou,
     /// Finished its answer; it is your turn.
     Idle,
+    /// The turn ended with an error (the agent's API failed); it is your turn too.
+    Error,
     /// Open but the state is unknown (no hook).
     Running,
 }
@@ -620,6 +629,7 @@ impl AgentState {
             AgentState::Working => "working",
             AgentState::NeedsYou => "needs you",
             AgentState::Idle => "your turn",
+            AgentState::Error => "error",
             AgentState::Running => "running",
         }
     }
@@ -628,7 +638,8 @@ impl AgentState {
     /// state among a tab's panes.
     pub fn urgency(&self) -> u8 {
         match self {
-            AgentState::NeedsYou => 3,
+            AgentState::NeedsYou => 4,
+            AgentState::Error => 3,
             AgentState::Idle => 2,
             AgentState::Working => 1,
             AgentState::Running => 0,
@@ -649,11 +660,11 @@ pub struct AgentBadge {
 
 /// The pane "jump to waiting agent" goes to: in `order` (every pane, in tab order, with its
 /// agent's state), the first one after `current` (cyclic, `current` itself last) that needs
-/// you, else the first whose agent finished its answer. `None`: no agent is waiting.
+/// you, else the first whose agent finished its answer or failed. `None`: no agent is waiting.
 pub fn next_waiting_agent(order: &[(PaneId, Option<AgentState>)], current: Option<PaneId>) -> Option<PaneId> {
     let n = order.len();
     let start = current.and_then(|c| order.iter().position(|(p, _)| *p == c)).map_or(0, |i| i + 1);
-    [AgentState::NeedsYou, AgentState::Idle]
+    [AgentState::NeedsYou, AgentState::Idle, AgentState::Error]
         .into_iter()
         .find_map(|want| (0..n).map(|k| &order[(start + k) % n]).find(|(_, s)| *s == Some(want)).map(|(p, _)| *p))
 }
@@ -815,7 +826,7 @@ pub struct App {
     link_ctrl: bool,
     pub usage_history: UsageHistory,
     pub ui_state: crate::store::UiState,
-    /// Latest events from the Claude Code hooks (pane → record).
+    /// Latest events from the agent hooks (pane → record).
     pub agent_hooks: HashMap<PaneId, crate::hooks::HookRecord>,
     /// When each pane's shell prompt last came back (Unix seconds): a hook record written
     /// until then belongs to a program that has exited (`clear_agent`).
@@ -825,9 +836,11 @@ pub struct App {
     /// subagents still running does not restart it). Shown as "working 2m" in the pane title.
     agent_working_since: HashMap<PaneId, i64>,
     last_hook_scan: Instant,
-    /// Whether the NOBLE hooks are installed in `~/.claude/settings.json` (shown in Settings).
-    pub hooks_installed: bool,
-    /// The one-time "show Claude status in NOBLE?" notice is up (`note_agent_offer`).
+    /// Agents whose NOBLE hooks are installed in their settings (`scan_agent_hooks`, Settings, the popup).
+    pub hooks_on: Vec<crate::hooks::Agent>,
+    /// Agents installed here: their command is on PATH, or their hooks are on.
+    pub agents_found: Vec<crate::hooks::Agent>,
+    /// The one-time "show agent status in NOBLE?" notice is up (`note_agent_offer`).
     pub hooks_offer: bool,
     /// Last mode reported to the sensor thread (based on the visible screen).
     sensor_mode: Option<SensorMode>,
@@ -993,11 +1006,9 @@ impl App {
             });
         }
         crate::hooks::prune(&app.paths.data, std::process::id());
-        app.hooks_installed = crate::hooks::settings_path().is_some_and(|p| {
-            // Hooks from an older NOBLE get the events added since (e.g. the subagent ones).
-            let _ = crate::hooks::upgrade(&p);
-            crate::hooks::is_installed(&p)
-        });
+        // Hooks from an older NOBLE get the events added since (e.g. the subagent ones), for every agent.
+        crate::hooks::upgrade_installed();
+        app.scan_agent_hooks();
         crate::update::cleanup_old();
         app.init_updates();
         if !app.ui_state.data.welcomed {
@@ -1112,7 +1123,8 @@ impl App {
             agent_cleared: HashMap::new(),
             agent_working_since: HashMap::new(),
             last_hook_scan: Instant::now(),
-            hooks_installed: false,
+            hooks_on: Vec::new(),
+            agents_found: Vec::new(),
             hooks_offer: false,
             sensor_mode: None,
             last_view: None,
@@ -1394,7 +1406,7 @@ impl App {
         self.request_visible_git();
         self.sync_power_state();
         self.request_home_live_data();
-        let hooks_live = self.hooks_installed || !self.agent_hooks.is_empty();
+        let hooks_live = !self.hooks_on.is_empty() || !self.agent_hooks.is_empty();
         if self.services.is_some() && hooks_live && self.last_hook_scan.elapsed() >= Duration::from_secs(1) {
             self.last_hook_scan = now;
             let records = crate::hooks::read_records(&self.paths.data, std::process::id());
@@ -1484,6 +1496,10 @@ mod tests {
         assert_eq!(next_waiting_agent(&idle, Some(4)), Some(1));
         // A focused pane that is gone counts as none.
         assert_eq!(next_waiting_agent(&idle, Some(99)), Some(1));
+        // A failed turn is waiting too, after the finished ones.
+        let failed = [(1, Some(Working)), (2, Some(Error)), (3, Some(Idle))];
+        assert_eq!(next_waiting_agent(&failed, Some(1)), Some(3));
+        assert_eq!(next_waiting_agent(&[(1, Some(Error)), (2, Some(Working))], Some(2)), Some(1));
         // Nothing waiting.
         assert_eq!(next_waiting_agent(&[(1, Some(Working)), (2, Some(Running)), (3, None)], Some(1)), None);
         assert_eq!(next_waiting_agent(&[], None), None);

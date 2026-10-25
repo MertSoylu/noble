@@ -360,7 +360,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
             // Open Claude/Codex session in the project: next to the name, ◆ when it needs attention, ● while running.
             let sessions = agents.get(&p.path).map_or(&[][..], Vec::as_slice);
             let marker =
-                sessions.iter().map(|(_, st)| *st).max_by_key(|st| state_rank(*st)).map(|st| state_glyph(st, th));
+                sessions.iter().map(|(_, st)| *st).max_by_key(AgentState::urgency).map(|st| state_glyph(st, th));
             let pinned = app.ui_state.is_pinned(&p.path);
             let pin_w = if pinned { 2 } else { 0 };
             let text_w = if marker.is_some() { name_w.saturating_sub(2) } else { name_w }.saturating_sub(pin_w);
@@ -889,21 +889,13 @@ fn signed_in(app: &App) -> Vec<&ProviderState> {
     app.quota_providers().collect()
 }
 
-/// State marker and color: ◆ needs attention, ○ your turn, ● running.
+/// State marker and color: ◆ needs attention, ✗ failed, ○ your turn, ● running.
 fn state_glyph(state: AgentState, th: &crate::theme::Theme) -> (&'static str, ratatui::style::Color) {
     match state {
         AgentState::NeedsYou => ("◆", th.warn),
+        AgentState::Error => ("✗", th.crit),
         AgentState::Idle => ("○", th.ok),
         AgentState::Working | AgentState::Running => ("●", th.accent2),
-    }
-}
-
-fn state_rank(state: AgentState) -> u8 {
-    match state {
-        AgentState::NeedsYou => 3,
-        AgentState::Idle => 2,
-        AgentState::Working => 1,
-        AgentState::Running => 0,
     }
 }
 

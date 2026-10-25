@@ -405,24 +405,50 @@ in a terminal NOBLE makes no network calls. It also warns when, at the current p
 fill up before it resets.
 
 <details>
-<summary><b>Claude Code session status (optional hooks)</b></summary>
+<summary><b>Agent status hooks (optional)</b></summary>
 
 <br>
 
-Without help NOBLE can only guess whether a Claude session is busy. Turn on
-**Settings → Terminal → Claude Code status hooks** and NOBLE adds a few hooks to `~/.claude/settings.json`
-(a backup is written next to it once; the first Claude launch offers to turn this on; turning the setting off removes exactly those entries). Claude then runs
-`noble hook <event>` on prompt / stop / notification / subagent start and stop / session start / session end.
-The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
-The Home screen then lists every Claude session as **working**, **needs you** or **your turn**, and a
-background tab lights up the moment Claude asks for permission. A session stays **working** while its
-subagents (background ones too) still run, and Claude's idle reminder does not count as needing you. Hooks
-set by an older NOBLE get the new events on the next start.
+Without help NOBLE can only guess whether an agent is busy. Turn on **Settings → Terminal → Agent status hooks**:
+NOBLE opens a popup with one row per agent it found on this machine (**Claude Code**, **Codex**, **Copilot CLI**
+and **OpenCode**; a row that is not found is shown as such). Click a row, or press ⏎ or space on it, to install
+or remove that agent's hooks. The first time you launch an agent that has no hooks yet, NOBLE offers to turn them
+on for every agent it found. Installing keeps the hooks you already have and writes a backup of the settings file
+the first time; turning the hooks off removes only NOBLE's entries (Copilot: its own `noble.json`; OpenCode: its
+own plugin file).
+
+| Agent | Settings file (Windows, Linux and macOS alike) |
+|---|---|
+| Claude Code | `~/.claude/settings.json` |
+| Codex | `hooks.json` in `$CODEX_HOME` when set, else `~/.codex` |
+| Copilot CLI | `noble.json` in `$COPILOT_HOME/hooks` when set, else `~/.copilot/hooks` |
+| OpenCode | `plugins/noble.js` in `$XDG_CONFIG_HOME/opencode` when set, else `~/.config/opencode` |
+
+On Windows these are in your user profile (`%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`, and so on). Each
+agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on its own
+events: prompt, stop, permission request, notification, subagent start and stop, session start and end. The
+command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
+
+- **Claude Code:** also reports a failed turn (an API error or a rate limit) as an error, and a permission request
+  as "needs you" at once. The notifications name the request: "Claude asks to run Bash", "Claude asks a question".
+- **Codex:** Codex runs user-level hooks only after you trust them once. After an install NOBLE says
+  "Codex: open /hooks once to trust NOBLE's hooks"; open `/hooks` in Codex and trust them. NOBLE cannot do this for you.
+- **Copilot CLI:** NOBLE's hooks are in its own file, so turning them off deletes that one file.
+- **OpenCode:** a plugin forwards session status, idle, errors and permission requests to NOBLE, and it runs NOBLE
+  only in a NOBLE pane. A child session is not told apart from its parent, so a parent tab can show idle while a
+  child still works.
+
+The Home screen then lists every session as **working**, **needs you**, **your turn** or **error**, and a
+background tab lights up the moment an agent asks for permission. A Claude session stays **working** while its
+subagents (background ones too) still run, and Claude's idle reminder does not count as needing you. After you
+answer a Claude permission prompt, the state stays "needs you" until the next prompt or stop. Hooks set by an
+older NOBLE get the new events on the next start.
 
 The pane title leads with the same state: `⠋ claude · working 2m +2` (a spinner, how long it has been working
-and its running subagents), `◆ claude · needs you`, `● claude · your turn`, or `○ codex` for an agent NOBLE can
-only recognize by name. Narrow panes keep the glyph and name, then the glyph alone. Each tab starts with a dot
-for the most urgent state among its panes (◆ needs you, ● your turn, spinner working, ○ running). The spinner
+and its running subagents), `◆ claude · needs you`, `● claude · your turn`, `✗ claude · error`, or `○ codex` for an
+agent without hooks on, which NOBLE recognizes by name only. Narrow panes keep the glyph and name, then the glyph
+alone. Each tab starts with a dot for the most urgent state among its panes (◆ needs you, ✗ error, ● your turn,
+spinner working, ○ running). The spinner
 only turns while a working agent is visible, its pane is printing (an interrupted session stays "working" until
 its next prompt, but stops spinning) and the laptop is plugged in; otherwise it is a still `…`.
 **Prefix `a`** (Jump to Waiting Agent) goes to the next pane, across tabs, whose agent needs you, else to the
@@ -481,7 +507,7 @@ On a narrow pane the title drops its folder first, then the tag, then this badge
 ## 🩺 Troubleshooting
 
 Run `noble doctor` for a plain-text report of your setup (version, OS, outer terminal, shells and their integration,
-Claude Code hooks, AI provider detection without any token, config and data paths, `gh` state). It works the same on
+agent status hooks per agent, AI provider detection without any token, config and data paths, `gh` state). It works the same on
 Windows, Linux and macOS, never opens the terminal, and is what a bug report asks for.
 
 - **Splits and restored tabs open in the wrong folder:** the shell is not reporting its directory (see Shell

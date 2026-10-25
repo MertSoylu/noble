@@ -158,6 +158,9 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     for (l, ok) in app.launchers.iter_mut() {
         *ok = matches!(l.command.as_str(), "claude" | "codex");
     }
+    // The agent hooks row shows the same two agents, with Claude's hooks on.
+    app.agents_found = vec![noble::hooks::Agent::Claude, noble::hooks::Agent::Codex];
+    app.hooks_on = vec![noble::hooks::Agent::Claude];
     app.handle(AppEvent::SensorStatic(Box::new(StaticInfo {
         host: "workstation".into(),
         os: "Windows 11 Pro".into(),
