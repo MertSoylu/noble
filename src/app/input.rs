@@ -856,7 +856,7 @@ impl App {
 
     fn on_mouse(&mut self, m: MouseEvent) {
         self.hover = Some((m.column, m.row));
-        self.track_focus_edge(m.row);
+        self.track_focus_edge(m.column, m.row);
         self.hold_toasts(m.column, m.row);
         if self.boot.is_some() {
             if matches!(m.kind, MouseEventKind::Down(_)) {

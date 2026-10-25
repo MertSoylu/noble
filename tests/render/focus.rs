@@ -170,6 +170,30 @@ fn pointer_dwell_on_an_edge_reveals_its_bar() {
 }
 
 #[test]
+fn resting_on_a_pane_button_does_not_reveal_the_top_bar() {
+    use crossterm::event::MouseEventKind::Moved;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("buttons".into()));
+    app.run(Action::FocusMode);
+    render(&mut app, 110, 30);
+    let button = find_hit(&app, |h| matches!(h, Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_)))
+        .expect("a pane button on the top row");
+    assert_eq!(button.y, 0, "the pane title row is the top row in focus mode");
+
+    // Away from the buttons the dwell still works; moving onto a button cancels it and the buttons stay usable.
+    mouse(&mut app, Moved, 2, 0);
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(has_top_bar(&render(&mut app, 110, 30)));
+    mouse(&mut app, Moved, button.x, 0);
+    let text = render(&mut app, 110, 30);
+    assert!(!has_top_bar(&text), "{text}");
+    std::thread::sleep(Duration::from_millis(450));
+    let text = render(&mut app, 110, 30);
+    assert!(!has_top_bar(&text), "the bar stays away while the pointer rests on a button\n{text}");
+    assert!(find_hit(&app, |h| matches!(h, Hit::PaneClose(_))).is_some());
+}
+
+#[test]
 fn revealed_top_bar_takes_the_clicks_on_its_row() {
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("clicks".into()));

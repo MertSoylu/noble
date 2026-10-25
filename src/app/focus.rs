@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::{App, ToastLevel, View};
+use ratatui::layout::Position;
+
+use super::{App, Hit, ToastLevel, View};
 use crate::keys::Action;
 
 /// How long the pointer must rest on an edge row before the bar on it appears.
@@ -38,7 +40,7 @@ impl App {
 
     /// Follows the pointer's row: a dwell starts when it moves onto the top or bottom row and ends when it
     /// leaves that row. Only focus mode on a terminal tab has edges to track.
-    pub(super) fn track_focus_edge(&mut self, y: u16) {
+    pub(super) fn track_focus_edge(&mut self, x: u16, y: u16) {
         let last = self.size.1.saturating_sub(1);
         let edge = if y == 0 {
             Some(FocusEdge::Top)
@@ -47,7 +49,12 @@ impl App {
         } else {
             None
         };
-        let edge = edge.filter(|_| self.focus_mode_active());
+        // A pane's own buttons (split, zoom, close) sit on that row; resting on one must not cover it with a bar.
+        // The hits of the last frame still list them while a bar is drawn over them.
+        let on_pane_button = self.hits.iter().any(|(r, h)| {
+            matches!(h, Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_)) && r.contains(Position::new(x, y))
+        });
+        let edge = edge.filter(|_| self.focus_mode_active() && !on_pane_button);
         if self.focus_edge.map(|(e, _)| e) != edge {
             self.focus_edge = edge.map(|e| (e, Instant::now()));
         }

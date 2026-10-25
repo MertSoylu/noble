@@ -36,9 +36,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Language:** everything is written in **English**: documentation (README, CONTRIBUTING, CHANGELOG, this
   file, workflow and config comments), issue/PR text, commit messages, code identifiers, code comments and UI
   text. This overrides any personal language preference.
-- **After every change, update the dev build:** on Windows run `cmd /c "%CD%\install.cmd"` (from PowerShell use
-  the full path; the relative name is not found), on Linux/macOS `./install.sh`, so the user can open the latest
-  state by typing `noble-dev`. This step is never skipped. The scripts build in release mode and install
+- **Dev build — ask first:** after a change, ask the user whether to update the dev build; run it only on a yes.
+  On Windows run `cmd /c "%CD%\install.cmd"` (from PowerShell use the full path; the relative name is not found),
+  on Linux/macOS `./install.sh`, so the user can open the latest state by typing `noble-dev`. The scripts build in release mode and install
   `~/.cargo/bin/noble-dev(.exe)`; they never touch the stable `noble` and work while noble-dev is running.
   `noble-dev` shows "NOBLE dev" in the top bar and saves its session to `session-dev.json`
   (`util::is_dev_build`); config and data are shared.
