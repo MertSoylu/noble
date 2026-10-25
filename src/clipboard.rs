@@ -22,11 +22,16 @@ pub struct Clipboard {
     inner: Option<arboard::Clipboard>,
     /// Whether OSC 52 may be written to stdout (off in headless tests).
     osc52: bool,
+    /// Whether the system clipboard may be used. Off in headless tests, which would otherwise overwrite the
+    /// developer's clipboard and, on Windows, open the clipboard from many test threads at once.
+    system: bool,
 }
 
 impl Clipboard {
-    pub fn new(osc52: bool) -> Clipboard {
-        Clipboard { inner: None, osc52 }
+    /// `live` is false in headless tests: no system clipboard and no OSC 52. `ai::isolated` also keeps the
+    /// system clipboard closed (the end-to-end tests run the real binary).
+    pub fn new(live: bool) -> Clipboard {
+        Clipboard { inner: None, osc52: live, system: live && !crate::ai::isolated() }
     }
 
     /// The system clipboard, opened on first use (and again after a failure).
@@ -34,6 +39,9 @@ impl Clipboard {
         // Over SSH this machine's clipboard is not the user's (on every OS: a Mac's pasteboard, a
         // Windows OpenSSH session, a Linux tmux started on the desktop): OSC 52 instead. A forwarded
         // X11 display (`ssh -X`) is the user's own, so its clipboard is used (`util::has_desktop`).
+        if !self.system {
+            return None;
+        }
         if crate::util::over_ssh() && !crate::util::has_desktop() {
             return None;
         }

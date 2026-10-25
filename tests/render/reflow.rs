@@ -231,6 +231,25 @@ fn check_resize_roundtrip(shell: &str) {
     pump_until(&mut app, &format!("{kind}: first prompt"), |a| a.panes[&id].prompted);
     // pwsh prints its prompt before PSReadLine is ready (slowest on macOS): let it settle before typing.
     wait_idle(&mut app, id);
+    // Unix: a short prompt. A CI machine's prompt is a long host name, and a line editor that redraws it after a
+    // resize moves the cursor up by the rows it thinks the prompt took and clears them: at 30 columns that reaches
+    // into the output above (bash 3.2 on macOS did). The redraw is the shell's business; the test looks at the output.
+    // Windows: the prompts are short and the shells there redraw from ConPTY's buffer.
+    let short_prompt = if kind.contains("zsh") {
+        Some("PROMPT='$ '")
+    } else if kind.contains("fish") {
+        Some("function fish_prompt; echo -n '$ '; end")
+    } else if kind.contains("pwsh") {
+        Some("function prompt { '> ' }")
+    } else if kind.contains("bash") {
+        Some("PS1='$ '")
+    } else {
+        None
+    };
+    if let Some(set) = short_prompt.filter(|_| !cfg!(windows)) {
+        app.panes[&id].write(format!("{set}\r").as_bytes());
+        wait_idle(&mut app, id);
+    }
     let token = long_token("SHELLLINE");
     // The shell joins the token from two pieces, so only its output holds the whole token (the typed line is
     // redrawn by the shell after a resize, which is the shell's business).
