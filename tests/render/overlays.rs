@@ -103,11 +103,13 @@ fn help_keys_keep_a_gap_from_their_text() {
             continue;
         };
         // Every scroll position shows other rows: each one is checked on the screen it is drawn on.
+        let mut mouse_row_seen = false;
         for scroll in 0..=geo.max_scroll() {
             if let Some(Overlay::Help(st)) = &mut app.overlay {
                 st.scroll = scroll;
             }
             let text = render(&mut app, w, h);
+            mouse_row_seen |= text.contains("double-click title  zoom / restore the pane");
             for line in geo.columns.iter().flat_map(|col| col.iter().skip(scroll).take(geo.rows)) {
                 let noble::app::help::Line::Row { key, desc, .. } = line else { continue };
                 let key_shown = noble::util::truncate(key, usize::from(geo.key_w) - noble::app::help::KEY_GAP);
@@ -123,9 +125,10 @@ fn help_keys_keep_a_gap_from_their_text() {
                 assert!(gap_ok, "{w}x{h}: `{key}` runs into its text `{desc}`:\n{text}");
             }
         }
-        // The first render is at scroll 0: the MOUSE section is in view at 160x45.
+        // The MOUSE section is reachable at 160x45: how many rows fit in view depends on the launchers
+        // installed on the machine (the HOME section lists them), so it may need scrolling.
         if (w, h) == (160, 45) {
-            assert!(text.contains("double-click title  zoom / restore the pane"), "{text}");
+            assert!(mouse_row_seen, "the MOUSE section never comes into view at {w}x{h}");
         }
     }
 }
