@@ -125,7 +125,10 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
 (a dead network share) opens in home instead. With several NOBLE windows open, each one saves its own tabs and
 the next launch brings back all of them; a window opened while another is running starts empty. Quick-launch
-tabs run their command (e.g. `claude`) again. The session is saved a couple of seconds after every change and
+tabs run their command (e.g. `claude`) again. An agent pane (Claude Code, Codex, Copilot CLI, OpenCode) picks its last
+conversation up again on the same path: `claude --resume`, `codex resume`, `copilot --resume`, `opencode --session`,
+added to its own launcher (Settings → Resume agent conversations; `resume_agents`, on by default). Saved workspaces and
+reopened tabs (prefix `T`) do the same. The session is saved a couple of seconds after every change and
 when the window closes, the process is terminated or the OS logs off. Save named workspaces, reopen or delete
 them from the palette. `noble .` (or `noble <folder>`) opens a shell tab in that folder.
 
@@ -259,7 +262,13 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | | | `i` | pass keys to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
+| | | `y` | send the last command's output to the agent pane (pasted, not run: press ⏎ yourself) |
 | | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
+
+A shell with NOBLE's hooks (PowerShell, bash 4.4+, zsh, fish) marks where each command's output starts and ends, so a
+terminal tab can jump between commands (pane menu, palette: Jump to Previous / Next Command), copy the last output, or
+send it to the agent in the same tab with its context line (`~/app $ cargo test → exit 101`). A failed command's ✗
+badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such marks, so these actions do nothing there.
 
 <details>
 <summary><b>Per-screen keys and mouse</b></summary>
@@ -273,7 +282,9 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
   `r` rescan / `R` refresh AI · `p` or `:` palette · `?` keys · `1…9` go to tab ·
   `m` system · `s` settings · `q` quit · `T` run a task of the selected project (only when it has tasks; the
   palette lists them; a launcher on `T` keeps the key). The selected project's card: click `PR #…` to open its pull request in the
-  browser, or a port (`⇄ :3000`) to open http://localhost:<port>; click a task chip to run it.
+  browser, or a port (`⇄ :3000`) to open http://localhost:<port>; click a task chip to run it. A `↻ claude · 2h ago`
+  line shows when Claude Code has a conversation in that folder (the time its `~/.claude/projects` folder changed);
+  click it to open a tab that runs `claude --continue` there.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
   (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
   `esc` back to the page you came from. The selected setting's description shows in a panel on the right on a terminal
@@ -334,6 +345,7 @@ shell = ""               # empty = pwsh → powershell → cmd on Windows, $SHEL
 shell_args = []
 scrollback = 5000
 restore_session = true
+resume_agents = true     # a restored Claude, Codex, Copilot or OpenCode pane picks its last conversation up again (false: starts fresh)
 copy_on_select = true
 osc52_write = true       # programs in a pane may set the clipboard (OSC 52, e.g. over SSH); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)

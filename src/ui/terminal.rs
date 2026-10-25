@@ -518,6 +518,10 @@ fn pane_frame(
         let spans: Vec<(&str, Style)> =
             [pad].into_iter().chain(spans.iter().map(|(t, s)| (t.as_str(), *s))).chain([pad]).collect();
         hud::put_spans(buf, x, y, &spans, w);
+        // A failed command's badge is a button: a click scrolls to its output (`App::show_last_command`).
+        if pane.running_for().is_none() && pane.last_result.is_some_and(|r| r.code.is_some_and(|c| c != 0)) {
+            on_top.push((Rect::new(x, y, w, 1), Hit::CommandBadge(pane.id)));
+        }
     }
     inner
 }

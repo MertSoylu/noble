@@ -1014,6 +1014,7 @@ impl App {
                     self.drag = Some(Drag::Tab { index: i });
                 }
             }
+            Hit::CommandBadge(p) => self.show_last_command(p),
             Hit::PaneTitle(p) => {
                 self.focus_pane(p);
                 // A double click on the title zooms the pane, or puts it back.
@@ -1204,6 +1205,7 @@ impl App {
                 self.launch(i, dir);
             }
             Hit::ProjectTask(i) => self.run_project_task(i),
+            Hit::ClaudeContinue => self.continue_claude(),
             Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),

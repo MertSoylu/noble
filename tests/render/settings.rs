@@ -467,3 +467,23 @@ fn key_bindings_editor_renders_and_asks_before_taking_keys() {
     }
     assert!(render(&mut app, 110, 30).contains("Settings → Key bindings"));
 }
+
+/// "Resume agent conversations" sits right after "Restore tabs on launch", is on by default and flips the config
+/// value both ways.
+#[test]
+fn resume_agents_row_sits_under_restore_and_toggles() {
+    use noble::app::{SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let items = app.settings_items();
+    let restore = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::Restore)).unwrap();
+    let resume = items.iter().position(|i| *i == SettingItem::Setting(SettingKey::ResumeAgents)).expect("the row");
+    assert_eq!(resume, restore + 1, "listed right after restore tabs");
+    assert_eq!(SettingKey::ResumeAgents.label(), "Resume agent conversations");
+    assert!(app.setting_on(SettingKey::ResumeAgents), "on by default");
+    app.settings_sel = resume;
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.cfg.terminal.resume_agents && !app.setting_on(SettingKey::ResumeAgents));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.cfg.terminal.resume_agents && app.setting_on(SettingKey::ResumeAgents));
+}

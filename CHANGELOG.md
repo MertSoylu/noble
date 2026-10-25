@@ -6,6 +6,20 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Command blocks: the shell's command marks (OSC 133, from NOBLE's PowerShell, bash, zsh and fish hooks) give each pane
+  the output range of its last 200 commands. New actions: Jump to Previous / Next Command, Copy Last Output, and Send
+  Last Output to Agent (prefix `y`), which pastes the output with its context line (`~/app $ cargo test → exit 101`) into
+  the agent pane of the same tab, never running it. A click on a failed command's ✗ badge scrolls to its output.
+- Agent conversations come back: a restored pane running Claude Code, Codex, Copilot CLI or OpenCode resumes its last
+  conversation (`claude --resume <id>`, `codex resume <id>`, `copilot --resume <id>`, `opencode --session <id>`), with
+  the launcher's own command. Session restore, saved workspaces and reopened tabs (prefix `T`) do the same. The session
+  id comes from the agent's hook payload and is kept only when it is a plain id (letters, digits, `-` and `_`).
+- Setting "Resume agent conversations" (`[terminal] resume_agents`, on by default): off starts agents fresh, as before.
+- Home: a `↻ claude · 2h ago` line on the selected project's card when Claude Code has a conversation there (the time
+  is the modification time of the project's folder under `~/.claude/projects/`, never a transcript). Clicking it opens
+  a tab that runs `claude --continue` in the project.
+
 ## [1.11.0] - 2026-10-25
 
 ### Added

@@ -1223,3 +1223,54 @@ fn theme_switch_notifies_only_panes_with_scheme_notices() {
     app.run(Action::CloseTab);
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 }
+
+/// The command output actions on a real pane: the shell's marks open a command block, the failed command's badge
+/// is a button that scrolls to its output, the jumps stop at the edges, and a send with no agent pane says so.
+#[test]
+fn command_output_follows_the_shell_marks() {
+    let mut app = demo_app(110, 30);
+    let wait = match app.shell.label().to_lowercase().as_str() {
+        "cmd" => "ping -n 60 127.0.0.1 >nul",
+        "pwsh" | "powershell" => "Start-Sleep 60",
+        _ => "sleep 60",
+    };
+    app.new_tab(std::env::temp_dir(), Some(wait), None);
+    let id = app.tabs[0].focus;
+    std::thread::sleep(Duration::from_millis(800));
+    app.pump();
+    app.panes.get_mut(&id).unwrap().prompted = true;
+    let feed = |app: &mut App, bytes: &[u8]| {
+        let pane = &app.panes[&id];
+        pane.parser().process(bytes);
+        pane.dirty.store(true, std::sync::atomic::Ordering::Release);
+        app.handle(AppEvent::PtyOutput);
+    };
+    // A command that prints thirty lines and fails (exit 101), marked the way NOBLE's shell hooks mark it.
+    let mut bytes = b"~/app $ cargo test\r\n\x1b]133;C\x07".to_vec();
+    for i in 0..30 {
+        bytes.extend(format!("line {i}\r\n").as_bytes());
+    }
+    bytes.extend(b"\x1b]133;D;101\x07");
+    feed(&mut app, &bytes);
+    let last = app.panes[&id].last_result.expect("the prompt ends the command");
+    assert_eq!(last.code, Some(101));
+    let blocks = app.panes[&id].command_blocks();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(app.panes[&id].block_lines(&blocks[0]).map(|l| l.len()), Some(30));
+
+    // No agent pane in the tab: nothing is sent, and the toast says so.
+    app.run(Action::SendLastOutput);
+    assert!(toast_texts(&app).iter().any(|t| t.contains("no agent pane")), "{:?}", toast_texts(&app));
+
+    // The failed badge is a button: a click scrolls the view to the command's output.
+    render(&mut app, 110, 30);
+    let badge = find_hit(&app, |h| *h == noble::app::Hit::CommandBadge(id)).expect("the ✗ badge is clickable");
+    click(&mut app, badge.x, badge.y);
+    assert!(app.panes[&id].scroll_offset() > 0, "the view moved to the output");
+
+    // It is the only command: the jumps find nothing further and say so.
+    app.run(Action::PrevCommand);
+    assert!(toast_texts(&app).iter().any(|t| t.contains("no earlier command")), "{:?}", toast_texts(&app));
+    app.run(Action::NextCommand);
+    assert_eq!(app.panes[&id].scroll_offset(), 0, "past the newest command the view is live");
+}

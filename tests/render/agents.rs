@@ -24,6 +24,7 @@ fn claude_hook_states_drive_sessions() {
         message: msg.map(str::to_string),
         ts: chrono::Utc::now().timestamp(),
         agent: None,
+        session: None,
         subagents: 0,
     };
     app.apply_hook_records([(pane, rec("prompt", None))].into_iter().collect());
@@ -71,6 +72,7 @@ fn claude_subagents_keep_the_session_working() {
         message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
         ts,
         agent: None,
+        session: None,
         subagents,
     };
     // Each step returns the state and the notices that step raised.
@@ -282,7 +284,14 @@ fn agent_state_change_marks_the_frame_dirty() {
     let mut app = demo_app(110, 30);
     app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
     let pane = app.tabs[0].focus;
-    let rec = |event: &str, ts: i64| HookRecord { event: event.into(), message: None, ts, agent: None, subagents: 0 };
+    let rec = |event: &str, ts: i64| HookRecord {
+        event: event.into(),
+        message: None,
+        ts,
+        agent: None,
+        session: None,
+        subagents: 0,
+    };
     let now = chrono::Utc::now().timestamp();
 
     // In the terminal the state shows in the pane title and the tab's dot.
@@ -505,6 +514,7 @@ fn permission_request_and_failed_turn() {
         message: message.map(str::to_string),
         ts: chrono::Utc::now().timestamp(),
         agent: None,
+        session: None,
         subagents: 0,
     };
     let texts = |app: &noble::app::App| app.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
@@ -549,6 +559,7 @@ fn another_agents_record_shows_under_its_name() {
         message: Some("Codex needs your approval".into()),
         ts: chrono::Utc::now().timestamp(),
         agent: Some(Agent::Codex),
+        session: None,
         subagents: 0,
     };
     app.apply_hook_records([(pane, record)].into());

@@ -163,6 +163,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
         git,
         repo: true,
         tasks: Vec::new(),
+        claude: None,
     };
     app.handle(AppEvent::Projects(vec![
         mk(
@@ -248,7 +249,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
         tabs: vec![SavedTab {
             name: None,
             origin: "noble-rs".into(),
-            layout: SavedNode::Leaf { cwd: "C:\\".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: "C:\\".into(), launch: None, resume: None },
             focus: 0,
         }],
         ..Default::default()
@@ -445,6 +446,7 @@ pub(crate) fn hook_rec(event: &str, ts: i64, subagents: usize) -> noble::hooks::
         message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
         ts,
         agent: None,
+        session: None,
         subagents,
     }
 }

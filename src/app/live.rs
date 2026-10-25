@@ -131,6 +131,7 @@ mod tests {
             git: None,
             repo: true,
             tasks: Vec::new(),
+            claude: None,
         }
     }
 

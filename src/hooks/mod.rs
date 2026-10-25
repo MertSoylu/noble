@@ -9,6 +9,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod opencode;
+pub mod resume;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -207,6 +208,10 @@ pub struct HookRecord {
     /// The agent that wrote the record. A record without one (written before other agents had hooks) is Claude's.
     #[serde(default)]
     pub agent: Option<Agent>,
+    /// The agent's session id from the payload (see [`resume::session_id`]), kept so the pane can pick the
+    /// conversation up again. Records written before it existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Subagents of the session still running (counted from the marker files, not stored).
     #[serde(skip)]
     pub subagents: usize,
@@ -485,6 +490,7 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
         message,
         ts: chrono::Utc::now().timestamp(),
         agent: Some(agent),
+        session: resume::session_id(agent, &input),
         subagents: 0,
     };
     let _ = crate::util::create_private_dir(&dir);

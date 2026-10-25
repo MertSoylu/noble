@@ -153,13 +153,13 @@ fn help_has_columns_a_filter_and_runs_rows() {
     for (w, h) in [(110, 30), (60, 20), (30, 8)] {
         save(&format!("help-{w}x{h}"), &render(&mut app, w, h));
     }
-    // Three columns (from 170) hold the whole list at 170x45.
+    // Three columns (from 170) of 40 rows: the list is longer than that, so it scrolls a little at 170x45.
     let mut wide = demo_app(170, 45);
     wide.run(Action::Help);
     let wide_text = render(&mut wide, 170, 45);
     let geo = wide.help_geometry("").expect("fits");
     assert_eq!(geo.columns.len(), 3);
-    assert_eq!(geo.max_scroll(), 0, "three columns need no scrolling at 170x45");
+    assert!(geo.max_scroll() > 0 && geo.max_scroll() < 20, "three columns scroll a little at 170x45: {geo:?}");
     for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
         assert!(wide_text.contains(name), "{name} is drawn:\n{wide_text}");
     }

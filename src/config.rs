@@ -46,6 +46,9 @@ pub struct TerminalCfg {
     pub shell_args: Vec<String>,
     pub scrollback: usize,
     pub restore_session: bool,
+    /// Restored agent panes pick their conversation up again (`claude --resume <id>` and the like). false: a
+    /// restored agent starts fresh.
+    pub resume_agents: bool,
     pub copy_on_select: bool,
     /// Programs in a pane may set the system clipboard with OSC 52 (false: such requests are ignored).
     pub osc52_write: bool,
@@ -141,6 +144,7 @@ impl Default for TerminalCfg {
             shell_args: Vec::new(),
             scrollback: 5000,
             restore_session: true,
+            resume_agents: true,
             copy_on_select: true,
             osc52_write: true,
             tab_follows_cwd: true,
@@ -252,6 +256,7 @@ shell = ""               # empty = automatic (pwsh → powershell → cmd | $SHE
 shell_args = []
 scrollback = 5000
 restore_session = true   # save tabs on exit, restore them at startup
+resume_agents = true     # restored agent panes resume their conversation (claude --resume, codex resume, copilot --resume=, opencode --session)
 copy_on_select = true    # copy mouse-selected text to the clipboard
 osc52_write = true       # programs in a pane may set the clipboard (OSC 52); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
@@ -853,6 +858,15 @@ mod tests {
     use super::*;
 
     /// OSC 52 clipboard writes from programs are on by default (as before the setting) and can be turned off.
+    #[test]
+    fn resume_agents_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().terminal.resume_agents);
+        assert!(parse(DEFAULT_CONFIG).unwrap().terminal.resume_agents);
+        assert!(!parse("[terminal]\nresume_agents = false\n").unwrap().terminal.resume_agents);
+        // A config written before the key existed keeps the default.
+        assert!(parse("[terminal]\nshell = \"\"\n").unwrap().terminal.resume_agents);
+    }
+
     #[test]
     fn osc52_write_defaults_on_and_can_be_turned_off() {
         assert!(Config::default().terminal.osc52_write);

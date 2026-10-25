@@ -4,6 +4,7 @@
 mod agent_hooks;
 mod agents;
 pub mod bindings;
+mod blocks;
 mod focus;
 pub mod fx;
 mod git;
@@ -441,6 +442,8 @@ pub enum Hit {
     Launcher(usize),
     /// A quick task chip on the selected project's card (`Project::tasks` index).
     ProjectTask(usize),
+    /// Home's card line "↻ claude · 2h ago" of the selected project: a tab that continues its last Claude conversation.
+    ClaudeContinue,
     AiRefresh,
     Setting(usize),
     /// Row in the scheme selector (`scheme_options` order).
@@ -470,6 +473,8 @@ pub enum Hit {
     MenuItem(usize),
     /// Top row of the pane frame (for the right-click menu).
     PaneTitle(PaneId),
+    /// The ✗ result badge of a pane in its title row: a click scrolls to that command's output.
+    CommandBadge(PaneId),
     /// Quick-action button on a project row (row, action).
     ProjectAct(usize, ProjectAct),
     /// Add prompt: switch to this mode (the choice line).
@@ -831,6 +836,11 @@ pub struct App {
     /// When each pane's shell prompt last came back (Unix seconds): a hook record written
     /// until then belongs to a program that has exited (`clear_agent`).
     agent_cleared: HashMap<PaneId, i64>,
+    /// The agent conversation each pane last reported (from its hook records). Kept after the record goes, so a
+    /// saved pane can resume it; dropped when the pane closes (`forget_agent`).
+    agent_resume: HashMap<PaneId, crate::hooks::resume::Resume>,
+    /// The agent pane a command's output was last sent to (`App::send_last_output`), used when the tab has none.
+    last_agent: Option<PaneId>,
     /// When each hook-tracked agent started its current stretch of work (Unix seconds): the
     /// record's time when it turned Working, kept while it stays Working (a `stop` with
     /// subagents still running does not restart it). Shown as "working 2m" in the pane title.
@@ -1121,6 +1131,8 @@ impl App {
             ui_state: crate::store::UiState::memory(),
             agent_hooks: HashMap::new(),
             agent_cleared: HashMap::new(),
+            agent_resume: HashMap::new(),
+            last_agent: None,
             agent_working_since: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_on: Vec::new(),

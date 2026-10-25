@@ -21,6 +21,7 @@ pub enum SettingKey {
     Tips,
     Shell,
     Restore,
+    ResumeAgents,
     CopySelect,
     Osc52Write,
     TabFollowsCwd,
@@ -93,6 +94,7 @@ impl SettingKey {
             SettingKey::Seconds => "Show seconds",
             SettingKey::Shell => "Shell",
             SettingKey::Restore => "Restore tabs on launch",
+            SettingKey::ResumeAgents => "Resume agent conversations",
             SettingKey::CopySelect => "Copy text on select",
             SettingKey::Osc52Write => "Clipboard from programs",
             SettingKey::TabFollowsCwd => "Tab name follows the folder",
@@ -132,6 +134,9 @@ impl SettingKey {
             SettingKey::Tips => "Hints about the current screen in the status bar",
             SettingKey::Shell => "Program that new terminal panes start",
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
+            SettingKey::ResumeAgents => {
+                "Restored Claude, Codex, Copilot and OpenCode panes pick up their last conversation"
+            }
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
             SettingKey::Osc52Write => "Let programs in a pane set the clipboard (OSC 52, e.g. over SSH)",
             SettingKey::TabFollowsCwd => "Name tabs after the folder the shell is in",
@@ -260,6 +265,7 @@ impl App {
             Shell,
             TermColors,
             Restore,
+            ResumeAgents,
             CopySelect,
             Osc52Write,
             TabFollowsCwd,
@@ -340,6 +346,7 @@ impl App {
             SettingKey::Tips => c.general.show_tips,
             SettingKey::Updates => c.general.check_updates,
             SettingKey::Restore => c.terminal.restore_session,
+            SettingKey::ResumeAgents => c.terminal.resume_agents,
             SettingKey::CopySelect => c.terminal.copy_on_select,
             SettingKey::Osc52Write => c.terminal.osc52_write,
             SettingKey::TabFollowsCwd => c.terminal.tab_follows_cwd,
@@ -528,6 +535,10 @@ impl App {
                     SettingKey::Restore => {
                         c.terminal.restore_session ^= true;
                         ("terminal", "restore_session", c.terminal.restore_session.to_string())
+                    }
+                    SettingKey::ResumeAgents => {
+                        c.terminal.resume_agents ^= true;
+                        ("terminal", "resume_agents", c.terminal.resume_agents.to_string())
                     }
                     SettingKey::CopySelect => {
                         c.terminal.copy_on_select ^= true;

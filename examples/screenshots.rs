@@ -247,6 +247,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         git,
         repo: true,
         tasks: Vec::new(),
+        claude: None,
     };
     app.handle(AppEvent::Projects(vec![
         mk(

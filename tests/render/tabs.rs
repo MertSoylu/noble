@@ -165,8 +165,8 @@ fn closed_tab_reopens_with_its_panes() {
     let layout = SavedNode::Split {
         dir: Dir::Row,
         ratio: 0.5,
-        a: Box::new(SavedNode::Leaf { cwd: alpha.display().to_string(), launch: None }),
-        b: Box::new(SavedNode::Leaf { cwd: beta.display().to_string(), launch: None }),
+        a: Box::new(SavedNode::Leaf { cwd: alpha.display().to_string(), launch: None, resume: None }),
+        b: Box::new(SavedNode::Leaf { cwd: beta.display().to_string(), launch: None, resume: None }),
     };
     let ws = Workspace {
         name: "split".into(),
@@ -185,7 +185,7 @@ fn closed_tab_reopens_with_its_panes() {
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 1, "the split tab closed");
     let key = app.keymap.hint(Action::ReopenTab).expect("T is bound");
-    let hint = format!("tab closed · {key} reopens it (launch commands run again)");
+    let hint = format!("tab closed · {key} reopens it (launch commands run again, agent conversations resume)");
     assert!(
         app.toasts.iter().any(|t| t.text == hint),
         "toast {hint:?}: {:?}",

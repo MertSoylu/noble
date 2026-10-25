@@ -1,5 +1,6 @@
 //! Terminal engine: PTY panes, split tree and input encoding.
 
+pub mod blocks;
 pub mod colors;
 pub mod input;
 pub mod integration;

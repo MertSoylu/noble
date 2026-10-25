@@ -19,6 +19,9 @@ pub struct Project {
     pub repo: bool,
     /// Quick tasks as shell commands (`cargo test`, `npm run dev`, `make build`), see `detect_tasks`.
     pub tasks: Vec<String>,
+    /// When Claude Code last started a conversation in this folder, see `claude_activity`. Filled in by the scan
+    /// thread (never by `scan` itself), so it is `None` until the first pass after the project is listed.
+    pub claude: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -188,6 +191,44 @@ fn last_active(git_dir: &Path) -> Option<SystemTime> {
         .max()
 }
 
+/// `~/.claude/projects`, where Claude Code keeps one folder per project. `None` without a home folder and when
+/// `ai::isolated` is set (a test must not look at the user's Claude folders).
+pub fn claude_projects_dir() -> Option<PathBuf> {
+    if crate::ai::isolated() {
+        return None;
+    }
+    Some(dirs::home_dir()?.join(".claude").join("projects"))
+}
+
+/// The name Claude Code gives a project's folder under `~/.claude/projects`: every character that is not an ASCII
+/// letter or digit becomes `-` (`C:\Users\me\app` → `C--Users-me-app`, `/home/me/app` → `-home-me-app`). A character
+/// outside the BMP becomes two, as it does in the JavaScript string Claude builds the name from.
+pub fn claude_folder_name(dir: &Path) -> String {
+    let mut out = String::new();
+    for c in dir.to_string_lossy().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.extend(std::iter::repeat_n('-', c.len_utf16()));
+        }
+    }
+    out
+}
+
+/// When Claude Code last started a conversation in `dir`: the modification time of its folder under `root`. Claude
+/// adds a file per conversation, so the folder changes then. Only the folder itself is looked at, never a transcript.
+pub fn claude_activity(root: &Path, dir: &Path) -> Option<SystemTime> {
+    let folder = root.join(claude_folder_name(dir));
+    std::fs::metadata(&folder).ok().filter(|m| m.is_dir())?.modified().ok()
+}
+
+/// Fills `Project::claude` for every listed folder (`root` is `claude_projects_dir`).
+fn fill_claude(list: &mut [Project], root: Option<&Path>) {
+    for p in list {
+        p.claude = root.and_then(|r| claude_activity(r, &p.path));
+    }
+}
+
 /// Whether a git repository sits inside `dir`, at most `depth` levels down (a quick check for the
 /// add prompt: the scan stops at the first one found). `dir` itself is not checked.
 pub fn holds_repos(dir: &Path, depth: usize, exclude: &[String]) -> bool {
@@ -221,6 +262,7 @@ pub fn scan(roots: &[PathBuf], max_depth: usize, exclude: &[String], limit: usiz
                 path: dir,
                 git: None,
                 repo: true,
+                claude: None,
             });
             continue;
         }
@@ -260,6 +302,7 @@ pub fn project_at(dir: &Path) -> Option<Project> {
             git: None,
             repo: true,
             tasks,
+            claude: None,
         },
         None => Project {
             name,
@@ -269,6 +312,7 @@ pub fn project_at(dir: &Path) -> Option<Project> {
             git: None,
             repo: false,
             tasks,
+            claude: None,
         },
     })
 }
@@ -677,13 +721,16 @@ pub fn spawn(
     use std::sync::mpsc::RecvTimeoutError;
     let _ = std::thread::Builder::new().name("projects".into()).spawn(move || {
         let git = util::which("git").filter(|g| git_is_real(g));
+        let claude = claude_projects_dir();
         // Last activity times from the previous scan: no git run for unchanged repos.
         let mut seen: std::collections::HashMap<PathBuf, Option<SystemTime>> = Default::default();
         loop {
             let cfg = cfg.lock().map(|c| c.clone()).unwrap_or_default();
             let roots = roots_from(&cfg);
             let list = scan(&roots, cfg.max_depth.clamp(1, 6), &cfg.exclude, 300);
-            let list = manual.lock().map(|m| m.clone()).unwrap_or_default().apply(list);
+            let mut list = manual.lock().map(|m| m.clone()).unwrap_or_default().apply(list);
+            // One stat per listed folder, here on the project thread (not on the UI thread).
+            fill_claude(&mut list, claude.as_deref());
             let targets: Vec<PathBuf> = list
                 .iter()
                 .take(EAGER_GIT)
@@ -979,6 +1026,7 @@ mod tests {
             git: None,
             repo: true,
             tasks: Vec::new(),
+            claude: None,
         };
         let list = vec![mk("/code/app"), mk("/code/app/vendor/lib"), mk("/code/apple")];
         let find = |c: &str| project_containing(&list, Path::new(c)).map(|p| p.name.as_str());
@@ -987,6 +1035,56 @@ mod tests {
         assert_eq!(find("/code/app/vendor/lib/src"), Some("/code/app/vendor/lib"));
         assert_eq!(find("/code/apple/"), Some("/code/apple"));
         assert_eq!(find("/code/ap"), None);
+    }
+
+    #[test]
+    fn claude_folder_names_follow_claude_code() {
+        // The Windows name is the one Claude Code wrote for a local project (`:\` → `--`, each `\` → `-`).
+        assert_eq!(claude_folder_name(Path::new(r"C:\Users\Mert\Desktop\Noble")), "C--Users-Mert-Desktop-Noble");
+        assert_eq!(claude_folder_name(Path::new("/home/x/proj")), "-home-x-proj");
+        // Every character that is not an ASCII letter or digit becomes one `-`: dots, underscores, spaces.
+        assert_eq!(claude_folder_name(Path::new("/home/x/my_app.v2 beta")), "-home-x-my-app-v2-beta");
+        // Outside the BMP a character is two UTF-16 units, so two dashes.
+        assert_eq!(claude_folder_name(Path::new("/a/😀")), "-a---");
+    }
+
+    #[test]
+    fn claude_activity_reads_only_the_folder_time() {
+        let base = std::env::temp_dir().join(format!("noble-claude-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("projects");
+        let project = base.join("work").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        // No folder for the project yet: no activity.
+        assert_eq!(claude_activity(&root, &project), None);
+        // A folder with a conversation file in it: its modification time is the activity.
+        let folder = root.join(claude_folder_name(&project));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("session.jsonl"), "{}\n").unwrap();
+        let seen = claude_activity(&root, &project).expect("the folder's time");
+        let folder_time = std::fs::metadata(&folder).unwrap().modified().unwrap();
+        assert_eq!(seen, folder_time);
+        // A file where the folder should be is not a conversation folder.
+        let other = base.join("work").join("other");
+        std::fs::write(root.join(claude_folder_name(&other)), "x").unwrap();
+        assert_eq!(claude_activity(&root, &other), None);
+        // The scan thread's fill leaves the field empty when there is no folder to read.
+        let mut list = vec![Project {
+            name: "app".into(),
+            path: project.clone(),
+            branch: None,
+            last_active: None,
+            git: None,
+            repo: false,
+            tasks: Vec::new(),
+            claude: Some(SystemTime::UNIX_EPOCH),
+        }];
+        fill_claude(&mut list, None);
+        assert_eq!(list[0].claude, None);
+        fill_claude(&mut list, Some(&root));
+        assert_eq!(list[0].claude, Some(folder_time));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

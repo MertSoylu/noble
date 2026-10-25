@@ -1343,7 +1343,7 @@ mod tests {
         let tab = SavedTab {
             name: None,
             origin: "kept".into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         session_save(&session, "1-1-0", vec![tab], false);
@@ -1502,7 +1502,7 @@ mod tests {
         let tab = SavedTab {
             name: None,
             origin: "kept".into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         session_begin(&session, "1-1-0");
@@ -1603,7 +1603,7 @@ mod tests {
         let tab = |origin: &str| SavedTab {
             name: None,
             origin: origin.into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         let started = Instant::now();
@@ -1641,7 +1641,7 @@ mod tests {
         let tab = |origin: &str| SavedTab {
             name: None,
             origin: origin.into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         session_save(&file, "1-1-0", vec![tab("saved")], false);
@@ -1733,7 +1733,7 @@ mod tests {
         let tab = |origin: &str| SavedTab {
             name: None,
             origin: origin.into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         let savers: Vec<_> = ["a", "b", "c", "d"]
@@ -1797,7 +1797,7 @@ mod tests {
         let tab = |origin: &str| SavedTab {
             name: None,
             origin: origin.into(),
-            layout: SavedNode::Leaf { cwd: ".".into(), launch: None },
+            layout: SavedNode::Leaf { cwd: ".".into(), launch: None, resume: None },
             focus: 0,
         };
         let old = std::time::SystemTime::now() - Duration::from_secs(3600);
@@ -2005,8 +2005,8 @@ mod tests {
                 layout: SavedNode::Split {
                     dir: crate::term::layout::Dir::Row,
                     ratio: 0.5,
-                    a: Box::new(SavedNode::Leaf { cwd: "C:\\a".into(), launch: Some("claude".into()) }),
-                    b: Box::new(SavedNode::Leaf { cwd: "C:\\b".into(), launch: None }),
+                    a: Box::new(SavedNode::Leaf { cwd: "C:\\a".into(), launch: Some("claude".into()), resume: None }),
+                    b: Box::new(SavedNode::Leaf { cwd: "C:\\b".into(), launch: None, resume: None }),
                 },
                 focus: 1,
             }],

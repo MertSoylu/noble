@@ -96,18 +96,18 @@ of every agent. No new UI.
 - `PermissionRequest` → "needs you" at once.
 - Clearer notification texts from `notification_type` and the tool name ("asks to run Bash", "asks a question").
 
-### A3 · Conversations come back
+### A3 · Conversations come back (done)
 
 A restored quick-launch tab starts `claude` again today: a new, empty conversation.
 
 - The session id the hooks receive on stdin is kept in the record, saved with the pane (`SavedNode::Leaf` gets a
   `resume` field) and restored as `claude --resume <id>`, `codex resume <id>` or `copilot --resume <id>`.
-- The same for workspaces and prefix `T` (reopen closed tab). Setting: "Resume agent conversations" (on by
-  default, to be confirmed).
+- The same for workspaces and prefix `T` (reopen closed tab). Setting: "Resume agent conversations" (on by default:
+  decided).
 - One line on the Home card: `↻ claude · 2h ago` runs `claude --continue` in the project. Only the modification time
   of the project's folder under `~/.claude/projects/` is read, never a transcript.
 
-### A4 · Carry context to the agent
+### A4 · Carry context to the agent (done)
 
 - The emulator keeps the absolute lines of the OSC 133 C and D marks, so every command's output range is known
   ("command blocks").
@@ -167,7 +167,7 @@ Installing is the biggest barrier for new users:
 2. **Stage 2 (done)**
    - Focus: A1 (Codex and Copilot first, then OpenCode), A2
    - Release: v1.11.0
-3. **Stage 3**
+3. **Stage 3 (done)**
    - Focus: A3 resume, A4 command blocks and send to agent
    - Release: v1.12.0
 4. **Stage 4**
@@ -196,9 +196,8 @@ reflow implementation wait for a later stage.
 
 ## Open decisions
 
-1. Resume agent conversations on by default?
-2. A7 (background Claude sessions on Home): yes or no?
-3. Which package managers: winget, Scoop, Homebrew, AUR?
+1. A7 (background Claude sessions on Home): yes or no?
+2. Which package managers: winget, Scoop, Homebrew, AUR?
 
 ## References
 

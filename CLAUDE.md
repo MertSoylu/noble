@@ -159,6 +159,19 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`Pane::command_ran`: the C mark, or for cmd.exe and bash 3.2 a typed line and the last Enter) becomes
   `Pane::last_result`, shown in the pane title (`ui/terminal.rs` `result_badge`), and a running one shows a
   live timer whose redraws `App::redraw_after` schedules (`pane::live_timer_next`).
+- **Command blocks:** `term/blocks.rs` (pure: `CommandBlock`, the epoch and history pruning, the context line, the
+  agent size cap) and `Callbacks::blocks` (`osc.rs`: `133;C` opens a block with the typed line above the cursor, `133;D`
+  closes it with the exit code). Line numbers are `screen_base` based; a column change (reflow) drops every block.
+  `Pane::step_command` / `show_last_output` / `block_lines` read them; `app/blocks.rs` holds the actions (jump, copy,
+  send to the agent of the tab or the last one used, pasted never run). The ✗ badge is `Hit::CommandBadge`.
+- **Agent resume:** `hooks/resume.rs` reads each agent's session id from its hook payload (`session_id`; Copilot
+  `sessionId`; OpenCode `properties.sessionID`) into `HookRecord.session`; `valid_id` keeps only `[A-Za-z0-9_-]` up to
+  128 characters, also when a session file is read back. `App::agent_resume` keeps the last id per pane (dropped in
+  `forget_agent`). `save_node` writes `SavedNode::Leaf.resume` only when the launcher runs that agent
+  (`resume_command`); `build_node` restores it through the launcher's own command, so session restore, workspaces and
+  prefix `T` share it. `[terminal] resume_agents` (default on) turns both off. Home: `projects::claude_activity` stats
+  `~/.claude/projects/<claude_folder_name>` in the scan thread (never a transcript; `None` under `ai::isolated`);
+  `Hit::ClaudeContinue` runs `continue_command`.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); `app/agent_hooks.rs` holds the per-agent install state
   and the popup toggles; the state types stay in `app/mod.rs`.

@@ -65,6 +65,12 @@ impl App {
                 crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
                 continue;
             }
+            // The conversation the agent reported: kept after its record goes (prompt, session end), so a later
+            // save of the pane can resume it. A session id that is not safe is ignored.
+            if let Some(id) = rec.session.as_deref().and_then(crate::hooks::resume::valid_id) {
+                let resume = crate::hooks::resume::Resume { agent: rec.agent(), id };
+                self.agent_resume.insert(pane, resume);
+            }
             // A new event notifies, and so does the state changing without one: the last
             // background subagent ending after `stop` turns Working into Idle with the same
             // event. A count change that keeps the state (2 subagents to 1) does not.
@@ -155,6 +161,7 @@ impl App {
 
     /// Forgets a closed pane's agent state and deletes its hook record.
     pub(crate) fn forget_agent(&mut self, pane: PaneId) {
+        self.agent_resume.remove(&pane);
         self.agent_cleared.remove(&pane);
         self.agent_working_since.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
@@ -316,7 +323,7 @@ mod tests {
     use crate::hooks::HookRecord;
 
     fn rec(event: &str, ts: i64, subagents: usize) -> HookRecord {
-        HookRecord { event: event.into(), message: None, ts, agent: None, subagents }
+        HookRecord { event: event.into(), message: None, ts, agent: None, session: None, subagents }
     }
 
     /// A headless app with one shell pane and its own data folder (the records are deleted from there;
