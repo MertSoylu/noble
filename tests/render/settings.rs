@@ -76,17 +76,21 @@ fn settings_screen_mouse_and_keys() {
     app.settings_sel = claude;
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.cfg.ai.providers.iter().any(|p| p == "claude"));
-    // The Claude hooks row only exists when Claude Code is installed (or our hooks are still set).
-    let hooks = noble::app::SettingItem::Setting(noble::app::SettingKey::ClaudeHooks);
+    // The agent hooks row only exists when an agent is installed here (or has hooks on).
+    let hooks = noble::app::SettingItem::Setting(noble::app::SettingKey::AgentHooks);
+    app.agents_found = vec![noble::hooks::Agent::Claude];
     assert!(app.settings_items().contains(&hooks));
-    assert!(render(&mut app, 160, 45).contains("Claude Code status hooks"));
+    assert!(render(&mut app, 160, 45).contains("Agent status hooks"));
     app.ai_installed.retain(|id| *id != "claude");
+    app.agents_found.clear();
     assert!(!app.settings_items().contains(&hooks));
     let text = render(&mut app, 160, 45);
     assert!(!text.contains("status hooks"), "{text}");
-    app.hooks_installed = true;
+    app.hooks_on = vec![noble::hooks::Agent::Claude];
+    app.agents_found = vec![noble::hooks::Agent::Claude];
     assert!(app.settings_items().contains(&hooks));
-    app.hooks_installed = false;
+    app.hooks_on.clear();
+    app.agents_found.clear();
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, View::Bridge);
     // Keyboard navigation does not overflow at either end.

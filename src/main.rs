@@ -62,13 +62,15 @@ fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("hook") {
         use std::io::Read;
+        // `noble hook <event> [--agent <id>]`: an unknown agent id records nothing (and reads nothing).
+        let Some(agent) = noble::hooks::agent_arg(argv.get(2..).unwrap_or(&[])) else { return Ok(()) };
         let mut input = String::new();
         let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
         let event = argv.get(1).map(String::as_str).unwrap_or("");
         // No folder for the files: nothing to record, and a hook never reports an error.
         let Some(paths) = Paths::resolve(None) else { return Ok(()) };
         let (instance, pane) = (std::env::var("NOBLE_INSTANCE").ok(), std::env::var("NOBLE_PANE").ok());
-        noble::hooks::run_cli(event, &input, &paths.data, instance.as_deref(), pane.as_deref());
+        noble::hooks::run_cli(agent, event, &input, &paths.data, instance.as_deref(), pane.as_deref());
         return Ok(());
     }
     if argv.first().map(String::as_str) == Some("update") {

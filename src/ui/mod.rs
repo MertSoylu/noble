@@ -851,7 +851,7 @@ fn notice_plan(app: &App, area: Rect) -> Option<NoticePlan> {
     let fixed = (1 + util::width(button) + util::width(NOTICE_CLOSE) + 1) as u16;
     let (long, short) = match version {
         Some(v) => (format!(" ↑ NOBLE {v} is available "), format!(" ↑ {v} ")),
-        None => (" Show Claude status in NOBLE? ".to_string(), " Claude status? ".to_string()),
+        None => (" Show agent status in NOBLE? ".to_string(), " Agent status? ".to_string()),
     };
     let room = area.width.saturating_sub(fixed + 2) / 2;
     let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };

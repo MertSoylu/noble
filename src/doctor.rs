@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::ai::{self, Presence};
 use crate::config::{self, Config, Paths};
+use crate::hooks::Agent;
 use crate::term::pane::{ShellSpec, resolve_shell};
 use crate::util;
 
@@ -30,6 +31,8 @@ pub struct Scope {
     pub system: bool,
     /// Whether `gh auth status` runs. It starts a process, so tests leave it off.
     pub gh_auth: bool,
+    /// The variables that move the agents' settings folders (`HookEnv::from_process` in `run_cli`).
+    pub env: crate::hooks::HookEnv,
 }
 
 /// The answers the report shows: `gather` fills them in, `render` turns them into text.
@@ -44,8 +47,8 @@ pub struct Facts {
     pub terminal: Terminal,
     pub default_shell: Shell,
     pub shells: Vec<Shell>,
-    pub hooks: Hooks,
-    pub settings: Option<PathBuf>,
+    /// Each agent's hook state, in `Agent::ALL` order.
+    pub hooks: Vec<AgentHooks>,
     pub providers: Providers,
     pub config_path: PathBuf,
     pub config: ConfigState,
@@ -82,6 +85,16 @@ pub enum Hooks {
     Unreadable,
     Installed,
     NotInstalled,
+    /// Not on this machine: no settings file and the agent's command is not on PATH.
+    NotFound,
+}
+
+/// One agent's hook state and the settings file it is read from (`None` when there is none to read).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentHooks {
+    pub agent: Agent,
+    pub state: Hooks,
+    pub settings: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,7 +141,7 @@ pub fn gather(paths: &Paths, scope: &Scope) -> Facts {
         integration: spec.integration_applies(),
         program: Some(PathBuf::from(&spec.program)),
     };
-    let (hooks, settings) = hooks(scope);
+    let hooks = hooks(scope);
     Facts {
         version: env!("CARGO_PKG_VERSION").into(),
         dev_build: util::is_dev_build(),
@@ -140,7 +153,6 @@ pub fn gather(paths: &Paths, scope: &Scope) -> Facts {
         default_shell,
         shells: probe_shells(&paths.data),
         hooks,
-        settings,
         providers: providers(scope),
         config_path: paths.config.clone(),
         config,
@@ -214,18 +226,26 @@ fn integration_of(program: &Path, data: &Path) -> bool {
     spec.integration_applies()
 }
 
-fn hooks(scope: &Scope) -> (Hooks, Option<PathBuf>) {
+/// Every agent's hook state (`Agent::ALL` order).
+fn hooks(scope: &Scope) -> Vec<AgentHooks> {
+    Agent::ALL.into_iter().map(|agent| agent_hooks(scope, agent)).collect()
+}
+
+fn agent_hooks(scope: &Scope, agent: Agent) -> AgentHooks {
+    let unknown = |state| AgentHooks { agent, state, settings: None };
     if !scope.system {
-        return (Hooks::Skipped, None);
+        return unknown(Hooks::Skipped);
     }
-    let Some(home) = &scope.home else { return (Hooks::NoHome, None) };
-    let path = home.join(".claude").join("settings.json");
-    let state = match crate::hooks::installed_state(&path) {
+    let Some(home) = &scope.home else { return unknown(Hooks::NoHome) };
+    // The agent's own settings path for this home and environment (CODEX_HOME and the like are honored).
+    let Some(path) = agent.settings_path_in(&scope.env, Some(home.clone())) else { return unknown(Hooks::NoHome) };
+    let state = match agent.installed_state(&path) {
         Ok(true) => Hooks::Installed,
+        Ok(false) if !path.exists() && !agent.on_path() => Hooks::NotFound,
         Ok(false) => Hooks::NotInstalled,
         Err(_) => Hooks::Unreadable,
     };
-    (state, Some(path))
+    AgentHooks { agent, state, settings: Some(path) }
 }
 
 fn providers(scope: &Scope) -> Providers {
@@ -293,17 +313,20 @@ pub fn render(f: &Facts) -> String {
         line(&mut out, &shell.name, &shell_text(shell));
     }
 
-    section(&mut out, "Claude Code hooks");
-    let status = match f.hooks {
-        Hooks::Installed => "installed",
-        Hooks::NotInstalled => "not installed",
-        Hooks::Unreadable => "unknown (the settings file cannot be read or parsed)",
-        Hooks::NoHome => "unknown (no home folder)",
-        Hooks::Skipped => SKIPPED,
-    };
-    line(&mut out, "status", status);
-    if let Some(path) = &f.settings {
-        line(&mut out, "settings", &util::tilde(path));
+    section(&mut out, "Agent hooks");
+    for h in &f.hooks {
+        let status = match h.state {
+            Hooks::Installed => "installed",
+            Hooks::NotInstalled => "not installed",
+            Hooks::NotFound => "not found",
+            Hooks::Unreadable => "unknown (the settings file cannot be read or parsed)",
+            Hooks::NoHome => "unknown (no home folder)",
+            Hooks::Skipped => SKIPPED,
+        };
+        line(&mut out, h.agent.name(), status);
+        if let Some(path) = &h.settings {
+            line(&mut out, "  settings", &util::tilde(path));
+        }
     }
 
     section(&mut out, "AI providers");
@@ -406,7 +429,12 @@ pub fn run_cli(args: &[String]) -> i32 {
         eprintln!("noble: no home folder for NOBLE's files: set NOBLE_HOME to the folder to use");
         return 1;
     };
-    let scope = Scope { home: dirs::home_dir(), system: !ai::isolated(), gh_auth: true };
+    let scope = Scope {
+        home: dirs::home_dir(),
+        system: !ai::isolated(),
+        gh_auth: true,
+        env: crate::hooks::HookEnv::from_process(),
+    };
     let text = render(&gather(&paths, &scope));
     // A closed pipe (`noble doctor | head`) is not an error worth a panic.
     let _ = std::io::stdout().lock().write_all(text.as_bytes());
@@ -460,8 +488,20 @@ mod tests {
             },
             default_shell: shell("pwsh", Some(pwsh), true),
             shells: vec![shell("pwsh", Some(pwsh), true), shell("bash", None, false)],
-            hooks: Hooks::Installed,
-            settings: Some(PathBuf::from("C:/elsewhere/.claude/settings.json")),
+            hooks: vec![
+                AgentHooks {
+                    agent: Agent::Claude,
+                    state: Hooks::Installed,
+                    settings: Some(PathBuf::from("C:/elsewhere/.claude/settings.json")),
+                },
+                AgentHooks {
+                    agent: Agent::Codex,
+                    state: Hooks::NotInstalled,
+                    settings: Some(PathBuf::from("C:/elsewhere/.codex/hooks.json")),
+                },
+                AgentHooks { agent: Agent::Copilot, state: Hooks::NotFound, settings: None },
+                AgentHooks { agent: Agent::OpenCode, state: Hooks::NotFound, settings: None },
+            ],
             providers: Providers::Checked(vec![
                 ("Claude Code", Presence::Ready),
                 ("Codex", Presence::NoLogin),
@@ -473,6 +513,11 @@ mod tests {
             data_exists: true,
             gh: Gh { path: Some(PathBuf::from("C:/elsewhere/gh.exe")), auth: GhAuth::LoggedIn },
         }
+    }
+
+    /// Every agent in one hook state and with no settings file (the report's hook lines).
+    fn hooks_all(state: Hooks) -> Vec<AgentHooks> {
+        Agent::ALL.into_iter().map(|agent| AgentHooks { agent, state, settings: None }).collect()
     }
 
     /// Whether the report has this exact line (a substring match would let "not found" pass for "not found here").
@@ -488,7 +533,7 @@ mod tests {
             "[System]",
             "[Terminal]",
             "[Shells]",
-            "[Claude Code hooks]",
+            "[Agent hooks]",
             "[AI providers]",
             "[Paths]",
             "[GitHub CLI]",
@@ -506,7 +551,7 @@ mod tests {
             "default (pwsh): C:/Program Files/PowerShell/7/pwsh.exe, integration: yes",
             "pwsh: C:/Program Files/PowerShell/7/pwsh.exe, integration: yes",
             "bash: not found",
-            "status: installed",
+            "Claude Code: installed",
             "Claude Code: detected (signed in)",
             "Codex: detected, not signed in",
             "Kilo Code: not found",
@@ -539,13 +584,15 @@ mod tests {
     fn skipped_probes_say_why() {
         let mut facts = sample();
         facts.system = false;
-        facts.hooks = Hooks::Skipped;
-        facts.settings = None;
+        facts.hooks = hooks_all(Hooks::Skipped);
         facts.providers = Providers::Skipped;
         facts.gh.auth = GhAuth::Skipped;
         let text = render(&facts);
         assert!(has_line(&text, "system integrations: skipped (NOBLE_NO_SYSTEM_INTEGRATIONS is set)"), "{text}");
-        assert_eq!(text.matches("status: skipped (NOBLE_NO_SYSTEM_INTEGRATIONS is set)").count(), 2, "{text}");
+        for agent in Agent::ALL {
+            assert!(has_line(&text, &format!("{}: {SKIPPED}", agent.name())), "{text}");
+        }
+        assert_eq!(text.matches("status: skipped (NOBLE_NO_SYSTEM_INTEGRATIONS is set)").count(), 1, "{text}");
         assert!(has_line(&text, "gh auth: skipped (NOBLE_NO_SYSTEM_INTEGRATIONS is set)"), "{text}");
         assert!(!text.contains("settings:"), "{text}");
         assert!(!text.contains("detected"), "{text}");
@@ -554,14 +601,15 @@ mod tests {
     #[test]
     fn hook_states_are_plain_words() {
         let cases = [
-            (Hooks::Installed, "status: installed"),
-            (Hooks::NotInstalled, "status: not installed"),
-            (Hooks::Unreadable, "status: unknown (the settings file cannot be read or parsed)"),
-            (Hooks::NoHome, "status: unknown (no home folder)"),
+            (Hooks::Installed, "Claude Code: installed"),
+            (Hooks::NotInstalled, "Claude Code: not installed"),
+            (Hooks::NotFound, "Claude Code: not found"),
+            (Hooks::Unreadable, "Claude Code: unknown (the settings file cannot be read or parsed)"),
+            (Hooks::NoHome, "Claude Code: unknown (no home folder)"),
         ];
         for (state, expected) in cases {
             let mut facts = sample();
-            facts.hooks = state;
+            facts.hooks = hooks_all(state);
             assert!(has_line(&render(&facts), expected), "{state:?}");
         }
     }
@@ -569,12 +617,13 @@ mod tests {
     #[test]
     fn no_home_folder_is_unknown_for_hooks_and_providers() {
         let mut facts = sample();
-        facts.hooks = Hooks::NoHome;
-        facts.settings = None;
+        facts.hooks = hooks_all(Hooks::NoHome);
         facts.providers = Providers::NoHome;
         let text = render(&facts);
-        assert!(!text.contains("Claude Code:"), "{text}");
-        assert_eq!(text.matches("status: unknown (no home folder)").count(), 2, "{text}");
+        for agent in Agent::ALL {
+            assert!(has_line(&text, &format!("{}: unknown (no home folder)", agent.name())), "{text}");
+        }
+        assert_eq!(text.matches("status: unknown (no home folder)").count(), 1, "{text}");
         assert!(!text.contains("settings:"), "{text}");
     }
 
@@ -663,7 +712,7 @@ mod tests {
         )
         .unwrap();
         let paths = Paths { config: dir.0.join("config.toml"), data: dir.0.join("data") };
-        let scope = Scope { home: Some(dir.0.clone()), system: true, gh_auth: false };
+        let scope = Scope { home: Some(dir.0.clone()), system: true, gh_auth: false, env: Default::default() };
         let text = render(&gather(&paths, &scope));
         // The detection did read the fake login, so the absence of the token below means something.
         // (CLAUDE_CONFIG_DIR, when set on the machine running the test, moves where Claude Code is looked for.)
@@ -685,12 +734,12 @@ mod tests {
         )
         .unwrap();
         let paths = Paths { config: dir.0.join("config.toml"), data: dir.0.join("data") };
-        let scope = Scope { home: Some(dir.0.clone()), system: false, gh_auth: true };
+        let scope = Scope { home: Some(dir.0.clone()), system: false, gh_auth: true, env: Default::default() };
         let facts = gather(&paths, &scope);
-        assert_eq!(facts.hooks, Hooks::Skipped);
+        assert!(facts.hooks.iter().all(|h| h.state == Hooks::Skipped));
         assert_eq!(facts.providers, Providers::Skipped);
         assert_eq!(facts.gh.auth, GhAuth::Skipped);
-        assert!(facts.settings.is_none());
+        assert!(facts.hooks.iter().all(|h| h.settings.is_none()));
         let text = render(&facts);
         assert!(!text.contains("ISOLATED"), "{text}");
     }
@@ -699,12 +748,14 @@ mod tests {
     fn gather_reads_only() {
         let dir = TempDir::new("noble-doctor-readonly");
         let paths = Paths { config: dir.0.join("config.toml"), data: dir.0.join("data") };
-        let scope = Scope { home: Some(dir.0.clone()), system: true, gh_auth: false };
+        let scope = Scope { home: Some(dir.0.clone()), system: true, gh_auth: false, env: Default::default() };
         let facts = gather(&paths, &scope);
         assert_eq!(facts.config, ConfigState::Missing);
         assert!(!dir.0.join("config.toml").exists());
         assert!(!dir.0.join("data").exists(), "the data folder is not created");
-        assert_eq!(facts.hooks, Hooks::NotInstalled, "no settings file means no hooks");
+        // Claude's command may or may not be on this machine's PATH: either way no hook is installed.
+        let claude = facts.hooks.iter().find(|h| h.agent == Agent::Claude).expect("claude row");
+        assert!(matches!(claude.state, Hooks::NotInstalled | Hooks::NotFound), "no settings file means no hooks");
         assert!(!dir.0.join(".claude").exists(), "the settings file is not created");
     }
 }

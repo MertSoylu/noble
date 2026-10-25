@@ -413,16 +413,9 @@ fn doctor_prints_its_report() {
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(out.status.success(), "stderr: {}\n{text}", String::from_utf8_lossy(&out.stderr));
-    for section in [
-        "[NOBLE]",
-        "[System]",
-        "[Terminal]",
-        "[Shells]",
-        "[Claude Code hooks]",
-        "[AI providers]",
-        "[Paths]",
-        "[GitHub CLI]",
-    ] {
+    for section in
+        ["[NOBLE]", "[System]", "[Terminal]", "[Shells]", "[Agent hooks]", "[AI providers]", "[Paths]", "[GitHub CLI]"]
+    {
         assert!(text.lines().any(|l| l == section), "missing {section}:\n{text}");
     }
     assert!(text.lines().any(|l| l == format!("version: {}", env!("CARGO_PKG_VERSION"))), "{text}");

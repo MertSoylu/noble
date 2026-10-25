@@ -6,6 +6,33 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Agent status hooks for Codex, Copilot CLI and OpenCode, next to Claude Code. Each agent's tab dot, pane title,
+  "needs you" (prefix `a`), notifications and the Home session list show its real state. Codex, Copilot CLI and
+  OpenCode are configured in their own files (`~/.codex/hooks.json`, `~/.copilot/hooks/noble.json`,
+  `~/.config/opencode/plugins/noble.js`; `CODEX_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` are honored).
+- Codex: after its hooks are installed NOBLE says once that they must be trusted in Codex's `/hooks` view.
+- `noble hook <event> --agent <id>` records the state of any agent. Without `--agent` it is Claude Code, as before.
+- Claude Code: a failed turn (`StopFailure`: an API error, a rate limit) shows as `✗ claude · error` in the pane title
+  and the tab dot, with a notification, instead of staying "working" until the next prompt.
+- Claude Code: a permission request (`PermissionRequest`) shows "needs you" at once.
+- Notification texts name what the agent wants: "Claude asks to run Bash", "Claude asks a question", "Claude stopped
+  with an error: …".
+- `noble doctor` lists the agent hooks of each agent: installed, not installed or not found (never a secret).
+
+### Changed
+- Settings: the "Claude Code status hooks" row is now "Agent status hooks". It opens a popup with one row per agent
+  found on this machine (on, off or not found); a click, ⏎ or space toggles an agent. Its value reads "N of M on".
+- The one-time offer covers every agent found on this machine ("Show agent status in NOBLE?") and turns on the hooks
+  of all of them when accepted.
+- Hooks set by an older NOBLE are upgraded for every agent at startup, not only for Claude Code.
+- A settings backup for a file that did not exist before is empty, so a later install no longer copies NOBLE's own
+  entries into it.
+
+### Fixed
+- A failed Claude Code turn no longer stays "working" until the next prompt (see `StopFailure` above).
+- A permission request and the notification for the same prompt raise one notice, not two.
+
 ## [1.10.2] - 2026-10-25
 
 ### Fixed

@@ -5,17 +5,37 @@ use std::collections::HashMap;
 
 use super::*;
 
-/// A Claude session's state from its last hook event. While subagents still run the
-/// session is working even after the main answer ended (`stop`); a question from Claude
-/// or one of its subagents (a permission prompt) still needs you.
+/// An agent session's state from its last hook event. While subagents still run the
+/// session is working even after the main answer ended (`stop`); a question from the agent
+/// or one of its subagents (a permission prompt) still needs you, at once; a failed turn is an error.
 pub(super) fn hook_state(rec: &crate::hooks::HookRecord) -> Option<AgentState> {
+    use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST, PROMPT, SESSION_START, STOP, STOP_FAILURE};
     let state = match rec.event.as_str() {
-        "prompt" => AgentState::Working,
-        "notification" => AgentState::NeedsYou,
-        "stop" | "session-start" => AgentState::Idle,
+        PROMPT => AgentState::Working,
+        NOTIFICATION | PERMISSION_REQUEST => AgentState::NeedsYou,
+        STOP_FAILURE => return Some(AgentState::Error),
+        STOP | SESSION_START => AgentState::Idle,
         _ => return None,
     };
     Some(if state == AgentState::Idle && rec.subagents > 0 { AgentState::Working } else { state })
+}
+
+/// Two records of one permission prompt: the agent sends a permission request and a notification for it, in
+/// either order. Both need you, so only the first one is announced.
+fn same_prompt(old: &crate::hooks::HookRecord, new: &crate::hooks::HookRecord) -> bool {
+    use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST};
+    matches!(
+        (old.event.as_str(), new.event.as_str()),
+        (PERMISSION_REQUEST, NOTIFICATION) | (NOTIFICATION, PERMISSION_REQUEST)
+    ) && hook_state(old) == hook_state(new)
+}
+
+/// How a notice names the agent: Claude's own name is short.
+fn agent_who(agent: crate::hooks::Agent) -> &'static str {
+    match agent {
+        crate::hooks::Agent::Claude => "Claude",
+        other => other.name(),
+    }
 }
 
 impl App {
@@ -49,10 +69,11 @@ impl App {
             // background subagent ending after `stop` turns Working into Idle with the same
             // event. A count change that keeps the state (2 subagents to 1) does not.
             let new_event = self.agent_hooks.get(&pane).is_none_or(|old| {
-                (&old.event, &old.message, old.ts) != (&rec.event, &rec.message, rec.ts)
+                (&old.event, &old.message, old.ts, old.agent()) != (&rec.event, &rec.message, rec.ts, rec.agent())
                     || hook_state(old) != hook_state(&rec)
             });
-            if new_event {
+            let announced = self.agent_hooks.get(&pane).is_some_and(|old| same_prompt(old, &rec));
+            if new_event && !announced {
                 changed.push((pane, rec.clone()));
             }
             live.insert(pane, rec);
@@ -85,11 +106,15 @@ impl App {
             self.dirty = true;
         }
         for (pane, rec) in changed {
+            let who = agent_who(rec.agent());
             let notice = match hook_state(&rec) {
                 Some(AgentState::NeedsYou) => {
-                    Some(rec.message.clone().unwrap_or_else(|| "Claude needs your attention".into()))
+                    Some(rec.message.clone().unwrap_or_else(|| format!("{who} needs your attention")))
                 }
-                Some(AgentState::Idle) if rec.event == "stop" => Some("Claude finished".into()),
+                Some(AgentState::Error) => {
+                    Some(rec.message.clone().unwrap_or_else(|| format!("{who} stopped with an error")))
+                }
+                Some(AgentState::Idle) if rec.event == crate::hooks::STOP => Some(format!("{who} finished")),
                 _ => None,
             };
             let Some(notice) = notice else { continue };
@@ -137,11 +162,22 @@ impl App {
         }
     }
 
+    /// Called once after an agent's hooks were written: Codex runs user-level hooks only after the user trusted
+    /// them in its `/hooks` view, so NOBLE says so. Other agents need nothing.
+    pub fn announce_hook_install(&mut self, agent: crate::hooks::Agent) {
+        if agent == crate::hooks::Agent::Codex {
+            self.toast(ToastLevel::Info, crate::hooks::codex::TRUST_NOTICE);
+        }
+    }
+
     /// The AI agent running in a pane and its state: from Claude's hook record, else
     /// guessed from the launcher command (while it still runs) or the window title.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
-        if let Some(rec) = self.agent_hooks.get(&pane) {
-            return hook_state(rec).map(|state| ("claude", state));
+        // A record whose event this build does not map falls through to the guess below.
+        if let Some(rec) = self.agent_hooks.get(&pane)
+            && let Some(state) = hook_state(rec)
+        {
+            return Some((rec.agent().id(), state));
         }
         let p = self.panes.get(&pane)?;
         // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
@@ -233,20 +269,22 @@ impl App {
     }
 }
 
-/// Whether the one-time hooks offer should show for a launch: Claude itself is starting, the hooks are not
-/// installed, `~/.claude/settings.json` is usable (not isolated, real app) and the offer was never made.
-pub(super) fn should_offer_hooks(is_claude: bool, installed: bool, available: bool, offered: bool) -> bool {
-    is_claude && !installed && available && !offered
+/// Whether the one-time hooks offer should show for a launch: the launched agent is installed here with its hooks
+/// off (`missing`), and the offer was never made.
+pub(super) fn should_offer_hooks(missing: bool, offered: bool) -> bool {
+    missing && !offered
 }
 
 impl App {
-    /// After a quick launch: the first time Claude is started while its status hooks are off, offers to enable
-    /// them (a clickable notice, see `Hit::HooksOffer`). Recorded in `state.json`, so it is offered only once.
+    /// After a quick launch: the first time an agent is started whose status hooks are off, offers to enable the
+    /// hooks of every installed agent that lacks them (a clickable notice, see `Hit::HooksOffer`). Recorded in
+    /// `state.json`, so it is offered only once.
     pub(super) fn note_agent_offer(&mut self, launch_command: &str) {
-        let is_claude = crate::ai::agent_kind(Some(launch_command), "") == Some("claude");
-        // Same guard as `toggle_claude_hooks`: never in tests or with `NOBLE_NO_SYSTEM_INTEGRATIONS`.
-        let available = self.services.is_some() && crate::hooks::settings_path().is_some();
-        if !should_offer_hooks(is_claude, self.hooks_installed, available, self.ui_state.data.hooks_offered) {
+        let Some(agent) = crate::ai::agent_kind(Some(launch_command), "").and_then(crate::hooks::Agent::from_id) else {
+            return;
+        };
+        let missing = self.missing_hooks().contains(&agent);
+        if !should_offer_hooks(missing, self.ui_state.data.hooks_offered) {
             return;
         }
         self.edit_ui_state(|d| d.hooks_offered = true);
@@ -254,20 +292,19 @@ impl App {
         self.dirty = true;
     }
 
-    /// The offer is showing (and still makes sense).
+    /// The offer is showing (and still makes sense: an installed agent lacks its hooks).
     pub fn hooks_offer_notice(&self) -> bool {
-        self.hooks_offer && !self.hooks_installed
+        self.hooks_offer && self.agents_found.iter().any(|a| !self.hooks_on(*a))
     }
 
-    /// Click on the offer: the same code path as the Settings toggle.
+    /// Click on the offer: installs the hooks of every installed agent that lacks them (the Settings popup's path).
     pub(super) fn accept_hooks_offer(&mut self) {
         self.hooks_offer = false;
-        if !self.hooks_installed {
-            self.toggle_claude_hooks();
-        }
+        let missing = self.missing_hooks();
+        self.install_agent_hooks(&missing);
     }
 
-    /// Click on the notice's x, or the palette's "Dismiss Claude Status Offer": hides the offer for this run.
+    /// Click on the notice's x, or the palette's "Dismiss Agent Status Offer": hides the offer for this run.
     pub(super) fn dismiss_hooks_offer(&mut self) {
         self.hooks_offer = false;
     }
@@ -279,7 +316,7 @@ mod tests {
     use crate::hooks::HookRecord;
 
     fn rec(event: &str, ts: i64, subagents: usize) -> HookRecord {
-        HookRecord { event: event.into(), message: None, ts, subagents }
+        HookRecord { event: event.into(), message: None, ts, agent: None, subagents }
     }
 
     /// A headless app with one shell pane and its own data folder (the records are deleted from there;
@@ -301,12 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn hooks_offer_only_once_for_claude_without_hooks() {
-        assert!(should_offer_hooks(true, false, true, false));
-        assert!(!should_offer_hooks(false, false, true, false), "other agents do not need Claude hooks");
-        assert!(!should_offer_hooks(true, true, true, false), "already installed");
-        assert!(!should_offer_hooks(true, false, false, false), "isolated or headless");
-        assert!(!should_offer_hooks(true, false, true, true), "offered before");
+    fn hooks_offer_only_for_a_missing_agent_and_once() {
+        assert!(should_offer_hooks(true, false));
+        assert!(!should_offer_hooks(false, false), "the launched agent has its hooks on or is not installed here");
+        assert!(!should_offer_hooks(true, true), "offered before");
     }
 
     #[test]
@@ -326,6 +361,42 @@ mod tests {
         assert_eq!(hook_state(&rec("stop", 1, 2)), Some(AgentState::Working));
         assert_eq!(hook_state(&rec("notification", 1, 2)), Some(AgentState::NeedsYou));
         assert_eq!(hook_state(&rec("something-else", 1, 0)), None);
+    }
+
+    /// A permission request needs you at once (also with subagents running); a failed turn is an error
+    /// and does not wait for subagents.
+    #[test]
+    fn permission_requests_and_failed_turns() {
+        use crate::hooks::{PERMISSION_REQUEST, STOP_FAILURE};
+        assert_eq!(hook_state(&rec(PERMISSION_REQUEST, 1, 2)), Some(AgentState::NeedsYou));
+        assert_eq!(hook_state(&rec(STOP_FAILURE, 1, 0)), Some(AgentState::Error));
+        assert_eq!(hook_state(&rec(STOP_FAILURE, 1, 2)), Some(AgentState::Error));
+        // One prompt, two records (in either order): the second is not a new question.
+        let (req, note) = (rec(PERMISSION_REQUEST, 1, 0), rec("notification", 2, 0));
+        assert!(same_prompt(&req, &note) && same_prompt(&note, &req));
+        assert!(!same_prompt(&rec("stop", 1, 0), &note), "a stop in between is another turn");
+        assert!(!same_prompt(&req, &rec(STOP_FAILURE, 2, 0)));
+    }
+
+    /// The records of an agent other than Claude show under that agent's name; a record without one is Claude's.
+    #[test]
+    fn records_show_under_their_own_agent() {
+        use crate::hooks::Agent;
+        let (mut app, pane) = app_with_pane();
+        let mut codex = rec("prompt", 100, 0);
+        codex.agent = Some(Agent::Codex);
+        apply(&mut app, pane, codex);
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Working)));
+        apply(&mut app, pane, rec("stop", 110, 0));
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)));
+    }
+
+    /// A record whose event is not mapped does not hide the pane's agent: the launcher's guess shows instead.
+    #[test]
+    fn an_unmapped_record_falls_back_to_the_guess() {
+        let (mut app, pane) = app_with_pane();
+        apply(&mut app, pane, rec("something-else", 100, 0));
+        assert_eq!(app.agent_state(pane), None, "no launcher or title names an agent here");
     }
 
     #[test]

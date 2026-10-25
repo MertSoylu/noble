@@ -42,7 +42,7 @@ pub enum SettingKey {
     CommandCode,
     AiRefresh,
     AiWarn,
-    ClaudeHooks,
+    AgentHooks,
     Updates,
 }
 
@@ -114,7 +114,7 @@ impl SettingKey {
             SettingKey::CommandCode => "Command Code",
             SettingKey::AiRefresh => "Refresh every",
             SettingKey::AiWarn => "Warn when usage reaches",
-            SettingKey::ClaudeHooks => "Claude Code status hooks",
+            SettingKey::AgentHooks => "Agent status hooks",
             SettingKey::Updates => "Check for updates",
         }
     }
@@ -149,7 +149,7 @@ impl SettingKey {
             SettingKey::QuickLaunch => "Choose the AI CLIs offered as launchers",
             SettingKey::AiRefresh => "How often usage is fetched while Home is open",
             SettingKey::AiWarn => "Warn when a quota reaches this percentage",
-            SettingKey::ClaudeHooks => "Show Claude Code's live state on its tab",
+            SettingKey::AgentHooks => "Show each agent's live state (Claude Code, Codex, Copilot, OpenCode) on its tab",
             SettingKey::Updates => "Look for a newer NOBLE release once a day",
         }
     }
@@ -178,7 +178,7 @@ impl SettingKey {
 
     /// Set in a popup window (⏎); ←→ do not change it.
     pub fn opens_popup(&self) -> bool {
-        matches!(self, SettingKey::QuickLaunch | SettingKey::KeyBindings)
+        matches!(self, SettingKey::QuickLaunch | SettingKey::KeyBindings | SettingKey::AgentHooks)
     }
 
     pub fn is_toggle(&self) -> bool {
@@ -190,6 +190,7 @@ impl SettingKey {
                 | SettingKey::Passthrough
                 | SettingKey::TermColors
                 | SettingKey::QuickLaunch
+                | SettingKey::AgentHooks
                 | SettingKey::KeyBindings
                 | SettingKey::AiRefresh
                 | SettingKey::AiWarn
@@ -267,8 +268,8 @@ impl App {
             Notify,
             QuickLaunch,
         ]);
-        if self.claude_hooks_available() {
-            terminal.push(SettingItem::Setting(ClaudeHooks));
+        if self.agent_hooks_available() {
+            terminal.push(SettingItem::Setting(AgentHooks));
         }
         let mut ai = rows(&[AiEnabled]);
         // A provider that is not installed is hidden anyway; toggling it is meaningless.
@@ -346,7 +347,6 @@ impl App {
             SettingKey::FocusMode => c.terminal.focus_mode,
             SettingKey::ShellFirst => c.keys.shell_first,
             SettingKey::Notify => c.terminal.notify,
-            SettingKey::ClaudeHooks => self.hooks_installed,
             SettingKey::AiEnabled => c.ai.enabled,
             SettingKey::Claude => has("claude"),
             SettingKey::Codex => has("codex"),
@@ -392,6 +392,10 @@ impl App {
                 } else {
                     format!("{shown} of {} shown", installed.len())
                 }
+            }
+            SettingKey::AgentHooks => {
+                let (on, found) = self.agent_hooks_count();
+                format!("{on} of {found} on")
             }
             SettingKey::AiWarn => match self.cfg.ai.warn_at {
                 0 => "Off".into(),
@@ -475,7 +479,7 @@ impl App {
         match item {
             SettingItem::Setting(SettingKey::QuickLaunch) => self.open_launcher_picker(),
             SettingItem::Setting(SettingKey::KeyBindings) => self.open_bindings(),
-            SettingItem::Setting(SettingKey::ClaudeHooks) => self.toggle_claude_hooks(),
+            SettingItem::Setting(SettingKey::AgentHooks) => self.open_agent_hooks(),
             SettingItem::OpenConfig => self.run(crate::keys::Action::OpenConfig),
             SettingItem::ReloadConfig => self.reload_config(true),
             SettingItem::Setting(key) => {
@@ -545,8 +549,8 @@ impl App {
                         c.terminal.focus_mode ^= true;
                         ("terminal", "focus_mode", c.terminal.focus_mode.to_string())
                     }
-                    // Written to Claude's own settings file, not the config (handled above).
-                    SettingKey::ClaudeHooks => return self.toggle_claude_hooks(),
+                    // Opens its popup (handled above).
+                    SettingKey::AgentHooks => return self.open_agent_hooks(),
                     SettingKey::TermColors => {
                         let names = self.scheme_options();
                         let cur = names
@@ -622,38 +626,6 @@ impl App {
                     self.toast(ToastLevel::Info, "shell applies to new tabs");
                 }
             }
-        }
-    }
-
-    /// The hooks row is shown only when Claude Code is installed, or when our hooks
-    /// are still in its settings (so they can be removed after an uninstall).
-    pub fn claude_hooks_available(&self) -> bool {
-        self.hooks_installed || self.ai_installed.contains(&"claude")
-    }
-
-    /// Adds or removes the Claude Code hooks in `~/.claude/settings.json`.
-    /// In headless mode (tests) the real file is never touched.
-    pub fn toggle_claude_hooks(&mut self) {
-        let Some(path) = crate::hooks::settings_path().filter(|_| self.services.is_some()) else {
-            self.toast(ToastLevel::Warn, "Claude Code settings are not available here");
-            return;
-        };
-        let result = if self.hooks_installed {
-            crate::hooks::uninstall(&path)
-        } else {
-            crate::hooks::install(&path, &crate::hooks::command_base())
-        };
-        match result {
-            Ok(()) => {
-                self.hooks_installed = crate::hooks::is_installed(&path);
-                let msg = if self.hooks_installed {
-                    "Claude Code hooks installed · applies to new Claude sessions"
-                } else {
-                    "Claude Code hooks removed"
-                };
-                self.toast(ToastLevel::Ok, msg);
-            }
-            Err(e) => self.toast(ToastLevel::Error, e),
         }
     }
 

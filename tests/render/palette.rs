@@ -162,10 +162,11 @@ fn palette_hints_follow_the_view() {
     app.run(Action::Bridge);
     let hooks = |app: &App| {
         let t = titles(app);
-        (t.iter().any(|x| x == "Enable Claude Status Hooks"), t.iter().any(|x| x == "Dismiss Claude Status Offer"))
+        (t.iter().any(|x| x == "Enable Agent Status Hooks"), t.iter().any(|x| x == "Dismiss Agent Status Offer"))
     };
     assert_eq!(hooks(&app), (false, false));
     app.hooks_offer = true;
+    app.agents_found = vec![noble::hooks::Agent::Claude];
     assert_eq!(hooks(&app), (true, true));
     app.run(Action::DismissHooksOffer);
     assert!(!app.hooks_offer);
@@ -173,7 +174,7 @@ fn palette_hints_follow_the_view() {
     app.hooks_offer = true;
     app.run(Action::EnableHooks);
     assert!(!app.hooks_offer, "the palette answers the offer");
-    assert!(!app.hooks_installed, "headless never touches ~/.claude");
+    assert!(app.hooks_on.is_empty(), "headless never touches ~/.claude");
     assert_eq!(hooks(&app), (false, false));
 }
 

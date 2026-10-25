@@ -377,6 +377,26 @@ impl App {
                     _ => true,
                 }
             }
+            Overlay::AgentHooks { selected } => {
+                let n = crate::hooks::Agent::ALL.len();
+                let sel = (*selected).min(n - 1);
+                match k.code {
+                    KeyCode::Esc | KeyCode::Char('q') => false,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *selected = sel.saturating_sub(1);
+                        true
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                        *selected = (sel + 1).min(n - 1);
+                        true
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        self.toggle_agent_hooks(crate::hooks::Agent::ALL[sel]);
+                        true
+                    }
+                    _ => true,
+                }
+            }
             Overlay::Launchers { selected } => {
                 let list = self.installed_launchers();
                 let sel = (*selected).min(list.len().saturating_sub(1));
@@ -1141,6 +1161,14 @@ impl App {
                 if let Some(item) = self.settings_items().get(i).copied() {
                     let dir = self.setting_click_dir(i, item, x, btn);
                     self.activate_setting(item, dir);
+                }
+            }
+            Hit::AgentHook(i) => {
+                if let Some(Overlay::AgentHooks { selected }) = &mut self.overlay {
+                    *selected = i;
+                }
+                if let Some(&agent) = crate::hooks::Agent::ALL.get(i) {
+                    self.toggle_agent_hooks(agent);
                 }
             }
             Hit::LaunchShow(i) | Hit::LaunchKey(i) => {

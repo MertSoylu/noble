@@ -50,7 +50,7 @@ install.cmd                     # Windows: builds --release and installs it as `
 `noble` (from a release or `cargo install noble`) stays untouched, and `noble-dev` runs your latest changes.
 The dev build shows **NOBLE dev** in its top bar and window title and saves its open tabs to a separate
 session file, so the two never overwrite each other's tabs. Both share the same config and data (projects,
-pins, AI cache, Claude hook status). For a completely separate sandbox add `NOBLE_HOME`:
+pins, AI cache, agent hook status). For a completely separate sandbox add `NOBLE_HOME`:
 
 ```powershell
 $env:NOBLE_HOME = "$env:TEMP\noble-sandbox"; noble-dev
@@ -81,7 +81,7 @@ cargo deny check                  # advisories, licenses, sources (`cargo instal
   the session is restored on the next launch. On Unix a window killed with SIGKILL is restored too.
 - **`tests/fuzz.rs`** feeds random and hostile input to the parsers that read text or JSON from outside NOBLE (git
   output, shell titles and OSC payloads, terminal lines, Windows Terminal settings, provider and GitHub API replies,
-  Claude hook payloads). Nothing may panic. The runs are deterministic: `NOBLE_FUZZ_SEED` picks another seed and
+  agent hook payloads). Nothing may panic. The runs are deterministic: `NOBLE_FUZZ_SEED` picks another seed and
   `NOBLE_FUZZ_SCALE` makes them longer.
 - **Performance checks** (ignored by default, run in release mode):
 
@@ -134,7 +134,8 @@ src/
   sensors.rs         sysinfo sampler thread
   projects.rs        repository scan and git status workers
   store.rs           recent dirs, session, workspaces, AI history, UI state (atomic JSON writes)
-  hooks.rs           Claude Code hook install/remove and `noble hook` state files
+  hooks/             agent status hooks: mod.rs (records, `noble hook`, shared helpers) and one module per
+                     agent (claude.rs, codex.rs, copilot.rs, opencode.rs): install, uninstall, upgrade, state
   wt.rs battery.rs   Windows Terminal color schemes · battery readers
   config.rs keys.rs theme.rs util.rs event.rs
 ```

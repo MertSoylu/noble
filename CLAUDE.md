@@ -160,7 +160,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `Pane::last_result`, shown in the pane title (`ui/terminal.rs` `result_badge`), and a running one shows a
   live timer whose redraws `App::redraw_after` schedules (`pane::live_timer_next`).
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
-  `agent_sessions_by_project`, the one-time hooks offer); the state types stay in `app/mod.rs`.
+  `agent_sessions_by_project`, the one-time hooks offer); `app/agent_hooks.rs` holds the per-agent install state
+  and the popup toggles; the state types stay in `app/mod.rs`.
 - **Session auto-save / termination:** `App::tick` compares the tabs with the last saved session and writes a
   change that lasted 2 s, only while it gets the session lock (`session_save_waiting`, 1 s wait); otherwise the
   save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
@@ -195,19 +196,27 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Terminal colors:** `theme.rs` `TermScheme`/`TermPalette`; `wt.rs` reads the PowerShell profile's scheme
   and user schemes from Windows Terminal's `settings.json` (JSONC) → `App::term_schemes`. Pane drawing
   (`ui/terminal.rs`) uses `TermPalette::resolve` every frame.
-- **Claude hooks:** `hooks.rs` — when enabled in Settings, adds `noble hook <event>` to
-  `~/.claude/settings.json` (writes a backup, removes only its own entries). `main.rs` handles this subcommand
-  without opening the terminal; state is written to `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files,
-  which `App::tick` reads at most once a second (`apply_hook_records` → `AgentState`; `tick` runs on every
-  event and at least every `IDLE_TICK` = 2 s, and this scan only while hooks are installed or records exist).
+- **Agent hooks:** `hooks/` — `mod.rs` holds what the agents share (`HookRecord` with its optional `agent`, the
+  records folder, `run_cli`, `read_records`, `prune`, `remove_record`, `command_base`/`quote_for_shell`, the `Agent`
+  registry and `HOOK_ARGS`); one module per agent: `claude.rs` (`~/.claude/settings.json`), `codex.rs`
+  (`hooks.json` under `$CODEX_HOME`), `copilot.rs` (its own `noble.json` under `$COPILOT_HOME/hooks`) and
+  `opencode.rs` (its own plugin file `plugins/noble.js`). Each offers `EVENTS`, `settings_path` (None when
+  `ai::isolated` or no home), `installed_state`, `install`, `uninstall`, `upgrade` and `record_message`; install
+  keeps the user's own hooks, writes a backup once and removes only NOBLE's entries. When enabled in Settings
+  (`app/agent_hooks.rs`, the "Agent status hooks" popup), an agent's hooks run `noble hook <event> [--agent <id>]`
+  (no flag = Claude). `main.rs` handles this subcommand without opening the terminal; state is written to
+  `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files, which `App::tick` reads at most once a second
+  (`apply_hook_records` → `AgentState`, the record's agent names the pane; `tick` runs on every event and at least
+  every `IDLE_TICK` = 2 s, and this scan only while hooks are installed or records exist).
   `session-end` deletes the record, and the prompt signal clears the pane's agent (`App::clear_agent`; older
   records are ignored) and its window title; the launcher command only names the agent until the first prompt
   (`Pane::launch_running`). Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files
   (`SubagentStart`/`SubagentStop`); while any exist the session stays Working after `Stop`. Idle-reminder and
-  `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `hooks::upgrade` adds newly added
-  events to an older install at startup. `hooks::prune` runs at startup. Never touch the real file in tests:
-  `NOBLE_HOME` does not move `~/.claude`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS` (`ai::isolated`), which
-  turns off the hooks settings path and AI credential detection.
+  `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `upgrade_installed` (every agent) adds
+  newly added events to an older install at startup. `hooks::prune` runs at startup. Never touch the real files in
+  tests: install/uninstall/upgrade take an explicit path, and `NOBLE_HOME` does not move `~/.claude`, `~/.codex`,
+  `~/.copilot` or `~/.config/opencode`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS` (`ai::isolated`), which turns
+  off every agent's settings path (`settings_path` returns None) and AI credential detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
 - **Private files:** on Unix NOBLE's folders are 0700 and new files 0600 (`util::create_private_dir`,
