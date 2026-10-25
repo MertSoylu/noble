@@ -18,6 +18,7 @@ use crate::term::integration;
 use crate::term::layout::PaneId;
 use crate::util;
 
+use super::blocks::{CommandBlock, retain_live};
 #[cfg(test)]
 use super::osc::same_host;
 pub use super::osc::{
@@ -43,6 +44,24 @@ pub(super) fn span_text(screen: &mut crate::vt100::Screen, line: usize, from: u1
     let text = screen.rows(from, to.saturating_sub(from)).nth(row);
     screen.set_scrollback(current);
     text
+}
+
+/// The numbers `Pane::step_command` works with: the screen's rows, the lines scrolled out of history, the scrollback
+/// length and the scroll offset now.
+fn view_numbers(p: &crate::vt100::Parser<Callbacks>) -> (usize, usize, usize, usize) {
+    let screen = p.screen();
+    (
+        crate::term::screen_size(screen).0 as usize,
+        screen.history_dropped(),
+        screen.scrollback_len(),
+        screen.scrollback(),
+    )
+}
+
+/// The scroll offset that puts the stable line `line` in the middle of a view `rows` high.
+fn centered_offset(line: usize, rows: usize, dropped: usize, history: usize) -> usize {
+    let top = line.saturating_sub(dropped).saturating_sub(rows / 2);
+    history.saturating_sub(top)
 }
 
 /// The parts of a paste: the start and end markers (empty without bracketed paste) around the body. Inside
@@ -1347,6 +1366,64 @@ impl Pane {
         read_scroll_text(&mut p, generation, have)
     }
 
+    /// The command blocks still valid in the scrollback, oldest first (`retain_live` drops the rest).
+    pub fn command_blocks(&self) -> Vec<CommandBlock> {
+        let mut p = lock(&self.parser);
+        let (dropped, epoch) = (p.screen().history_dropped(), p.screen().reflow_epoch());
+        let cb = p.callbacks_mut();
+        retain_live(&mut cb.blocks, dropped, epoch);
+        cb.blocks.iter().cloned().collect()
+    }
+
+    /// The newest block whose command has finished: the one the copy and send actions take.
+    pub fn last_output_block(&self) -> Option<CommandBlock> {
+        self.command_blocks().into_iter().rev().find(|b| b.end.is_some())
+    }
+
+    /// The text of a block's output lines, trailing spaces trimmed; `None` when a line is no longer in the
+    /// scrollback. The block must come from `command_blocks` (its numbers are valid now).
+    pub fn block_lines(&self, block: &CommandBlock) -> Option<Vec<String>> {
+        let end = block.end?;
+        let mut p = lock(&self.parser);
+        let screen = p.screen_mut();
+        let cols = crate::term::screen_size(screen).1;
+        (block.start..end).map(|line| span_text(screen, line, 0, cols).map(|t| t.trim_end().to_string())).collect()
+    }
+
+    /// Moves the view to the command before (`forward` false) or after the middle line of the view, the one a jump
+    /// last centered on. Past the newest command the view returns to the live screen. `None` when the view does not
+    /// move (no such command, and already at the edge or live).
+    pub fn step_command(&self, forward: bool) -> Option<()> {
+        let blocks = self.command_blocks();
+        let mut p = lock(&self.parser);
+        let (rows, dropped, history, current) = view_numbers(&p);
+        let reference = dropped + history - current + rows / 2;
+        let target = if forward {
+            blocks.iter().map(|b| b.start).find(|&s| s > reference)
+        } else {
+            blocks.iter().rev().map(|b| b.start).find(|&s| s < reference)
+        };
+        let offset = match target {
+            Some(line) => centered_offset(line, rows, dropped, history),
+            None if forward => 0,
+            None => return None,
+        };
+        if offset == current {
+            return None;
+        }
+        self.set_offset(&mut p, offset);
+        Some(())
+    }
+
+    /// Scrolls to the output of the newest finished command (the ✗ badge's click). `false` when there is none.
+    pub fn show_last_output(&self) -> bool {
+        let Some(start) = self.last_output_block().map(|b| b.start) else { return false };
+        let mut p = lock(&self.parser);
+        let (rows, dropped, history, _) = view_numbers(&p);
+        self.set_offset(&mut p, centered_offset(start, rows, dropped, history));
+        true
+    }
+
     /// Scrolls so the absolute line (0 = oldest) lands in the middle of the screen.
     pub fn scroll_to_line(&self, line: usize, history: usize) {
         let rows = self.size.0 as usize;
@@ -2308,5 +2385,106 @@ Claude needs your permission",
             }
         }
         assert!(pane.exited.load(Ordering::Acquire));
+    }
+
+    /// A pane whose shell has already exited, so a test feeds its emulator alone (the reader thread is gone).
+    fn exited_pane(scrollback: usize) -> Pane {
+        let (program, args) = if cfg!(windows) { ("cmd", vec!["/C", "exit 0"]) } else { ("sh", vec!["-c", "exit 0"]) };
+        let spec = ShellSpec::new(program, args.into_iter().map(String::from).collect());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd = std::env::temp_dir();
+        let colors: SharedColors = Default::default();
+        let spec_in =
+            SpawnSpec { cwd: &cwd, command: None, shell: &spec, rows: 6, cols: 40, scrollback, colors: &colors };
+        let pane = Pane::spawn(9, spec_in, tx).unwrap();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(AppEvent::PtyExit(9)) => break,
+                Ok(_) => {}
+                Err(e) => panic!("no PtyExit: {e}"),
+            }
+        }
+        pane
+    }
+
+    /// Ten commands of four lines each (the command, then three output lines), marked as the shells mark them.
+    fn feed_commands(pane: &Pane, count: usize) {
+        for i in 0..count {
+            let bytes = format!("~ $ cmd{i}\r\n\x1b]133;C\x07a{i}\r\nb{i}\r\nc{i}\r\n\x1b]133;D;{i}\x07");
+            pane.parser().process(bytes.as_bytes());
+        }
+    }
+
+    #[test]
+    fn command_blocks_hold_each_output_range_and_its_typed_line() {
+        let pane = exited_pane(100);
+        feed_commands(&pane, 3);
+        let blocks = pane.command_blocks();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[1].line.as_deref(), Some("~ $ cmd1"));
+        assert_eq!(blocks[1].exit, Some(1));
+        assert_eq!(pane.block_lines(&blocks[1]).unwrap(), vec!["a1", "b1", "c1"]);
+        assert_eq!(pane.last_output_block().map(|b| b.exit), Some(Some(2)));
+        // A command still running has no output yet.
+        pane.parser().process(b"~ $ sleep\r\n\x1b]133;C\x07running\r\n");
+        assert_eq!(pane.last_output_block().map(|b| b.exit), Some(Some(2)), "the finished one stays the last");
+        assert!(pane.command_blocks().last().unwrap().end.is_none());
+    }
+
+    #[test]
+    fn stepping_centers_each_command_and_returns_to_the_live_screen() {
+        let pane = exited_pane(100);
+        feed_commands(&pane, 10);
+        // From the live view the previous command is the newest one; the middle row of the view shows it.
+        assert!(pane.step_command(false).is_some());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a9");
+        assert!(pane.step_command(false).is_some());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a8");
+        assert!(pane.step_command(true).is_some());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a9");
+        // Past the newest command the view returns to the live screen; there it stops.
+        assert!(pane.step_command(true).is_some());
+        assert_eq!(pane.scroll_offset(), 0);
+        assert!(pane.step_command(true).is_none());
+        assert_eq!(pane.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn stepping_stops_at_the_first_command() {
+        let pane = exited_pane(100);
+        feed_commands(&pane, 3);
+        assert!(pane.step_command(false).is_some());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a2");
+        assert!(pane.step_command(false).is_some());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a1");
+        // The first command is at the top of the history, so it cannot be centered: the view shows it from the top.
+        assert!(pane.step_command(false).is_some());
+        assert_eq!(pane.visible_row(1).unwrap().trim_end(), "a0");
+        assert!(pane.step_command(false).is_none(), "no earlier command: the view does not move");
+        assert_eq!(pane.visible_row(1).unwrap().trim_end(), "a0");
+    }
+
+    #[test]
+    fn the_failed_badge_scrolls_to_the_newest_command_output() {
+        let pane = exited_pane(100);
+        assert!(!pane.show_last_output(), "no command yet");
+        feed_commands(&pane, 10);
+        assert!(pane.show_last_output());
+        assert_eq!(pane.visible_row(3).unwrap().trim_end(), "a9");
+    }
+
+    #[test]
+    fn command_blocks_go_with_the_reflow_and_with_their_lines() {
+        let pane = exited_pane(3);
+        feed_commands(&pane, 2);
+        assert_eq!(pane.command_blocks().len(), 2);
+        // A column change renumbers the lines: no block survives it.
+        pane.parser().screen_mut().set_size(crate::term::vt_size(6), crate::term::vt_size(20));
+        assert!(pane.command_blocks().is_empty());
+        // Output that scrolls the lines out of the 3-line history drops the block of the lines that went.
+        feed_commands(&pane, 4);
+        let blocks = pane.command_blocks();
+        assert!(!blocks.is_empty() && blocks.len() < 4, "{blocks:?}");
+        assert!(blocks.iter().all(|b| b.start >= pane.parser().screen().history_dropped()));
     }
 }

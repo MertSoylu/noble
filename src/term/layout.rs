@@ -284,6 +284,10 @@ pub enum SavedNode {
         /// Quick-launch command this pane was opened with (e.g. `claude`); run again on restore.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launch: Option<String>,
+        /// The agent conversation the pane was running (its session id); restored by adding the agent's
+        /// resume arguments to `launch`. Files written before this existed have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<crate::hooks::resume::Resume>,
     },
     Split {
         dir: Dir,
@@ -296,6 +300,15 @@ pub enum SavedNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session file from before `resume` existed loads with none, and writing one without a resume adds no key.
+    #[test]
+    fn saved_leaf_without_resume_loads_and_writes_as_before() {
+        let old: SavedNode = serde_json::from_str(r#"{"type":"leaf","cwd":"C:\\x","launch":"claude"}"#).unwrap();
+        assert_eq!(old, SavedNode::Leaf { cwd: "C:\\x".into(), launch: Some("claude".into()), resume: None });
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("resume"), "no resume key without one: {text}");
+    }
 
     fn area() -> Rect {
         Rect::new(0, 0, 100, 40)

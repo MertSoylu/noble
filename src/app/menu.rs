@@ -33,6 +33,8 @@ pub enum MenuCmd {
     TogglePin(PathBuf),
     RemoveProject(PathBuf),
     OpenLink(crate::term::link::Link),
+    /// An action run on a pane (the pane is focused first): the command output actions of its menu.
+    PaneAction(PaneId, crate::keys::Action),
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +114,18 @@ impl App {
             item("Split down", &hint(A::SplitDown), MenuCmd::Split(pane, Dir::Col)),
             item("Zoom / restore", &hint(A::Zoom), MenuCmd::Zoom(pane)),
         ]);
+        // The commands the shell marked in this pane: jumps, copy, and the send to an agent (see `app/blocks.rs`).
+        if p.last_output_block().is_some() {
+            items.extend([
+                item("Jump to previous command", &hint(A::PrevCommand), MenuCmd::PaneAction(pane, A::PrevCommand)),
+                item("Jump to next command", &hint(A::NextCommand), MenuCmd::PaneAction(pane, A::NextCommand)),
+                item("Copy last output", &hint(A::CopyLastOutput), MenuCmd::PaneAction(pane, A::CopyLastOutput)),
+            ]);
+            if self.agent_target(pane).is_some() {
+                let send = MenuCmd::PaneAction(pane, A::SendLastOutput);
+                items.push(item("Send last output to agent", &hint(A::SendLastOutput), send));
+            }
+        }
         // Quick launchers run next to this pane, in its directory.
         for (i, l) in self.quick_launchers() {
             items.push(item(&format!("Launch {} in split", l.name), "", MenuCmd::LaunchSplit(pane, i)));
@@ -202,6 +216,11 @@ impl App {
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
             MenuCmd::RemoveProject(path) => self.request_remove_project(path),
             MenuCmd::OpenLink(target) => self.open_link(target),
+            MenuCmd::PaneAction(pane, action) => {
+                if self.focus_pane(pane) {
+                    self.run(action);
+                }
+            }
         }
     }
 

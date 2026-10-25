@@ -129,6 +129,10 @@ impl App {
             Action::Passthrough => self.passthrough(),
             Action::JumpToAgent => self.jump_to_agent(),
             Action::OpenLink => self.open_link_menu(),
+            Action::PrevCommand => self.step_command(false),
+            Action::NextCommand => self.step_command(true),
+            Action::CopyLastOutput => self.copy_last_output(),
+            Action::SendLastOutput => self.send_last_output(),
             Action::SendPrefix => {
                 let bytes = crate::term::input::encode_key(
                     &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
@@ -411,8 +415,13 @@ impl App {
             self.tabs[v].activity = false;
         }
         if user {
+            let again = if self.cfg.terminal.resume_agents {
+                "launch commands run again, agent conversations resume"
+            } else {
+                "launch commands run again"
+            };
             let text = match self.keymap.hint(Action::ReopenTab) {
-                Some(key) => format!("tab closed · {key} reopens it (launch commands run again)"),
+                Some(key) => format!("tab closed · {key} reopens it ({again})"),
                 None => "tab closed".into(),
             };
             self.toast(ToastLevel::Info, text);
@@ -659,6 +668,28 @@ impl App {
 
     /// Runs a launcher command in a new tab in the selected project (or a given directory).
     pub fn launch(&mut self, idx: usize, dir: Option<PathBuf>) {
+        self.launch_with(idx, dir, false);
+    }
+
+    /// Index of the installed launcher that runs Claude Code, if there is one.
+    pub fn claude_launcher(&self) -> Option<usize> {
+        self.launchers
+            .iter()
+            .position(|(l, available)| *available && crate::ai::agent_kind(Some(&l.command), "") == Some("claude"))
+    }
+
+    /// Home's card line: a new tab in the selected project that continues its last Claude conversation
+    /// (`claude --continue`, through the `claude` launcher).
+    pub fn continue_claude(&mut self) {
+        match self.claude_launcher() {
+            Some(idx) => self.launch_with(idx, None, true),
+            None => self.toast(ToastLevel::Warn, "claude is not installed ('claude' not on PATH)"),
+        }
+    }
+
+    /// `launch`; with `continue_last` the command also gets Claude's `--continue` (unless the launcher already picks a
+    /// conversation). The tab is remembered with the launcher's own command, as `launch` does.
+    fn launch_with(&mut self, idx: usize, dir: Option<PathBuf>, continue_last: bool) {
         let Some((launcher, available)) = self.launchers.get(idx).cloned() else { return };
         if !available {
             self.toast(
@@ -673,7 +704,12 @@ impl App {
             return;
         };
         let origin = format!("{} · {}", dir_name(&path), launcher.name);
-        let command = self.shell.invocation(&launcher.command);
+        let line = if continue_last {
+            crate::hooks::resume::continue_command(&launcher.command).unwrap_or_else(|| launcher.command.clone())
+        } else {
+            launcher.command.clone()
+        };
+        let command = self.shell.invocation(&line);
         let before = self.tabs.len();
         self.new_tab(path, Some(&command), Some(origin));
         // Remembered for the session: the restored pane runs the launcher again.
@@ -937,9 +973,11 @@ impl App {
         match n {
             Node::Leaf(id) => {
                 let pane = self.panes.get(id);
+                let launch = pane.and_then(|p| p.launcher.clone());
                 SavedNode::Leaf {
                     cwd: pane.map(|p| p.cwd()).unwrap_or_else(home).display().to_string(),
-                    launch: pane.and_then(|p| p.launcher.clone()),
+                    resume: self.saved_resume(*id, launch.as_deref()),
+                    launch,
                 }
             }
             Node::Split { dir, ratio, a, b } => SavedNode::Split {
@@ -949,6 +987,15 @@ impl App {
                 b: Box::new(self.save_node(b)),
             },
         }
+    }
+
+    /// The conversation a pane resumes on restore: the session its agent reported, when the setting is on and its
+    /// launcher runs that agent (`resume::resume_command` decides, so a shell launcher saves none).
+    fn saved_resume(&self, pane: PaneId, launch: Option<&str>) -> Option<crate::hooks::resume::Resume> {
+        let resume = self.agent_resume.get(&pane)?;
+        let launch = launch?;
+        let resumes = self.cfg.terminal.resume_agents && crate::hooks::resume::resume_command(launch, resume).is_some();
+        resumes.then(|| resume.clone())
     }
 
     /// One tab as the session file and the workspaces store it.
@@ -988,10 +1035,17 @@ impl App {
     ) -> Option<Node> {
         let (rows, cols) = size;
         match n {
-            SavedNode::Leaf { cwd, launch } => {
+            SavedNode::Leaf { cwd, launch, resume } => {
                 let path = PathBuf::from(cwd);
+                // A saved conversation resumes through the launcher's own command, with the agent's resume arguments
+                // after it (only when the setting is on and the launcher runs that agent). Otherwise a quick-launch
+                // pane runs its command again. The saved launcher stays as it was, so a later save does not repeat
+                // the arguments.
+                let resume = resume.as_ref().filter(|_| self.cfg.terminal.resume_agents);
+                let resumed =
+                    launch.as_deref().zip(resume).and_then(|(l, r)| crate::hooks::resume::resume_command(l, r));
                 // A quick-launch pane runs its command again (prepared for the current shell).
-                let command = launch.as_deref().map(|l| self.shell.invocation(l));
+                let command = resumed.as_deref().or(launch.as_deref()).map(|l| self.shell.invocation(l));
                 let command = command.as_deref();
                 // A failed spawn in the saved directory (e.g. no permission to enter it) is
                 // retried in home, on Windows and Unix alike.
@@ -1007,6 +1061,10 @@ impl App {
                 };
                 if let Some(p) = self.panes.get_mut(&id) {
                     p.launcher = launch.clone();
+                }
+                // The pane keeps the conversation, so saving it again (or closing it into the reopen list) keeps it.
+                if let Some(r) = resume {
+                    self.agent_resume.insert(id, r.clone());
                 }
                 Some(Node::Leaf(id))
             }

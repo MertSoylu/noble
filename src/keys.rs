@@ -252,10 +252,14 @@ pub enum Action {
     DismissHooksOffer,
     Notifications,
     FocusMode,
+    PrevCommand,
+    NextCommand,
+    CopyLastOutput,
+    SendLastOutput,
 }
 
 impl Action {
-    pub const ALL: [Action; 59] = [
+    pub const ALL: [Action; 63] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -315,6 +319,10 @@ impl Action {
         Action::DismissHooksOffer,
         Action::Notifications,
         Action::FocusMode,
+        Action::PrevCommand,
+        Action::NextCommand,
+        Action::CopyLastOutput,
+        Action::SendLastOutput,
     ];
 
     pub fn id(&self) -> String {
@@ -372,6 +380,10 @@ impl Action {
                     Action::DismissHooksOffer => "dismiss_hooks_offer",
                     Action::Notifications => "notifications",
                     Action::FocusMode => "focus_mode",
+                    Action::PrevCommand => "prev_command",
+                    Action::NextCommand => "next_command",
+                    Action::CopyLastOutput => "copy_last_output",
+                    Action::SendLastOutput => "send_last_output",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -438,6 +450,10 @@ impl Action {
             Action::DismissHooksOffer => "Dismiss Agent Status Offer".into(),
             Action::Notifications => "Show Notifications".into(),
             Action::FocusMode => "Toggle Focus Mode".into(),
+            Action::PrevCommand => "Jump to Previous Command".into(),
+            Action::NextCommand => "Jump to Next Command".into(),
+            Action::CopyLastOutput => "Copy Last Output".into(),
+            Action::SendLastOutput => "Send Last Output to Agent".into(),
         }
     }
 
@@ -480,6 +496,10 @@ impl Action {
             | Action::SendPrefix
             | Action::PaneMenu
             | Action::Passthrough
+            | Action::PrevCommand
+            | Action::NextCommand
+            | Action::CopyLastOutput
+            | Action::SendLastOutput
             | Action::OpenLink => "PANE",
             _ => "SYS",
         }
@@ -555,6 +575,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("i"), Action::Passthrough),
         (c("a"), Action::JumpToAgent),
         (c("u"), Action::OpenLink),
+        (c("y"), Action::SendLastOutput),
     ];
     for n in 1..=9u8 {
         v.push((Chord::new(KeyCode::Char((b'0' + n) as char), KeyModifiers::NONE), Action::GoTab(n)));

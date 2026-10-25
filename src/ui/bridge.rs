@@ -561,10 +561,13 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     y += 1;
     // The spacer row under the title carries the pull request and the ports.
     live_row(buf, x, y, w, app, p, hits);
-    // The TASKS section comes under the spacer row when there is room; the rest of the card follows it.
-    let tasks_used = task_section(buf, x, y + 1, w, area.bottom().saturating_sub(y + 1), app, p, hits);
-    let rows = area.bottom().saturating_sub(y).saturating_sub(tasks_used);
-    y += 1 + tasks_used;
+    // The Claude line comes under the spacer row (one row, when the project has a conversation), then the TASKS
+    // section when there is room; the rest of the card follows them.
+    let claude_used = claude_line(buf, Rect::new(x, y + 1, w, area.bottom().saturating_sub(y + 1)), app, p, hits);
+    let tasks_top = y + 1 + claude_used;
+    let tasks_used = task_section(buf, x, tasks_top, w, area.bottom().saturating_sub(tasks_top), app, p, hits);
+    let rows = area.bottom().saturating_sub(y).saturating_sub(claude_used + tasks_used);
+    y += 1 + claude_used + tasks_used;
     let Some(g) = p.git.as_ref() else {
         let text = if p.repo { "checking git status…" } else { "not a git repository" };
         hud::put(buf, x, y, text, th.dim(), w);
@@ -625,6 +628,23 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
         hud::put(buf, x + col as u16 * col_w, y + row as u16, &more, th.dim(), col_w);
     }
     y + change_rows
+}
+
+/// The Claude line of the selected project's card: `↻ claude · 2h ago`, when the project has a Claude conversation
+/// folder and a `claude` launcher is installed. A click continues that conversation (`Hit::ClaudeContinue`). `line` is
+/// the row it would take (drawn only when it has a row). Returns the rows used (0 or 1).
+fn claude_line(buf: &mut Buffer, line: Rect, app: &App, p: &Project, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+    let Some(when) = p.claude else { return 0 };
+    if line.height == 0 || line.width < 12 || app.claude_launcher().is_none() {
+        return 0;
+    }
+    let th = &app.theme;
+    let since = ago(when);
+    let text = if since == "now" { "↻ claude · just now".to_string() } else { format!("↻ claude · {since} ago") };
+    hud::put(buf, line.x, line.y, &text, th.accent(), line.width);
+    let width = (util::width(&text) as u16).min(line.width);
+    hits.push((Rect::new(line.x, line.y, width, 1), Hit::ClaudeContinue));
+    1
 }
 
 /// Most rows the TASKS chips take (they wrap onto a second row).

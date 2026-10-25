@@ -1,6 +1,7 @@
 //! vt100 callbacks: the OSC sequences a shell or program sends (window title, working directory,
 //! clipboard, notifications, prompt marks, exit codes, OSC 8 links) and the OSC 7 path helpers.
 
+use super::blocks::{CommandBlock, MAX_BLOCKS, retain_live};
 use super::colors::{OscScan, SCHEME_NOTICES, SharedColors, Terminator};
 use super::pane::{screen_base, span_text};
 use crate::util;
@@ -32,6 +33,9 @@ pub struct Callbacks {
     /// `preexec`, fish `fish_preexec`, PowerShell's read-line wrapper). It is not sent for an empty
     /// line, so it tells a command that ran from an Enter that only brought the prompt back.
     pub started: Option<std::time::Instant>,
+    /// The commands the shell ran in this pane, oldest first: opened by `133;C`, closed by `133;D` (see
+    /// `open_block`, `close_block`). Pruned where the numbering is no longer valid (`retain_live`).
+    pub blocks: std::collections::VecDeque<CommandBlock>,
     /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
     /// OSC 8 links (newest last, capped in number).
@@ -200,16 +204,19 @@ impl crate::vt100::Callbacks for Callbacks {
             // optionally with its exit code (`133;D;1`). A bare D keeps a code already reported, and
             // so does a second code: the first one of a prompt is NOBLE's own (see `exit`).
             [b"133", kind, rest @ ..] if matches!(kind.first(), Some(b'A' | b'D')) => {
-                if kind.first() == Some(&b'D')
-                    && let Some(code) = rest.first().and_then(|c| parse_exit_code(c))
-                {
-                    self.exit.get_or_insert(code);
+                let code = rest.first().and_then(|c| parse_exit_code(c));
+                if kind.first() == Some(&b'D') {
+                    if let Some(code) = code {
+                        self.exit.get_or_insert(code);
+                    }
+                    self.close_block(screen, code);
                 }
                 self.shell_prompt();
             }
             // OSC 133;C: the command line typed at the prompt starts running.
             [b"133", kind, ..] if kind.first() == Some(&b'C') => {
                 self.started = Some(std::time::Instant::now());
+                self.open_block(screen);
             }
             // Color queries (`?`): OSC 4 palette entries, 10 text, 11 background, 12 cursor. The answer waits for the
             // string's terminator (`seal_color_replies`). A color being set, or reset (104, 110 …), is ignored.
@@ -360,6 +367,37 @@ impl Callbacks {
             _ if TRACKED_MODES.contains(&mode) => self.mode_on(mode),
             _ => return None,
         })
+    }
+
+    /// A command starts running (`133;C`): its output begins on the cursor's line. The typed command is on the line
+    /// above (Enter moved the cursor down before the shell ran it), so that line is kept as the command's text.
+    fn open_block(&mut self, screen: &mut crate::vt100::Screen) {
+        let epoch = screen.reflow_epoch();
+        retain_live(&mut self.blocks, screen.history_dropped(), epoch);
+        let (row, _) = screen.cursor_position();
+        let start = screen_base(screen) + row as usize;
+        let cols = crate::term::screen_size(screen).1;
+        let line = start.checked_sub(1).and_then(|l| span_text(screen, l, 0, cols)).map(|t| t.trim_end().to_string());
+        if self.blocks.len() >= MAX_BLOCKS {
+            self.blocks.pop_front();
+        }
+        self.blocks.push_back(CommandBlock { start, end: None, epoch, exit: None, line });
+    }
+
+    /// A command finished (`133;D`): its output ends where the cursor is, and the line the cursor is on counts when
+    /// it holds output (the command printed without a final line break). A block that a reflow renumbered in the
+    /// meantime is dropped instead: its lines are no longer where it says.
+    fn close_block(&mut self, screen: &crate::vt100::Screen, code: Option<i32>) {
+        let epoch = screen.reflow_epoch();
+        let Some(block) = self.blocks.back_mut().filter(|b| b.end.is_none()) else { return };
+        if block.epoch != epoch {
+            self.blocks.pop_back();
+            return;
+        }
+        let (row, col) = screen.cursor_position();
+        let end = screen_base(screen) + row as usize + usize::from(col > 0);
+        block.end = Some(end.max(block.start));
+        block.exit = code;
     }
 
     fn push_link(&mut self, link: Hyperlink) {
@@ -698,5 +736,89 @@ mod tests {
     fn existing_device_attribute_answers_are_unchanged() {
         let mut p = parser(10, 40);
         assert_eq!(answer(&mut p, b"\x1b[5n\x1b[c\x1b[>c"), "\x1b[0n\x1b[?1;2c\x1b[>0;10;1c");
+    }
+
+    fn parser_with_history(rows: u16, cols: u16, history: usize) -> crate::vt100::Parser<Callbacks> {
+        crate::vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(rows),
+            crate::term::vt_size(cols),
+            history,
+            Callbacks::default(),
+        )
+    }
+
+    #[test]
+    fn command_marks_open_and_close_a_block_with_its_lines_code_and_typed_line() {
+        let mut p = parser_with_history(10, 40, 100);
+        p.process(b"~/app $ cargo test\r\n\x1b]133;C\x07");
+        p.process(b"running 1 test\r\nFAILED\r\n\x1b]133;D;101\x07~/app $ ");
+        let blocks: Vec<CommandBlock> = p.callbacks().blocks.iter().cloned().collect();
+        assert_eq!(
+            blocks,
+            vec![CommandBlock {
+                start: 1,
+                end: Some(3),
+                epoch: p.screen().reflow_epoch(),
+                exit: Some(101),
+                line: Some("~/app $ cargo test".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn output_without_a_final_line_break_counts_its_line_and_a_bare_d_keeps_no_code() {
+        let mut p = parser_with_history(10, 40, 100);
+        p.process(b"$ printf x\r\n\x1b]133;C\x07x\x1b]133;D\x07");
+        let b = p.callbacks().blocks.back().unwrap().clone();
+        assert_eq!((b.start, b.end, b.exit), (1, Some(2), None));
+        // A second D after the block closed changes nothing, and a D without a block opens none.
+        p.process(b"\x1b]133;D;7\x07");
+        assert_eq!(p.callbacks().blocks.len(), 1);
+        assert_eq!(p.callbacks().blocks.back().unwrap().exit, None);
+    }
+
+    #[test]
+    fn a_command_still_running_has_no_end_yet() {
+        let mut p = parser_with_history(10, 40, 100);
+        p.process(b"$ sleep 9\r\n\x1b]133;C\x07waiting\r\n");
+        let b = p.callbacks().blocks.back().unwrap().clone();
+        assert_eq!((b.start, b.end), (1, None));
+    }
+
+    #[test]
+    fn blocks_are_pruned_when_their_lines_scroll_out_of_history() {
+        let mut p = parser_with_history(4, 40, 3);
+        p.process(b"$ a\r\n\x1b]133;C\x07one\r\n\x1b]133;D;0\x07");
+        assert_eq!(p.callbacks().blocks.len(), 1);
+        // Enough output to push the block's lines out of the 3-line history.
+        p.process(&b"x\r\n".repeat(8));
+        assert!(p.screen().history_dropped() > 1);
+        p.process(b"$ b\r\n\x1b]133;C\x07");
+        let starts: Vec<usize> = p.callbacks().blocks.iter().map(|b| b.start).collect();
+        assert_eq!(starts.len(), 1, "the first block went with its lines: {starts:?}");
+        assert!(starts[0] >= p.screen().history_dropped());
+    }
+
+    #[test]
+    fn blocks_do_not_survive_a_reflow() {
+        let mut p = parser_with_history(4, 40, 100);
+        p.process(b"$ a\r\n\x1b]133;C\x07one\r\n\x1b]133;D;0\x07");
+        let before = p.screen().reflow_epoch();
+        p.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(20));
+        assert_ne!(p.screen().reflow_epoch(), before, "a column change renumbers the lines");
+        // The next command prunes the old block; the numbers of the new one are the new epoch's.
+        p.process(b"$ b\r\n\x1b]133;C\x07");
+        let blocks: Vec<CommandBlock> = p.callbacks().blocks.iter().cloned().collect();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].epoch, p.screen().reflow_epoch());
+    }
+
+    #[test]
+    fn a_reflow_while_a_command_runs_drops_its_block_at_the_end() {
+        let mut p = parser_with_history(4, 40, 100);
+        p.process(b"$ long\r\n\x1b]133;C\x07out\r\n");
+        p.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(20));
+        p.process(b"\x1b]133;D;0\x07");
+        assert!(p.callbacks().blocks.is_empty(), "its start is in the old numbering");
     }
 }

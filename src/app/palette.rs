@@ -162,6 +162,10 @@ impl App {
                 | Action::OpenLink
                 | Action::Search
                 | Action::FocusMode
+                | Action::PrevCommand
+                | Action::NextCommand
+                | Action::CopyLastOutput
+                | Action::SendLastOutput
                 | Action::Passthrough => in_term,
                 Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
                 Action::ReopenTab => !self.closed_tabs.is_empty(),

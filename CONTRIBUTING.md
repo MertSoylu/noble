@@ -122,9 +122,10 @@ src/
                      reload.rs (config reload), git.rs, input.rs (keys, mouse, clipboard), menu.rs (context
                      menus), ops.rs (tabs, panes, launchers), search.rs (scrollback search, links),
                      palette.rs, settings.rs, agents.rs, live.rs (Home ports and PR), fx.rs (effects),
-                     bindings.rs (key bindings), help.rs (help screen)
+                     bindings.rs (key bindings), help.rs (help screen), blocks.rs (command blocks: jump,
+                     copy, send to the agent)
   term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
-                     osc.rs (vt100 callbacks, OSC parsing),
+                     osc.rs (vt100 callbacks, OSC parsing), blocks.rs (command output ranges, agent context),
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
   vt100/             the terminal emulator: vt100 0.18.1 (MIT, Jesse Luehrs; `LICENSE-MIT` stays) vendored and
                      extended with reflow (`reflow.rs`, `Grid::set_size`); owned code, it does not follow upstream
@@ -135,7 +136,8 @@ src/
   projects.rs        repository scan and git status workers
   store.rs           recent dirs, session, workspaces, AI history, UI state (atomic JSON writes)
   hooks/             agent status hooks: mod.rs (records, `noble hook`, shared helpers) and one module per
-                     agent (claude.rs, codex.rs, copilot.rs, opencode.rs): install, uninstall, upgrade, state
+                     agent (claude.rs, codex.rs, copilot.rs, opencode.rs): install, uninstall, upgrade, state;
+                     resume.rs (session ids from hook payloads, resume and continue command lines)
   wt.rs battery.rs   Windows Terminal color schemes · battery readers
   config.rs keys.rs theme.rs util.rs event.rs
 ```

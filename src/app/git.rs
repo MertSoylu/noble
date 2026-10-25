@@ -71,6 +71,7 @@ mod tests {
             git: None,
             repo: true,
             tasks: Vec::new(),
+            claude: None,
         };
         let projects = [project(r"\\attacker\share\repo"), project("/home/me/repo")];
         assert_eq!(git_project_path(&projects, Path::new("/home/me/repo/src")), Some(PathBuf::from("/home/me/repo")));

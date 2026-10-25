@@ -73,7 +73,7 @@ fn write_session(file: &std::path::Path, ws: &Workspace) {
 }
 
 fn leaf(dir: &std::path::Path) -> SavedNode {
-    SavedNode::Leaf { cwd: dir.display().to_string(), launch: None }
+    SavedNode::Leaf { cwd: dir.display().to_string(), launch: None, resume: None }
 }
 
 fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -556,4 +556,74 @@ fn workspace_names_are_checked_before_saving() {
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert_eq!(app.workspaces.list.len(), 1);
     assert!(toast_texts(&app).last().is_some_and(|t| t.contains("replaced")), "{:?}", toast_texts(&app));
+}
+
+/// A restored agent pane picks its conversation up again: the session id its hook record reported is saved with
+/// the pane, and the restored launcher runs with the agent's resume arguments after its own. With the setting off
+/// the same session restores the launcher as it was.
+#[test]
+fn restored_agent_pane_resumes_its_conversation() {
+    let data = session_dir("resume");
+    let project = data.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut cfg = session_cfg();
+    // The launcher names the agent, so the pane is an agent pane; `echo` stands in for the agent's program.
+    let command = if cfg!(windows) { "cmd /c echo claude --model opus" } else { "echo claude --model opus" };
+    cfg.launchers =
+        vec![noble::config::Launcher { key: "x".into(), name: "Claude".into(), command: command.into(), show: true }];
+    fn lines_have(app: &App, text: &str) -> bool {
+        let id = app.tabs[0].panes()[0];
+        app.panes[&id].all_lines().0.iter().any(|l| l.contains(text))
+    }
+    fn wait(app: &mut App, text: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !lines_have(app, text) && std::time::Instant::now() < deadline {
+            app.pump();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        lines_have(app, text)
+    }
+
+    let mut app = session_app(&data, false, cfg.clone());
+    app.restore_last_session();
+    app.launch(0, Some(project.clone()));
+    assert!(wait(&mut app, "claude --model opus"), "the launcher never ran");
+    // The agent's session-start record reports its conversation id.
+    let id = app.tabs[0].panes()[0];
+    let now = chrono::Utc::now().timestamp();
+    let record = noble::hooks::HookRecord {
+        event: noble::hooks::SESSION_START.into(),
+        message: None,
+        ts: now,
+        agent: Some(noble::hooks::Agent::Claude),
+        session: Some("abc-123".into()),
+        subagents: 0,
+    };
+    app.apply_hook_records(std::collections::HashMap::from([(id, record)]));
+    app.shutdown();
+    let text = std::fs::read_to_string(data.join("session.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let leaf = &saved["tabs"][0]["layout"];
+    assert_eq!(
+        leaf["resume"],
+        serde_json::json!({ "agent": "claude", "id": "abc-123" }),
+        "saved with the pane: {text}"
+    );
+
+    // Restored with the setting on: the launcher runs with the resume arguments after its own.
+    let mut again = session_app(&data, false, cfg.clone());
+    again.restore_last_session();
+    assert!(wait(&mut again, "--resume abc-123"), "the conversation was not resumed");
+    assert!(lines_have(&again, "claude --model opus --resume abc-123"));
+    again.shutdown();
+
+    // Setting off: the same file restores the launcher as it was.
+    let mut off_cfg = cfg.clone();
+    off_cfg.terminal.resume_agents = false;
+    let mut off = session_app(&data, false, off_cfg);
+    off.restore_last_session();
+    assert!(wait(&mut off, "claude --model opus"), "the launcher did not run");
+    let id = off.tabs[0].panes()[0];
+    assert!(!off.panes[&id].all_lines().0.iter().any(|l| l.contains("--resume")), "resumed with the setting off");
+    off.shutdown();
 }

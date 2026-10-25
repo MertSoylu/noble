@@ -411,6 +411,7 @@ fn bridge_shows_agent_sessions_and_usage_graph() {
         git: None,
         repo: true,
         tasks: Vec::new(),
+        claude: None,
     });
     app.handle(AppEvent::Projects(projects));
     let probe = if cfg!(windows) { "cmd /c echo claude-probe" } else { "echo claude-probe" };
@@ -675,6 +676,7 @@ fn remove_and_add_projects() {
         git: None,
         repo: true,
         tasks: Vec::new(),
+        claude: None,
     });
     app.handle(AppEvent::Projects(scanned.clone()));
     // Pin it, then remove it with → → ⏎ and the last menu item.
@@ -945,4 +947,60 @@ fn open_folder_without_a_project_says_so() {
     assert!(text.contains("Folder"), "{text}");
     click(&mut app, folder.x + 1, folder.y);
     assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+}
+
+/// The selected project's card shows `↻ claude · 2h ago` when the project has a Claude conversation folder and a
+/// `claude` launcher is installed; a click on it is a `ClaudeContinue` hit. Without either, the line is left out.
+#[test]
+fn project_card_shows_the_claude_line() {
+    use noble::app::Hit;
+    let mut app = demo_app(160, 45);
+    let path = app.selected_project().expect("a selected project").path.clone();
+    let two_hours = SystemTime::now() - Duration::from_secs(2 * 3600 + 30);
+    for p in &mut app.projects {
+        p.claude = Some(two_hours);
+    }
+    let claude =
+        noble::config::Launcher { key: "c".into(), name: "claude".into(), command: "claude".into(), show: true };
+    app.launchers = vec![(claude.clone(), true)];
+
+    let text = render(&mut app, 160, 45);
+    save("home-claude-line-160x45", &text);
+    assert!(text.contains("↻ claude · 2h ago"), "{text}");
+    assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_some(), "the line is clickable");
+    // Every size: the line is drawn whole or left out, never past the card.
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("home-claude-line-{w}x{h}"), &text);
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "overflow at {w}x{h}");
+    }
+
+    // No `claude` launcher installed: no line and no hit.
+    app.launchers = vec![(claude.clone(), false)];
+    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_none());
+    app.launchers = Vec::new();
+    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    // The launcher is there, but the project has no conversation folder.
+    app.launchers = vec![(claude, true)];
+    for p in &mut app.projects {
+        p.claude = None;
+    }
+    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    // Other projects keep their own times: only the selected one is on the card.
+    for p in &mut app.projects {
+        p.claude = (p.path == path).then_some(two_hours);
+    }
+    assert!(render(&mut app, 160, 45).contains("↻ claude · 2h ago"));
+}
+
+/// Without a `claude` launcher the continue action says so instead of opening a tab.
+#[test]
+fn continue_claude_without_a_launcher_says_so() {
+    let mut app = demo_app(160, 45);
+    app.launchers = Vec::new();
+    let tabs = app.tabs.len();
+    app.continue_claude();
+    assert_eq!(app.tabs.len(), tabs, "no tab without the launcher");
+    assert!(app.toasts.iter().any(|t| t.text.contains("claude is not installed")), "a toast says why");
 }
