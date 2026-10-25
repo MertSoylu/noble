@@ -709,12 +709,12 @@ impl TermPalette {
     }
 
     /// Turns a vt100 color into a drawing color; `default` is the background/text default.
-    pub fn color(&self, c: vt100::Color, default: Color) -> Color {
+    pub fn color(&self, c: crate::vt100::Color, default: Color) -> Color {
         match c {
-            vt100::Color::Default => default,
-            vt100::Color::Idx(i) if i < 16 => self.ansi.map(|a| a[i as usize]).unwrap_or(Color::Indexed(i)),
-            vt100::Color::Idx(i) => Color::Indexed(i),
-            vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+            crate::vt100::Color::Default => default,
+            crate::vt100::Color::Idx(i) if i < 16 => self.ansi.map(|a| a[i as usize]).unwrap_or(Color::Indexed(i)),
+            crate::vt100::Color::Idx(i) => Color::Indexed(i),
+            crate::vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
         }
     }
 }
@@ -747,11 +747,11 @@ mod term_tests {
         let list = builtin_schemes();
         let follow = TermPalette::resolve(&list, FOLLOW_THEME, "", "", &th);
         assert_eq!((follow.bg, follow.fg, follow.ansi), (th.bg, th.fg, None));
-        assert_eq!(follow.color(vt100::Color::Idx(1), th.fg), Color::Indexed(1));
+        assert_eq!(follow.color(crate::vt100::Color::Idx(1), th.fg), Color::Indexed(1));
         let gray = TermPalette::resolve(&list, "Light-Gray", "", "", &th);
         assert_eq!(gray.bg, rgb(0xc8c8c8));
-        assert_eq!(gray.color(vt100::Color::Idx(1), gray.fg), rgb(0xa3261b));
-        assert_eq!(gray.color(vt100::Color::Idx(200), gray.fg), Color::Indexed(200));
+        assert_eq!(gray.color(crate::vt100::Color::Idx(1), gray.fg), rgb(0xa3261b));
+        assert_eq!(gray.color(crate::vt100::Color::Idx(200), gray.fg), Color::Indexed(200));
         let custom = TermPalette::resolve(&list, "light-gray", "#d0d0d0", "112233", &th);
         assert_eq!((custom.bg, custom.fg), (rgb(0xd0d0d0), rgb(0x112233)));
         assert_eq!(TermPalette::resolve(&list, "bogus", "nope", "", &th).bg, th.bg);

@@ -2,7 +2,7 @@
 //! clipboard, notifications, prompt marks, exit codes, OSC 8 links) and the OSC 7 path helpers.
 
 use super::colors::{OscScan, SCHEME_NOTICES, SharedColors, Terminator};
-use super::pane::{history_len, span_text};
+use super::pane::{screen_base, span_text};
 use crate::util;
 
 /// vt100 callbacks: title, working directory, terminal query replies, clipboard.
@@ -37,7 +37,7 @@ pub struct Callbacks {
     /// OSC 8 links (newest last, capped in number).
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
-    open_link: Option<(usize, u16, String)>,
+    open_link: Option<(usize, u16, String, u64)>,
     /// The host named by the pane's first OSC 7 report (its own shell, before any `ssh`).
     local_host: Option<String>,
     /// The `TRACKED_MODES` a program has set (`CSI ? Ps h`) and not reset since.
@@ -89,11 +89,12 @@ fn parse_exit_code(raw: &[u8]) -> Option<i32> {
     text.parse::<i32>().ok().or_else(|| text.parse::<u32>().ok().map(|c| c as i32))
 }
 
-/// Text marked with OSC 8: absolute line (0 = oldest scrollback line) and column span.
+/// Text marked with OSC 8: stable line number (`pane::screen_base`: lines scrolled out plus scrollback index) and
+/// column span.
 ///
-/// vt100 does not report how many lines scrolled out of a full scrollback, so `line` drifts once the
-/// scrollback is full. `text` (the marked cells when the link closed) lets a lookup discard a link
-/// whose line no longer holds that text instead of returning the wrong address.
+/// The number stays right while output scrolls, a full scrollback included. A reflow renumbers the lines: the
+/// links of an older `epoch` (`Screen::reflow_epoch`) are dropped. `text` (the marked cells when the link closed) is
+/// a last guard that lets a lookup discard a link whose line no longer holds that text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hyperlink {
     pub line: usize,
@@ -101,27 +102,28 @@ pub struct Hyperlink {
     pub to: u16,
     pub url: String,
     pub text: String,
+    pub epoch: u64,
 }
 
 /// Maximum number of OSC 8 links kept.
 const MAX_HYPERLINKS: usize = 1000;
 
-impl vt100::Callbacks for Callbacks {
-    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+impl crate::vt100::Callbacks for Callbacks {
+    fn set_window_title(&mut self, _: &mut crate::vt100::Screen, title: &[u8]) {
         self.title = String::from_utf8_lossy(title).trim().to_string();
     }
 
-    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+    fn audible_bell(&mut self, _: &mut crate::vt100::Screen) {
         self.bell = true;
     }
 
-    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
+    fn copy_to_clipboard(&mut self, _: &mut crate::vt100::Screen, _ty: &[u8], data: &[u8]) {
         if let Some(bytes) = util::base64_decode(data) {
             self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
         }
     }
 
-    fn unhandled_osc(&mut self, screen: &mut vt100::Screen, params: &[&[u8]]) {
+    fn unhandled_osc(&mut self, screen: &mut crate::vt100::Screen, params: &[&[u8]]) {
         let join = |parts: &[&[u8]]| {
             parts.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect::<Vec<_>>().join(";")
         };
@@ -170,16 +172,19 @@ impl vt100::Callbacks for Callbacks {
             [b"8", _params, uri @ ..] => {
                 let url = join(uri);
                 let (row, col) = screen.cursor_position();
-                let line = history_len(screen) + row as usize;
-                if let Some((l0, c0, open)) = self.open_link.take() {
+                let line = screen_base(screen) + row as usize;
+                let epoch = screen.reflow_epoch();
+                if let Some((l0, c0, open, opened)) = self.open_link.take() {
                     let cols = crate::term::screen_size(screen).1;
                     // A span whose line already left the scrollback cannot be verified later: dropped.
                     let mut span = |line: usize, from: u16, to: u16| {
                         if let Some(text) = span_text(screen, line, from, to) {
-                            self.push_link(Hyperlink { line, from, to, url: open.clone(), text });
+                            self.push_link(Hyperlink { line, from, to, url: open.clone(), text, epoch });
                         }
                     };
-                    if line == l0 {
+                    if opened != epoch {
+                        // A reflow between the start and the end moved the start: no span to take.
+                    } else if line == l0 {
                         span(line, c0, col);
                     } else {
                         // Line-spanning link: end of the first line and start of the last.
@@ -188,7 +193,7 @@ impl vt100::Callbacks for Callbacks {
                     }
                 }
                 if !url.is_empty() {
-                    self.open_link = Some((line, col, url));
+                    self.open_link = Some((line, col, url, epoch));
                 }
             }
             // OSC 133: FinalTerm/VS Code prompt marks. A = prompt started, D = command finished,
@@ -218,13 +223,13 @@ impl vt100::Callbacks for Callbacks {
         }
     }
 
-    fn visual_bell(&mut self, _: &mut vt100::Screen) {
+    fn visual_bell(&mut self, _: &mut crate::vt100::Screen) {
         self.bell = true;
     }
 
     fn unhandled_csi(
         &mut self,
-        screen: &mut vt100::Screen,
+        screen: &mut crate::vt100::Screen,
         i1: Option<u8>,
         i2: Option<u8>,
         params: &[&[u16]],
@@ -336,8 +341,8 @@ impl Callbacks {
     /// Whether a private DEC mode is set, for DECRQM. `None` when NOBLE does not recognize the mode.
     /// The modes vt100 handles are read from the screen; the `TRACKED_MODES` are read from `tracked_modes`, so adding
     /// a mode there is enough for DECRQM. A mode vt100 handles needs its own arm here.
-    fn private_mode(&self, screen: &vt100::Screen, mode: u16) -> Option<bool> {
-        use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+    fn private_mode(&self, screen: &crate::vt100::Screen, mode: u16) -> Option<bool> {
+        use crate::vt100::{MouseProtocolEncoding, MouseProtocolMode};
         let mouse = screen.mouse_protocol_mode();
         let encoding = screen.mouse_protocol_encoding();
         Some(match mode {
@@ -359,6 +364,8 @@ impl Callbacks {
 
     fn push_link(&mut self, link: Hyperlink) {
         if link.to > link.from && !link.url.is_empty() {
+            // Links of an older numbering (a reflow) can no longer be found.
+            self.hyperlinks.retain(|h| h.epoch == link.epoch);
             self.hyperlinks.push_back(link);
             if self.hyperlinks.len() > MAX_HYPERLINKS {
                 self.hyperlinks.pop_front();
@@ -475,8 +482,8 @@ fn percent_decode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn parser(rows: u16, cols: u16) -> vt100::Parser<Callbacks> {
-        vt100::Parser::new_with_callbacks(
+    fn parser(rows: u16, cols: u16) -> crate::vt100::Parser<Callbacks> {
+        crate::vt100::Parser::new_with_callbacks(
             crate::term::vt_size(rows),
             crate::term::vt_size(cols),
             0,
@@ -485,7 +492,7 @@ mod tests {
     }
 
     /// The answer a query gets, taken out of the emulator the way the reader thread does.
-    fn answer(p: &mut vt100::Parser<Callbacks>, query: &[u8]) -> String {
+    fn answer(p: &mut crate::vt100::Parser<Callbacks>, query: &[u8]) -> String {
         p.process(query);
         String::from_utf8(std::mem::take(&mut p.callbacks_mut().responses)).unwrap()
     }
@@ -574,7 +581,7 @@ mod tests {
     #[test]
     fn scheme_query_is_answered_from_the_shared_colors() {
         let colors = SharedColors::default();
-        let mut p = vt100::Parser::new_with_callbacks(
+        let mut p = crate::vt100::Parser::new_with_callbacks(
             crate::term::vt_size(10),
             crate::term::vt_size(40),
             0,

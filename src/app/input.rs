@@ -830,7 +830,7 @@ impl App {
     fn pane_wants_mouse(&self, pane: PaneId) -> bool {
         self.panes
             .get(&pane)
-            .map(|p| p.parser().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None)
+            .map(|p| p.parser().screen().mouse_protocol_mode() != crate::vt100::MouseProtocolMode::None)
             .unwrap_or(false)
     }
 

@@ -29,6 +29,8 @@ arboard = { version = "3.7.0", default-features = false, features = ["wayland-da
 chrono = "0.4.45"
 crossterm = "0.29.0"
 dirs = "7.0.0"
+# itoa and vte are the dependencies of the vendored vt100 emulator (`src/vt100`); vte/std as upstream enabled it.
+itoa = "1.0.18"
 portable-pty = "0.9.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 # SHA-256 of `noble update` downloads; already in the tree as ureq's TLS backend (rustls), so no new crate.
@@ -39,7 +41,7 @@ sysinfo = "0.39.6"
 toml = "1.1.6"
 unicode-width = "0.2.2"
 ureq = "3.4.2"
-vt100 = "0.18.1"
+vte = { version = "0.15.0", default-features = false, features = ["std"] }
 
 # The OS asking NOBLE to end (`termination.rs`): signals on Unix, console control events on Windows.
 [target.'cfg(unix)'.dependencies]

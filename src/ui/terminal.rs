@@ -595,16 +595,26 @@ fn pane_content(
     let default_bg = pal.bg;
     // Matches in the visible rows: (screen row, start, end, selected).
     let found: Vec<(u16, u16, u16, bool)> = match marks.search {
-        Some(s) => {
-            let top = s.history.saturating_sub(screen.scrollback());
+        // The matches were computed at some point; their lines are located by the stable line numbers, so output (or a
+        // growing screen) since then does not shift the marks. After a reflow they are not drawn until refreshed.
+        Some(s) if s.epoch == screen.reflow_epoch() => {
+            let top = (screen.history_dropped() + screen.scrollback_len()).saturating_sub(screen.scrollback()) as i64
+                - s.dropped as i64;
             s.matches
                 .iter()
                 .enumerate()
-                .filter(|(_, m)| m.line >= top && m.line < top + rows as usize)
-                .map(|(i, m)| ((m.line - top) as u16, m.col, m.col + m.width, s.current == Some(i)))
+                .filter_map(|(i, m)| {
+                    let row = m.line as i64 - top;
+                    (0..i64::from(rows)).contains(&row).then_some((
+                        row as u16,
+                        m.col,
+                        m.col + m.width,
+                        s.current == Some(i),
+                    ))
+                })
                 .collect()
         }
-        None => Vec::new(),
+        _ => Vec::new(),
     };
     for r in 0..inner.height.min(rows) {
         for c in 0..inner.width.min(cols) {

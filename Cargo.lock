@@ -728,6 +728,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "dirs",
+ "itoa",
  "libc",
  "portable-pty",
  "ratatui",
@@ -739,7 +740,7 @@ dependencies = [
  "toml",
  "unicode-width",
  "ureq",
- "vt100",
+ "vte",
  "windows-sys 0.61.2",
 ]
 
@@ -1629,17 +1630,6 @@ name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
-
-[[package]]
-name = "vt100"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb05cdd19ae8707bf6a0a269972c07e6358103a7079faec749dec318a5b3dc23"
-dependencies = [
- "itoa",
- "unicode-width",
- "vte",
-]
 
 [[package]]
 name = "vte"

@@ -19,7 +19,7 @@ const READY_COMMAND: &[u8] = b"echo e2e-ready-$((6*7))\r";
 /// The screen as text, one line per row. `vt100::Screen::contents()` joins a row that wrapped onto the next one with
 /// no line break, so a shell's output can end up on one long line with the text around it (on Windows the whole
 /// screen was one such line in the failing run).
-fn screen_text(screen: &vt100::Screen) -> String {
+fn screen_text(screen: &noble::vt100::Screen) -> String {
     let (_, cols) = noble::term::screen_size(screen);
     screen.rows(0, cols).collect::<Vec<_>>().join("\n")
 }
@@ -30,7 +30,7 @@ fn has_word(text: &str, word: &str) -> bool {
 }
 
 struct Harness {
-    parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
+    parser: Arc<Mutex<noble::vt100::Parser<Callbacks>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
@@ -52,7 +52,7 @@ impl Harness {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+        let parser = Arc::new(Mutex::new(noble::vt100::Parser::new_with_callbacks(
             noble::term::vt_size(rows),
             noble::term::vt_size(cols),
             0,
@@ -85,6 +85,13 @@ impl Harness {
 
     fn screen(&self) -> String {
         screen_text(self.parser.lock().unwrap().screen())
+    }
+
+    /// Resizes the terminal NOBLE runs in, as dragging the window edge does: the PTY (NOBLE gets the resize) and
+    /// the emulator that reads its output.
+    fn resize(&self, rows: u16, cols: u16) {
+        self._master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).unwrap();
+        self.parser.lock().unwrap().screen_mut().set_size(noble::term::vt_size(rows), noble::term::vt_size(cols));
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -174,7 +181,7 @@ impl Drop for Home {
 #[test]
 fn ready_word_is_read_from_its_own_row() {
     let read = |bytes: &[u8]| {
-        let mut parser = vt100::Parser::new(noble::term::vt_size(6), noble::term::vt_size(20), 0);
+        let mut parser = noble::vt100::Parser::new(noble::term::vt_size(6), noble::term::vt_size(20), 0);
         parser.process(bytes);
         (parser.screen().contents(), has_word(&screen_text(parser.screen()), READY_WORD))
     };
@@ -559,4 +566,56 @@ fn key_bindings_are_saved_to_the_config() {
     h.wait_for("ctrl+a v is not bound", 10);
     // The app goes first: while it runs it can still write to the folder.
     drop(h);
+}
+
+/// A long line printed in a terminal tab stays whole while the window is made narrow and wide again: the real binary
+/// in a real pseudo-terminal, resized from outside. The line is read from the rows it occupies, glued together.
+#[test]
+fn a_long_line_stays_whole_when_the_window_is_resized() {
+    let home = Home::new("noble-e2e-resize");
+    let h = Harness::start(&home, 34, 120);
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    h.wait_for("Projects", 20);
+    h.send(b"t");
+    h.wait_for("ctrl+a menu", 10);
+    h.wait_shell_ready(20);
+    // The typed line spells the end as `$((6*7))`, so only the output holds the whole line (like READY_COMMAND).
+    let digits = "0123456789".repeat(20);
+    let line = format!("ELONG{digits}42");
+    h.send(format!("echo ELONG{digits}$((6*7))\r").as_bytes());
+    // The rows the line occupies, glued: from the row that starts it for as long as the line is.
+    let glued = |screen: &str| -> String {
+        let rows: Vec<&str> = screen.lines().collect();
+        let Some(first) = rows.iter().position(|r| r.trim_end().starts_with("ELONG")) else { return String::new() };
+        let mut text = String::new();
+        for row in &rows[first..] {
+            text.push_str(row.trim_end());
+            if text.len() >= line.len() {
+                break;
+            }
+        }
+        text
+    };
+    let wait_whole = |what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let s = h.screen();
+            if glued(&s) == line {
+                save(&format!("resize-{what}"), &s);
+                return;
+            }
+            assert!(Instant::now() < deadline, "{what}: the line is not whole:\n{s}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    wait_whole("120x34");
+    for (rows, cols) in [(34u16, 70u16), (30, 45), (40, 160), (34, 120)] {
+        h.resize(rows, cols);
+        wait_whole(&format!("{cols}x{rows}"));
+    }
+    h.send(b"\x01");
+    h.send(b"q");
+    h.wait_for("QUIT NOBLE", 5);
+    h.send(b"y");
 }

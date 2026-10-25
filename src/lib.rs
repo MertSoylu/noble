@@ -1,5 +1,7 @@
 //! NOBLE — retro-futurist HUD terminal workspace.
 
+extern crate alloc;
+
 pub mod ai;
 pub mod app;
 pub mod battery;
@@ -21,4 +23,5 @@ pub mod theme;
 pub mod ui;
 pub mod update;
 pub mod util;
+pub mod vt100;
 pub mod wt;

@@ -11,49 +11,53 @@ use crate::term::layout::PaneId;
 use crate::term::link;
 use crate::term::pane::{Match, find_matches};
 
-/// How many old matches on each side of the selected one decide the shift in `scrolled_out`.
-const SHIFT_WINDOW: usize = 64;
-/// How many shifts `scrolled_out` tries at most.
-const SHIFT_CANDIDATES: usize = 256;
 /// Output while the search is open recomputes the matches at most this often: a burst of output costs one
 /// refresh per interval, and the last output always gets its refresh (`App::refresh_search_when_due`).
 pub(super) const SEARCH_REFRESH: Duration = Duration::from_millis(100);
 
-/// How many lines dropped off the top since `old` was computed: the shift that makes most old matches
-/// around the selected one (`old[selected]`) reappear (same column, `shift` lines higher) in `new`.
-/// `0` when nothing lines up better than no shift.
+/// The selection after the matches were computed again on a text with `dropped` lines above it and numbering `epoch`
+/// (`new`, `capped`): `(current, detached)`, the newest match when nothing is kept.
 ///
-/// Runs for every output batch while the search is open, so only a window of old matches around the
-/// selection is scored (the one the search has to keep), not all of them for every candidate shift.
-fn scrolled_out(old: &[Match], new: &[Match], selected: usize) -> usize {
-    use std::collections::HashSet;
-    let Some(first) = new.first() else { return 0 };
-    if selected >= old.len() {
-        return 0;
-    }
-    let window = &old[selected.saturating_sub(SHIFT_WINDOW)..(selected + SHIFT_WINDOW + 1).min(old.len())];
-    let known: HashSet<(usize, u16)> = new.iter().map(|m| (m.line, m.col)).collect();
-    let score =
-        |k: usize| window.iter().filter(|m| m.line.checked_sub(k).is_some_and(|l| known.contains(&(l, m.col)))).count();
-    // The oldest surviving match is the first new one, so the shift is one of these distances. The
-    // matches are sorted by line, so the smallest distances come first.
-    let mut candidates: Vec<usize> = Vec::with_capacity(SHIFT_CANDIDATES);
-    for k in old.iter().filter_map(|m| m.line.checked_sub(first.line)) {
-        if candidates.last() != Some(&k) {
-            if candidates.len() == SHIFT_CANDIDATES {
-                break;
+/// Lines keep a stable number (`dropped + line`) while output scrolls and while the screen grows or shrinks, so the
+/// selection moves by how far the first line moved. A reflow renumbers the lines: then the selection is the same
+/// place counted from the newest match (newer lines are the last to leave the scrollback), clamped.
+fn carry_selection(
+    s: &SearchState,
+    new: &[Match],
+    capped: bool,
+    dropped: usize,
+    epoch: u64,
+) -> (Option<usize>, Option<Match>) {
+    // The selected match: the one selected, or the one the selection fell out of the window on.
+    let selected = match s.current {
+        Some(i) => s.matches.get(i).copied(),
+        None => s.detached,
+    };
+    let mut current = None;
+    let mut detached = None;
+    if let Some(m) = selected {
+        if epoch != s.epoch {
+            if let Some(i) = s.current {
+                let newer = s.matches.len().saturating_sub(i + 1);
+                current = new.len().checked_sub(1 + newer);
             }
-            candidates.push(k);
+        } else if let Some(line) = (m.line + s.dropped).checked_sub(dropped) {
+            match new.iter().position(|n| n.line == line && n.col == m.col) {
+                Some(i) => current = Some(i),
+                // Older than every kept match: the window moved past it (a capped search keeps the newest only).
+                // The selection stays where it was, and the newest match is not selected instead.
+                None if capped && new.first().is_some_and(|f| line < f.line) => {
+                    detached = Some(Match { line, ..m });
+                }
+                None => {}
+            }
         }
     }
-    let mut best = (score(0), 0);
-    for k in candidates.into_iter().filter(|&k| k > 0) {
-        let s = score(k);
-        if s > best.0 {
-            best = (s, k);
-        }
-    }
-    best.1
+    let current = current.or_else(|| match detached {
+        Some(_) => None,
+        None => new.len().checked_sub(1),
+    });
+    (current, detached)
 }
 
 impl App {
@@ -73,6 +77,8 @@ impl App {
             current: None,
             detached: None,
             history: 0,
+            dropped: 0,
+            epoch: 0,
             text: None,
             capped: false,
             stale: false,
@@ -101,42 +107,15 @@ impl App {
         let history = text.history;
         let (matches, capped) = find_matches(&text.lines, &s.query);
         let Some(s) = self.search.as_mut() else { return };
-        // The selected match: the one selected, or the one the selection fell out of the window on.
-        let selected = match s.current {
-            Some(i) => s.matches.get(i).copied(),
-            None => s.detached,
-        };
-        // When old lines drop off the top (scrollback full or cleared), absolute line numbers shift. A full
-        // scrollback keeps its length, so the drop is recovered from the matches themselves; a shorter
-        // scrollback is the fallback when the matches do not line up.
-        // Without a selection nothing has to be kept, so the shift is not worked out at all.
-        let mut current = None;
-        let mut detached = None;
-        if let Some(m) = selected {
-            let dropped = match scrolled_out(&s.matches, &matches, s.current.unwrap_or(0)) {
-                0 => (s.history as isize - history as isize).max(0) as usize,
-                n => n,
-            };
-            if let Some(line) = m.line.checked_sub(dropped) {
-                match matches.iter().position(|n| n.line == line && n.col == m.col) {
-                    Some(i) => current = Some(i),
-                    // Older than every kept match: the window moved past it (a capped search keeps the newest only).
-                    // The selection stays where it was, and the newest match is not selected instead.
-                    None if capped && matches.first().is_some_and(|f| line < f.line) => {
-                        detached = Some(Match { line, ..m });
-                    }
-                    None => {}
-                }
-            }
-        }
-        s.current = current.or_else(|| match detached {
-            Some(_) => None,
-            None => matches.len().checked_sub(1),
-        });
+        let (dropped, epoch) = (text.dropped, text.epoch);
+        let (current, detached) = carry_selection(s, &matches, capped, dropped, epoch);
+        s.current = current;
         s.detached = detached;
         s.matches = matches;
         s.capped = capped;
         s.history = history;
+        s.dropped = dropped;
+        s.epoch = epoch;
         s.text = Some(text);
         s.stale = false;
         s.refreshed = Some(Instant::now());
@@ -467,44 +446,66 @@ mod tests {
         Match { line, col, width: 3 }
     }
 
-    /// A full scrollback keeps its length while lines drop off the top: the shift comes from the matches.
-    #[test]
-    fn scrolled_out_recovers_the_dropped_lines() {
-        let old = [m(10, 0), m(40, 4), m(41, 0), m(90, 2)];
-        // Seven lines dropped: matches moved up, one new match appeared at the bottom.
-        let new = [m(3, 4), m(34, 0), m(83, 2), m(95, 0)];
-        assert_eq!(scrolled_out(&old, &new, 3), 7);
-        // The oldest match itself scrolled out.
-        let new = [m(33, 4), m(34, 0), m(83, 2)];
-        assert_eq!(scrolled_out(&old, &new, 2), 7);
+    fn state(matches: Vec<Match>, current: Option<usize>, dropped: usize, epoch: u64) -> SearchState {
+        SearchState {
+            pane: PaneId::default(),
+            query: String::new(),
+            matches,
+            current,
+            detached: None,
+            history: 0,
+            dropped,
+            epoch,
+            text: None,
+            capped: false,
+            stale: false,
+            refreshed: None,
+        }
     }
 
+    /// Lines scrolled out of a full scrollback: the counter says how many, the matches need not line up.
     #[test]
-    fn scrolled_out_is_zero_when_nothing_moved() {
-        let old = [m(10, 0), m(20, 0), m(30, 0)];
-        assert_eq!(scrolled_out(&old, &old, 1), 0);
-        // Growing history only appends matches.
-        assert_eq!(scrolled_out(&old, &[m(10, 0), m(20, 0), m(30, 0), m(50, 1)], 2), 0);
-        assert_eq!(scrolled_out(&[], &old, 0), 0);
-        assert_eq!(scrolled_out(&old, &[], 0), 0);
-        // A selection that is not an old match (none to keep) never scores anything.
-        assert_eq!(scrolled_out(&old, &old, 3), 0);
+    fn selection_follows_the_lines_that_scrolled_out() {
+        let s = state(vec![m(10, 0), m(40, 4), m(41, 0), m(90, 2)], Some(2), 0, 0);
+        // Seven lines dropped: matches moved up, a new one appeared at the bottom.
+        let new = [m(3, 0), m(33, 4), m(34, 0), m(83, 2), m(95, 0)];
+        assert_eq!(carry_selection(&s, &new, false, 7, 0), (Some(2), None));
+        // The selected line itself scrolled out: the newest match is selected.
+        assert_eq!(carry_selection(&s, &[m(83, 2), m(95, 0)], false, 42, 0), (Some(1), None));
     }
 
-    /// Many matches: only the window around the selection is scored, so matches far from it
-    /// that line up with another shift do not outvote the ones next to it.
+    /// A taller screen pulls history back: the first line moved (`dropped` shrinks) and the selection follows it.
     #[test]
-    fn scrolled_out_scores_only_around_the_selection() {
-        // 5000 matches, one every 3 lines, with varying columns so a wrong shift does not line up.
-        let old: Vec<Match> = (0..5000).map(|i| m(i * 3, (i % 5) as u16)).collect();
-        // Around the selection four matches (12 lines) dropped off the top; the many matches below
-        // line up with a shift of 3 instead.
-        let new: Vec<Match> = (0..4999)
-            .map(|i| if i < 1000 { (old[i + 4], 12) } else { (old[i + 1], 3) })
-            .map(|(x, k)| m(x.line - k, x.col))
-            .collect();
-        assert!(new.windows(2).all(|w| w[0].line < w[1].line));
-        assert_eq!(scrolled_out(&old, &new, 100), 12);
-        assert_eq!(scrolled_out(&old, &new, 4000), 3);
+    fn selection_follows_a_row_grow() {
+        let s = state(vec![m(10, 0), m(20, 0), m(30, 0)], Some(1), 6, 0);
+        // Three blank stand-ins came back to the top: every index is three higher, `dropped` three lower.
+        let new = [m(13, 0), m(23, 0), m(33, 0)];
+        assert_eq!(carry_selection(&s, &new, false, 3, 0), (Some(1), None));
+        // Without dropped lines the same text keeps its indexes.
+        assert_eq!(carry_selection(&s, &s.matches.clone(), false, 6, 0), (Some(1), None));
+    }
+
+    /// After a reflow the old numbers mean nothing: the selection keeps its place counted from the newest match.
+    #[test]
+    fn selection_survives_a_new_epoch_by_position_from_the_end() {
+        let s = state(vec![m(1, 0), m(2, 0), m(3, 0), m(4, 0)], Some(1), 0, 0);
+        // Two matches below the selected one; the reflow made more matches above.
+        let new = [m(1, 0), m(2, 0), m(3, 0), m(5, 0), m(8, 0), m(9, 0)];
+        assert_eq!(carry_selection(&s, &new, false, 0, 1), (Some(3), None));
+        // Fewer matches than before: clamped to "none", so the newest is selected.
+        assert_eq!(carry_selection(&s, &[m(9, 0)], false, 0, 1), (Some(0), None));
+        // A search without a selection selects the newest one.
+        let s = state(vec![m(1, 0)], None, 0, 0);
+        assert_eq!(carry_selection(&s, &new, false, 0, 1), (Some(5), None));
+    }
+
+    /// A capped search keeps the newest matches only: a selection older than all of them is detached.
+    #[test]
+    fn selection_older_than_the_kept_matches_is_detached() {
+        let s = state(vec![m(10, 0), m(20, 0), m(30, 0)], Some(0), 0, 0);
+        let new = [m(20, 0), m(30, 0), m(40, 0)];
+        assert_eq!(carry_selection(&s, &new, true, 0, 0), (None, Some(m(10, 0))));
+        // Without the cap it is simply gone.
+        assert_eq!(carry_selection(&s, &new, false, 0, 0), (Some(2), None));
     }
 }
