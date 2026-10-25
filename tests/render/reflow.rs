@@ -363,6 +363,8 @@ fn check_numbered_roundtrip(shell: &str) {
         format!("1..15|%{{\"LINE $_\"}}; ('{head}'+'{tail}')")
     } else if kind.contains("cmd") {
         format!("(for /L %i in (1,1,15) do @echo LINE %i) & echo {head}^{tail}")
+    } else if kind.contains("fish") {
+        format!("for i in (seq 1 15); echo LINE $i; end; echo \"{head}\"\"{tail}\"")
     } else {
         format!("for i in $(seq 1 15); do echo LINE $i; done; echo \"{head}\"\"{tail}\"")
     };
