@@ -109,6 +109,16 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Mouse/hit-test:** `ui/*` drawing functions fill `hits: Vec<(Rect, Hit)>` while drawing; `app/input.rs`
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.
+- **Vendored vt100 and reflow:** the emulator is `src/vt100/` (vt100 0.18.1, MIT, `LICENSE-MIT` kept; owned code,
+  it does not follow upstream). `Screen::set_reflow(true)` (set in `Pane::spawn` on every platform) makes
+  `Grid::set_size` rewrap the primary grid and its scrollback on a column change (`reflow.rs`; rows carry a `wrapped`
+  flag, a wide character moved by the edge leaves a leading spacer); the alternate screen still truncates and pads.
+  `set_pull_history(false)` on Windows: ConPTY repaints from its own viewport top, so a taller pane adds blank rows
+  at the bottom instead of pulling history down. `Screen::history_dropped()` counts lines that scrolled out and
+  `reflow_epoch()` changes whenever lines are renumbered; `pane::screen_base` (`history_dropped + scrollback_len`)
+  gives a line its stable number, which search matches (`SearchState`, `ScrollText`), OSC 8 spans and
+  `scroll_mark` use. On an epoch change search is redone and OSC 8 links are dropped. Reflow is eager (about 100 ms
+  at 100k rows, a few ms at the default history).
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
   shell integration (cwd tracking via OSC 7 / OSC 9;9; the pane's writer thread is the only writer to the PTY
   (`PtyInput`), so `Pane::write` never blocks on a program that does not read; `Pane::cwd` checks a reported folder

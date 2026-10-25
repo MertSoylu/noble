@@ -15,7 +15,7 @@ Within each section the items are in order of priority.
 - Only Claude Code has a real agent state (its hooks). Every other agent is guessed from the program name
   (`agent_kind` in `src/ai/mod.rs`) and shows as a plain `○ codex`.
 - The emulator answers only DSR and DA (`unhandled_csi` in `src/term/osc.rs`): synchronized output, color queries,
-  focus reports and OSC 9;4 progress are ignored, and a resize cuts lines (no reflow).
+  focus reports and OSC 9;4 progress are ignored, and a resize cuts lines (no reflow; done in T7).
 
 ## 0 · Ship v1.10.0 — done
 
@@ -30,13 +30,13 @@ v1.10.0 shipped as a minor release.
 - **Notifications lead nowhere (done):** clicking a "Claude needs you" toast only dismisses it, because `ToastTarget`
   knows only `Config` (`toast_clicked` in `src/app/input.rs`). Add `ToastTarget::Pane` so a click goes to that tab
   and pane; choosing an entry in the notification list should do the same (copying stays as a second choice).
-- **Zoom and resize cut lines for good:** `vt100` 0.18 `Grid::set_size` truncates the visible rows and does not
+- **Zoom and resize cut lines for good (done):** `vt100` 0.18 `Grid::set_size` truncates the visible rows and does not
   reflow, and zooming resizes the PTY (`App::sync_layout`), so zooming a pane and restoring it loses the end of
-  wide lines. See T7.
+  wide lines. Fixed by the reflow in T7.
 - **Stale render dumps (done):** `target/audit` keeps dumps of screens that no longer exist. Clear the folder at the
   start of the render tests so the audit only shows current screens.
 - **`portable-pty` future incompatibility (watch):** 0.9.0, the latest on crates.io, pulls `nix` 0.28, which a
-  future Rust will reject (`cargo report future-incompatibilities`). Track upstream; use `[patch]` if needed.
+  future Rust will reject (`cargo report future-incompatibilities`). Track upstream; use `[patch]` if needed. Rust 1.99+ reports nix 0.28 as future-incompatible (warn only; builds with RUSTFLAGS=-D warnings fail); no hard-error date yet (rust-lang/rust#159218 is a draft). Vendor portable-pty when that changes or upstream publishes nix ≥ 0.29.
 
 ## 2 · Terminal fidelity: AI CLIs draw in NOBLE as in a native terminal
 
@@ -58,7 +58,9 @@ v1.10.0 shipped as a minor release.
   clicks, shift+drag selection and ctrl+click inside NOBLE on Windows, Linux and macOS. Claude's docs warn that
   ConPTY-based hosts can leave stale fragments on screen, and NOBLE's panes run on ConPTY on Windows: add a render or
   PTY test, and a documented fix if needed.
-- **T7 · Reflow spike:** (a) a `vt100` fork that reflows using the rows' wrap flags, or (b) moving to
+- **T7 · Reflow (done):** `vt100` 0.18.1 is vendored as `src/vt100` and reflows the primary screen and its
+  scrollback on a width change; search, OSC 8 links and the scrollback bar use stable line numbers
+  (`history_dropped`, reflow epoch). Spike options were: (a) a `vt100` fork that reflows using the rows' wrap flags, or (b) moving to
   `alacritty_terminal` (reflow, the kitty keyboard protocol and synchronized output built in, but `term/osc.rs` and
   `ui/terminal.rs` rewritten). The decision and a prototype; the implementation comes later.
 

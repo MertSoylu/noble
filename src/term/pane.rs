@@ -24,21 +24,20 @@ pub use super::osc::{
     Callbacks, FOCUS_REPORTS, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
 };
 
-/// Scrollback length (without disturbing the visible scroll position).
-pub(super) fn history_len(screen: &mut vt100::Screen) -> usize {
-    let current = screen.scrollback();
-    screen.set_scrollback(usize::MAX);
-    let len = screen.scrollback();
-    screen.set_scrollback(current);
-    len
+/// The stable number of the first line of the live screen: lines scrolled out so far plus the scrollback length.
+/// Line `n` of the scrollback is `history_dropped + n`; it keeps its number while output scrolls (a full scrollback
+/// included) and while the screen grows, and changes only with the `reflow_epoch`.
+pub(super) fn screen_base(screen: &crate::vt100::Screen) -> usize {
+    screen.history_dropped() + screen.scrollback_len()
 }
 
-/// Text of columns `from..to` on an absolute line (0 = oldest scrollback line), or `None` if the line
-/// is gone. The visible scroll position is preserved.
-pub(super) fn span_text(screen: &mut vt100::Screen, line: usize, from: u16, to: u16) -> Option<String> {
+/// Text of columns `from..to` on a stable line (see `screen_base`), or `None` if the line is gone. The visible
+/// scroll position is preserved.
+pub(super) fn span_text(screen: &mut crate::vt100::Screen, line: usize, from: u16, to: u16) -> Option<String> {
+    // A line that scrolled out of the scrollback is not there any more.
+    let line = line.checked_sub(screen.history_dropped())?;
     let current = screen.scrollback();
-    screen.set_scrollback(usize::MAX);
-    let history = screen.scrollback();
+    let history = screen.scrollback_len();
     let (row, offset) = if line >= history { (line - history, 0) } else { (0, history - line) };
     screen.set_scrollback(offset);
     let text = screen.rows(from, to.saturating_sub(from)).nth(row);
@@ -649,7 +648,7 @@ type HeldView = (Buffer, Option<(u16, u16)>);
 
 pub struct Pane {
     pub id: PaneId,
-    pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
+    pub parser: Arc<Mutex<crate::vt100::Parser<Callbacks>>>,
     /// Input and DSR/DA answers on their way to the PTY (`PtyInput`).
     input: PtyInput,
     master: Box<dyn MasterPty + Send>,
@@ -772,7 +771,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Returns whether a synchronized-output block is open after the chunk (`Callbacks::sync_open`): the caller then holds
 /// the redraw back, and `held` says so to the main thread (set under the parser lock, which `Pane::release_sync` takes).
 fn process_output(
-    parser: &Mutex<vt100::Parser<Callbacks>>,
+    parser: &Mutex<crate::vt100::Parser<Callbacks>>,
     output_gen: &AtomicU64,
     held: &AtomicBool,
     input: &PtyInput,
@@ -795,7 +794,7 @@ fn process_output(
 /// Feeds a chunk to the emulator. A full reset (`ESC c`, RIS) is not reported by vt100, so the chunk is cut after it
 /// and the modes NOBLE tracks itself are cleared there (an open synchronized block ends); a reset split between two
 /// reads is found through `Callbacks::ended_in_esc`.
-pub fn feed(p: &mut vt100::Parser<Callbacks>, chunk: &[u8]) {
+pub fn feed(p: &mut crate::vt100::Parser<Callbacks>, chunk: &[u8]) {
     let mut start = 0;
     let mut esc = p.callbacks().ended_in_esc;
     for (i, &b) in chunk.iter().enumerate() {
@@ -890,12 +889,21 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let mut writer = pair.master.take_writer().context("pty writer")?;
         let (input, queue) = PtyInput::channel();
-        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+        let parser = Arc::new(Mutex::new(crate::vt100::Parser::new_with_callbacks(
             crate::term::vt_size(rows),
             crate::term::vt_size(cols),
             spec.scrollback,
             Callbacks::with_colors(spec.colors.clone()),
         )));
+        // Every platform reflows the rows on a width change (measured with cmd, PowerShell and Git Bash: without it a
+        // line that was wrapped at the old width stays cut when ConPTY does not repaint it). Windows: ConPTY also
+        // keeps the top row of its viewport where it was when the pane gets taller and repaints from there, so the
+        // history is not pulled down on a taller pane (the repaint would write over the pulled rows); the rows are
+        // added at the bottom. Linux and macOS: the kernel PTY repaints nothing and the screen stays bottom-anchored.
+        if let Ok(mut p) = parser.lock() {
+            p.screen_mut().set_reflow(true);
+            p.screen_mut().set_pull_history(!cfg!(windows));
+        }
         let dirty = Arc::new(AtomicBool::new(false));
         let output_gen = Arc::new(AtomicU64::new(0));
         let held = Arc::new(AtomicBool::new(false));
@@ -1014,8 +1022,17 @@ impl Pane {
         }
         self.size = (rows, cols);
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let epoch = lock(&self.parser).screen().reflow_epoch();
         set_screen_size(&self.parser, &self.output_gen, rows, cols);
         self.selection = None;
+        if lock(&self.parser).screen().reflow_epoch() != epoch {
+            // The lines were renumbered: the count of lines that arrived while scrolled back starts over.
+            let offset = self.scroll_offset();
+            self.scroll_mark.set(if offset == 0 { (0, 0) } else { (offset, 0) });
+        }
+        // The width change rewrapped the lines: the copy of the last frame (`remember_view`) shows the old wrap, so a
+        // synchronized block that is open now draws the live screen for one frame instead.
+        *lock(&self.view) = None;
         true
     }
 
@@ -1071,7 +1088,7 @@ impl Pane {
         Some(*cursor)
     }
 
-    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<Callbacks>> {
+    pub fn parser(&self) -> MutexGuard<'_, crate::vt100::Parser<Callbacks>> {
         lock(&self.parser)
     }
 
@@ -1090,7 +1107,7 @@ impl Pane {
     }
 
     /// Sets the scroll offset and keeps `scroll_mark` (the count of new lines below) in step.
-    fn set_offset(&self, p: &mut vt100::Parser<Callbacks>, offset: usize) {
+    fn set_offset(&self, p: &mut crate::vt100::Parser<Callbacks>, offset: usize) {
         let arrived = self.arrived(p.screen().scrollback());
         p.screen_mut().set_scrollback(offset);
         let now = p.screen().scrollback();
@@ -1114,7 +1131,7 @@ impl Pane {
 
     /// The scrollback length (lines above the screen), without moving the view.
     pub fn history_len(&self) -> usize {
-        history_len(lock(&self.parser).screen_mut())
+        lock(&self.parser).screen().scrollback_len()
     }
 
     /// The launcher command the pane was opened with is still running: no prompt has come
@@ -1357,7 +1374,7 @@ impl Pane {
 
 /// All lines including the scrollback (0 = oldest) and the scrollback length, read from `p`.
 /// The visible scroll position is preserved.
-fn scrollback_lines(p: &mut vt100::Parser<Callbacks>) -> (Vec<String>, usize) {
+fn scrollback_lines(p: &mut crate::vt100::Parser<Callbacks>) -> (Vec<String>, usize) {
     let screen = p.screen_mut();
     let original = screen.scrollback();
     screen.set_scrollback(usize::MAX);
@@ -1392,6 +1409,10 @@ pub struct ScrollText {
     pub lines: Arc<Vec<String>>,
     /// Scrollback length (see `all_lines`).
     pub history: usize,
+    /// Lines above the first one (`Screen::history_dropped`): `dropped + index` is a line's stable number.
+    pub dropped: usize,
+    /// The numbering this copy belongs to (`Screen::reflow_epoch`).
+    pub epoch: u64,
     generation: u64,
     size: (u16, u16),
 }
@@ -1399,7 +1420,7 @@ pub struct ScrollText {
 /// Resizes the emulator's screen and moves the output generation with it, under the lock `scroll_text` reads both
 /// with. Without the bump a copy taken before a resize stays valid after it, even when the size returns to the one
 /// it was read at (A → B → A with no output in between).
-fn set_screen_size(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, rows: u16, cols: u16) {
+fn set_screen_size(parser: &Mutex<crate::vt100::Parser<Callbacks>>, output_gen: &AtomicU64, rows: u16, cols: u16) {
     let mut p = lock(parser);
     // vt100 returns to the live screen on a resize (as xterm does); a pane scrolled back stays where it was.
     let offset = p.screen().scrollback();
@@ -1410,27 +1431,29 @@ fn set_screen_size(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &Atomic
 
 /// The text of `p` at output generation `generation`: `have` itself when it was read at the same generation
 /// and size, otherwise read anew.
-fn read_scroll_text(p: &mut vt100::Parser<Callbacks>, generation: u64, have: Option<&ScrollText>) -> ScrollText {
+fn read_scroll_text(p: &mut crate::vt100::Parser<Callbacks>, generation: u64, have: Option<&ScrollText>) -> ScrollText {
     let size = crate::term::screen_size(p.screen());
     if let Some(text) = have.filter(|t| t.generation == generation && t.size == size) {
         return text.clone();
     }
     let (lines, history) = scrollback_lines(p);
-    ScrollText { lines: Arc::new(lines), history, generation, size }
+    let (dropped, epoch) = (p.screen().history_dropped(), p.screen().reflow_epoch());
+    ScrollText { lines: Arc::new(lines), history, dropped, epoch, generation, size }
 }
 
 /// The OSC 8 link at on-screen (row, col): address and column span.
-fn hyperlink_in(p: &mut vt100::Parser<Callbacks>, row: u16, col: u16) -> Option<(String, u16, u16)> {
-    let offset = p.screen().scrollback();
-    let line = history_len(p.screen_mut()).saturating_sub(offset) + row as usize;
+fn hyperlink_in(p: &mut crate::vt100::Parser<Callbacks>, row: u16, col: u16) -> Option<(String, u16, u16)> {
     let screen = p.screen();
+    let line = screen_base(screen) - screen.scrollback() + row as usize;
+    let epoch = screen.reflow_epoch();
     p.callbacks()
         .hyperlinks
         .iter()
         .rev()
-        // The text check rejects links whose absolute line drifted (full scrollback).
+        // Links of another numbering (a reflow) are gone; the text check is a last guard against a mismatch.
         .find(|h| {
-            h.line == line
+            h.epoch == epoch
+                && h.line == line
                 && col >= h.from
                 && col < h.to
                 && screen.rows(h.from, h.to - h.from).nth(row as usize).is_some_and(|t| t == h.text)
@@ -1517,8 +1540,8 @@ mod tests {
     use super::*;
 
     /// An emulator of `rows` x `cols` with `scrollback` lines and NOBLE's callbacks.
-    fn test_parser(rows: u16, cols: u16, scrollback: usize) -> vt100::Parser<Callbacks> {
-        vt100::Parser::new_with_callbacks(
+    fn test_parser(rows: u16, cols: u16, scrollback: usize) -> crate::vt100::Parser<Callbacks> {
+        crate::vt100::Parser::new_with_callbacks(
             crate::term::vt_size(rows),
             crate::term::vt_size(cols),
             scrollback,
@@ -1801,7 +1824,7 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0],
-            Hyperlink { line: 0, from: 4, to: 8, url: "https://example.com/a;b".into(), text: "docs".into() }
+            Hyperlink { line: 0, from: 4, to: 8, url: "https://example.com/a;b".into(), text: "docs".into(), epoch: 0 }
         );
         // The absolute line number stays fixed while the screen scrolls.
         parser.process(b"\r\n\n\n\n\n\n\x1b]8;;file:///tmp/x.rs\x07x.rs\x1b]8;;\x07");
@@ -1810,10 +1833,10 @@ mod tests {
         assert!(last.line >= 6, "{last:?}");
     }
 
-    /// Once the scrollback is full its length stops growing while lines still scroll out, so a stored
-    /// absolute line drifts: the link must not answer for text that is no longer there.
+    /// Once the scrollback is full its length stops growing while lines still scroll out. The stable line numbers
+    /// (`screen_base`) follow the lines anyway: the link is found where it moved to, and not where it was.
     #[test]
-    fn osc8_hyperlink_is_not_returned_after_the_scrollback_drifts() {
+    fn osc8_hyperlink_follows_a_full_scrollback() {
         let mut parser = test_parser(4, 40, 3);
         // Fill the scrollback (3 lines) first, then write a link on the bottom row.
         parser.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
@@ -1822,10 +1845,58 @@ mod tests {
         // Two more lines scroll out: the link moved up to row 1 while the scrollback length is unchanged.
         parser.process(b"\r\nx\r\ny");
         assert_eq!(hyperlink_in(&mut parser, 3, 2), None);
-        assert_eq!(hyperlink_in(&mut parser, 1, 2), None);
-        // A link written after the drift still works.
+        assert_eq!(hyperlink_in(&mut parser, 1, 2).map(|l| l.0).as_deref(), Some("https://a.example/"));
+        // A link written after the scroll works too, and the first one is gone once its line left the scrollback.
         parser.process(b"\r\n\x1b]8;;https://b.example/\x1b\\beta\x1b]8;;\x1b\\");
         assert_eq!(hyperlink_in(&mut parser, 3, 1).map(|l| l.0).as_deref(), Some("https://b.example/"));
+        parser.process(b"\r\n\r\n\r\n");
+        let a_links = (0..4).filter(|&r| hyperlink_in(&mut parser, r, 1).is_some_and(|l| l.0 == "https://a.example/"));
+        assert_eq!(a_links.count(), 0);
+    }
+
+    /// A growing screen pulls history back: the link keeps its line number, so it is found on its new row.
+    #[test]
+    fn osc8_hyperlink_survives_a_row_grow() {
+        let mut parser = test_parser(3, 40, 100);
+        parser.process(b"1\r\n2\r\n3\r\n\x1b]8;;https://a.example/\x1b\\alpha\x1b]8;;\x1b\\");
+        assert_eq!(hyperlink_in(&mut parser, 2, 1).map(|l| l.0).as_deref(), Some("https://a.example/"));
+        parser.screen_mut().set_size(crate::term::vt_size(6), crate::term::vt_size(40));
+        assert_eq!(hyperlink_in(&mut parser, 2, 1), None);
+        let row = parser.screen().cursor_position().0;
+        assert_eq!(hyperlink_in(&mut parser, row, 1).map(|l| l.0).as_deref(), Some("https://a.example/"));
+    }
+
+    /// A reflow renumbers the lines: links of before it are gone (they would point at other text), links written
+    /// after it work.
+    #[test]
+    fn osc8_hyperlinks_are_cleared_by_a_reflow() {
+        let mut parser = test_parser(4, 40, 100);
+        parser.process(b"\x1b]8;;https://a.example/\x1b\\alpha\x1b]8;;\x1b\\");
+        assert_eq!(hyperlink_in(&mut parser, 0, 1).map(|l| l.0).as_deref(), Some("https://a.example/"));
+        parser.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(20));
+        assert_eq!(hyperlink_in(&mut parser, 0, 1), None);
+        parser.process(b"\r\n\x1b]8;;https://b.example/\x1b\\beta\x1b]8;;\x1b\\");
+        assert_eq!(parser.callbacks().hyperlinks.len(), 1, "the old link was dropped");
+        assert_eq!(hyperlink_in(&mut parser, 1, 1).map(|l| l.0).as_deref(), Some("https://b.example/"));
+        // A link still open across a reflow has no valid start: it is not recorded.
+        parser.process(b"\x1b]8;;https://c.example/\x1b\\gam");
+        parser.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(10));
+        parser.process(b"ma\x1b]8;;\x1b\\");
+        assert!(parser.callbacks().hyperlinks.iter().all(|h| h.url != "https://c.example/"));
+    }
+
+    /// The scrollback bar's length is the live scrollback after a reflow (a narrower pane has more lines).
+    #[test]
+    fn the_history_length_follows_a_reflow() {
+        let mut parser = test_parser(4, 40, 1000);
+        for i in 0..10 {
+            parser.process(format!("{i} {}\r\n", "x".repeat(30)).as_bytes());
+        }
+        let before = parser.screen().scrollback_len();
+        parser.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(20));
+        assert!(parser.screen().scrollback_len() > before, "the lines wrap to more rows");
+        parser.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(40));
+        assert!(parser.screen().scrollback_len().abs_diff(before) <= 1, "the screen may start a row later");
     }
 
     #[test]
@@ -2008,6 +2079,7 @@ Claude needs your permission",
         assert!(!Arc::ptr_eq(&a.lines, &d.lines), "new output: fresh lines");
         assert!(d.lines.iter().any(|l| l.trim_end() == "line 10"));
         assert_eq!(d.history, a.history + 1);
+        assert_eq!((d.dropped, d.epoch), (0, 0));
         p.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(10));
         let e = super::read_scroll_text(&mut p, 2, Some(&d));
         assert!(!Arc::ptr_eq(&d.lines, &e.lines), "resize: fresh lines");
@@ -2051,7 +2123,7 @@ Claude needs your permission",
     fn color_answers_end_like_the_query() {
         let colors = SharedColors::default();
         colors.write().unwrap().bg = [0x1e, 0x2f, 0x3c];
-        let parser = Mutex::new(vt100::Parser::new_with_callbacks(
+        let parser = Mutex::new(crate::vt100::Parser::new_with_callbacks(
             crate::term::vt_size(10),
             crate::term::vt_size(40),
             0,

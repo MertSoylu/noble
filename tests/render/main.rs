@@ -14,6 +14,7 @@ mod palette;
 mod panes;
 mod power;
 mod pty;
+mod reflow;
 mod search;
 mod session;
 mod settings;

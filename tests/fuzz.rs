@@ -302,7 +302,7 @@ fn terminal_queries_never_panic() {
     ];
     let mut rng = Rng::seeded(0x2026_1004_2031_0996);
     let colors = SharedColors::default();
-    let mut parser = vt100::Parser::new_with_callbacks(
+    let mut parser = noble::vt100::Parser::new_with_callbacks(
         noble::term::vt_size(10),
         noble::term::vt_size(40),
         0,
@@ -340,6 +340,192 @@ fn terminal_queries_never_panic() {
         let params: [&[u8]; 4] = [b"?", b"", b"300", b"?"];
         for n in 0..=params.len() {
             let _ = ColorReport::dark().answers(number, &params[..n]);
+        }
+    }
+}
+
+/// The text of the whole main screen (scrollback and rows) as logical lines: the rows of a wrapped run are joined
+/// cell by cell (a blank cell is a space, the spacer left by a wide character at the edge and the continuation
+/// cell are nothing) and the trailing blanks of every line and the blank lines at the end are cut.
+fn logical_lines(parser: &mut noble::vt100::Parser<noble::term::pane::Callbacks>) -> Vec<String> {
+    let screen = parser.screen_mut();
+    let keep = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (usize::from(rows.get()), cols.get());
+    let history = screen.scrollback_len();
+    let mut lines = Vec::new();
+    let mut open = String::new();
+    for i in 0..history + rows {
+        // Scrolled so that absolute row `i` is the first one shown (or, below the history, the live screen).
+        let offset = history.saturating_sub(i);
+        screen.set_scrollback(offset);
+        let row = u16::try_from(i - (history - offset)).unwrap();
+        for col in 0..cols {
+            let cell = screen.cell(row, col).expect("a cell inside the screen");
+            if cell.is_wide_continuation() || cell.is_leading_spacer() {
+                continue;
+            }
+            open.push_str(if cell.has_contents() { cell.contents() } else { " " });
+        }
+        if !screen.row_wrapped(row) {
+            lines.push(open.trim_end().to_string());
+            open.clear();
+        }
+    }
+    if !open.is_empty() {
+        lines.push(open.trim_end().to_string());
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    screen.set_scrollback(keep);
+    lines
+}
+
+/// Every cell of the shown screen exists, a wide character is followed by its continuation cell and a continuation
+/// cell follows a wide character (at every scroll position of the history too).
+fn assert_grid_sound(parser: &mut noble::vt100::Parser<noble::term::pane::Callbacks>, what: &str) {
+    let screen = parser.screen_mut();
+    let keep = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    assert!(screen.scrollback_len() <= screen.scrollback_capacity(), "{what}: history over its capacity");
+    let top = screen.scrollback_len();
+    let mut offset = 0;
+    loop {
+        screen.set_scrollback(offset);
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = screen.cell(row, col).unwrap_or_else(|| panic!("{what}: no cell at {row},{col}"));
+                if cell.is_wide_continuation() {
+                    let prev = col.checked_sub(1).and_then(|c| screen.cell(row, c));
+                    assert!(prev.is_some_and(|p| p.is_wide()), "{what}: orphan continuation at {row},{col}");
+                }
+                if cell.is_wide() {
+                    let next = screen.cell(row, col + 1);
+                    assert!(next.is_some_and(|n| n.is_wide_continuation()), "{what}: wide cell cut at {row},{col}");
+                }
+            }
+            assert!(screen.cell(row, cols).is_none(), "{what}: a row is wider than the screen");
+        }
+        if offset >= top {
+            break;
+        }
+        offset = (offset + usize::from(rows)).min(top);
+    }
+    screen.set_scrollback(keep);
+}
+
+/// Random bytes mixed with random resizes (narrow, wide, tall, short; on the main and the alternate screen; wide
+/// characters, SGR, cursor moves, scroll regions): never a panic, every row has the screen's width, no wide
+/// character is cut, the history stays within its capacity, and a shrink followed by a grow back loses no text of a
+/// line when nothing was written in between (the lossless round trip behind zoom and restore).
+#[test]
+fn reflow_survives_random_output_and_resizes() {
+    const BITS: [&str; 46] = [
+        "a",
+        "bc",
+        "hello world ",
+        "0123456789",
+        "x",
+        " ",
+        "\r\n",
+        "\r\n",
+        "\n",
+        "\r",
+        "\t",
+        "\x08",
+        "日本",
+        "語",
+        "🙂",
+        "e\u{301}",
+        "\x1b[1;31m",
+        "\x1b[48;5;20m",
+        "\x1b[0m",
+        "\x1b[H",
+        "\x1b[3;5H",
+        "\x1b[9999;9999H",
+        "\x1b[2J",
+        "\x1b[3J",
+        "\x1b[K",
+        "\x1b[2K",
+        "\x1b[2L",
+        "\x1b[2M",
+        "\x1b[3P",
+        "\x1b[3@",
+        "\x1b[4X",
+        "\x1b[2A",
+        "\x1b[2B",
+        "\x1b[5D",
+        "\x1b[2;5r",
+        "\x1b[r",
+        "\x1b[S",
+        "\x1b[T",
+        "\x1b7",
+        "\x1b8",
+        "\x1bM",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[?25l",
+        "\x1b[?7l",
+        "\x1b[?7h",
+    ];
+    let mut rng = Rng::seeded(0x7e_f10a_2026_1025);
+    let total = steps(6_000);
+    let mut parser = None;
+    for i in 0..total {
+        // A fresh emulator now and then keeps the history small; every third one has a tiny history that fills up.
+        if i % 150 == 0 {
+            let capacity = if (i / 150) % 3 == 2 { 12 } else { 100_000 };
+            let rows = 2 + rng.below(25) as u16;
+            let cols = 2 + rng.below(60) as u16;
+            parser = Some((
+                noble::vt100::Parser::new_with_callbacks(
+                    noble::term::vt_size(rows),
+                    noble::term::vt_size(cols),
+                    capacity,
+                    noble::term::pane::Callbacks::default(),
+                ),
+                capacity == 100_000,
+            ));
+        }
+        let (parser, lossless) = parser.as_mut().unwrap();
+        let text = rng.text(&BITS, 12);
+        let bytes = text.as_bytes();
+        let cut = rng.below(bytes.len() + 1);
+        noble::term::pane::feed(parser, &bytes[..cut]);
+        if rng.below(3) == 0 {
+            let rows = 2 + rng.below(25) as u16;
+            let cols = 2 + rng.below(60) as u16;
+            parser.screen_mut().set_size(noble::term::vt_size(rows), noble::term::vt_size(cols));
+            assert_grid_sound(parser, "after a resize");
+        }
+        noble::term::pane::feed(parser, &bytes[cut..]);
+        if i % 7 == 0 {
+            assert_grid_sound(parser, "after output");
+        }
+        if *lossless && i % 5 == 0 {
+            // Round trip on the main screen: narrower or shorter, then back, with no output in between.
+            noble::term::pane::feed(parser, b"\x1b[?1049l");
+            let (rows0, cols0) = parser.screen().size();
+            let before = logical_lines(parser);
+            let rows1 = 2 + rng.below(25) as u16;
+            let cols1 = 2 + rng.below(60) as u16;
+            parser.screen_mut().set_size(noble::term::vt_size(rows1), noble::term::vt_size(cols1));
+            assert_grid_sound(parser, "in the narrow size");
+            let during = logical_lines(parser);
+            parser.screen_mut().set_size(rows0, cols0);
+            assert_grid_sound(parser, "back at the old size");
+            let after = logical_lines(parser);
+            assert_eq!(before, after, "step {i}: {cols0}x{rows0} -> {cols1}x{rows1} -> back changed the text");
+            // The text is the same at the other size too, as far as the width lets a wide character stay whole.
+            if cols1 >= 2 {
+                assert_eq!(
+                    before.len(),
+                    during.len(),
+                    "step {i}: {cols0}x{rows0} -> {cols1}x{rows1} changed the number of lines"
+                );
+            }
         }
     }
 }

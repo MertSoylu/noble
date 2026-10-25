@@ -526,6 +526,11 @@ pub struct SearchState {
     pub detached: Option<crate::term::pane::Match>,
     /// Scrollback length when the matches were computed (absolute line → screen line).
     pub history: usize,
+    /// Lines scrolled out above the first one of the text the matches were computed on
+    /// (`Screen::history_dropped`): `dropped + match.line` is a line's stable number.
+    pub dropped: usize,
+    /// The numbering of that text (`Screen::reflow_epoch`); a reflow changes it and the lines with it.
+    pub epoch: u64,
     /// The scrollback text the matches were computed on; reused while the pane has no new output.
     pub text: Option<crate::term::pane::ScrollText>,
     /// More matches than `MAX_MATCHES`: only the newest are kept (the bar shows "10000+").

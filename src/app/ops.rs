@@ -624,7 +624,11 @@ impl App {
         }
     }
 
-    /// Brings the visible tab's panes to their new size before drawing.
+    /// Brings the visible tab's panes to their new size before drawing. Resizes are coalesced by the frame loop: it
+    /// drains every waiting event (any number of window resizes) before it draws, and this runs once per draw, so a
+    /// pane reflows at most once per frame and a pane already at its size does nothing (`Pane::resize`). A reflow
+    /// costs a few milliseconds at the default history and about 100 ms at the largest (the ignored
+    /// `reflow_cost_of_a_full_scrollback` test), which the frame limit absorbs.
     pub fn sync_layout(&mut self) {
         // While a divider is dragged the shells keep their size (the panes are drawn clipped or padded):
         // resizing a PTY on every mouse step makes the shell redraw its screen each time, which flickers

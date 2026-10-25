@@ -126,6 +126,8 @@ src/
   term/              layout.rs (pure split tree), pane.rs (PTY + vt100 + shell integration),
                      osc.rs (vt100 callbacks, OSC parsing),
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
+  vt100/             the terminal emulator: vt100 0.18.1 (MIT, Jesse Luehrs; `LICENSE-MIT` stays) vendored and
+                     extended with reflow (`reflow.rs`, `Grid::set_size`); owned code, it does not follow upstream
   ui/                hud.rs (bounds-safe drawing primitives), bridge.rs (Home), terminal.rs,
                      system.rs, settings.rs, overlay.rs, boot.rs
   ai/                providers.rs (one adapter per provider), json.rs (tolerant parsing), collector

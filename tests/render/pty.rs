@@ -253,6 +253,61 @@ fn heavy_output_throughput() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Cost of a reflow: a full 100 thousand row scrollback at 200 columns is cut to 80 columns and back, and one column
+/// narrower. Prints the times (run with `cargo test --release --test render reflow_cost -- --ignored --nocapture`).
+///
+/// Measured on the development machine (Windows 11, 12th gen i7-12700H, release build), 100 thousand rows of history
+/// that is half 350 character lines (two rows at 200 columns) and half short ones:
+///
+/// | resize | first version | now |
+/// | --- | --- | --- |
+/// | 200 -> 80 columns | 330 ms | 103 ms |
+/// | 80 -> 200 columns | 156 ms | 60 ms |
+/// | 200 -> 199 columns | 145 ms | 44 ms |
+///
+/// "Now" moves a row that already fits over as it is, copies runs of ordinary cells in one go, leaves the padding of
+/// history rows out, and does not rewrap the oldest history that the capacity cuts off anyway (`reflow::skippable`).
+/// The default history is 5000 rows, which takes about a twentieth of that (a few milliseconds); only the
+/// largest setting is near the 50 ms that a resize may take without being noticed, so reflow stays eager. The
+/// budget below is generous so that a slow CI runner passes while a quadratic mistake does not.
+#[test]
+#[ignore]
+fn reflow_cost_of_a_full_scrollback() {
+    use noble::vt100::Parser;
+    const HISTORY: usize = 100_000;
+    let mut parser = Parser::new(noble::term::vt_size(50), noble::term::vt_size(200), HISTORY);
+    // Half of the lines fill two rows (350 characters), the others one: a mix of wrapped and short lines.
+    let long = "0123456789 ".repeat(32);
+    let mut n = 0;
+    while parser.screen().scrollback_len() < HISTORY {
+        let line = if n % 2 == 0 { &long[..350] } else { "short line" };
+        parser.process(
+            format!(
+                "{n:06} {line}
+"
+            )
+            .as_bytes(),
+        );
+        n += 1;
+    }
+    let history = parser.screen().scrollback_len();
+    let time = |what: &str, cols: u16, parser: &mut Parser| {
+        let started = std::time::Instant::now();
+        parser.screen_mut().set_size(noble::term::vt_size(50), noble::term::vt_size(cols));
+        let took = started.elapsed();
+        println!("{what}: {:.1} ms (history {} rows)", took.as_secs_f64() * 1000.0, parser.screen().scrollback_len());
+        took
+    };
+    let narrow = time("200 -> 80 columns", 80, &mut parser);
+    let wide = time("80 -> 200 columns", 200, &mut parser);
+    let one = time("200 -> 199 columns", 199, &mut parser);
+    println!("history before: {history} rows");
+    let budget = Duration::from_millis(500);
+    for took in [narrow, wide, one] {
+        assert!(took < budget, "a reflow of a full scrollback took {took:?}");
+    }
+}
+
 /// A quoted command (path with spaces) runs intact in cmd.exe: launchers are
 /// invoked as `"C:\...\claude.exe"`.
 #[test]

@@ -1,7 +1,7 @@
 //! Turns keyboard and mouse events into xterm byte sequences sent to the PTY.
 
+use crate::vt100::{MouseProtocolEncoding, MouseProtocolMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 /// xterm modifier parameter: 1 + shift + 2·alt + 4·ctrl.
 fn modifier_param(mods: KeyModifiers) -> u8 {

@@ -6,6 +6,23 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- Resizing or zooming a pane no longer cuts lines for good. The terminal now reflows the lines that were wrapped
+  by the screen width: shrinking a pane and restoring it (zoom in, zoom out; focus mode; dragging a window edge)
+  gives the original text back, wide characters stay together at the new edge and a line that ended with a hard
+  newline is never joined to the next. This covers the scrollback, the cursor and the saved cursor. When the pane
+  gets fewer rows, the lines that no longer fit move into the scrollback instead of being dropped.
+- Search matches, the selected match, ctrl+click links (OSC 8) and the scrollback bar stay on the right text while
+  output scrolls, a full scrollback included, and after a reflow (matches are searched again, links of the old
+  wrapping are dropped).
+
+### Changed
+- The `vt100` terminal emulator is now part of the crate (`src/vt100`, based on vt100 0.18.1 by Jesse Luehrs,
+  MIT licence kept in `src/vt100/LICENSE-MIT`), because upstream has no reflow. It adds reflow, a count of lines
+  that scrolled out (`history_dropped`) and a reflow epoch. The `vt100` dependency is gone; `vte` and `itoa` are
+  new direct dependencies. On Windows the history is not pulled down when a pane gets taller, because ConPTY
+  repaints from the top of its own viewport.
+
 ## [1.10.1] - 2026-10-25
 
 ### Added

@@ -561,3 +561,91 @@ fn link_highlight_follows_ctrl_the_pointer_and_the_output() {
     assert!(app.take_dirty(), "a frame is drawn again with the new highlight");
     app.run(Action::CloseTab);
 }
+
+/// The line text of the selected match.
+fn selected_line(app: &App) -> String {
+    let s = app.search.as_ref().unwrap();
+    let text = s.text.as_ref().unwrap();
+    text.lines[s.matches[s.current.expect("a selected match")].line].trim_end().to_string()
+}
+
+/// Opens a search for "row " in a pane whose command printed 60 lines (a real command, not text fed to the emulator:
+/// on Windows ConPTY repaints the viewport after a resize from its own buffer), with the fifth newest match selected.
+fn selected_search(app: &mut App) -> noble::term::layout::PaneId {
+    let script = if cfg!(windows) {
+        "(for /L %i in (1,1,60) do @echo row %i) & echo GROW_DONE"
+    } else {
+        "for i in $(seq 1 60); do echo row $i; done; echo GROW_DONE"
+    };
+    // cmd.exe syntax on Windows and POSIX sh elsewhere: the shell is chosen to match.
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into();
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), Some(script), Some("grow".into()));
+    let id = app.tabs[0].focus;
+    wait_for(app, id, "GROW_DONE");
+    app.run(Action::Search);
+    for c in "row ".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    for _ in 0..4 {
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    }
+    id
+}
+
+fn refresh_now(app: &mut App) {
+    app.search.as_mut().unwrap().refreshed = Some(std::time::Instant::now() - Duration::from_secs(1));
+    app.tick();
+}
+
+/// A taller pane pulls history back onto the screen: the lines keep their stable numbers, so the selected match
+/// stays on the same text (the scrollback length alone moves, which the old fallback took for lines scrolled out).
+#[test]
+fn search_selection_survives_a_row_grow() {
+    let mut app = demo_app(110, 30);
+    let id = selected_search(&mut app);
+    let before = selected_line(&app);
+    let history = app.search.as_ref().unwrap().history;
+    assert!(before.starts_with("row "), "{before}");
+    render(&mut app, 110, 40);
+    refresh_now(&mut app);
+    let s = app.search.as_ref().unwrap();
+    assert!(!s.stale);
+    // Windows: a taller pane keeps its top row and gets blank rows at the bottom (ConPTY's viewport grows that way),
+    // so nothing is pulled back; Linux and macOS pull the newest history rows onto the screen.
+    if cfg!(windows) {
+        assert_eq!(s.history, history, "nothing is pulled back from the scrollback");
+    } else {
+        assert!(s.history < history, "rows were pulled back from the scrollback");
+    }
+    assert_eq!(s.epoch, app.panes[&id].scroll_text(None).epoch, "a height change keeps the numbering");
+    assert_eq!(selected_line(&app), before);
+    // And back: a shorter pane pushes rows into the scrollback.
+    render(&mut app, 110, 26);
+    refresh_now(&mut app);
+    assert_eq!(selected_line(&app), before);
+    app.run(Action::CloseTab);
+}
+
+/// A width change reflows: the numbering changes (a new epoch), the stale matches are searched again and the
+/// selection stays on the same place in the text.
+#[test]
+fn search_selection_survives_a_reflow() {
+    let mut app = demo_app(110, 30);
+    let id = selected_search(&mut app);
+    let before = selected_line(&app);
+    let epoch = app.search.as_ref().unwrap().epoch;
+    render(&mut app, 50, 30);
+    assert!(app.search.as_ref().unwrap().stale);
+    refresh_now(&mut app);
+    let s = app.search.as_ref().unwrap();
+    assert!(!s.stale);
+    assert_ne!(s.epoch, epoch, "the width change renumbers the lines");
+    assert_eq!(s.epoch, app.panes[&id].scroll_text(None).epoch);
+    assert_eq!(selected_line(&app), before);
+    // The marks are drawn again for the new numbering.
+    let text = render(&mut app, 50, 30);
+    assert!(text.contains("row "), "{text}");
+    app.run(Action::CloseTab);
+}

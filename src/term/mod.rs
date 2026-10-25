@@ -19,7 +19,7 @@ pub fn vt_size(n: u16) -> NonZeroU16 {
 }
 
 /// The emulator screen's (rows, cols) as plain numbers.
-pub fn screen_size(screen: &vt100::Screen) -> (u16, u16) {
+pub fn screen_size(screen: &crate::vt100::Screen) -> (u16, u16) {
     let (rows, cols) = screen.size();
     (rows.get(), cols.get())
 }
