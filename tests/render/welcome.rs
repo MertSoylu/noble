@@ -162,3 +162,43 @@ fn welcome_card_lists_only_installed_launchers() {
     let text = render(&mut app, 110, 30);
     assert!(!text.contains("right there") && text.contains("command palette"), "{text}");
 }
+
+/// The launcher line drops whole launcher names that do not fit and counts them as "+N": at every size
+/// the card is drawn at, the line never ends in a cut name (it used to stop at "… / Antigravit").
+#[test]
+fn welcome_card_launcher_line_drops_whole_names() {
+    use noble::config::Launcher;
+    const NAMES: [&str; 6] = ["Claude", "Codex", "Gemini", "Antigravity", "Opencode", "Cursor"];
+    let keys = ["c", "x", "g", "a", "o", "u"];
+    let commands = ["claude", "codex", "gemini", "antigravity", "opencode", "cursor"];
+    let mut app = demo_app(110, 30);
+    app.launchers = keys
+        .iter()
+        .zip(commands)
+        .map(|(key, name)| {
+            (Launcher { key: key.to_string(), name: name.into(), command: name.into(), show: true }, true)
+        })
+        .collect();
+    app.show_welcome();
+    let mut checked = 0;
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("welcome-launchers-{w}x{h}"), &text);
+        // The line runs to the card's right border; a cut line never reaches "right there".
+        let Some(line) = text.lines().find(|l| l.contains("start ")) else { continue };
+        checked += 1;
+        let from = &line[line.find("start ").expect("start")..];
+        let segment = from.split('│').next().unwrap_or_default().trim_end();
+        assert!(segment.ends_with(" right there"), "{w}x{h}: the launcher line is cut: {segment:?}\n{text}");
+        let list = segment.strip_prefix("start ").and_then(|s| s.strip_suffix(" right there")).expect("launcher line");
+        // `Claude / Codex +4`: the names shown, then the count of the names left out.
+        let (shown, hidden) = match list.rsplit_once('+') {
+            Some((names, n)) => (names.trim_end(), n.parse::<usize>().expect("+N count")),
+            None => (list, 0),
+        };
+        let names: Vec<&str> = if shown.is_empty() { Vec::new() } else { shown.split(" / ").collect() };
+        assert!(names.iter().all(|n| NAMES.contains(n)), "{w}x{h}: a cut or unknown name in {segment:?}\n{text}");
+        assert_eq!(names.len() + hidden, NAMES.len(), "{w}x{h}: the names left out are not counted in {segment:?}");
+    }
+    assert!(checked >= 3, "the launcher line is drawn at 110, 120 and 160 columns");
+}

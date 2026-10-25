@@ -250,6 +250,14 @@ impl App {
                     st.selected = st.matches.len().saturating_sub(1);
                     true
                 }
+                // In the notification list: copies the selected text, whatever Enter does with it.
+                KeyCode::Char('y') if ctrl => {
+                    if let Some(super::PaletteCmd::Notice { text, .. }) = st.current().map(|i| i.cmd.clone()) {
+                        self.copy_notice(&text);
+                        return;
+                    }
+                    true
+                }
                 KeyCode::Backspace => {
                     st.query.pop();
                     st.refilter();
@@ -838,20 +846,52 @@ impl App {
         }
     }
 
-    /// A click dismisses a notification (by its id: the list may have changed since the last frame);
-    /// a config error also opens the config file at its line.
+    /// A click dismisses a notification (by its id: the list may have changed since the last frame) and
+    /// goes where it leads (`follow_toast`).
     fn toast_clicked(&mut self, id: u64) {
         let Some(i) = self.toasts.iter().position(|t| t.id == id) else { return };
         let toast = self.toasts.remove(i);
         self.dirty = true;
-        match toast.target {
-            Some(ToastTarget::Config { line: Some(line) }) => {
+        if let Some(target) = toast.target {
+            self.follow_toast(target);
+        }
+    }
+
+    /// Goes where a notification leads: a config error opens the config file at its line, a pane's
+    /// notification shows the pane. Choosing the notification in the list does the same.
+    pub(super) fn follow_toast(&mut self, target: ToastTarget) {
+        match target {
+            ToastTarget::Config { line: Some(line) } => {
                 let path = self.paths.config.clone();
                 self.open_link(crate::term::link::Link::File { path, line: Some(line), col: None });
             }
-            Some(ToastTarget::Config { line: None }) => self.run(Action::OpenConfig),
-            None => {}
+            ToastTarget::Config { line: None } => self.run(Action::OpenConfig),
+            ToastTarget::Pane { tab, pane } => self.show_toast_pane(tab, pane),
         }
+    }
+
+    /// Whether a notification still leads somewhere: a pane's notification needs its tab and pane to be open.
+    pub fn toast_target_open(&self, target: &ToastTarget) -> bool {
+        match target {
+            ToastTarget::Pane { tab, pane } => {
+                self.tab_index(*tab).is_some_and(|ti| self.tabs[ti].root.contains(*pane))
+            }
+            ToastTarget::Config { .. } => true,
+        }
+    }
+
+    /// Shows a notification's pane: its tab is switched to and the pane focused. A zoomed tab that shows
+    /// another pane goes back to its layout first, so the pane is visible (as `jump_to_agent`). Nothing moves
+    /// when the tab or the pane has closed.
+    fn show_toast_pane(&mut self, tab: crate::term::TabId, pane: PaneId) {
+        let Some(ti) = self.tab_index(tab).filter(|&ti| self.tabs[ti].root.contains(pane)) else {
+            self.toast(ToastLevel::Info, "that pane has closed");
+            return;
+        };
+        if self.tabs[ti].zoomed && self.tabs[ti].focus != pane {
+            self.tabs[ti].zoomed = false;
+        }
+        self.focus_pane(pane);
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {

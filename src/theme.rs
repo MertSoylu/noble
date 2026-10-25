@@ -614,7 +614,8 @@ const BUILTIN_SCHEMES: [SchemeRow; 14] = [
     ),
 ];
 
-const CAMPBELL: [u32; 16] = [
+/// The Campbell palette (Windows Terminal's default); `term::colors` reports it when the outer terminal's own is in use.
+pub const CAMPBELL: [u32; 16] = [
     0x0c0c0c, 0xc50f1f, 0x13a10e, 0xc19c00, 0x0037da, 0x881798, 0x3a96dd, 0xcccccc, 0x767676, 0xe74856, 0x16c60c,
     0xf9f1a5, 0x3b78ff, 0xb4009e, 0x61d6d6, 0xf2f2f2,
 ];

@@ -5,6 +5,7 @@ pub mod app;
 pub mod battery;
 pub mod clipboard;
 pub mod config;
+pub mod doctor;
 pub mod event;
 pub mod hooks;
 pub mod keys;

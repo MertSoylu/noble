@@ -57,6 +57,9 @@ In a split tab the panes without the focus fade a little (`dim_inactive`), so th
 Focus mode (`prefix f`, or `focus_mode` in the config) hides the top and bottom bars on a terminal tab, so its panes
 get the whole screen: the bars come back while the prefix is armed or the pointer rests on the top or bottom row, and a
 `◆ 2` chip on the bottom row shows the markers of the other tabs.
+Programs can rely on the usual terminal queries: synchronized output (no half-drawn frames), the pane's colors
+(OSC 4 / 10 / 11 / 12, `COLORFGBG`, color scheme notices) so AI CLIs pick the right light or dark theme, focus
+reports, XTVERSION and DECRQM.
 
 </td>
 <td width="50%" valign="top">
@@ -282,7 +285,8 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
   (needs an outer terminal that reports Shift). The pane menu and palette can launch an agent in a split.
-- **Notifications:** background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
+- **Notifications:** clicking one that came from a pane (a toast, or `⏎` in the notification list) goes to that tab
+  and pane; `ctrl+y` in the list copies its text. Background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
   while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
@@ -475,6 +479,10 @@ On a narrow pane the title drops its folder first, then the tag, then this badge
 </details>
 
 ## 🩺 Troubleshooting
+
+Run `noble doctor` for a plain-text report of your setup (version, OS, outer terminal, shells and their integration,
+Claude Code hooks, AI provider detection without any token, config and data paths, `gh` state). It works the same on
+Windows, Linux and macOS, never opens the terminal, and is what a bug report asks for.
 
 - **Splits and restored tabs open in the wrong folder:** the shell is not reporting its directory (see Shell
   integration above). cmd keeps a `PROMPT` you set yourself, so add `$E]9;9;$P$E\` to it; bash, zsh and fish

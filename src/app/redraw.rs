@@ -117,6 +117,13 @@ impl App {
             let into_minute = (now_ms - since * 1000).rem_euclid(60_000) as u64;
             want(Duration::from_millis(60_000 - into_minute + 5));
         }
+        // A synchronized-output block still open: the frame is drawn when its time is up, even if no byte comes. A
+        // pane outside a block adds nothing here (one atomic load), so an idle terminal gets no wake-up.
+        for pane in self.panes.values() {
+            if let Some(left) = pane.sync_wake() {
+                want(left + Duration::from_millis(5));
+            }
+        }
         let charging = self.sensors.battery().is_some_and(|(b, _)| b.state == crate::battery::PowerState::Charging);
         if charging && matches!(self.view, View::Bridge | View::System) {
             want(Duration::from_millis(450));

@@ -152,12 +152,18 @@ fn backup_is_intact(backup: &Path) -> bool {
     })
 }
 
-/// Are the hooks installed for every event?
+/// Are the hooks installed for every event? An unreadable or unparseable settings file counts as not installed.
 pub fn is_installed(path: &Path) -> bool {
-    let Ok(v) = read_settings(path) else { return false };
-    EVENTS.iter().all(|(event, _)| {
+    installed_state(path).unwrap_or(false)
+}
+
+/// `is_installed`, but a settings file that cannot be read or parsed is an error (`noble doctor` reports it as
+/// unknown). Read-only: the file is never written here.
+pub fn installed_state(path: &Path) -> Result<bool, String> {
+    let v = read_settings(path)?;
+    Ok(EVENTS.iter().all(|(event, _)| {
         v.pointer(&format!("/hooks/{event}")).and_then(Value::as_array).is_some_and(|l| l.iter().any(is_noble_hook))
-    })
+    }))
 }
 
 /// Adds the missing hooks; touches neither other settings nor other hooks.

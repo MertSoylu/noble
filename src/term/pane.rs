@@ -8,9 +8,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use crate::config::TerminalCfg;
 use crate::event::AppEvent;
+use crate::term::colors::{SCHEME_NOTICES, SharedColors, Terminator};
 use crate::term::integration;
 use crate::term::layout::PaneId;
 use crate::util;
@@ -18,7 +21,7 @@ use crate::util;
 #[cfg(test)]
 use super::osc::same_host;
 pub use super::osc::{
-    Callbacks, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
+    Callbacks, FOCUS_REPORTS, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
 };
 
 /// Scrollback length (without disturbing the visible scroll position).
@@ -149,6 +152,19 @@ impl ShellSpec {
             _ => return None,
         };
         (!self.args.iter().any(|a| skip.contains(&a.as_str()))).then_some(dir)
+    }
+
+    /// Does NOBLE's shell integration reach this shell with these arguments? `noble doctor` reports it. It mirrors
+    /// `args_with_command`, `extra_env` and `integration_dir`: PowerShell's prompt hook is added unless its arguments
+    /// run a command of their own, cmd's PROMPT only when PROMPT is unset, the Unix shells through their scripts
+    /// (`integration` must be set), and the other shells (sh, WSL, …) get none.
+    pub fn integration_applies(&self) -> bool {
+        match self.kind() {
+            ShellKind::PowerShell => !self.pwsh_runs_own_command(),
+            ShellKind::Cmd => std::env::var("PROMPT").is_err(),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Fish => self.integration_dir().is_some(),
+            ShellKind::Posix | ShellKind::Wsl => false,
+        }
     }
 
     /// Writes the integration scripts. If that fails the shell starts without them
@@ -628,6 +644,9 @@ struct CwdCheck {
     usable: Option<bool>,
 }
 
+/// A copy of drawn pane content and the cursor cell it had (`Pane::remember_view`).
+type HeldView = (Buffer, Option<(u16, u16)>);
+
 pub struct Pane {
     pub id: PaneId,
     pub parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
@@ -640,6 +659,12 @@ pub struct Pane {
     /// Sends the folder-check answers (`AppEvent::PaneCwd`) to the main loop.
     events: Sender<AppEvent>,
     pub dirty: Arc<AtomicBool>,
+    /// Output arrived inside a synchronized-output block and its `PtyOutput` event is held back
+    /// (`process_output`, `release_sync`).
+    held: Arc<AtomicBool>,
+    /// The pane's content as it was last drawn outside a synchronized block, and the cursor cell: drawn instead of the
+    /// half-written frame while a block is open (`remember_view`, `held_view`).
+    view: Mutex<Option<HeldView>>,
     /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
     output_gen: Arc<AtomicU64>,
     /// (row, col)
@@ -729,6 +754,8 @@ pub struct SpawnSpec<'a> {
     pub rows: u16,
     pub cols: u16,
     pub scrollback: usize,
+    /// The colors the pane answers color queries with and `COLORFGBG` is taken from (`App::colors`).
+    pub colors: &'a SharedColors,
 }
 
 /// How long a newly reported working directory may take to answer before it counts as unusable.
@@ -741,16 +768,57 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What the reader thread does with one chunk of a program's output: the emulator reads it, the output counter
 /// moves, and the answers the chunk asks for (DSR/DA) are queued to the writer like keys, so they keep their place
 /// among the input. Never blocks on the program.
-fn process_output(parser: &Mutex<vt100::Parser<Callbacks>>, output_gen: &AtomicU64, input: &PtyInput, chunk: &[u8]) {
-    let responses = {
+///
+/// Returns whether a synchronized-output block is open after the chunk (`Callbacks::sync_open`): the caller then holds
+/// the redraw back, and `held` says so to the main thread (set under the parser lock, which `Pane::release_sync` takes).
+fn process_output(
+    parser: &Mutex<vt100::Parser<Callbacks>>,
+    output_gen: &AtomicU64,
+    held: &AtomicBool,
+    input: &PtyInput,
+    chunk: &[u8],
+) -> bool {
+    let (responses, hold) = {
         let mut p = lock(parser);
         // An emulator error must not kill the whole pane: skip this chunk.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.process(chunk)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| feed(&mut p, chunk)));
         // Bumped under the same lock `scroll_text` reads it with: a new value means new output.
         output_gen.fetch_add(1, Ordering::Release);
-        std::mem::take(&mut p.callbacks_mut().responses)
+        let hold = p.callbacks().sync_open();
+        held.store(hold, Ordering::Release);
+        (std::mem::take(&mut p.callbacks_mut().responses), hold)
     };
     input.send(&responses);
+    hold
+}
+
+/// Feeds a chunk to the emulator. A full reset (`ESC c`, RIS) is not reported by vt100, so the chunk is cut after it
+/// and the modes NOBLE tracks itself are cleared there (an open synchronized block ends); a reset split between two
+/// reads is found through `Callbacks::ended_in_esc`.
+pub fn feed(p: &mut vt100::Parser<Callbacks>, chunk: &[u8]) {
+    let mut start = 0;
+    let mut esc = p.callbacks().ended_in_esc;
+    for (i, &b) in chunk.iter().enumerate() {
+        if esc && b == b'c' {
+            p.process(&chunk[start..=i]);
+            p.callbacks_mut().reset_modes();
+            start = i + 1;
+        }
+        esc = b == 0x1b;
+        // A color query is cut off after its terminator, so its answer ends the same way (BEL or ST).
+        if let Some(end) = p.callbacks_mut().osc_scan.push(b) {
+            p.process(&chunk[start..=i]);
+            p.callbacks_mut().seal_color_replies(end);
+            start = i + 1;
+        }
+    }
+    p.process(&chunk[start..]);
+    // Answers whose terminator the scan did not see (a C1 terminator) end with BEL; one whose string the emulator
+    // ended at an ESC waits for the `\` in the next chunk.
+    if !p.callbacks().osc_scan.awaiting_st() {
+        p.callbacks_mut().seal_color_replies(Terminator::Bel);
+    }
+    p.callbacks_mut().ended_in_esc = esc;
 }
 
 impl Pane {
@@ -792,6 +860,8 @@ impl Pane {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "NOBLE");
+        // rxvt's hint for programs that cannot ask (OSC 11): `15;0` on a dark background, `0;15` on a light one.
+        cmd.env("COLORFGBG", spec.colors.read().unwrap_or_else(|e| e.into_inner()).colorfgbg());
         // The outer terminal's identity (kitty/Ghostty terminfo, iTerm2) does not describe the
         // pane: apps would look up the wrong terminfo or send that terminal's own sequences.
         // Windows Terminal's `WT_SESSION` / `WT_PROFILE_ID` would make apps think they draw in it directly.
@@ -824,10 +894,11 @@ impl Pane {
             crate::term::vt_size(rows),
             crate::term::vt_size(cols),
             spec.scrollback,
-            Callbacks::default(),
+            Callbacks::with_colors(spec.colors.clone()),
         )));
         let dirty = Arc::new(AtomicBool::new(false));
         let output_gen = Arc::new(AtomicU64::new(0));
+        let held = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
 
         // The writer thread is the only one that writes to the PTY, so a child that does not read its input
@@ -850,6 +921,7 @@ impl Pane {
             let input = input.clone();
             let dirty = dirty.clone();
             let output_gen = output_gen.clone();
+            let held = held.clone();
             let tx = tx.clone();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
@@ -857,12 +929,22 @@ impl Pane {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            process_output(&parser, &output_gen, &input, &buf[..n]);
+                            // Inside a synchronized block the output is fed to the emulator but not announced: the
+                            // main thread draws the frame when the block ends, or when `Pane::release_sync` finds its
+                            // time is up (this thread may be blocked in `read` by then).
+                            if process_output(&parser, &output_gen, &held, &input, &buf[..n]) {
+                                continue;
+                            }
                             if !dirty.swap(true, Ordering::AcqRel) && tx.send(AppEvent::PtyOutput).is_err() {
                                 break;
                             }
                         }
                     }
+                }
+                // The program is gone: a block it left open is over, and the output held back is announced.
+                lock(&parser).callbacks_mut().reset_modes();
+                if held.swap(false, Ordering::AcqRel) && !dirty.swap(true, Ordering::AcqRel) {
+                    let _ = tx.send(AppEvent::PtyOutput);
                 }
             })?;
         }
@@ -886,6 +968,8 @@ impl Pane {
             exited,
             events: tx,
             dirty,
+            held,
+            view: Mutex::new(None),
             output_gen,
             size: (rows, cols),
             start_cwd: cwd,
@@ -933,6 +1017,58 @@ impl Pane {
         set_screen_size(&self.parser, &self.output_gen, rows, cols);
         self.selection = None;
         true
+    }
+
+    /// Announces the output held back by a synchronized block whose time is up (the program never sent the `l`). The
+    /// reader thread does it itself when a byte ends the block; this covers the case where no byte comes. Called from
+    /// `App::tick`; costs one atomic load when nothing is held.
+    pub fn release_sync(&self) {
+        if !self.held.load(Ordering::Acquire) {
+            return;
+        }
+        let open = lock(&self.parser).callbacks().sync_open();
+        if !open && self.held.swap(false, Ordering::AcqRel) && !self.dirty.swap(true, Ordering::AcqRel) {
+            let _ = self.events.send(AppEvent::PtyOutput);
+        }
+    }
+
+    /// How long until the held output must be released (`None`: nothing is held; zero: overdue).
+    pub fn sync_wake(&self) -> Option<std::time::Duration> {
+        if !self.held.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(lock(&self.parser).callbacks().sync_left().unwrap_or_default())
+    }
+
+    /// Keeps a copy of the content just drawn (`inner` of `buf`) and its cursor cell, for `held_view`.
+    pub fn remember_view(&self, buf: &Buffer, inner: Rect, cursor: Option<(u16, u16)>) {
+        let mut copy = Buffer::empty(inner);
+        for y in inner.top()..inner.bottom() {
+            for x in inner.left()..inner.right() {
+                if let (Some(from), Some(to)) = (buf.cell((x, y)), copy.cell_mut((x, y))) {
+                    *to = from.clone();
+                }
+            }
+        }
+        *lock(&self.view) = Some((copy, cursor));
+    }
+
+    /// While a synchronized block is open: draws the last complete content into `buf` and returns its cursor cell
+    /// (`Some(cursor)`). `None` when no block is open, or no copy of that size exists (the first block of the pane).
+    pub fn held_view(&self, buf: &mut Buffer, inner: Rect) -> Option<Option<(u16, u16)>> {
+        if !lock(&self.parser).callbacks().sync_open() {
+            return None;
+        }
+        let view = lock(&self.view);
+        let (copy, cursor) = view.as_ref().filter(|(copy, _)| copy.area == inner)?;
+        for y in inner.top()..inner.bottom() {
+            for x in inner.left()..inner.right() {
+                if let (Some(from), Some(to)) = (copy.cell((x, y)), buf.cell_mut((x, y))) {
+                    *to = from.clone();
+                }
+            }
+        }
+        Some(*cursor)
     }
 
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<Callbacks>> {
@@ -1097,6 +1233,16 @@ impl Pane {
 
     pub fn take_notice(&self) -> Option<String> {
         lock(&self.parser).callbacks_mut().notice.take()
+    }
+
+    /// Whether the program in the pane set focus reports (`CSI ? 1004 h`, not reset since).
+    pub fn wants_focus_reports(&self) -> bool {
+        lock(&self.parser).callbacks().mode_on(FOCUS_REPORTS)
+    }
+
+    /// Whether the program in the pane set color scheme notices (`CSI ? 2031 h`, not reset since).
+    pub fn wants_scheme_notices(&self) -> bool {
+        lock(&self.parser).callbacks().mode_on(SCHEME_NOTICES)
     }
 
     /// The visible characters of a row (blank = ' ', second half of a wide character = '\0').
@@ -1576,6 +1722,26 @@ mod tests {
         }
     }
 
+    /// `noble doctor` reports the integration per shell: the prompt hooks and scripts reach the shells that have
+    /// them, and the arguments that replace the user's startup files turn them off.
+    #[test]
+    fn integration_applies_per_shell() {
+        let with = |program: &str, args: &[&str]| ShellSpec {
+            integration: Some(std::path::PathBuf::from("/data/shell")),
+            ..ShellSpec::new(program, args.iter().map(|a| a.to_string()).collect())
+        };
+        assert!(with("pwsh", &["-NoProfile"]).integration_applies());
+        assert!(!with("pwsh", &["-Command", "echo hi"]).integration_applies(), "its own command");
+        assert!(with("/bin/bash", &[]).integration_applies());
+        assert!(!with("/bin/bash", &["--norc"]).integration_applies());
+        assert!(with("/usr/bin/zsh", &["-l"]).integration_applies());
+        assert!(!with("/usr/bin/zsh", &["-f"]).integration_applies());
+        assert!(with("/usr/bin/fish", &[]).integration_applies());
+        assert!(!with("/usr/bin/fish", &["-N"]).integration_applies());
+        assert!(!with("/bin/sh", &[]).integration_applies(), "sh has no integration");
+        assert!(!ShellSpec::new("/bin/bash", vec![]).integration_applies(), "no integration folder: none");
+    }
+
     #[test]
     fn launcher_invocation() {
         let pwsh = ShellSpec::new("powershell.exe", vec![]);
@@ -1879,6 +2045,41 @@ Claude needs your permission",
         assert_eq!(lock(&parser).screen().scrollback(), 5);
     }
 
+    /// Color queries are answered with the pane's colors and end the way the query ended (BEL or ST), also when the
+    /// query is cut between two reads; a color being set answers nothing. Runs on every OS (no PTY is needed).
+    #[test]
+    fn color_answers_end_like_the_query() {
+        let colors = SharedColors::default();
+        colors.write().unwrap().bg = [0x1e, 0x2f, 0x3c];
+        let parser = Mutex::new(vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(10),
+            crate::term::vt_size(40),
+            0,
+            Callbacks::with_colors(colors.clone()),
+        ));
+        let output = AtomicU64::new(0);
+        let (input, queue) = PtyInput::channel();
+        let held = AtomicBool::new(false);
+        let queued = || -> String { String::from_utf8(queue.try_iter().flatten().collect()).unwrap() };
+        process_output(&parser, &output, &held, &input, b"\x1b]11;?\x07");
+        assert_eq!(queued(), "\x1b]11;rgb:1e1e/2f2f/3c3c\x07");
+        process_output(&parser, &output, &held, &input, b"\x1b]11;?\x1b\\");
+        assert_eq!(queued(), "\x1b]11;rgb:1e1e/2f2f/3c3c\x1b\\");
+        // Cut between two reads, in the middle of the terminator.
+        process_output(&parser, &output, &held, &input, b"\x1b]11;?\x1b");
+        assert_eq!(queued(), "");
+        process_output(&parser, &output, &held, &input, b"\\");
+        assert_eq!(queued(), "\x1b]11;rgb:1e1e/2f2f/3c3c\x1b\\");
+        // Each query keeps its own terminator, in order with the other answers.
+        process_output(&parser, &output, &held, &input, b"\x1b]10;?\x07\x1b[5n\x1b]4;1;?\x1b\\");
+        let text = queued();
+        assert!(text.starts_with("\x1b]10;rgb:cccc/cccc/cccc\x07\x1b[0n\x1b]4;1;rgb:c5c5/0f0f/1f1f\x1b\\"), "{text:?}");
+        // Setting a color, or resetting it, is answered with nothing and does not break what follows.
+        process_output(&parser, &output, &held, &input, b"\x1b]11;#102030\x07\x1b]4;1;rgb:ff/00/00\x07\x1b]111\x07ok");
+        assert_eq!(queued(), "");
+        assert!(lock(&parser).screen().contents().contains("ok"));
+    }
+
     /// The reader thread's step on one chunk of output (`process_output`): the answers a program asks for are queued
     /// to the writer, in order, with nothing else. Runs on every OS: no PTY is needed to check the queue.
     #[test]
@@ -1886,14 +2087,67 @@ Claude needs your permission",
         let parser = Mutex::new(test_parser(10, 40, 0));
         let output = AtomicU64::new(0);
         let (input, queue) = PtyInput::channel();
-        process_output(&parser, &output, &input, b"ab\x1b[6n");
-        process_output(&parser, &output, &input, b"plain text\r\n");
-        process_output(&parser, &output, &input, b"\x1b[c\x1b[5n");
+        let held = AtomicBool::new(false);
+        process_output(&parser, &output, &held, &input, b"ab\x1b[6n");
+        process_output(&parser, &output, &held, &input, b"plain text\r\n");
+        process_output(&parser, &output, &held, &input, b"\x1b[c\x1b[5n");
         let queued: Vec<u8> = queue.try_iter().flatten().collect();
         assert_eq!(queued, b"\x1b[1;3R\x1b[?1;2c\x1b[0n", "cursor position, primary DA, status");
         assert_eq!(input.queued.load(Ordering::Acquire), queued.len());
         assert_eq!(output.load(Ordering::Acquire), 3, "every chunk counts as output");
         assert!(lock(&parser).callbacks().responses.is_empty(), "the answers were taken out of the emulator");
+    }
+
+    /// The reader thread's step on synchronized output: a chunk that leaves a block open is held back (`true`, `held`
+    /// set), a chunk that ends it releases it, several blocks in a chunk and a block split across chunks both work, and
+    /// a full reset ends an open block, also when its `ESC` and `c` come in different reads.
+    #[test]
+    fn synchronized_blocks_are_held_until_they_end() {
+        let parser = Mutex::new(test_parser(10, 40, 0));
+        let output = AtomicU64::new(0);
+        let held = AtomicBool::new(false);
+        let (input, _queue) = PtyInput::channel();
+        let step = |chunk: &[u8]| process_output(&parser, &output, &held, &input, chunk);
+        assert!(!step(b"plain\r\n"), "no block: announced at once");
+        assert!(step(b"\x1b[?2026hfirst half"), "the block is open after the chunk");
+        assert!(held.load(Ordering::Acquire));
+        assert!(step(b" second half"), "still open");
+        assert!(!step(b"\x1b[?2026l"), "the `l` ends it");
+        assert!(!held.load(Ordering::Acquire));
+        assert!(!step(b"\x1b[?2026ha\x1b[?2026l\x1b[?2026hb\x1b[?2026l"), "two whole blocks in one chunk");
+        assert!(step(b"\x1b[?2026ha\x1b[?2026lb\x1b[?2026hc"), "a block opened at the end of the chunk");
+        assert!(!step(b"\x1b[?2026l"));
+        assert!(!step(b"\x1b[?20"), "a sequence cut in two: no block yet");
+        assert!(step(b"26h"), "its second half opens the block");
+        assert!(!step(b"\x1bc"), "a full reset ends the block");
+        assert!(!lock(&parser).callbacks().sync_open());
+        assert!(step(b"\x1b[?2026htext\x1b"));
+        assert!(!step(b"c"), "ESC at the end of one read, `c` at the start of the next");
+        // A block opened after the reset in the same chunk stays open.
+        assert!(step(b"\x1bc\x1b[?2026h"));
+        assert_eq!(output.load(Ordering::Acquire), 13, "every chunk counts as output");
+    }
+
+    /// A block left open stays held while its time runs, and the held flag is what `release_sync` and `sync_wake` read:
+    /// the block is over by itself at the timeout, with no byte arriving (the reader may be blocked in `read`).
+    #[test]
+    fn a_forgotten_block_is_over_after_the_timeout() {
+        use std::time::Duration;
+        let parser = Mutex::new(test_parser(10, 40, 0));
+        lock(&parser).callbacks_mut().set_sync_timeout(Some(Duration::from_millis(60)));
+        let output = AtomicU64::new(0);
+        let held = AtomicBool::new(false);
+        let (input, _queue) = PtyInput::channel();
+        assert!(process_output(&parser, &output, &held, &input, b"\x1b[?2026hhalf a frame"));
+        assert!(held.load(Ordering::Acquire));
+        let left = lock(&parser).callbacks().sync_left().expect("the block is open");
+        assert!(left <= Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(!lock(&parser).callbacks().sync_open(), "no `l` came, the time is up");
+        assert!(held.load(Ordering::Acquire), "held until the main thread releases it");
+        // The next chunk, whatever it is, is announced again.
+        assert!(!process_output(&parser, &output, &held, &input, b"more"));
+        assert!(!held.load(Ordering::Acquire));
     }
 
     /// Input is written in the order it was queued, and nothing is queued past the cap: the program that does
@@ -1964,7 +2218,9 @@ Claude needs your permission",
         let spec = ShellSpec::new(program, args.into_iter().map(String::from).collect());
         let (tx, rx) = std::sync::mpsc::channel();
         let cwd = std::env::temp_dir();
-        let spec_in = SpawnSpec { cwd: &cwd, command: None, shell: &spec, rows: 10, cols: 40, scrollback: 10 };
+        let colors: SharedColors = Default::default();
+        let spec_in =
+            SpawnSpec { cwd: &cwd, command: None, shell: &spec, rows: 10, cols: 40, scrollback: 10, colors: &colors };
         let pane = Pane::spawn(7, spec_in, tx).unwrap();
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(20)) {

@@ -79,12 +79,58 @@ fn help_at_a_tiny_size_says_so() {
     let mut app = demo_app(110, 30);
     app.run(Action::Help);
     let text = render(&mut app, 30, 8);
-    assert!(text.contains("enlarge window"), "{text}");
+    // The note sits on a row of its own: the dimmed Home screen behind the overlay shows nothing on it.
+    assert!(text.lines().any(|l| l.trim() == "enlarge window"), "{text}");
     for (w, h) in [(1, 1), (2, 3), (12, 5), (29, 40), (40, 5)] {
         render(&mut app, w, h);
     }
     // Big enough again: the key list is back.
     assert!(render(&mut app, 110, 30).contains("KEYBOARD REFERENCE"));
+}
+
+/// No key of the keyboard reference runs into its description: at every audited size the key column
+/// is wider than the key it shows, so at least two blanks come before the text. A key too long for
+/// its column is cut with "…" instead.
+#[test]
+fn help_keys_keep_a_gap_from_their_text() {
+    use noble::app::Overlay;
+    for (w, h) in [(160, 45), (120, 34), (110, 30), (90, 28), (76, 24), (56, 18), (30, 8)] {
+        let mut app = demo_app(w, h);
+        app.run(Action::Help);
+        let text = render(&mut app, w, h);
+        let Some(geo) = app.help_geometry("") else {
+            assert!(text.contains("enlarge window"), "{w}x{h}:\n{text}");
+            continue;
+        };
+        // Every scroll position shows other rows: each one is checked on the screen it is drawn on.
+        let mut mouse_row_seen = false;
+        for scroll in 0..=geo.max_scroll() {
+            if let Some(Overlay::Help(st)) = &mut app.overlay {
+                st.scroll = scroll;
+            }
+            let text = render(&mut app, w, h);
+            mouse_row_seen |= text.contains("double-click title  zoom / restore the pane");
+            for line in geo.columns.iter().flat_map(|col| col.iter().skip(scroll).take(geo.rows)) {
+                let noble::app::help::Line::Row { key, desc, .. } = line else { continue };
+                let key_shown = noble::util::truncate(key, usize::from(geo.key_w) - noble::app::help::KEY_GAP);
+                // The key as drawn, then at least two blanks, then the start of the description.
+                let head: String = desc.chars().take(3).collect();
+                let gap_ok = text.lines().any(|l| {
+                    l.match_indices(key_shown.as_str()).any(|(i, _)| {
+                        let rest = &l[i + key_shown.len()..];
+                        let after = rest.trim_start_matches(' ');
+                        rest.len() - after.len() >= 2 && after.starts_with(&head)
+                    })
+                });
+                assert!(gap_ok, "{w}x{h}: `{key}` runs into its text `{desc}`:\n{text}");
+            }
+        }
+        // The MOUSE section is reachable at 160x45: how many rows fit in view depends on the launchers
+        // installed on the machine (the HOME section lists them), so it may need scrolling.
+        if (w, h) == (160, 45) {
+            assert!(mouse_row_seen, "the MOUSE section never comes into view at {w}x{h}");
+        }
+    }
 }
 
 /// The keyboard reference: two columns on a wide screen with no scrolling; one column that scrolls
@@ -377,7 +423,7 @@ fn notifications_action_lists_past_toasts() {
     assert!(titles[1].ends_with("second, an error"), "{titles:?}");
     assert!(titles[2].ends_with("first note"), "{titles:?}");
     assert_eq!(titles[0].as_bytes()[2], b':', "title starts with the time: {}", titles[0]);
-    assert_eq!(st.all[0].cmd, PaletteCmd::CopyNotice("third note".into()));
+    assert_eq!(st.all[0].cmd, PaletteCmd::Notice { text: "third note".into(), target: None });
     let cmd = st.all[0].cmd.clone();
     app.overlay = None;
     app.run_palette(cmd);
@@ -391,4 +437,177 @@ fn notifications_action_lists_past_toasts() {
     assert_eq!(app.notices.len(), noble::app::NOTICE_HISTORY);
     assert_eq!(app.notices.back().map(|n| n.text.as_str()), Some("note 59"));
     assert_eq!(app.notices.front().map(|n| n.text.as_str()), Some("note 10"));
+}
+
+/// Two terminal tabs at 120 columns: the first with one pane, the second split in two. Returns the second tab's
+/// first pane and its split (the one with focus).
+fn two_tabs_second_split(app: &mut App) -> (noble::term::layout::PaneId, noble::term::layout::PaneId) {
+    app.new_tab(std::env::temp_dir(), None, Some("first".into()));
+    app.new_tab(std::env::temp_dir(), None, Some("second".into()));
+    let first = app.tabs[1].focus;
+    app.run(Action::SplitRight);
+    (first, app.tabs[1].focus)
+}
+
+/// The agent in `pane` needs you while its tab is in the background (a hook record, as Claude writes it).
+fn needs_you(app: &mut App, pane: noble::term::layout::PaneId) {
+    let now = chrono::Utc::now().timestamp();
+    app.apply_hook_records(std::collections::HashMap::from([(pane, hook_rec("notification", now, 0))]));
+}
+
+/// Clicks the notification whose text is `text` (it must be on screen).
+fn click_toast(app: &mut App, text: &str) {
+    render(app, 120, 30);
+    let id = app.toasts.iter().find(|t| t.text == text).expect("toast on screen").id;
+    let rect = find_hit(app, |h| matches!(h, noble::app::Hit::Toast(x) if *x == id)).expect("toast hit");
+    click(app, rect.x + 1, rect.y);
+    assert!(!app.toasts.iter().any(|t| t.id == id), "a click dismisses the notification");
+}
+
+/// "Claude needs you" from a background pane: its toast leads to that tab and pane, and the click dismisses it.
+#[test]
+fn clicking_a_pane_toast_goes_to_its_pane() {
+    use noble::app::{ToastTarget, View};
+    let mut app = demo_app(120, 30);
+    let (first, other) = two_tabs_second_split(&mut app);
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, other);
+    let text = app.toasts[0].text.clone();
+    assert_eq!(app.toasts[0].target, Some(ToastTarget::Pane { tab: app.tabs[1].id, pane: other }));
+    click_toast(&mut app, &text);
+    assert_eq!(app.view, View::Term(1), "the pane's tab is shown");
+    assert_eq!(app.tabs[1].focus, other, "and its pane focused");
+    assert_ne!(app.tabs[1].focus, first);
+}
+
+/// A click on a pane's notification restores a zoomed tab that shows another pane; a pane that is already the
+/// zoomed one keeps its zoom.
+#[test]
+fn pane_toast_click_keeps_the_zoom_consistent() {
+    use noble::app::View;
+    let mut app = demo_app(120, 30);
+    let (first, other) = two_tabs_second_split(&mut app);
+    app.view = View::Term(1);
+    app.run(Action::Zoom);
+    assert!(app.tabs[1].zoomed && app.tabs[1].focus == other);
+    // The hidden pane needs you: the zoom goes, the pane is shown.
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, first);
+    let text = app.toasts[0].text.clone();
+    click_toast(&mut app, &text);
+    assert_eq!((app.view, app.tabs[1].focus), (View::Term(1), first));
+    assert!(!app.tabs[1].zoomed, "the pane must be visible");
+    // The zoomed pane itself needs you: it stays zoomed.
+    app.tabs[1].focus = other;
+    app.run(Action::Zoom);
+    assert!(app.tabs[1].zoomed);
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, other);
+    let text = app.toasts[0].text.clone();
+    click_toast(&mut app, &text);
+    assert_eq!((app.view, app.tabs[1].focus), (View::Term(1), other));
+    assert!(app.tabs[1].zoomed);
+}
+
+/// A notification whose pane or tab has closed only dismisses: nothing else moves.
+#[test]
+fn closed_pane_or_tab_toast_only_dismisses() {
+    use noble::app::View;
+    let mut app = demo_app(120, 30);
+    let (first, other) = two_tabs_second_split(&mut app);
+    // The split pane closes; its notification is still on screen.
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, other);
+    let text = app.toasts[0].text.clone();
+    app.view = View::Term(1);
+    app.run(Action::ClosePane);
+    assert_eq!(app.tabs[1].panes(), vec![first]);
+    app.view = View::Bridge;
+    click_toast(&mut app, &text);
+    assert_eq!(app.view, View::Bridge, "the pane is gone: no view change");
+    // The whole tab closes: the same goes for its pane's notification.
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, first);
+    let text = app.toasts[0].text.clone();
+    app.view = View::Term(1);
+    app.run(Action::CloseTab);
+    assert_eq!(app.tabs.len(), 1);
+    app.view = View::Bridge;
+    click_toast(&mut app, &text);
+    assert_eq!(app.view, View::Bridge, "the tab is gone: no view change");
+}
+
+/// The notification list: Enter on a pane's notification goes to its pane; ctrl+y copies it instead, and a
+/// notification without a pane is copied by Enter. The footer shows both choices.
+#[test]
+fn notification_list_goes_to_the_pane_and_copies() {
+    use noble::app::{Overlay, PaletteCmd, ToastTarget, View};
+    let mut app = demo_app(120, 30);
+    let (_, other) = two_tabs_second_split(&mut app);
+    app.view = View::Term(0);
+    app.toasts.clear();
+    needs_you(&mut app, other);
+    app.toast(ToastLevel::Info, "plain note");
+    let key = |app: &mut App, code: KeyCode, mods: KeyModifiers| app.on_key(KeyEvent::new(code, mods));
+    // Opens the list and selects the row whose command matches `want`.
+    let select = |app: &mut App, want: fn(&PaletteCmd) -> bool| {
+        app.run(Action::Notifications);
+        let Some(Overlay::Palette(st)) = &mut app.overlay else { panic!("no list") };
+        st.selected = st.all.iter().position(|i| want(&i.cmd)).expect("row");
+    };
+    let to_pane = |c: &PaletteCmd| matches!(c, PaletteCmd::Notice { target: Some(ToastTarget::Pane { .. }), .. });
+    let plain = |c: &PaletteCmd| matches!(c, PaletteCmd::Notice { target: None, .. });
+
+    select(&mut app, to_pane);
+    let text = render(&mut app, 120, 30);
+    assert!(text.contains("go to") && text.contains("ctrl+y copy"), "{text}");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.overlay.is_none(), "Enter closes the list");
+    assert_eq!((app.view, app.tabs[1].focus), (View::Term(1), other), "Enter shows the pane");
+
+    // Ctrl+Y copies the same notification and leaves the view alone.
+    app.view = View::Term(0);
+    select(&mut app, to_pane);
+    key(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert!(app.overlay.is_none(), "copying closes the list too");
+    assert_eq!(app.view, View::Term(0));
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+
+    // A notification without a pane: Enter copies, and the footer offers no "go to".
+    select(&mut app, plain);
+    let text = render(&mut app, 120, 30);
+    assert!(text.contains("⏎ copy") && !text.contains("go to") && !text.contains("ctrl+y"), "{text}");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.view, View::Term(0));
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+
+    // The pane has closed since: the footer offers "copy" and Enter copies instead of doing nothing.
+    app.view = View::Term(1);
+    app.run(Action::ClosePane);
+    app.view = View::Term(0);
+    app.toasts.clear();
+    select(&mut app, to_pane);
+    let text = render(&mut app, 120, 30);
+    assert!(text.contains("⏎ copy") && !text.contains("go to"), "{text}");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.view, View::Term(0));
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+
+    // The list stays readable at every size; the audit dumps show the footers.
+    for (w, h) in SIZES {
+        app.run(Action::Notifications);
+        let Some(Overlay::Palette(st)) = &mut app.overlay else { panic!("no list") };
+        st.selected = st.all.iter().position(|i| to_pane(&i.cmd)).expect("row");
+        let text = render(&mut app, w, h);
+        save(&format!("notifications-list-{w}x{h}"), &text);
+        app.overlay = None;
+    }
 }

@@ -64,6 +64,14 @@ pub fn put_center(buf: &mut Buffer, area: Rect, y: u16, s: &str, style: Style) {
     put(buf, x, y, s, style, area.width);
 }
 
+/// The "enlarge window" note for an area too small to draw in. Its row is cleared first, so the text
+/// never lands on what was drawn there before (the dimmed screen under an overlay, for one).
+pub fn too_small(buf: &mut Buffer, area: Rect, th: &Theme) {
+    let y = area.y + area.height / 2;
+    fill(buf, Rect::new(area.x, y, area.width, 1), Style::default().bg(th.bg).fg(th.fg));
+    put_center(buf, area, y, "enlarge window", th.dim());
+}
+
 pub fn hline(buf: &mut Buffer, x: u16, y: u16, w: u16, ch: &str, style: Style) {
     for i in 0..w {
         put(buf, x + i, y, ch, style, 1);

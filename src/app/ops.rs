@@ -41,6 +41,13 @@ fn dir_name(path: &Path) -> String {
 
 impl App {
     pub fn run(&mut self, action: Action) {
+        self.run_action(action);
+        // An action may move the focus (a split, a tab switch): the programs are told at once.
+        self.sync_focus_reports();
+        self.sync_color_reports();
+    }
+
+    fn run_action(&mut self, action: Action) {
         match action {
             Action::Bridge => self.view = View::Bridge,
             Action::System => self.view = View::System,
@@ -331,6 +338,7 @@ impl App {
             rows,
             cols,
             scrollback: self.cfg.terminal.scrollback.clamp(100, 100_000),
+            colors: &self.colors,
         };
         let pane = Pane::spawn(id, spec, self.tx.clone()).map_err(|e| format!("{e:#}"))?;
         self.panes.insert(id, pane);

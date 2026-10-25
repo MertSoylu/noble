@@ -46,6 +46,16 @@ body:
       label: Terminal and shell
       placeholder: Windows Terminal 1.22 + PowerShell 7.5
   - type: textarea
+    id: doctor
+    attributes:
+      label: noble doctor output
+      description: |
+        Run `noble doctor` and paste its whole output here. It lists the OS, the terminal, the shells, the Claude Code
+        hooks, the AI providers and the config and data paths. It contains no tokens or credentials.
+      render: text
+    validations:
+      required: true
+  - type: textarea
     id: log
     attributes:
       label: Log or config

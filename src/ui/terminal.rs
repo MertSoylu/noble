@@ -584,6 +584,10 @@ fn pane_content(
 ) -> Option<(u16, u16)> {
     // The themed background also shows in the edge cells the screen does not cover.
     hud::fill(buf, inner, Style::default().bg(pal.bg).fg(pal.fg));
+    // A synchronized-output block is open: the frame in the emulator is half written, so the last complete one stays.
+    if let Some(cursor) = pane.held_view(buf, inner) {
+        return cursor;
+    }
     let parser = pane.parser();
     let screen = parser.screen();
     let (rows, cols) = crate::term::screen_size(screen);
@@ -670,11 +674,16 @@ fn pane_content(
             }
         }
     }
-    if !shown.focused || screen.hide_cursor() || screen.scrollback() > 0 {
-        return None;
-    }
-    let (cr, cc) = screen.cursor_position();
-    (cr < inner.height && cc < inner.width).then(|| (inner.x + cc, inner.y + cr))
+    let cursor = if !shown.focused || screen.hide_cursor() || screen.scrollback() > 0 {
+        None
+    } else {
+        let (cr, cc) = screen.cursor_position();
+        (cr < inner.height && cc < inner.width).then(|| (inner.x + cc, inner.y + cr))
+    };
+    // Only drawn into `buf` by the loop above; the copy is for the next frame that falls inside a block.
+    drop(parser);
+    pane.remember_view(buf, inner, cursor);
+    cursor
 }
 
 /// The pane is big enough for the search bar on its bottom row.

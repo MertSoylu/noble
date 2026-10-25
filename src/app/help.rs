@@ -10,8 +10,12 @@ use super::App;
 use crate::keys::Action;
 use crate::util;
 
-/// Width of the key column of one row.
-pub const KEY_W: usize = 18;
+/// Longest key text that sets the width of the key column (longer keys are cut with "…").
+pub const KEY_MAX: usize = 20;
+/// Blank columns between the key column and the description.
+pub const KEY_GAP: usize = 2;
+/// Narrowest description the key column leaves room for; a tiny box gives the key column less.
+const DESC_MIN: usize = 12;
 /// Longest description that sets the width of a column (longer ones are cut with "…").
 const DESC_CAP: usize = 56;
 /// Blank columns between two columns of the list.
@@ -61,6 +65,9 @@ pub struct Geometry {
     pub rect: Rect,
     /// Text width of one column.
     pub col_w: u16,
+    /// Width of the key column, gap included: keys are cut to `key_w - KEY_GAP`, and the description
+    /// starts after the key column.
+    pub key_w: u16,
     /// Lines shown per column (the footer takes the last row of the box).
     pub rows: usize,
     pub columns: Vec<Vec<Line>>,
@@ -286,10 +293,13 @@ pub fn geometry(area: Rect, sections: &[Section]) -> Option<Geometry> {
     // The box: one column keeps the old 78 columns; more columns take the width their longest
     // description needs, up to the screen.
     let desc_w = sections.iter().flat_map(|s| &s.rows).map(|r| util::width(&r.desc).min(DESC_CAP)).max().unwrap_or(0);
+    // The key column fits the longest key (cut at KEY_MAX) and keeps KEY_GAP blank columns after it.
+    let longest_key = sections.iter().flat_map(|s| &s.rows).map(|r| util::width(&r.key)).max().unwrap_or(0);
+    let mut key_text = longest_key.min(KEY_MAX);
     let w = if k == 1 {
         78.min(area.width.saturating_sub(2))
     } else {
-        let natural = 4 + k * (1 + KEY_W + desc_w) + (k - 1) * usize::from(GAP);
+        let natural = 4 + k * (1 + key_text + KEY_GAP + desc_w) + (k - 1) * usize::from(GAP);
         u16::try_from(natural).unwrap_or(u16::MAX).min(area.width.saturating_sub(4))
     };
     // One column scrolls, so it keeps a compact box; several columns use the whole height.
@@ -306,6 +316,9 @@ pub fn geometry(area: Rect, sections: &[Section]) -> Option<Geometry> {
     let inner_w = w.saturating_sub(4);
     let rows = usize::from(h.saturating_sub(3));
     let col_w = inner_w.saturating_sub((k as u16 - 1) * GAP) / k as u16;
+    // A narrow column keeps room for a description: the key column gives up the rest.
+    key_text = key_text.min(usize::from(col_w).saturating_sub(1 + KEY_GAP + DESC_MIN));
+    let key_w = u16::try_from(key_text + KEY_GAP).unwrap_or(u16::MAX);
 
     // Selectable rows are numbered in reading order: the columns hold the sections in order.
     let mut sel = 0;
@@ -332,7 +345,7 @@ pub fn geometry(area: Rect, sections: &[Section]) -> Option<Geometry> {
     if columns.is_empty() {
         columns.push(Vec::new());
     }
-    Some(Geometry { rect, col_w, rows, columns })
+    Some(Geometry { rect, col_w, key_w, rows, columns })
 }
 
 impl App {
@@ -388,6 +401,27 @@ mod tests {
         assert_eq!(split(&[3, 3, 3], 3), vec![0..1, 1..2, 2..3]);
         assert_eq!(split(&[3, 3, 3], 1), vec![0..3]);
         assert!(split(&[], 2).is_empty());
+    }
+
+    #[test]
+    fn key_column_fits_the_longest_key_with_a_gap() {
+        let row = |k: &str, d: &str| Row { key: k.into(), desc: d.into(), action: None };
+        let sections = vec![Section {
+            title: "MOUSE".into(),
+            rows: vec![row("double-click title", "zoom / restore the pane"), row("ctrl+click", "open")],
+        }];
+        // The longest key (18 columns) and its two blank columns.
+        let g = geometry(Rect::new(0, 0, 160, 45), &sections).expect("fits");
+        assert_eq!(usize::from(g.key_w), "double-click title".len() + KEY_GAP);
+        // One column (110 wide) gives the same width.
+        assert_eq!(usize::from(geometry(Rect::new(0, 0, 110, 30), &sections).expect("fits").key_w), 20);
+        // A key longer than KEY_MAX takes the cap, and the column keeps its gap.
+        let long = vec![Section { title: "X".into(), rows: vec![row(&"k".repeat(40), "d")] }];
+        let g = geometry(Rect::new(0, 0, 160, 45), &long).expect("fits");
+        assert_eq!(usize::from(g.key_w), KEY_MAX + KEY_GAP);
+        // A narrow box gives the key column less, so a description keeps DESC_MIN columns.
+        let g = geometry(Rect::new(0, 0, 34, 20), &long).expect("fits");
+        assert!(g.col_w - g.key_w > DESC_MIN as u16, "{g:?}");
     }
 
     #[test]

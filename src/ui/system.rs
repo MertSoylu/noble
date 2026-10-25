@@ -11,7 +11,7 @@ use crate::util;
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     if area.width < 30 || area.height < 8 {
-        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        hud::too_small(buf, area, th);
         return;
     }
     let area = if area.width >= 80 { Rect::new(area.x + 1, area.y, area.width - 2, area.height) } else { area };

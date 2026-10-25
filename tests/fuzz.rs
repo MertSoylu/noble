@@ -250,3 +250,96 @@ fn key_encoding_never_panics() {
         let _ = noble::keys::Chord::from_event(&ev).to_string();
     }
 }
+
+/// Hostile output through the emulator step the reader thread runs (`pane::feed`): synchronized output, focus and
+/// scheme modes, DECRQM, XTVERSION, color queries and sets, cut anywhere, with resets in between. Must not panic,
+/// and what it queues stays bounded by what it read.
+#[test]
+fn terminal_queries_never_panic() {
+    use noble::term::colors::{ColorReport, OscScan, SharedColors, Terminator};
+    use noble::term::pane::{Callbacks, feed};
+    const BITS: [&str; 40] = [
+        "\x1b[?2026h",
+        "\x1b[?2026l",
+        "\x1b[?2026$p",
+        "\x1b[?1004h",
+        "\x1b[?1004l",
+        "\x1b[?2031;1049;99999h",
+        "\x1b[?2031l",
+        "\x1b[?996n",
+        "\x1b[?1004$p",
+        "\x1b[$p",
+        "\x1b[65535$p",
+        "\x1b[?65536$p",
+        "\x1b[>q",
+        "\x1b[>0q",
+        "\x1b[>99999q",
+        "\x1b]11;?\x07",
+        "\x1b]11;?\x1b\\",
+        "\x1b]10;?;?;?;?\x07",
+        "\x1b]12;?\x07",
+        "\x1b]4;1;?;256;?;-1;?;x;?\x07",
+        "\x1b]4;\x07",
+        "\x1b]4;1;rgb:ff/00/00\x07",
+        "\x1b]104\x07",
+        "\x1b]11;#zzzz\x07",
+        "\x1b]",
+        "\x1b",
+        "\x1b\\",
+        "\x1bc",
+        "\x07",
+        "\x18",
+        "\u{9c}",
+        ";",
+        "?",
+        "11",
+        "4",
+        "🙂",
+        "\u{0}",
+        "\r\n",
+        "abc",
+        "\x1b[",
+    ];
+    let mut rng = Rng::seeded(0x2026_1004_2031_0996);
+    let colors = SharedColors::default();
+    let mut parser = vt100::Parser::new_with_callbacks(
+        noble::term::vt_size(10),
+        noble::term::vt_size(40),
+        0,
+        Callbacks::with_colors(colors.clone()),
+    );
+    let mut scan = OscScan::default();
+    let mut read = 0usize;
+    let mut queued = 0usize;
+    for i in 0..steps(20_000) {
+        let text = rng.text(&BITS, 8);
+        let bytes = text.as_bytes();
+        // Cut at a random byte, so sequences split between reads like on a PTY.
+        let cut = rng.below(bytes.len() + 1);
+        for part in [&bytes[..cut], &bytes[cut..]] {
+            read += part.len();
+            feed(&mut parser, part);
+            let _ = parser.callbacks().sync_left();
+            let _ = parser.callbacks().mode_on(1004);
+        }
+        for b in bytes {
+            let _ = scan.push(*b);
+        }
+        parser.callbacks_mut().seal_color_replies(Terminator::St);
+        queued += parser.callbacks().responses.len();
+        parser.callbacks_mut().responses.clear();
+        if i % 97 == 0 {
+            // Another palette, a light one.
+            let mut r = ColorReport::dark();
+            r.bg = [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8];
+            *colors.write().unwrap() = r;
+        }
+    }
+    assert!(queued <= read * 64 + 1024, "{queued} bytes of answers for {read} bytes read");
+    for number in [&b"4"[..], b"10", b"11", b"12", b"", b"x", b"99999999999999999999"] {
+        let params: [&[u8]; 4] = [b"?", b"", b"300", b"?"];
+        for n in 0..=params.len() {
+            let _ = ColorReport::dark().answers(number, &params[..n]);
+        }
+    }
+}
