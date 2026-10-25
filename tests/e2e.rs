@@ -4,7 +4,7 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -190,8 +190,20 @@ fn ready_word_is_read_from_its_own_row() {
     assert!(!found, "the title counted as the output");
 }
 
+/// Writes an `e2e-*.txt` dump into `target/audit`. The first call of the run removes the earlier `e2e-*` dumps (once,
+/// before any is written); the render binary clears the other files there and leaves these alone.
 fn save(name: &str, text: &str) {
+    static CLEARED: Once = Once::new();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("audit");
+    CLEARED.call_once(|| {
+        let _ = std::fs::create_dir_all(&dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("e2e-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    });
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join(format!("e2e-{name}.txt")), text);
 }
@@ -378,6 +390,38 @@ fn folder_argument_is_validated() {
 
     let help = String::from_utf8_lossy(&run(&["--help"]).stdout).into_owned();
     assert!(help.contains("<dir>"), "{help}");
+}
+
+/// `noble doctor` prints its report without a terminal: it exits 0, shows every section, marks the machine-wide
+/// probes as skipped under the isolation every e2e test uses, and writes nothing into NOBLE's folder.
+#[test]
+fn doctor_prints_its_report() {
+    let home = Home::new("noble-e2e-doctor");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+        .arg("doctor")
+        .env("NOBLE_HOME", &*home)
+        .env(noble::ai::ISOLATED_ENV, "1")
+        .env("NOBLE_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "stderr: {}\n{text}", String::from_utf8_lossy(&out.stderr));
+    for section in [
+        "[NOBLE]",
+        "[System]",
+        "[Terminal]",
+        "[Shells]",
+        "[Claude Code hooks]",
+        "[AI providers]",
+        "[Paths]",
+        "[GitHub CLI]",
+    ] {
+        assert!(text.lines().any(|l| l == section), "missing {section}:\n{text}");
+    }
+    assert!(text.lines().any(|l| l == format!("version: {}", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains("system integrations: skipped (NOBLE_NO_SYSTEM_INTEGRATIONS is set)"), "{text}");
+    assert!(text.contains("gh auth: skipped"), "{text}");
+    assert!(!home.join("config.toml").exists(), "the report must not create the config file");
 }
 
 /// `kill` (SIGTERM) and a closing terminal window (SIGHUP) run the normal shutdown path, which saves the

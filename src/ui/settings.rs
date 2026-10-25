@@ -111,7 +111,7 @@ pub fn sync_scroll(app: &mut App, area: Rect) {
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     if area.width < 30 || area.height < 8 {
-        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        hud::too_small(buf, area, th);
         return;
     }
     let (frame, rows) = page_frame(area);

@@ -1,5 +1,6 @@
 //! Headless render tests: every screen is drawn at many sizes without panicking
-//! and text dumps are written under `target/audit/` (for visual review).
+//! and text dumps are written under `target/audit/` (for visual review). The folder is emptied once per run, before
+//! the first dump, so it only holds the screens of the last run (`common::audit_dir`).
 
 mod agents;
 mod animation;

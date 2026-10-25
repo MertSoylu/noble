@@ -1,9 +1,11 @@
 //! Real shells in a PTY: cwd tracking, command results, output throughput and hostile names.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use noble::app::{App, View};
 use noble::event::AppEvent;
 use noble::keys::Action;
+use noble::term::layout::PaneId;
+use noble::term::pane::ShellSpec;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::path::PathBuf;
@@ -682,6 +684,286 @@ fn cursor_position_answer_reaches_the_program() {
     assert!(app.tabs.is_empty());
 }
 
+/// Identity and mode queries are answered and the answers reach the program: XTVERSION (`CSI > q`) names NOBLE and
+/// its version, and DECRQM (`CSI ? Ps $ p`) reports a mode the program set (1) and a mode NOBLE does not know (0).
+/// The program reads each answer back by its byte count, with POSIX `sh`, `stty`, `dd` and `od`, so it runs on Unix.
+/// Windows panes get the same answers through the same reader thread, but ConPTY hands a Windows program the answer
+/// as keyboard input, so the bytes it reads are not the bytes NOBLE wrote: the answers are checked by the unit tests in
+/// `term/osc.rs`, and the queue step on every OS by `pane::tests::query_answers_are_queued_to_the_writer`.
+#[test]
+fn identity_and_mode_answers_reach_the_program() {
+    if cfg!(windows) {
+        return;
+    }
+    let xtversion = format!("\x1bP>|NOBLE {}\x1b\\", env!("CARGO_PKG_VERSION"));
+    // (the query, the answer it must get). The program sets 2004 and 1004 first, then asks for them.
+    let queries: [(&str, &str); 4] = [
+        ("\x1b[?2004h\x1b[?2004$p", "\x1b[?2004;1$y"),
+        ("\x1b[>q", xtversion.as_str()),
+        ("\x1b[?1004h\x1b[?1004$p", "\x1b[?1004;1$y"),
+        ("\x1b[?2031h\x1b[?2031$p", "\x1b[?2031;1$y"),
+    ];
+    // Raw mode; each step prints the query (`\033` for ESC), reads the answer's bytes back and prints them as hex.
+    let mut script = String::from("stty raw -echo;");
+    for (query, answer) in queries {
+        script += &format!(
+            "printf '{}';dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \n';printf ' ';",
+            query.replace('\x1b', "\\033"),
+            answer.len()
+        );
+    }
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "sh".into();
+    cfg.terminal.shell_args = vec!["-c".into(), format!("{script}sleep 3")];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("identity".into()));
+    let id = app.tabs[0].focus;
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        app.pump();
+        let Some(pane) = app.panes.get(&id) else { panic!("the program's pane closed before the answers came back") };
+        let screen = pane.parser().screen().contents();
+        if queries.iter().all(|(_, answer)| screen.contains(&hex(answer))) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "not every answer came back:\n{screen}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
+/// Focus reports (DECSET 1004): a program that set the mode gets `CSI O` when its pane loses the focus and `CSI I`
+/// when it gets it back, for a focus move between panes and for NOBLE's own window. A repeated event sends nothing.
+/// The programs are this test binary again: the `#[ignore]`d `focus_child_*` tests below print each focus event
+/// the reporting one reads (crossterm reads `CSI I` / `CSI O` as focus events on Unix; on Windows ConPTY passes
+/// them to the child as console focus events), so the pane's screen shows what arrived.
+#[test]
+fn focus_reports_follow_the_focused_pane() {
+    let exe = std::env::current_exe().expect("the test binary").display().to_string();
+    let child = |test: &str| ShellSpec::new(exe.clone(), vec!["--ignored".into(), "--nocapture".into(), test.into()]);
+    let mut app = demo_app(110, 30);
+    app.shell = child("focus_child_reports");
+    app.run(Action::NewTab);
+    let reporting = app.tabs[0].focus;
+    // The mode is set before the focus moves away from this pane, so every report below is a real change.
+    pump_until(&mut app, "the reporting program is ready", |app| screen_text(app, reporting).contains("READY"));
+    app.shell = child("focus_child_plain");
+    app.run(Action::SplitRight);
+    let plain = app.tabs[0].focus;
+    pump_until(&mut app, "the plain program is ready", |app| screen_text(app, plain).contains("READY"));
+
+    // The focus moves to the new pane: the reporting pane hears that it lost it, the plain one has no mode.
+    pump_until(&mut app, "the reporting pane hears the loss", |app| focus_events(app, reporting, "focus-out") == 1);
+    app.run(Action::FocusLeft);
+    assert_eq!(app.tabs[0].focus, reporting);
+    pump_until(&mut app, "the reporting pane hears the gain", |app| focus_events(app, reporting, "focus-in") == 1);
+    // NOBLE's window goes to the background and comes back; a second gain in a row is no change.
+    app.handle(AppEvent::Input(Event::FocusLost));
+    pump_until(&mut app, "the window loss reaches the pane", |app| focus_events(app, reporting, "focus-out") == 2);
+    app.handle(AppEvent::Input(Event::FocusGained));
+    app.handle(AppEvent::Input(Event::FocusGained));
+    pump_until(&mut app, "the window gain reaches the pane", |app| focus_events(app, reporting, "focus-in") == 2);
+
+    // Nothing more arrives, and the pane without the mode was never told anything.
+    std::thread::sleep(Duration::from_millis(500));
+    app.pump();
+    assert_eq!(focus_events(&app, reporting, "focus-out"), 2, "{}", screen_text(&app, reporting));
+    assert_eq!(focus_events(&app, reporting, "focus-in"), 2, "{}", screen_text(&app, reporting));
+    // The pane whose program never set the mode was sent nothing. On Windows ConPTY turns the mode on in every pane by
+    // itself (its host asks for focus events), so the plain pane has it there too, and the reports reach it only as
+    // console focus events that a program reading no input never sees. On Unix the pane's tty echoes every byte
+    // NOBLE writes to it (`^[[I` / `^[[O`), so an echo would show a report.
+    #[cfg(not(windows))]
+    {
+        assert!(!app.panes[&plain].wants_focus_reports());
+        let echoed = screen_text(&app, plain);
+        assert!(!echoed.contains("^[[I") && !echoed.contains("^[[O"), "{echoed}");
+    }
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.tabs.is_empty());
+}
+
+/// The screen of a pane, as text.
+fn screen_text(app: &App, id: PaneId) -> String {
+    app.panes[&id].parser().screen().contents()
+}
+
+/// How many times `word` (a focus event the child printed) is on a pane's screen.
+fn focus_events(app: &App, id: PaneId, word: &str) -> usize {
+    screen_text(app, id).matches(word).count()
+}
+
+/// The reporting program of `focus_reports_follow_the_focused_pane`: sets focus reports, then prints each focus event.
+/// It runs only as that test's child (`--ignored`).
+#[test]
+#[ignore = "a child program of focus_reports_follow_the_focused_pane"]
+fn focus_child_reports() {
+    focus_child(true);
+}
+
+/// The program without the mode in `focus_reports_follow_the_focused_pane`: it prints `READY` and reads no input, so
+/// the line discipline of its tty echoes what NOBLE writes to it on Unix.
+#[test]
+#[ignore = "a child program of focus_reports_follow_the_focused_pane"]
+fn focus_child_plain() {
+    println!("READY");
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// Raw mode, `READY` once the mode is set (when `reports`), then one line per focus event until `q` or a minute.
+fn focus_child(reports: bool) {
+    use std::io::Write;
+    crossterm::terminal::enable_raw_mode().expect("raw mode");
+    let mut out = std::io::stdout();
+    if reports {
+        write!(out, "\x1b[?1004h").expect("the pane");
+    }
+    write!(out, "READY\r\n").expect("the pane");
+    out.flush().expect("the pane");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if !crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            continue;
+        }
+        let word = match crossterm::event::read() {
+            Ok(Event::FocusGained) => "focus-in",
+            Ok(Event::FocusLost) => "focus-out",
+            Ok(Event::Key(k)) if k.code == KeyCode::Char('q') => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        };
+        write!(out, "{word}\r\n").expect("the pane");
+        out.flush().expect("the pane");
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// Synchronized output (DECSET 2026): a program writes a frame inside `CSI ? 2026 h` … `l` in several chunks with
+/// pauses between them. Every frame NOBLE draws meanwhile is the previous complete one, never a half-written one,
+/// and the finished frame shows when the block ends. The parser itself does hold the half frame (it is fed as it
+/// arrives), so the check is on what the pane draws. The program is this test binary again (`sync_child_*`).
+#[test]
+fn synchronized_frame_is_never_drawn_half_written() {
+    let exe = std::env::current_exe().expect("the test binary").display().to_string();
+    let mut app = demo_app(110, 30);
+    app.shell = ShellSpec::new(exe, vec!["--ignored".into(), "--nocapture".into(), "sync_child_frame".into()]);
+    app.run(Action::NewTab);
+    let id = app.tabs[0].focus;
+    // Long enough for the slowest runner: the pauses in the program add up to well under it.
+    app.panes[&id].parser().callbacks_mut().set_sync_timeout(Some(Duration::from_secs(10)));
+    // The first frame is drawn (and kept) before the block starts: the program waits for a second after printing it.
+    pump_until(&mut app, "the first frame is drawn", |app| screen_text(app, id).contains("BASE-FRAME"));
+    let mut shown = render(&mut app, 110, 30);
+    assert!(shown.contains("BASE-FRAME"), "{shown}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut during_block = 0;
+    while !shown.contains("FINAL-FRAME") {
+        assert!(!shown.contains("PARTIAL"), "a half-written frame was drawn:\n{shown}");
+        assert!(shown.contains("BASE-FRAME"), "the pane went blank or changed before the frame was complete:\n{shown}");
+        // The emulator already holds the half frame: that is the case the drawing has to cover.
+        if screen_text(&app, id).contains("PARTIAL") {
+            during_block += 1;
+        }
+        assert!(std::time::Instant::now() < deadline, "the frame never completed:\n{shown}");
+        app.pump();
+        app.tick();
+        std::thread::sleep(Duration::from_millis(5));
+        shown = render(&mut app, 110, 30);
+    }
+    assert!(during_block > 0, "the test never saw the emulator holding a half frame");
+    assert!(!shown.contains("PARTIAL"), "{shown}");
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+}
+
+/// A program that opens a block and never closes it is not frozen: after the timeout (about 150 ms) its frame is drawn
+/// and the held-back output event is sent, with no more bytes coming.
+#[test]
+fn forgotten_synchronized_block_is_released_after_the_timeout() {
+    let exe = std::env::current_exe().expect("the test binary").display().to_string();
+    let mut app = demo_app(110, 30);
+    app.shell = ShellSpec::new(exe, vec!["--ignored".into(), "--nocapture".into(), "sync_child_forgotten".into()]);
+    app.run(Action::NewTab);
+    let id = app.tabs[0].focus;
+    // A timeout long enough to see the frame held (the default one is checked by the unit tests).
+    let timeout = Duration::from_millis(1500);
+    app.panes[&id].parser().callbacks_mut().set_sync_timeout(Some(timeout));
+    pump_until(&mut app, "the first frame is drawn", |app| screen_text(app, id).contains("BASE-FRAME"));
+    let shown = render(&mut app, 110, 30);
+    assert!(shown.contains("BASE-FRAME"), "{shown}");
+    // While the block is open the frame is not drawn; after the timeout it is, with no further output.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while app.panes[&id].sync_wake().is_none() {
+        app.pump();
+        assert!(std::time::Instant::now() < deadline, "the block never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let opened = std::time::Instant::now();
+    loop {
+        app.pump();
+        app.tick();
+        let shown = render(&mut app, 110, 30);
+        if shown.contains("FORGOTTEN-FRAME") {
+            break;
+        }
+        assert!(opened.elapsed() < Duration::from_secs(30), "the frame was held for good:\n{shown}");
+        assert!(shown.contains("BASE-FRAME"), "the held frame is the previous one:\n{shown}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(opened.elapsed() >= timeout - Duration::from_millis(200), "released after {:?}", opened.elapsed());
+    // The event that was held back reaches the app: the tick releases it once the time is up, whichever of the two
+    // came first in the loop above.
+    app.tick();
+    app.pump();
+    assert!(app.panes[&id].sync_wake().is_none(), "the held output was released");
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+}
+
+/// The program of `synchronized_frame_is_never_drawn_half_written`. It runs only as that test's child (`--ignored`).
+#[test]
+#[ignore = "a child program of synchronized_frame_is_never_drawn_half_written"]
+fn sync_child_frame() {
+    use std::io::Write;
+    let mut out = sync_child_start();
+    // The frame in two chunks with pauses, then the end of the block together with the last part.
+    for (text, pause) in [("\x1b[?2026h\x1b[2J\x1b[HPARTIAL-ONE", 300), ("\r\nPARTIAL-TWO", 300)] {
+        write!(out, "{text}").expect("the pane");
+        out.flush().expect("the pane");
+        std::thread::sleep(Duration::from_millis(pause));
+    }
+    write!(out, "\x1b[2J\x1b[HFINAL-FRAME\x1b[?2026l").expect("the pane");
+    out.flush().expect("the pane");
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// The program of `forgotten_synchronized_block_is_released_after_the_timeout`: opens a block and never closes it.
+#[test]
+#[ignore = "a child program of forgotten_synchronized_block_is_released_after_the_timeout"]
+fn sync_child_forgotten() {
+    use std::io::Write;
+    let mut out = sync_child_start();
+    write!(out, "\x1b[?2026h\x1b[2J\x1b[HFORGOTTEN-FRAME").expect("the pane");
+    out.flush().expect("the pane");
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// What both synchronized-output programs begin with: raw mode (the answer to the probe must not be echoed), the
+/// probe for mode 2026, a first frame, and a pause long enough for the test to draw it.
+fn sync_child_start() -> std::io::Stdout {
+    use std::io::Write;
+    crossterm::terminal::enable_raw_mode().expect("raw mode");
+    let mut out = std::io::stdout();
+    write!(out, "\x1b[?2026$p\x1b[2J\x1b[HBASE-FRAME").expect("the pane");
+    out.flush().expect("the pane");
+    std::thread::sleep(Duration::from_millis(1500));
+    out
+}
+
 /// A folder the shell reports on a network path (Git Bash's `file://localhost//server/share`) is shown in the
 /// title, but it is never checked, joined or acted on: the pane keeps using its start folder.
 #[test]
@@ -741,4 +1023,148 @@ fn reported_folder_is_checked_in_the_background() {
     assert!(!app.panes[&id].set_cwd_usable(&target.display().to_string(), true));
     let _ = std::fs::remove_dir_all(&target);
     app.run(Action::CloseTab);
+}
+
+/// A config whose panes follow the UI theme (`theme`), so the theme alone decides the pane colors.
+fn theme_colored(app: &App, theme: &str) -> noble::config::Config {
+    let mut cfg = app.cfg.clone();
+    cfg.general.theme = theme.into();
+    cfg.general.transparent = false;
+    cfg.terminal.colors = noble::theme::FOLLOW_THEME.into();
+    cfg.terminal.background = String::new();
+    cfg.terminal.foreground = String::new();
+    cfg
+}
+
+/// `text` as the format string of POSIX `printf`: ESC, BEL and the backslash written as escapes.
+fn printf_escaped(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\x1b' => "\\033".to_string(),
+            '\x07' => "\\007".to_string(),
+            '\\' => "\\\\".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// Color queries reach the program with the pane's colors: OSC 11 and OSC 4 end the way the query ended (BEL or ST),
+/// `CSI ? 996 n` tells light from dark, and `COLORFGBG` is in the environment. The theme is a light one (Latte), so a
+/// dark default would show. The program reads each answer back by its byte count, with POSIX `sh`, `stty`, `dd` and
+/// `od`, so it runs on Unix; ConPTY hands a Windows program the answer as keyboard input, so there the answers are
+/// checked by `pane::tests::color_answers_end_like_the_query` (the queue step on every OS) and the `osc.rs` tests.
+#[test]
+fn color_queries_reach_the_program() {
+    if cfg!(windows) {
+        return;
+    }
+    let mut app = demo_app(110, 30);
+    let cfg = theme_colored(&app, "latte");
+    app.apply_config(cfg);
+    app.sync_color_reports();
+    let report = app.colors.read().unwrap().clone();
+    assert!(report.is_light(), "Latte is a light theme");
+    let rgb = noble::term::colors::xterm_rgb(report.bg);
+    let red = noble::term::colors::xterm_rgb(report.palette(1));
+    // (the query, the answer it must get).
+    let queries = [
+        ("\x1b]11;?\x07".to_string(), format!("\x1b]11;{rgb}\x07")),
+        ("\x1b]11;?\x1b\\".to_string(), format!("\x1b]11;{rgb}\x1b\\")),
+        ("\x1b]4;1;?\x07".to_string(), format!("\x1b]4;1;{red}\x07")),
+        ("\x1b[?996n".to_string(), "\x1b[?997;2n".to_string()),
+    ];
+    // Raw mode; each step prints the query (`\033` for ESC, `\\` for the backslash), reads the answer's bytes back
+    // and prints them as hex. The environment variable comes first.
+    let mut script = String::from("printf 'FGBG=%s ' \"$COLORFGBG\";stty raw -echo;");
+    for (query, answer) in &queries {
+        script += &format!(
+            "printf '{}';dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \n';printf ' ';",
+            printf_escaped(query),
+            answer.len()
+        );
+    }
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "sh".into();
+    cfg.terminal.shell_args = vec!["-c".into(), format!("{script}sleep 3")];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("colors".into()));
+    let id = app.tabs[0].focus;
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    pump_until(&mut app, "every color answer came back", |app| {
+        let screen = screen_text(app, id);
+        screen.contains("FGBG=0;15") && queries.iter().all(|(_, answer)| screen.contains(&hex(answer)))
+    });
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
+/// A change of theme sends `CSI ? 997 ; Ps n` to the panes whose program set mode 2031 and to no other, and only when
+/// the background turned light or dark. `sync_color_reports` names the panes it told, which is checked on every OS;
+/// on Unix the tty echoes what NOBLE wrote to a pane, so the screens show who got the notice.
+#[test]
+fn theme_switch_notifies_only_panes_with_scheme_notices() {
+    let mut app = demo_app(110, 30);
+    let cfg = theme_colored(&app, "amber");
+    app.apply_config(cfg);
+    app.sync_color_reports();
+    if !cfg!(windows) {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = "sh".into();
+        cfg.terminal.shell_args = vec!["-c".into(), "sleep 30".into()];
+        app.apply_config(cfg);
+    }
+    app.run(Action::NewTab);
+    let with_mode = app.tabs[0].focus;
+    app.run(Action::NewTab);
+    let without = app.tabs[1].focus;
+    // The program of the first pane asks for the notices.
+    app.panes[&with_mode].parser().process(b"\x1b[?2031h");
+    assert!(app.panes[&with_mode].wants_scheme_notices());
+    assert!(!app.panes[&without].wants_scheme_notices());
+
+    // Dark to light: the pane with the mode is told, the other is not.
+    let cfg = theme_colored(&app, "latte");
+    app.apply_config(cfg);
+    assert_eq!(app.sync_color_reports(), vec![with_mode]);
+    // Nothing changed since: nothing is sent.
+    assert!(app.sync_color_reports().is_empty());
+    // Light to another light theme: the colors change, the scheme does not turn.
+    let cfg = theme_colored(&app, "paper");
+    app.apply_config(cfg);
+    assert!(app.sync_color_reports().is_empty());
+    assert!(app.colors.read().unwrap().is_light());
+    // A light terminal scheme over a dark theme counts the same.
+    let mut cfg = theme_colored(&app, "amber");
+    cfg.terminal.colors = "solarized-light".into();
+    app.apply_config(cfg);
+    assert!(app.sync_color_reports().is_empty(), "still light");
+    // Back to dark: told again, with the dark notice.
+    let cfg = theme_colored(&app, "amber");
+    app.apply_config(cfg);
+    assert_eq!(app.sync_color_reports(), vec![with_mode]);
+    assert!(!app.colors.read().unwrap().is_light());
+    // A program that reset the mode is no longer told.
+    app.panes[&with_mode].parser().process(b"\x1b[?2031l");
+    let cfg = theme_colored(&app, "latte");
+    app.apply_config(cfg);
+    assert!(app.sync_color_reports().is_empty());
+
+    #[cfg(not(windows))]
+    {
+        // Light, dark, light were sent while the mode was on: two notices in the order they were sent. The
+        // tty shows ESC as `^[`.
+        pump_until(&mut app, "the notices are echoed", |app| {
+            screen_text(app, with_mode).matches("^[[?997;").count() >= 2
+        });
+        let echoed = screen_text(&app, with_mode);
+        let (first, second) = (echoed.find("^[[?997;2n"), echoed.find("^[[?997;1n"));
+        assert!(first.is_some() && second.is_some() && first < second, "{echoed}");
+        std::thread::sleep(Duration::from_millis(300));
+        app.pump();
+        assert!(!screen_text(&app, without).contains("997"), "{}", screen_text(&app, without));
+    }
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 }

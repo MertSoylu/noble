@@ -18,7 +18,7 @@ impl App {
             ToastLevel::Warn => Some(Duration::from_secs(4)),
             _ => Some(Duration::from_secs(3)),
         };
-        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now() });
+        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now(), target: target.clone() });
         while self.notices.len() > NOTICE_HISTORY {
             self.notices.pop_front();
         }
@@ -141,6 +141,7 @@ impl App {
     /// Turns signals from background tabs into tab markers and notifications.
     pub(super) fn notify(&mut self, sig: &PaneSignal) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(sig.id)) else { return };
+        let target = Some(ToastTarget::Pane { tab: self.tabs[ti].id, pane: sig.id });
         let title = self.tab_title(ti);
         let long = sig
             .finished
@@ -172,7 +173,7 @@ impl App {
         if sig.visible {
             // On the visible tab only the app's own notice is shown.
             if let Some(n) = &sig.notice {
-                self.toast(ToastLevel::Info, n.clone());
+                self.toast_target(ToastLevel::Info, n.clone(), target);
             }
             return;
         }
@@ -183,7 +184,7 @@ impl App {
         let Some(message) = message else { return };
         if self.cfg.terminal.notify {
             self.outer_notice = Some(message.clone());
-            self.toast(ToastLevel::Info, message);
+            self.toast_target(ToastLevel::Info, message, target);
             self.outer_bell = true;
         }
     }
@@ -230,5 +231,67 @@ impl App {
         if let Some(v) = self.update_available.take() {
             self.edit_ui_state(|d| d.update_skipped = v);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A headless app with two tabs of one shell pane each; the second tab's pane is returned too.
+    fn app_with_two_tabs() -> (App, PaneId) {
+        let mut app = App::headless(Config::default(), (120, 30));
+        app.new_tab(std::env::temp_dir(), None, Some("first".into()));
+        app.new_tab(std::env::temp_dir(), None, Some("second".into()));
+        let pane = app.tabs[1].focus;
+        (app, pane)
+    }
+
+    fn signal(id: PaneId, visible: bool) -> PaneSignal {
+        PaneSignal {
+            id,
+            visible,
+            bell: false,
+            notice: None,
+            started: None,
+            finished: None,
+            cwd: None,
+            exit: None,
+            failed: false,
+        }
+    }
+
+    /// Every kind of pane notification (a notice, a bell, a long command) carries the pane's tab and pane ids,
+    /// on a background tab and on the visible one.
+    #[test]
+    fn pane_notifications_point_at_their_tab_and_pane() {
+        let (mut app, pane) = app_with_two_tabs();
+        app.cfg.terminal.notify = true;
+        app.cfg.terminal.notify_after = 10;
+        let want = Some(ToastTarget::Pane { tab: app.tabs[1].id, pane });
+        app.view = View::Term(0);
+        let notice = PaneSignal { notice: Some("agent says hi".into()), ..signal(pane, false) };
+        let bell = PaneSignal { bell: true, ..signal(pane, false) };
+        let long = PaneSignal { finished: Some(Duration::from_secs(30)), exit: Some(0), ..signal(pane, false) };
+        for (kind, sig) in [("notice", notice), ("bell", bell), ("long command", long)] {
+            app.toasts.clear();
+            app.notify(&sig);
+            assert_eq!(app.toasts.last().map(|t| t.target.clone()), Some(want.clone()), "{kind}");
+            assert_eq!(app.notices.back().map(|n| n.target.clone()), Some(want.clone()));
+        }
+        // The visible tab shows the app's own notices, and they lead to the pane too.
+        app.view = View::Term(1);
+        app.toasts.clear();
+        app.notify(&PaneSignal { notice: Some("visible note".into()), ..signal(pane, true) });
+        assert_eq!(app.toasts.last().map(|t| t.target.clone()), Some(want));
+    }
+
+    /// A pane that is not in any tab (closed) raises nothing.
+    #[test]
+    fn a_closed_pane_raises_no_notification() {
+        let (mut app, _) = app_with_two_tabs();
+        app.toasts.clear();
+        app.notify(&PaneSignal { bell: true, ..signal(PaneId::MAX, false) });
+        assert!(app.toasts.is_empty());
     }
 }

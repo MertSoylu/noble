@@ -16,6 +16,7 @@ mod palette;
 mod power;
 mod redraw;
 mod reload;
+mod reports;
 mod search;
 mod session;
 mod settings;
@@ -37,7 +38,7 @@ use crate::sensors::{self, KillOutcome, SensorMode, SensorRequest, Sensors};
 use crate::store::{Recent, SavedTab, UsageHistory, Workspaces};
 use crate::term::layout::{Divider, PaneId};
 use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
-use crate::term::{Tab, TabAlert};
+use crate::term::{Tab, TabAlert, TabId};
 use crate::theme::Theme;
 
 pub use bindings::BindingsState;
@@ -333,6 +334,10 @@ pub enum ToastLevel {
 pub enum ToastTarget {
     /// A config error: opens the config file at this line (the Edit Config File action without one).
     Config { line: Option<u32> },
+    /// A pane's notification (an agent needs you, a finished command, an alert): goes to the pane in its tab.
+    /// Both ids are stable: a tab's index and a pane's place in the layout change when other tabs close. A tab
+    /// or pane that has gone makes the click a plain dismiss.
+    Pane { tab: TabId, pane: PaneId },
 }
 
 pub struct Toast {
@@ -384,6 +389,8 @@ pub struct Notice {
     pub text: String,
     pub level: ToastLevel,
     pub at: chrono::DateTime<chrono::Local>,
+    /// Where choosing it in the list leads (as the toast's click does).
+    pub target: Option<ToastTarget>,
 }
 
 /// How many notifications the history keeps (newest last).
@@ -839,6 +846,10 @@ pub struct App {
     pub outer_notice: Option<String>,
     /// Whether the NOBLE window has focus, as far as the outer terminal reports it (`None`: no report yet).
     pub window_focused: Option<bool>,
+    /// The pane that held the focus at the last focus-report sync (`sync_focus_reports`), `None` when no pane did.
+    focus_held: Option<PaneId>,
+    /// The colors the panes answer color queries with (`sync_color_reports`); shared with their reader threads.
+    pub colors: crate::term::colors::SharedColors,
     /// A newer published release (announced bottom right).
     pub update_available: Option<String>,
     /// Next update check (`None`: no checking, e.g. headless mode, `noble-dev`).
@@ -907,6 +918,7 @@ impl App {
         app.boot = None;
         app.rx = Some(rx);
         app.owned_data = Some(data);
+        app.sync_color_reports();
         app
     }
 
@@ -962,6 +974,7 @@ impl App {
         app.dev = crate::util::is_dev_build();
         app.usage_history = UsageHistory::load(app.paths.data_file("ai-history.json"));
         app.reload_schemes();
+        app.sync_color_reports();
         app.ui_state = ui_state;
         let version = env!("CARGO_PKG_VERSION");
         // `noble` and `noble-dev` keep their own record, so alternating between them does not replay it.
@@ -1107,6 +1120,8 @@ impl App {
             outer_bell: false,
             outer_notice: None,
             window_focused: None,
+            focus_held: None,
+            colors: Default::default(),
             update_available: None,
             next_update_check: None,
             session_autosave: false,
@@ -1155,6 +1170,8 @@ impl App {
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
         let power = self.on_battery();
         let changed = self.apply(ev);
+        self.sync_focus_reports();
+        self.sync_color_reports();
         shown || changed || self.ui_fingerprint() != before || self.on_battery() != power
     }
 
@@ -1340,6 +1357,8 @@ impl App {
         // `fx` effects are left out: their pacing already draws their final frame.
         let before = (self.ui_fingerprint(), self.moving());
         self.tick_inner();
+        // A live config reload may have changed the palette.
+        self.sync_color_reports();
         // When the animation ends, the final (static) frame must draw too.
         if (self.ui_fingerprint(), self.moving()) != before {
             self.dirty = true;
@@ -1347,6 +1366,10 @@ impl App {
     }
 
     fn tick_inner(&mut self) {
+        // Output held back by a synchronized-output block whose time is up (`redraw_after` wakes the loop for it).
+        for pane in self.panes.values() {
+            pane.release_sync();
+        }
         // Store files found damaged by a write since the last tick (kept aside, see `store::keep_aside`).
         for text in crate::store::take_notices() {
             self.toast(ToastLevel::Error, text);

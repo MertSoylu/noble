@@ -1,12 +1,19 @@
 //! vt100 callbacks: the OSC sequences a shell or program sends (window title, working directory,
 //! clipboard, notifications, prompt marks, exit codes, OSC 8 links) and the OSC 7 path helpers.
 
+use super::colors::{OscScan, SCHEME_NOTICES, SharedColors, Terminator};
 use super::pane::{history_len, span_text};
 use crate::util;
 
 /// vt100 callbacks: title, working directory, terminal query replies, clipboard.
 #[derive(Default)]
 pub struct Callbacks {
+    /// The pane's colors for the OSC 4 / 10 / 11 / 12 and `CSI ? 996 n` queries (`None`: they are not answered).
+    pub colors: Option<SharedColors>,
+    /// Answers to color queries still waiting for the terminator of their OSC string (`seal_color_replies`).
+    color_replies: Vec<String>,
+    /// Finds how the OSC strings in the output end (`feed`).
+    pub(super) osc_scan: OscScan,
     pub title: String,
     pub cwd: Option<String>,
     /// Replies the emulator must write back to the PTY (DSR, DA).
@@ -33,9 +40,38 @@ pub struct Callbacks {
     open_link: Option<(usize, u16, String)>,
     /// The host named by the pane's first OSC 7 report (its own shell, before any `ssh`).
     local_host: Option<String>,
+    /// The `TRACKED_MODES` a program has set (`CSI ? Ps h`) and not reset since.
+    tracked_modes: std::collections::BTreeSet<u16>,
+    /// When the program opened the synchronized-output block it is in (`CSI ? 2026 h`); `None` outside one.
+    /// A block that outlives `sync_timeout` no longer counts as open (see `sync_left`).
+    sync_since: Option<std::time::Instant>,
+    /// Replaces `SYNC_TIMEOUT` (tests make the block long or short).
+    sync_timeout: Option<std::time::Duration>,
+    /// The last chunk of output ended in ESC, so a `c` at the start of the next one is a full reset (RIS).
+    pub(super) ended_in_esc: bool,
 }
 
+/// Synchronized output (DECSET 2026): the program brackets a frame in `CSI ? 2026 h` … `l`, and the terminal shows
+/// it only when it is complete. The reader thread holds the redraw back meanwhile (`Pane::spawn`).
+pub const SYNC_OUTPUT: u16 = 2026;
+
+/// How long a synchronized block may stay open: a program that never sends the `l` must not freeze its pane.
+pub const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Focus reports (DECSET 1004): the program gets `CSI I` / `CSI O` when its pane gains or loses the focus
+/// (`App::sync_focus_reports`).
+pub const FOCUS_REPORTS: u16 = 1004;
+
+/// Private DEC modes that vt100 passes on to `unhandled_csi` (it does not act on them), so NOBLE records their
+/// set/reset itself for DECRQM. A mode vt100 handles is read from its screen instead (`Callbacks::private_mode`).
+const TRACKED_MODES: &[u16] = &[FOCUS_REPORTS, 1047, SYNC_OUTPUT, SCHEME_NOTICES];
+
 impl Callbacks {
+    /// Callbacks that answer color queries from `colors`.
+    pub fn with_colors(colors: SharedColors) -> Callbacks {
+        Callbacks { colors: Some(colors), ..Callbacks::default() }
+    }
+
     /// The shell is back at its prompt, so the program that ran before it has exited:
     /// the window title it set no longer describes the pane (a shell that titles its
     /// prompt sets a new one right after). Only shells emit these marks; agents such as
@@ -170,6 +206,14 @@ impl vt100::Callbacks for Callbacks {
             [b"133", kind, ..] if kind.first() == Some(&b'C') => {
                 self.started = Some(std::time::Instant::now());
             }
+            // Color queries (`?`): OSC 4 palette entries, 10 text, 11 background, 12 cursor. The answer waits for the
+            // string's terminator (`seal_color_replies`). A color being set, or reset (104, 110 …), is ignored.
+            [number @ (b"4" | b"10" | b"11" | b"12"), rest @ ..] => {
+                if let Some(colors) = &self.colors {
+                    let report = colors.read().unwrap_or_else(|e| e.into_inner());
+                    self.color_replies.extend(report.answers(number, rest));
+                }
+            }
             _ => {}
         }
     }
@@ -182,28 +226,137 @@ impl vt100::Callbacks for Callbacks {
         &mut self,
         screen: &mut vt100::Screen,
         i1: Option<u8>,
-        _i2: Option<u8>,
+        i2: Option<u8>,
         params: &[&[u16]],
         c: char,
     ) {
         let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-        match (i1, c) {
+        match (i1, i2, c) {
             // DSR: cursor position. ConPTY asks for this at startup and waits for the answer.
-            (None, 'n') if first == 6 => {
+            (None, None, 'n') if first == 6 => {
                 let (row, col) = screen.cursor_position();
                 self.responses.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
             }
-            (None, 'n') if first == 5 => self.responses.extend_from_slice(b"\x1b[0n"),
+            (None, None, 'n') if first == 5 => self.responses.extend_from_slice(b"\x1b[0n"),
+            // Color scheme query: `CSI ? 996 n` → `CSI ? 997 ; 1 n` (dark) or `; 2 n` (light).
+            (Some(b'?'), None, 'n') if first == 996 => {
+                if let Some(colors) = &self.colors {
+                    let report = colors.read().unwrap_or_else(|e| e.into_inner());
+                    self.responses.extend_from_slice(report.scheme_notice());
+                }
+            }
             // Primary device attributes.
-            (None, 'c') if first == 0 => self.responses.extend_from_slice(b"\x1b[?1;2c"),
+            (None, None, 'c') if first == 0 => self.responses.extend_from_slice(b"\x1b[?1;2c"),
             // Secondary device attributes.
-            (Some(b'>'), 'c') => self.responses.extend_from_slice(b"\x1b[>0;10;1c"),
+            (Some(b'>'), None, 'c') => self.responses.extend_from_slice(b"\x1b[>0;10;1c"),
+            // XTVERSION: `CSI > q` (or `CSI > 0 q`) asks for the name and version of the terminal.
+            (Some(b'>'), None, 'q') if first == 0 => {
+                self.responses
+                    .extend_from_slice(format!("\x1bP>|NOBLE {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes());
+            }
+            // DECRQM for private modes: `CSI ? Ps $ p` → `CSI ? Ps ; Pm $ y`, Pm 1 set, 2 reset, 0 not recognized.
+            (Some(b'?'), Some(b'$'), 'p') => {
+                let pm = match self.private_mode(screen, first) {
+                    Some(true) => 1,
+                    Some(false) => 2,
+                    None => 0,
+                };
+                self.responses.extend_from_slice(format!("\x1b[?{first};{pm}$y").as_bytes());
+            }
+            // DECRQM for ANSI modes: `CSI Ps $ p` → `CSI Ps ; Pm $ y`. NOBLE tracks no ANSI mode yet, so none is
+            // recognized.
+            (Some(b'$'), None, 'p') => self.responses.extend_from_slice(format!("\x1b[{first};0$y").as_bytes()),
+            // Set and reset of a tracked private mode. vt100 hands over each unhandled mode of a sequence with the
+            // whole parameter list, so the modes that are not tracked are skipped here.
+            (Some(b'?'), None, 'h' | 'l') => {
+                for mode in params.iter().filter_map(|p| p.first()).filter(|m| TRACKED_MODES.contains(*m)) {
+                    if c == 'h' {
+                        self.tracked_modes.insert(*mode);
+                    } else {
+                        self.tracked_modes.remove(mode);
+                    }
+                    if *mode == SYNC_OUTPUT {
+                        // A second `h` inside an open block does not extend it; one after the timeout starts a new one.
+                        if c == 'l' {
+                            self.sync_since = None;
+                        } else if !self.sync_open() {
+                            self.sync_since = Some(std::time::Instant::now());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
 }
 
 impl Callbacks {
+    /// Time left of the open synchronized block at `now`; `None` when no block is open (none was started, it ended,
+    /// or it ran past the timeout).
+    pub fn sync_left_at(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let limit = self.sync_timeout.unwrap_or(SYNC_TIMEOUT);
+        let used = now.saturating_duration_since(self.sync_since?);
+        limit.checked_sub(used).filter(|left| !left.is_zero())
+    }
+
+    /// Time left of the open synchronized block (see `sync_left_at`).
+    pub fn sync_left(&self) -> Option<std::time::Duration> {
+        self.sync_left_at(std::time::Instant::now())
+    }
+
+    /// Whether a synchronized block is open now: the frame being drawn is not complete.
+    pub fn sync_open(&self) -> bool {
+        self.sync_left().is_some()
+    }
+
+    /// Sets the longest a block may stay open; `None` restores `SYNC_TIMEOUT`. For tests.
+    pub fn set_sync_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.sync_timeout = timeout;
+    }
+
+    /// Ends the color answers waiting for a terminator: they go out the way the query ended (BEL or ST).
+    pub fn seal_color_replies(&mut self, end: Terminator) {
+        for body in self.color_replies.drain(..) {
+            self.responses.extend_from_slice(body.as_bytes());
+            self.responses.extend_from_slice(end.bytes());
+        }
+    }
+
+    /// A full reset (RIS) or the end of the program: the modes it set are gone, an open block is over.
+    pub fn reset_modes(&mut self) {
+        self.tracked_modes.clear();
+        self.sync_since = None;
+    }
+
+    /// Whether a `TRACKED_MODES` mode is set (`CSI ? Ps h` seen and not reset since).
+    pub fn mode_on(&self, mode: u16) -> bool {
+        self.tracked_modes.contains(&mode)
+    }
+
+    /// Whether a private DEC mode is set, for DECRQM. `None` when NOBLE does not recognize the mode.
+    /// The modes vt100 handles are read from the screen; the `TRACKED_MODES` are read from `tracked_modes`, so adding
+    /// a mode there is enough for DECRQM. A mode vt100 handles needs its own arm here.
+    fn private_mode(&self, screen: &vt100::Screen, mode: u16) -> Option<bool> {
+        use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+        let mouse = screen.mouse_protocol_mode();
+        let encoding = screen.mouse_protocol_encoding();
+        Some(match mode {
+            1 => screen.application_cursor(),
+            // DECTCEM: set (1) while the cursor is shown.
+            25 => !screen.hide_cursor(),
+            9 => mouse == MouseProtocolMode::Press,
+            1000 => mouse == MouseProtocolMode::PressRelease,
+            1002 => mouse == MouseProtocolMode::ButtonMotion,
+            1003 => mouse == MouseProtocolMode::AnyMotion,
+            1005 => encoding == MouseProtocolEncoding::Utf8,
+            1006 => encoding == MouseProtocolEncoding::Sgr,
+            47 | 1049 => screen.alternate_screen(),
+            2004 => screen.bracketed_paste(),
+            _ if TRACKED_MODES.contains(&mode) => self.mode_on(mode),
+            _ => return None,
+        })
+    }
+
     fn push_link(&mut self, link: Hyperlink) {
         if link.to > link.from && !link.url.is_empty() {
             self.hyperlinks.push_back(link);
@@ -316,4 +469,224 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parser(rows: u16, cols: u16) -> vt100::Parser<Callbacks> {
+        vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(rows),
+            crate::term::vt_size(cols),
+            0,
+            Callbacks::default(),
+        )
+    }
+
+    /// The answer a query gets, taken out of the emulator the way the reader thread does.
+    fn answer(p: &mut vt100::Parser<Callbacks>, query: &[u8]) -> String {
+        p.process(query);
+        String::from_utf8(std::mem::take(&mut p.callbacks_mut().responses)).unwrap()
+    }
+
+    #[test]
+    fn xtversion_names_noble_and_its_version() {
+        let mut p = parser(10, 40);
+        let want = format!("\x1bP>|NOBLE {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(answer(&mut p, b"\x1b[>q"), want);
+        assert_eq!(answer(&mut p, b"\x1b[>0q"), want);
+        // Another parameter is not XTVERSION.
+        assert_eq!(answer(&mut p, b"\x1b[>1q"), "");
+    }
+
+    #[test]
+    fn decrqm_reads_the_modes_vt100_handles_from_the_screen() {
+        let mut p = parser(10, 40);
+        // Defaults: the cursor is shown, the other modes are reset.
+        assert_eq!(answer(&mut p, b"\x1b[?25$p"), "\x1b[?25;1$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1$p"), "\x1b[?1;2$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1000$p"), "\x1b[?1000;2$y");
+        assert_eq!(answer(&mut p, b"\x1b[?2004$p"), "\x1b[?2004;2$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1049$p"), "\x1b[?1049;2$y");
+        // Each mode set (`h`) and then reset (`l`), with the state DECRQM answers in between.
+        for (mode, set, reset) in [
+            (1, "\x1b[?1h", "\x1b[?1l"),
+            (25, "\x1b[?25h", "\x1b[?25l"),
+            (1002, "\x1b[?1002h", "\x1b[?1002l"),
+            (1003, "\x1b[?1003h", "\x1b[?1003l"),
+            (1005, "\x1b[?1005h", "\x1b[?1005l"),
+            (1006, "\x1b[?1006h", "\x1b[?1006l"),
+            (2004, "\x1b[?2004h", "\x1b[?2004l"),
+            (1049, "\x1b[?1049h", "\x1b[?1049l"),
+            (47, "\x1b[?47h", "\x1b[?47l"),
+        ] {
+            let query = format!("\x1b[?{mode}$p");
+            p.process(set.as_bytes());
+            assert_eq!(answer(&mut p, query.as_bytes()), format!("\x1b[?{mode};1$y"), "set {mode}");
+            p.process(reset.as_bytes());
+            assert_eq!(answer(&mut p, query.as_bytes()), format!("\x1b[?{mode};2$y"), "reset {mode}");
+        }
+    }
+
+    #[test]
+    fn decrqm_mouse_modes_follow_the_one_mode_vt100_keeps() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?1000h");
+        assert_eq!(answer(&mut p, b"\x1b[?1000$p"), "\x1b[?1000;1$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1002$p"), "\x1b[?1002;2$y");
+        p.process(b"\x1b[?1002h");
+        assert_eq!(answer(&mut p, b"\x1b[?1002$p"), "\x1b[?1002;1$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1000$p"), "\x1b[?1000;2$y", "vt100 keeps one mouse mode");
+        p.process(b"\x1b[?1002l");
+        assert_eq!(answer(&mut p, b"\x1b[?1002$p"), "\x1b[?1002;2$y");
+    }
+
+    #[test]
+    fn decrqm_tracks_the_modes_vt100_passes_on() {
+        let mut p = parser(10, 40);
+        // 1047 is not handled by vt100: NOBLE records it itself, in a sequence with a mode vt100 handles too.
+        assert_eq!(answer(&mut p, b"\x1b[?1047$p"), "\x1b[?1047;2$y");
+        p.process(b"\x1b[?1049;1047h");
+        assert_eq!(answer(&mut p, b"\x1b[?1047$p"), "\x1b[?1047;1$y");
+        assert_eq!(answer(&mut p, b"\x1b[?1049$p"), "\x1b[?1049;1$y");
+        p.process(b"\x1b[?1047l");
+        assert_eq!(answer(&mut p, b"\x1b[?1047$p"), "\x1b[?1047;2$y");
+        // A mode that is not tracked is not recorded, and an unknown mode is not recognized.
+        p.process(b"\x1b[?1047;9998h");
+        assert_eq!(answer(&mut p, b"\x1b[?1047$p"), "\x1b[?1047;1$y");
+        assert_eq!(answer(&mut p, b"\x1b[?9998$p"), "\x1b[?9998;0$y");
+        assert_eq!(answer(&mut p, b"\x1b[?9999$p"), "\x1b[?9999;0$y");
+    }
+
+    #[test]
+    fn scheme_notices_mode_is_tracked_until_reset() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[?2031$p"), "\x1b[?2031;2$y", "supported, off");
+        p.process(b"\x1b[?2031h");
+        assert!(p.callbacks().mode_on(SCHEME_NOTICES));
+        assert_eq!(answer(&mut p, b"\x1b[?2031$p"), "\x1b[?2031;1$y");
+        p.process(b"\x1b[?2031l");
+        assert!(!p.callbacks().mode_on(SCHEME_NOTICES));
+        assert_eq!(answer(&mut p, b"\x1b[?2031$p"), "\x1b[?2031;2$y");
+    }
+
+    #[test]
+    fn scheme_query_is_answered_from_the_shared_colors() {
+        let colors = SharedColors::default();
+        let mut p = vt100::Parser::new_with_callbacks(
+            crate::term::vt_size(10),
+            crate::term::vt_size(40),
+            0,
+            Callbacks::with_colors(colors.clone()),
+        );
+        assert_eq!(answer(&mut p, b"\x1b[?996n"), "\x1b[?997;1n", "dark");
+        colors.write().unwrap().bg = [0xfa, 0xfa, 0xfa];
+        assert_eq!(answer(&mut p, b"\x1b[?996n"), "\x1b[?997;2n", "light");
+        // A pane without colors answers nothing, and the ordinary status report is untouched.
+        let mut bare = parser(10, 40);
+        assert_eq!(answer(&mut bare, b"\x1b[?996n\x1b[5n"), "\x1b[0n");
+    }
+
+    #[test]
+    fn focus_reports_mode_is_tracked_until_reset() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[?1004$p"), "\x1b[?1004;2$y");
+        p.process(b"\x1b[?1004h");
+        assert!(p.callbacks().mode_on(FOCUS_REPORTS));
+        assert_eq!(answer(&mut p, b"\x1b[?1004$p"), "\x1b[?1004;1$y");
+        p.process(b"\x1b[?1004l");
+        assert!(!p.callbacks().mode_on(FOCUS_REPORTS));
+        assert_eq!(answer(&mut p, b"\x1b[?1004$p"), "\x1b[?1004;2$y");
+        // Set in a sequence with a mode vt100 handles.
+        p.process(b"\x1b[?1049;1004h");
+        assert_eq!(answer(&mut p, b"\x1b[?1004$p"), "\x1b[?1004;1$y");
+        // Like xterm, the mode survives the prompt marks (a program that leaves without resetting it keeps it),
+        // and the other sequences that do not touch it.
+        p.process(b"\x1b]7;file:///tmp\x07\x1b]9;9;C:\\\x07\x1b]133;A\x07\x1b]0;title\x07\x1b]133;C\x07");
+        assert!(p.callbacks().mode_on(FOCUS_REPORTS));
+        // The alternate screen exit does not reset it either (xterm does not).
+        p.process(b"\x1b[?1049l");
+        assert!(p.callbacks().mode_on(FOCUS_REPORTS));
+    }
+
+    #[test]
+    fn synchronized_output_is_reported_and_blocks_follow_h_and_l() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;2$y", "supported, off");
+        assert!(!p.callbacks().sync_open());
+        p.process(b"\x1b[?2026h");
+        assert!(p.callbacks().sync_open());
+        assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;1$y");
+        p.process(b"\x1b[?2026l");
+        assert!(!p.callbacks().sync_open());
+        assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;2$y");
+        // Several blocks one after the other, and one set in a sequence with another mode.
+        p.process(b"\x1b[?2026h a \x1b[?2026l\x1b[?2026h b \x1b[?2026l");
+        assert!(!p.callbacks().sync_open());
+        p.process(b"\x1b[?25;2026h");
+        assert!(p.callbacks().sync_open());
+        p.process(b"\x1b[?2026l");
+        // A sequence split across reads still opens the block.
+        p.process(b"\x1b[?20");
+        assert!(!p.callbacks().sync_open());
+        p.process(b"26h");
+        assert!(p.callbacks().sync_open());
+        p.process(b"\x1b[?2026l");
+        assert!(!p.callbacks().sync_open());
+    }
+
+    #[test]
+    fn synchronized_block_ends_at_the_timeout_and_a_repeated_h_does_not_extend_it() {
+        use std::time::{Duration, Instant};
+        let mut p = parser(10, 40);
+        p.callbacks_mut().set_sync_timeout(Some(Duration::from_millis(100)));
+        let start = Instant::now();
+        p.process(b"\x1b[?2026h");
+        let cb = p.callbacks();
+        assert!(cb.sync_left_at(start).is_some(), "open right away");
+        assert!(cb.sync_left_at(start + Duration::from_millis(99)).is_some());
+        assert!(cb.sync_left_at(start + Duration::from_millis(100) + Duration::from_secs(1)).is_none());
+        assert!(cb.sync_left_at(start + Duration::from_secs(5)).is_none());
+        // A program that forgot the `l`: the block is over by itself, the mode is still set for DECRQM.
+        std::thread::sleep(Duration::from_millis(130));
+        assert!(!p.callbacks().sync_open());
+        assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;1$y");
+        // Its next `h` opens a new block; an `h` inside an open block keeps the first one's time.
+        p.process(b"\x1b[?2026h");
+        assert!(p.callbacks().sync_open());
+        let opened = Instant::now();
+        std::thread::sleep(Duration::from_millis(60));
+        p.process(b"\x1b[?2026h");
+        let left = p.callbacks().sync_left_at(opened + Duration::from_millis(60)).expect("still open");
+        assert!(left <= Duration::from_millis(40), "the second h did not start the time over: {left:?}");
+        // Without an override the limit is `SYNC_TIMEOUT`.
+        p.callbacks_mut().set_sync_timeout(None);
+        p.process(b"\x1b[?2026l\x1b[?2026h");
+        let left = p.callbacks().sync_left().expect("open");
+        assert!(left > Duration::from_millis(100) && left <= SYNC_TIMEOUT, "{left:?}");
+    }
+
+    #[test]
+    fn full_reset_clears_the_tracked_modes_and_the_block() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?2026h\x1b[?1004h");
+        p.callbacks_mut().reset_modes();
+        assert!(!p.callbacks().sync_open());
+        assert!(!p.callbacks().mode_on(FOCUS_REPORTS));
+        assert_eq!(answer(&mut p, b"\x1b[?2026$p"), "\x1b[?2026;2$y");
+    }
+
+    #[test]
+    fn decrqm_ansi_modes_are_not_recognized() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[4$p"), "\x1b[4;0$y");
+        assert_eq!(answer(&mut p, b"\x1b[20$p"), "\x1b[20;0$y");
+    }
+
+    #[test]
+    fn existing_device_attribute_answers_are_unchanged() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[5n\x1b[c\x1b[>c"), "\x1b[0n\x1b[?1;2c\x1b[>0;10;1c");
+    }
 }

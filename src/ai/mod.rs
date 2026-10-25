@@ -308,6 +308,25 @@ pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<
     result
 }
 
+/// Runs a prepared command and returns whether it exited with success. Its output is discarded, and its process
+/// tree is killed when the call returns (as in `run_command`), also on a timeout, which is an `Err`. Used where
+/// only the exit status matters (`gh auth status` writes its answer to stderr).
+pub fn run_succeeds(mut cmd: std::process::Command, timeout: Duration) -> Result<bool, String> {
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut tracked = spawn_tracked(cmd)?;
+    let deadline = Instant::now() + timeout;
+    // `try_wait` reaps the child once it has exited, so the tree kill in `Tracked`'s drop then aims at a group whose
+    // leader is gone. Only grandchildren still in that group are reached; the pid-reuse window is not guarded here.
+    loop {
+        match tracked.0.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => return Err("timeout".into()),
+            Err(e) => return Err(format!("cannot wait for the command: {e}")),
+        }
+    }
+}
+
 /// Background commands that are running now, by pid (on Unix the pid is also the process group id). A command is
 /// added when it starts and removed when it is stopped. `closed` is set on shutdown (`kill_background_children`):
 /// from then on no command starts, so none can outlive NOBLE. Both live under the one lock, so a command either

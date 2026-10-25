@@ -66,8 +66,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `buf.cell_mut(..)` (as in `ui/mod.rs`, `ui/overlay.rs`); never index it. `ui::draw` also updates layout state
   (`sync_layout`, `hits`, the slide animation), so it is not a pure function of `App`.
 - State only changes on the main thread; background jobs send an `AppEvent`. The one deliberate exception:
-  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers DSR/DA queries itself
-  (queued to the pane's writer thread, like keys).
+  a pane's PTY reader thread feeds the shared `vt100` parser and `Callbacks` and answers terminal queries itself
+  (DSR/DA, DECRQM, XTVERSION, OSC 4/10/11/12 colors, `CSI ? 996 n`; queued to the pane's writer thread, like keys).
 - Network/CLI errors never panic: providers return `Err(String)`, the UI shows the cache with "~".
 
 ## Architecture (parts that span several files)
@@ -123,6 +123,20 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   that replace the config (`--norc`, `-f`, `-N`, `--rcfile`, `-c` …) disable the integration.
 - **Clipboard:** `clipboard.rs` keeps one `arboard` handle for the whole run (X11 serves copied text from the
   owning process); without a system clipboard copied text goes out as OSC 52.
+- **Terminal queries and modes:** `term/osc.rs` `Callbacks` answers XTVERSION and DECRQM and tracks the DEC modes
+  vt100 passes to `unhandled_csi` (`TRACKED_MODES`: 1004 focus reports, 1047, 2026 synchronized output, 2031 color
+  notices); `OscScan` (reader thread) finds the terminator of OSC color queries, which vt100 does not pass on.
+  `term/colors.rs` `ColorReport` is the palette snapshot (built from `TermPalette::resolve`, shared as
+  `App::colors`, written only by the main thread in `App::sync_color_reports`, `app/reports.rs`); a light/dark flip
+  sends `CSI ? 997` to panes with 2031. Synchronized output: while a block is open the reader still feeds the parser
+  but holds back `PtyOutput` (`Pane::release_sync` from `App::tick` after `SYNC_TIMEOUT` 150 ms); drawing shows
+  the pane's copy of its last view (`Pane::remember_view`/`held_view`) meanwhile. Focus reports are sent by
+  `App::sync_focus_reports` after every event and action when the focused pane or window focus changes.
+- **Notifications to panes:** every pane notification goes through `App::notify` with a `ToastTarget::Pane { tab,
+  pane }`; a click (`toast_clicked`) or `⏎` in the notification list (`PaletteCmd::Notice`) switches to it, a closed
+  tab or pane only dismisses; `ctrl+y` copies.
+- **`noble doctor`:** `doctor.rs` (`gather` probes read-only and bounded, `render` is a pure function of `Facts`),
+  run from `main.rs` before the terminal opens; it must stay free of secrets and honor `ai::isolated`.
 - **Prompt signal:** `term/osc.rs` `Callbacks` sets the `prompt` flag on every prompt (OSC 7 / 9;9 / 133 A or D);
   `App::on_pty_output` (`app/notify.rs`) treats it as "command finished" → that repo's git status is refreshed with
   `ProjectReq::Refresh`, and a long command in a background tab raises a notification (`notify`).

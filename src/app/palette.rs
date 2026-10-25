@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{App, Overlay, SettingItem, ToastLevel, View};
+use super::{App, Overlay, SettingItem, ToastLevel, ToastTarget, View};
 use crate::keys::Action;
 use crate::util;
 
@@ -29,8 +29,12 @@ pub enum PaletteCmd {
     Workspace(usize),
     DeleteWorkspace(String),
     OpenDir(PathBuf),
-    /// A past notification: copies its full text.
-    CopyNotice(String),
+    /// A past notification (`notifications`): Enter follows its target, as a click on the toast does, or copies
+    /// its full text when it has none; Ctrl+Y always copies the text.
+    Notice {
+        text: String,
+        target: Option<ToastTarget>,
+    },
     /// A Settings row: running it does what ⏎ does on that row (`App::enter_setting`).
     Setting(SettingItem),
 }
@@ -307,7 +311,7 @@ impl App {
                     ToastLevel::Error => "error",
                 }
                 .into(),
-                cmd: PaletteCmd::CopyNotice(n.text.clone()),
+                cmd: PaletteCmd::Notice { text: n.text.clone(), target: n.target.clone() },
             })
             .collect();
         self.open_palette_on(items);
@@ -355,7 +359,7 @@ impl App {
     pub fn palette_key(&self, cmd: &PaletteCmd) -> Option<String> {
         Some(match cmd {
             PaletteCmd::Action(a) => a.id(),
-            PaletteCmd::GoTab(_) | PaletteCmd::CopyNotice(_) => return None,
+            PaletteCmd::GoTab(_) | PaletteCmd::Notice { .. } => return None,
             PaletteCmd::OpenProject(p) => format!("project:{}", p.display()),
             PaletteCmd::Launch { launcher, path } => {
                 let name = self.launchers.get(*launcher).map_or(launcher.to_string(), |(l, _)| l.name.clone());
@@ -398,17 +402,24 @@ impl App {
             PaletteCmd::Theme(name) => self.set_theme(name),
             PaletteCmd::Workspace(i) => self.restore_workspace(i),
             PaletteCmd::DeleteWorkspace(name) => self.request_delete_workspace(name),
-            PaletteCmd::CopyNotice(text) => {
-                if self.clipboard.set(&text).is_some() {
-                    self.toast(ToastLevel::Ok, "copied");
-                } else {
-                    self.toast(ToastLevel::Warn, "clipboard unavailable");
-                }
-            }
+            PaletteCmd::Notice { text, target } => match target {
+                Some(target) if self.toast_target_open(&target) => self.follow_toast(target),
+                // No target, or its pane has closed: Enter copies.
+                _ => self.copy_notice(&text),
+            },
             PaletteCmd::OpenDir(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.new_tab(p, None, Some(name));
             }
+        }
+    }
+
+    /// Copies a notification's text to the clipboard and says so.
+    pub(super) fn copy_notice(&mut self, text: &str) {
+        if self.clipboard.set(text).is_some() {
+            self.toast(ToastLevel::Ok, "copied");
+        } else {
+            self.toast(ToastLevel::Warn, "clipboard unavailable");
         }
     }
 }

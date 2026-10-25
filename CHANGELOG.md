@@ -6,6 +6,35 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Synchronized output (`CSI ? 2026 h` / `l`): a program that draws a frame inside a block (Claude Code and other AI
+  CLIs do) no longer shows it half-written. NOBLE holds back the redraw until the block ends, for at most 150 ms,
+  and keeps showing the last complete frame meanwhile. Works on Windows, Linux and macOS.
+- Color queries: panes answer OSC 10 / 11 / 12 and OSC 4 with the pane's real palette (Windows Terminal schemes
+  included), so programs that pick a light or dark theme from OSC 11 (Claude Code's `auto` theme, neovim, bat,
+  delta) get the right colors on Latte, Paper, Solarized Light and the other light themes. `COLORFGBG` is set in
+  every pane, `CSI ? 996 n` is answered, and a program that turned on color scheme notices (mode 2031) is told when
+  a theme change flips light and dark.
+- Focus reports (DECSET 1004): a program that asks for them gets `CSI I` / `CSI O` when its pane or NOBLE's window
+  gains or loses the focus (vim's autoread, tools that notify only while in the background).
+- Identity and mode queries: XTVERSION (`CSI > q`) answers `NOBLE <version>` and DECRQM (`CSI ? Ps $ p`) reports
+  the modes NOBLE knows.
+- `noble doctor` prints a plain-text report for bug reports: version, OS, outer terminal and truecolor, the shells
+  found and whether NOBLE's shell integration applies to them, Claude Code hooks, AI provider detection (never a
+  token), the config and data paths, whether `config.toml` parses and the GitHub CLI state. It never opens the
+  terminal and changes nothing; `--config <path>` checks another config file. The bug report template asks for it.
+
+### Changed
+- Clicking a pane's notification (a "Claude needs you" toast, a finished long command, the bell, an OSC 9 / 777
+  notice) goes to that tab and pane. In the notification list `⏎` does the same, and `ctrl+y` copies the text
+  (plain notices are still copied with `⏎`).
+
+### Fixed
+- The keyboard reference (`?`): the key column is sized from the longest key, so "double-click title" no longer
+  runs into its description at wide sizes.
+- The welcome card's launcher line drops whole names and shows "+N" instead of cutting a name in the middle.
+- The render tests clear `target/audit` once per run, so it holds only dumps of screens that exist.
+
 ## [1.10.0] - 2026-10-25
 
 ### Added

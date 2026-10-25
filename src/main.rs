@@ -24,11 +24,13 @@ fn usage() {
     println!(
         "NOBLE {} — retro-futurist HUD terminal workspace\n\n\
          USAGE: noble [--config <path>] [--no-boot] [<dir>]\n       \
-                noble update [--check]\n\n\
+                noble update [--check]\n       \
+                noble doctor [--config <path>]\n\n\
          ARGUMENTS:\n  \
            <dir>             open a shell tab in this folder (`noble .` for the current one)\n\n\
          COMMANDS:\n  \
-           update            download and install the latest release\n\n\
+           update            download and install the latest release\n  \
+           doctor            print a report for bug reports (no terminal is opened)\n\n\
          OPTIONS:\n  \
            --config <path>   use an alternate config file\n  \
            --no-boot         skip the boot sequence\n  \
@@ -71,6 +73,10 @@ fn main() -> anyhow::Result<()> {
     }
     if argv.first().map(String::as_str) == Some("update") {
         std::process::exit(noble::update::run_cli(&argv[1..]));
+    }
+    // `noble doctor`: a report for bug reports. Like `update`, it never opens the terminal.
+    if argv.first().map(String::as_str) == Some("doctor") {
+        std::process::exit(noble::doctor::run_cli(&argv[1..]));
     }
     let mut config_override: Option<PathBuf> = None;
     let mut no_boot = false;

@@ -12,12 +12,32 @@ use noble::term::layout::SavedNode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
+/// The dump folder. The first call of the run empties it, before any dump is written: `Once` makes every other test
+/// thread wait until the clearing is done. The e2e binary (`tests/e2e.rs`) writes its own `e2e-*.txt` dumps into the
+/// same folder, so `clear_dumps` leaves those alone; cargo runs the two binaries one after another, but they can also
+/// run side by side (`cargo test --test e2e` in one terminal, `--test render` in another).
 pub(crate) fn audit_dir() -> PathBuf {
+    static CLEARED: Once = Once::new();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("audit");
+    CLEARED.call_once(|| clear_dumps(&dir));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Removes the files of an earlier run from `dir` (the folder itself stays), except the e2e binary's `e2e-*` dumps.
+/// Files that cannot be removed (open in an editor on Windows) stay: a stale dump is better than a failed test.
+pub(crate) fn clear_dumps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let owned_by_e2e = entry.file_name().to_string_lossy().starts_with("e2e-");
+        if path.is_file() && !owned_by_e2e {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 pub(crate) fn render(app: &mut App, w: u16, h: u16) -> String {
@@ -488,4 +508,42 @@ pub(crate) fn find_text(buf: &ratatui::buffer::Buffer, needle: &str, min_x: u16)
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_dir_clears_once_then_keeps_later_dumps() {
+        // The first `save` of the run empties the folder; a file added after it stays for later dumps.
+        save("clear-probe", "first");
+        let stale = audit_dir().join("clear-probe-stale.txt");
+        std::fs::write(&stale, "left over").unwrap();
+        save("clear-probe", "second");
+        assert!(stale.exists(), "a later dump cleared the folder again");
+        std::fs::remove_file(&stale).unwrap();
+    }
+
+    #[test]
+    fn clear_dumps_keeps_the_e2e_binarys_files() {
+        let dir = TempDir::new("noble-audit-clear");
+        let stale = dir.path().join("help-160x45.txt");
+        let e2e = dir.path().join("e2e-welcome.txt");
+        std::fs::write(&stale, "old").unwrap();
+        std::fs::write(&e2e, "old").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        clear_dumps(dir.path());
+        assert!(!stale.exists(), "a render dump survived the clearing");
+        assert!(e2e.exists(), "the e2e binary's dump was removed");
+        assert!(dir.path().join("sub").is_dir(), "a folder was removed");
+    }
+
+    #[test]
+    fn clear_dumps_ignores_a_missing_folder() {
+        let dir = TempDir::new("noble-audit-missing");
+        let missing = dir.path().join("not-there");
+        clear_dumps(&missing);
+        assert!(!missing.exists());
+    }
 }

@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 
 use super::hud;
 use crate::app::bindings::{self, BindingsState, Slot};
-use crate::app::help::{GAP, KEY_W, Line, geometry};
+use crate::app::help::{GAP, KEY_GAP, Line, geometry};
 use crate::app::{App, HelpState, Hit, Overlay};
 use crate::keys::Action;
 use crate::theme::Theme;
@@ -365,17 +365,25 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
     // The launcher line lists only the CLIs that are installed (and shown); none installed, no line.
     let launchers: Vec<_> = app.quick_launchers().map(|(_, l)| l).collect();
     let mut keys = vec![("⏎".to_string(), "open a terminal in the selected project".to_string())];
-    if !launchers.is_empty() {
-        let keys_text = launchers.iter().map(|l| l.key.as_str()).collect::<Vec<_>>().join("  ");
-        let names = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect::<Vec<_>>().join(" / ");
-        keys.push((keys_text, format!("start {names} right there")));
-    }
     if let Some(k) = app.keymap.hint(Action::Palette) {
         keys.push((k, "command palette — everything is in there".into()));
     }
     keys.push(("?".into(), "every shortcut · ctrl+click opens links".into()));
-    // The key column fits the longest key (a rebound palette key can be "ctrl+space :").
-    let key_w = keys.iter().map(|(k, _)| util::width(k) + 2).max().unwrap_or(8).clamp(8, 16);
+    // The key column fits the longest key (a rebound palette key can be "ctrl+space :") and the launcher keys,
+    // but takes at most half the card so the text beside it keeps room; a longer key is cut.
+    let launcher_keys = launchers.iter().map(|l| l.key.as_str()).collect::<Vec<_>>().join("  ");
+    let key_w = keys
+        .iter()
+        .map(|(k, _)| util::width(k) + 2)
+        .chain((!launchers.is_empty()).then(|| util::width(&launcher_keys) + 2))
+        .max()
+        .unwrap_or(8)
+        .clamp(8, ((iw / 2) as usize).max(8));
+    if !launchers.is_empty() {
+        let names: Vec<String> = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect();
+        let what = launcher_what(&names, (iw as usize).saturating_sub(key_w));
+        keys.insert(1, (launcher_keys, what));
+    }
     for (key, what) in &keys {
         line(buf, y, &[(&util::pad_right(key, key_w), th.accent_bold()), (what, th.text())]);
         y += 1;
@@ -390,6 +398,28 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
             hud::put_right(buf, x + iw, by, hint, th.dim());
         }
     }
+}
+
+/// The welcome card's launcher line, `start Claude / Codex +2 right there`: names are dropped from the end
+/// as whole names until the line fits `avail` columns, and the count of those left out follows as `+N`
+/// (the same mark the project card uses for ports). A name is never cut; only when not even `+N` fits is
+/// the line cut, with "…".
+fn launcher_what(names: &[String], avail: usize) -> String {
+    let line = |shown: usize| {
+        let mut list = names[..shown].join(" / ");
+        if shown < names.len() {
+            if shown > 0 {
+                list.push(' ');
+            }
+            list.push_str(&format!("+{}", names.len() - shown));
+        }
+        format!("start {list} right there")
+    };
+    (0..=names.len())
+        .rev()
+        .map(&line)
+        .find(|text| util::width(text) <= avail)
+        .unwrap_or_else(|| util::truncate(&line(0), avail))
 }
 
 /// Theme selector: each row is drawn in its theme's own colors (name, accents, status
@@ -803,7 +833,29 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     }
     // Keys in the accent color, their meaning dimmed.
     let (k, d) = (th.accent2(), th.dim());
-    hud::put_spans(buf, x, fy, &[("↑↓", k), (" select  ", d), ("⏎", k), (" run  ", d), ("esc", k), (" close", d)], iw);
+    let mut keys = vec![("↑↓", k), (" select  ", d), ("⏎", k)];
+    match st.current().map(|i| &i.cmd) {
+        // A notification: Enter goes where it leads (or copies it, when nowhere), ctrl+y copies it in any case.
+        Some(crate::app::PaletteCmd::Notice { target, .. }) => {
+            use crate::app::ToastTarget;
+            // A pane's notification whose pane has closed is only copied, like one without a target.
+            let target = target.as_ref().filter(|t| app.toast_target_open(t));
+            keys.push((
+                match target {
+                    Some(ToastTarget::Pane { .. }) => " go to  ",
+                    Some(ToastTarget::Config { .. }) => " open  ",
+                    None => " copy  ",
+                },
+                d,
+            ));
+            if target.is_some() {
+                keys.extend([("ctrl+y", k), (" copy  ", d)]);
+            }
+        }
+        _ => keys.push((" run  ", d)),
+    }
+    keys.extend([("esc", k), (" close", d)]);
+    hud::put_spans(buf, x, fy, &keys, iw);
 }
 
 /// The keyboard reference: one or more columns of sections, a filter in the title and a selection.
@@ -812,7 +864,7 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
     let sections = app.help_sections(&st.query);
     let Some(g) = geometry(area, &sections) else {
         // Too small for the key list: a note instead of nothing (as the Settings screen does).
-        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        hud::too_small(buf, area, th);
         return;
     };
     let rect = g.rect;
@@ -827,7 +879,7 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
         hud::put(buf, inner.x + 1, inner.y, "no matches", th.dim(), inner.width.saturating_sub(2));
     }
     let scroll = st.scroll.min(g.max_scroll());
-    let key_w = KEY_W as u16;
+    let key_w = g.key_w;
     for (c, col) in g.columns.iter().enumerate() {
         let x = inner.x + 1 + c as u16 * (g.col_w + GAP);
         for (i, line) in col.iter().skip(scroll).take(g.rows).enumerate() {
@@ -851,11 +903,13 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
                     if let Some(s) = sel {
                         hits.push((Rect::new(x, y, g.col_w, 1), Hit::HelpRow(*s)));
                     }
+                    // The key is cut to the column less its gap, so the description never starts inside it.
+                    let key_text = util::truncate(key, usize::from(key_w).saturating_sub(KEY_GAP));
                     hud::put(
                         buf,
                         x + 1,
                         y,
-                        &util::pad_right(key, KEY_W),
+                        &util::pad_right(&key_text, usize::from(key_w)),
                         Style::default().fg(th.accent2).bg(bg),
                         key_w,
                     );
@@ -880,7 +934,7 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
 fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let Some(g) = bindings::geometry(area) else {
-        hud::put_center(buf, area, area.y + area.height / 2, "enlarge window", th.dim());
+        hud::too_small(buf, area, th);
         return;
     };
     hits.push((g.rect, Hit::Inert));
