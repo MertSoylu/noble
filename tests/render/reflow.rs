@@ -331,6 +331,22 @@ fn check_numbered_roundtrip(shell: &str) {
     let id = app.tabs[0].focus;
     pump_until(&mut app, &format!("{kind}: first prompt"), |a| a.panes[&id].prompted);
     wait_idle(&mut app, id);
+    // Unix: a short prompt, as in `check_resize_roundtrip` (a line editor that redraws a long prompt after a resize
+    // clears rows of the output above it; that is the shell's business, the test looks at the output). Windows: the
+    // prompts are short and the shells there redraw from ConPTY's buffer.
+    let short_prompt = if kind.contains("zsh") {
+        Some("PROMPT='$ '")
+    } else if kind.contains("fish") {
+        Some("function fish_prompt; echo -n '$ '; end")
+    } else if kind.contains("bash") {
+        Some("PS1='$ '")
+    } else {
+        None
+    };
+    if let Some(set) = short_prompt.filter(|_| !cfg!(windows)) {
+        app.panes[&id].write(format!("{set}\r").as_bytes());
+        wait_idle(&mut app, id);
+    }
     app.panes.get_mut(&id).unwrap().resize(10, 40);
     // The shell redraws its prompt for the new size; a key typed while it does is lost (Git Bash).
     run_for(&mut app, Duration::from_millis(1500));
