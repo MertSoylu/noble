@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod ai;
 pub mod app;
 pub mod battery;
+pub mod bg;
 pub mod clipboard;
 pub mod config;
 pub mod doctor;

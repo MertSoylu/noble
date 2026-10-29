@@ -466,6 +466,71 @@ fn quota_warning_fires_once() {
     assert!(app.toasts.is_empty());
 }
 
+/// A full quota marks its launcher on Home with ⚠, and launching it says when it resets. A window past `warn_at`
+/// shows in the agent pane's title ("⚠ 5h 92%"); when such a window resets, NOBLE says so at its reset time.
+#[test]
+fn quota_warnings_on_launcher_pane_and_reset() {
+    use noble::app::View;
+    use noble::hooks::HookRecord;
+    let mut app = demo_app(160, 45);
+    let claude =
+        noble::config::Launcher { key: "c".into(), name: "claude".into(), command: "echo claude".into(), show: true };
+    app.launchers = vec![(claude, true)];
+    let now = chrono::Utc::now().timestamp();
+    let state = |id: &'static str, name: &'static str, used: u8, resets_at: i64| ProviderState {
+        id,
+        name,
+        login_hint: "login",
+        presence: Presence::Ready,
+        status: Status::Ok,
+        usage: Some(Usage {
+            windows: vec![Window { label: "5H".into(), used, resets_at: Some(resets_at) }],
+            plan: None,
+            note: None,
+        }),
+        fetched_at: Some(now),
+    };
+    // Full: the chip is marked. Launching it says when the quota resets (1h12m, a few seconds of slack).
+    app.handle(AppEvent::Ai(Box::new(state("claude", "Claude Code", 100, now + 4350))));
+    let text = render(&mut app, 160, 45);
+    save("bridge-quota-full-160x45", &text);
+    assert!(text.contains("Claude ⚠"), "{text}");
+    // Narrow sizes: the chip is reviewed for overflow in these dumps.
+    for (w, h) in [(80, 24), (40, 14)] {
+        save(&format!("bridge-quota-full-{w}x{h}"), &render(&mut app, w, h));
+    }
+    app.toasts.clear();
+    app.launch(0, Some(std::env::temp_dir()));
+    let texts: Vec<&str> = app.toasts.iter().map(|t| t.text.as_str()).collect();
+    assert!(texts.contains(&"Claude Code 5h quota is full · resets in 1h12m"), "{texts:?}");
+
+    // 92%: the chip is not full any more, and the agent's pane title names the window.
+    app.handle(AppEvent::Ai(Box::new(state("claude", "Claude Code", 92, now + 3600))));
+    assert!(!render(&mut app, 160, 45).contains("Claude ⚠"));
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs.last().expect("agent tab").focus;
+    let record =
+        HookRecord { event: "prompt".into(), message: None, ts: now, agent: None, session: None, subagents: 0 };
+    app.apply_hook_records([(pane, record)].into());
+    app.view = View::Term(app.tabs.len() - 1);
+    let text = render(&mut app, 160, 45);
+    save("pane-quota-warning-160x45", &text);
+    assert!(text.contains("claude") && text.contains("⚠ 5h 92%"), "{text}");
+    // A narrow pane: the full title drops the window when it does not fit, and the dump shows it.
+    save("pane-quota-warning-60x20", &render(&mut app, 60, 20));
+
+    // A window past `warn_at` that resets: the notice comes at its reset time (the tick checks it).
+    app.toasts.clear();
+    let soon = chrono::Utc::now().timestamp() + 2;
+    app.handle(AppEvent::Ai(Box::new(state("codex", "Codex", 93, soon))));
+    assert!(app.toasts.iter().any(|t| t.text.starts_with("Codex 5h usage at 93%")), "{:?}", app.toasts.len());
+    app.toasts.clear();
+    std::thread::sleep(Duration::from_millis(2100));
+    app.tick();
+    let texts: Vec<&str> = app.toasts.iter().map(|t| t.text.as_str()).collect();
+    assert!(texts.contains(&"Codex 5h quota reset"), "{texts:?}");
+}
+
 /// Adding a project folder: a prompt opens, an invalid path is rejected and a
 /// valid one joins the list along with the default roots.
 #[test]
@@ -1003,4 +1068,94 @@ fn continue_claude_without_a_launcher_says_so() {
     app.continue_claude();
     assert_eq!(app.tabs.len(), tabs, "no tab without the launcher");
     assert!(app.toasts.iter().any(|t| t.text.contains("claude is not installed")), "a toast says why");
+}
+
+/// A tall card shows more of the history: the first 8 commits come first, more only fill rows the changed files
+/// leave free, and the files keep their rows.
+#[test]
+fn project_card_commits_follow_the_height() {
+    let commits = |n: usize| -> Vec<noble::projects::Commit> {
+        (0..n)
+            .map(|i| noble::projects::Commit {
+                hash: format!("c{i:06}"),
+                time: chrono::Utc::now().timestamp() - 3600 * (i as i64 + 1),
+                author: "Mert".into(),
+                subject: format!("commit number {i}"),
+            })
+            .collect()
+    };
+    let shown = |text: &str| text.lines().filter(|l| l.contains("commit number")).count();
+    let mut app = demo_app(160, 45);
+    // Set on the app directly: a scan result keeps the git state it already has.
+    let git = app.projects[0].git.as_mut().expect("demo repo");
+    git.commits = commits(noble::projects::MAX_COMMITS);
+    let tall = render(&mut app, 160, 60);
+    save("bridge-commits-160x60", &tall);
+    let normal = render(&mut app, 160, 45);
+    save("bridge-commits-160x45", &normal);
+    assert!(shown(&tall) > 8 && shown(&tall) > shown(&normal), "tall {} vs {}\n{tall}", shown(&tall), shown(&normal));
+    assert!(shown(&normal) >= 8, "the first 8 always fit at 160x45: {normal}");
+    // The demo's changed files are still listed on the tall card.
+    assert!(tall.contains("src/ui/bridge.rs") && tall.contains("tests/new.rs"), "{tall}");
+    // Many changed files: the extra commits give their rows back to the files.
+    let git = app.projects[0].git.as_mut().unwrap();
+    git.changes = (0..30).map(|i| (" M".to_string(), format!("src/file{i:02}.rs"))).collect();
+    git.dirty = 30;
+    let busy = render(&mut app, 160, 60);
+    save("bridge-commits-busy-160x60", &busy);
+    assert!(shown(&busy) <= shown(&tall), "{busy}");
+    for (w, h) in SIZES {
+        render(&mut app, w, h);
+    }
+}
+
+/// Claude Code's background sessions (`claude --bg`) are listed in the AI panel under the agent sessions: running
+/// and failed ones show, a finished one from two days ago does not. Each shown row has a hit that attaches to it
+/// (`bg_attach` gives the folder, the command and the tab title). The click itself is not sent here: it would run
+/// `claude attach` on this machine.
+#[test]
+fn bridge_lists_background_claude_sessions() {
+    use noble::app::Hit;
+    use noble::bg::BgSession;
+    let mut app = demo_app(160, 45);
+    let now = chrono::Utc::now().timestamp();
+    let dir = std::env::temp_dir();
+    let session = |id: &str, name: &str, state: &str, started: i64| BgSession {
+        id: id.into(),
+        cwd: Some(dir.clone()),
+        name: name.into(),
+        state: state.into(),
+        started,
+    };
+    app.bg_sessions = vec![
+        session("run1a2b", "Fix the build", "running", now - 600),
+        session("old3c4d", "Stale task", "done", now - 2 * 86_400),
+        session("bad5e6f", "Broken migration", "failed", now - 3600),
+    ];
+    let text = render(&mut app, 160, 45);
+    save("bridge-bg-160x45", &text);
+    assert!(text.contains("claude bg · Fix the build") && text.contains("running"), "{text}");
+    assert!(text.contains("claude bg · Broken migration") && text.contains("failed"), "{text}");
+    assert!(!text.contains("Stale task"), "a finished session from two days ago is not listed: {text}");
+    assert!(find_hit(&app, |h| *h == Hit::BgSession(0)).is_some(), "running row hit");
+    assert!(find_hit(&app, |h| *h == Hit::BgSession(2)).is_some(), "failed row hit");
+    assert!(find_hit(&app, |h| *h == Hit::BgSession(1)).is_none(), "the old one has no row");
+
+    let (cwd, line, origin) = app.bg_attach(0).expect("attach info for the running session");
+    assert_eq!(cwd, dir);
+    assert_eq!(line, "claude attach run1a2b");
+    assert!(origin.ends_with("· claude bg"), "{origin}");
+
+    // The same list is no change; a changed state is (then the first list goes back for the dumps).
+    let same_as_first = app.bg_sessions.clone();
+    assert!(!app.set_bg_sessions(same_as_first.clone()), "the same list changes nothing");
+    let mut changed = app.bg_sessions.clone();
+    changed[0].state = "done".into();
+    assert!(app.set_bg_sessions(changed), "a new state is a change");
+    app.set_bg_sessions(same_as_first);
+
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-bg-{w}x{h}"), &text);
+    }
 }

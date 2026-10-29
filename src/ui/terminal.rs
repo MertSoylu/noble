@@ -8,7 +8,7 @@ use super::hud;
 use crate::app::{AgentBadge, AgentState, App, Hit, LinkHover, SearchState};
 use crate::keys::Action;
 use crate::term::layout::{Dir, PaneId, frame_rect};
-use crate::term::pane::Pane;
+use crate::term::pane::{Pane, Progress, ProgressState};
 use crate::theme::{TermPalette, Theme};
 use crate::ui::hud::Outline;
 use crate::util;
@@ -47,8 +47,10 @@ pub fn draw(
     for (id, rect) in &frames {
         let Some(pane) = app.panes.get(id) else { continue };
         let focused = *id == tab.focus;
-        let agent = app.agent_badge(*id).map(|b| (b, working_glyph(app, &[*id])));
-        let inner = pane_frame(buf, *rect, pane, focused, ctx, agent, th, hits, &mut on_top);
+        let working = working_glyph(app, &[*id]);
+        let agent = app.agent_badge(*id).map(|b| (b, working));
+        let progress = app.pane_progress(*id).map(|g| (g, working));
+        let inner = pane_frame(buf, *rect, pane, focused, ctx, agent, progress, th, hits, &mut on_top);
         if inner.width == 0 || inner.height == 0 {
             continue;
         }
@@ -89,10 +91,12 @@ pub fn draw(
         if let Some(pane) = app.panes.get(&z.pane) {
             hud::clear(buf, rect, th);
             let o = Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right() };
-            let agent = app.agent_badge(z.pane).map(|b| (b, working_glyph(app, &[z.pane])));
+            let working = working_glyph(app, &[z.pane]);
+            let agent = app.agent_badge(z.pane).map(|b| (b, working));
+            let progress = app.pane_progress(z.pane).map(|g| (g, working));
             let ctx = FrameCtx { hover: None, ..ctx };
             let mut buttons = Vec::new();
-            let inner = pane_frame(buf, o, pane, true, ctx, agent, th, &mut Vec::new(), &mut buttons);
+            let inner = pane_frame(buf, o, pane, true, ctx, agent, progress, th, &mut Vec::new(), &mut buttons);
             cluster_brackets(buf, &buttons);
             if inner.width > 0 && inner.height > 0 {
                 pane_content(buf, inner, pane, th, &pal, Shown::default(), &Marks::default());
@@ -143,11 +147,42 @@ pub fn result_badge(pane: &Pane, on_battery: bool, th: &Theme) -> Option<Vec<(St
     })
 }
 
+/// The progress report of a pane (OSC 9;4) in its title: the percentage (`42%`), `✗` on an error and `‖` while
+/// paused (each with the percentage when it has one), and `working` (the spinner or "…") for a busy report with no
+/// percentage. An agent's state glyph already shows that it works, so for an agent such a report adds nothing.
+pub fn progress_badge(
+    progress: Progress,
+    agent: bool,
+    working: &'static str,
+    th: &Theme,
+) -> Option<Vec<(String, Style)>> {
+    let mark = match progress.state {
+        ProgressState::Normal | ProgressState::Indeterminate if progress.spins() => {
+            if agent {
+                return None;
+            }
+            Some((working.to_string(), Style::default().fg(th.accent2).add_modifier(Modifier::BOLD)))
+        }
+        ProgressState::Normal | ProgressState::Indeterminate => None,
+        ProgressState::Error => Some(("✗".to_string(), Style::default().fg(th.crit).add_modifier(Modifier::BOLD))),
+        ProgressState::Paused => Some(("‖".to_string(), Style::default().fg(th.warn).add_modifier(Modifier::BOLD))),
+    };
+    let mut out: Vec<(String, Style)> = mark.into_iter().collect();
+    if let Some(percent) = progress.percent {
+        if !out.is_empty() {
+            out.push((" ".to_string(), th.dim()));
+        }
+        out.push((format!("{percent}%"), th.text()));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The glyph of a working agent in one of `panes`: the braille spinner while agents spin
 /// (`App::agent_spinning`: a live one works in a visible pane and the laptop is not on battery) and
-/// one of these panes is live itself (`App::agent_live`), otherwise a static "…".
+/// one of these panes is live itself (`App::agent_live`), otherwise a static "…". A pane whose progress
+/// report is busy with no percentage (`App::progress_spins`) spins the same way.
 pub fn working_glyph(app: &App, panes: &[PaneId]) -> &'static str {
-    if app.agent_spinning() && panes.iter().any(|p| app.agent_live(*p)) {
+    if app.agent_spinning() && panes.iter().any(|p| app.agent_live(*p) || app.progress_spins(*p)) {
         hud::agent_spinner(app.started.elapsed().as_millis())
     } else {
         "…"
@@ -200,6 +235,11 @@ pub fn agent_title(
     if b.state != AgentState::Running {
         let took = b.working_since.and_then(|t| working_for(now - t)).map(|t| format!(" {t}")).unwrap_or_default();
         full.push((format!(" · {}{took}", b.state.label()), state_style));
+    }
+    // A quota window past `warn_at` ("⚠ 5h 92%"): the glyph carries the warning color, the text stays readable.
+    if let Some(quota) = &b.quota {
+        full.push((" ⚠".to_string(), Style::default().fg(th.warn).add_modifier(Modifier::BOLD)));
+        full.push((format!(" {quota}"), th.text().add_modifier(Modifier::BOLD)));
     }
     if b.subagents > 0 {
         full.push((format!(" +{}", b.subagents), th.dim()));
@@ -374,10 +414,10 @@ struct FrameCtx {
     hover: Option<PaneId>,
 }
 
-/// The title row and lines of a pane; returns the area inside. `agent`: the agent running in the
-/// pane and the glyph of a working one (`working_glyph`). The buttons show on the focused pane and
-/// on the one under the mouse; elsewhere their place stays a plain line with no click target, so
-/// the row never shifts when they appear. Their brackets are drawn by `cluster_brackets` once the
+/// The title row and lines of a pane; returns the area inside. `agent`: the agent running in the pane and the glyph
+/// of a working one (`working_glyph`); `progress`: the pane's progress report and the same glyph for a busy one. The
+/// buttons show on the focused pane and on the one under the mouse; elsewhere their place stays a plain line with no
+/// click target, so the row never shifts when they appear. Their brackets are drawn by `cluster_brackets` once the
 /// frames are joined.
 #[allow(clippy::too_many_arguments)]
 fn pane_frame(
@@ -387,6 +427,7 @@ fn pane_frame(
     focused: bool,
     ctx: FrameCtx,
     agent: Option<(AgentBadge, &'static str)>,
+    progress: Option<(Progress, &'static str)>,
     th: &Theme,
     hits: &mut Vec<(Rect, Hit)>,
     on_top: &mut Vec<(Rect, Hit)>,
@@ -418,6 +459,7 @@ fn pane_frame(
     if !lock.is_empty() {
         lead.push((lock.to_string(), title_style));
     }
+    let has_agent = agent.is_some();
     let (label, state) = match agent {
         Some((b, working)) => {
             let [full, ..] = agent_title(&b, working, chrono::Utc::now().timestamp(), title_style, th);
@@ -427,8 +469,19 @@ fn pane_frame(
         }
         None => ((pane.label(), title_style), Vec::new()),
     };
-    // A pane running an agent shows its state rather than the command's result or live timer.
-    let badge = if agent.is_none() { result_badge(pane, ctx.on_battery, th) } else { None };
+    // The progress report leads the badge. A pane running an agent shows its state rather than the command's
+    // result or live timer.
+    let mut badge = progress.and_then(|(g, working)| progress_badge(g, has_agent, working, th)).unwrap_or_default();
+    // Cells of the badge before the command result: the click target of a failed command starts after them.
+    let mut result_at = 0;
+    if !has_agent && let Some(result) = result_badge(pane, ctx.on_battery, th) {
+        if !badge.is_empty() {
+            badge.push((" ".to_string(), th.dim()));
+        }
+        result_at = spans_width(&badge);
+        badge.extend(result);
+    }
+    let badge = (!badge.is_empty()).then_some(badge);
     let mut groups = vec![1];
     if ctx.multi || ctx.zoomed {
         groups.push(1);
@@ -518,9 +571,16 @@ fn pane_frame(
         let spans: Vec<(&str, Style)> =
             [pad].into_iter().chain(spans.iter().map(|(t, s)| (t.as_str(), *s))).chain([pad]).collect();
         hud::put_spans(buf, x, y, &spans, w);
-        // A failed command's badge is a button: a click scrolls to its output (`App::show_last_command`).
+        // A failed command's badge is a button: a click scrolls to its output (`App::show_last_command`). A progress
+        // report before the result is no part of that button, so its cells (and the space after them) are left out.
         if pane.running_for().is_none() && pane.last_result.is_some_and(|r| r.code.is_some_and(|c| c != 0)) {
-            on_top.push((Rect::new(x, y, w, 1), Hit::CommandBadge(pane.id)));
+            let (hx, hw) = if result_at == 0 {
+                (x, w)
+            } else {
+                let at = result_at as u16;
+                (x + 1 + at, w.saturating_sub(2 + at))
+            };
+            on_top.push((Rect::new(hx, y, hw, 1), Hit::CommandBadge(pane.id)));
         }
     }
     inner
@@ -697,8 +757,9 @@ fn pane_content(
         (cr < inner.height && cc < inner.width).then(|| (inner.x + cc, inner.y + cr))
     };
     // Only drawn into `buf` by the loop above; the copy is for the next frame that falls inside a block.
+    let main = !screen.alternate_screen();
     drop(parser);
-    pane.remember_view(buf, inner, cursor);
+    pane.remember_view(buf, inner, cursor, main);
     cursor
 }
 
@@ -1046,10 +1107,14 @@ mod tests {
             state,
             working_since: since.map(|s| now - s),
             subagents,
+            quota: None,
         };
         let titles = |b: AgentBadge, working| agent_title(&b, working, now, th.text(), &th).map(|v| text(&v));
         let working = titles(badge("claude", AgentState::Working, Some(125), 2), "⠋");
         assert_eq!(working, ["⠋ claude · working 2m +2", "⠋ claude", "⠋"]);
+        // A window past `warn_at` joins the full title after the state; the short forms leave it out.
+        let warned = AgentBadge { quota: Some("5h 92%".into()), ..badge("claude", AgentState::Working, Some(125), 2) };
+        assert_eq!(titles(warned, "⠋"), ["⠋ claude · working 2m ⚠ 5h 92% +2", "⠋ claude", "⠋"]);
         let fresh = titles(badge("claude", AgentState::Working, Some(20), 0), "…");
         assert_eq!(fresh[0], "… claude · working");
         let waiting = titles(badge("codex", AgentState::NeedsYou, None, 0), "⠋");

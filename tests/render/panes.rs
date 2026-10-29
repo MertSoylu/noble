@@ -747,14 +747,23 @@ fn launcher_in_split_and_palette_targets() {
     assert_eq!(here.cmd, PaletteCmd::Launch { launcher: 0, path: app.focused_cwd().unwrap() });
     assert!(items.iter().any(|i| i.cmd == PaletteCmd::LaunchSplit(0)));
 
-    // The pane menu offers it too.
+    // The pane menu offers it too, in one sub-list row that opens the launchers at the same place.
     app.open_pane_menu(pane, 10, 5);
-    let has = match &app.overlay {
-        Some(noble::app::Overlay::Menu(m)) => m.items.iter().any(|it| it.cmd == MenuCmd::LaunchSplit(pane, 0)),
-        _ => false,
+    let rows = match &app.overlay {
+        Some(noble::app::Overlay::Menu(m)) => {
+            m.items.iter().filter(|it| it.label.starts_with("Launch")).map(|it| it.cmd.clone()).collect::<Vec<_>>()
+        }
+        _ => panic!("pane menu not open"),
     };
-    assert!(has, "pane menu lacks the launcher");
-    app.run_menu(MenuCmd::LaunchSplit(pane, 0));
+    assert_eq!(rows, vec![MenuCmd::LaunchMenu(pane)], "one launch row in the pane menu");
+    let Some(noble::app::Overlay::Menu(m)) = &app.overlay else { panic!("pane menu not open") };
+    assert!(m.items.iter().any(|it| it.label == "Launch in split ›"), "row label");
+    app.run_menu(MenuCmd::LaunchMenu(pane));
+    let Some(noble::app::Overlay::Menu(sub)) = &app.overlay else { panic!("launch sub-list not open") };
+    assert_eq!((sub.x, sub.y), (10, 5), "the sub-list opens where the menu was");
+    assert_eq!(sub.items.len(), 1);
+    assert_eq!((sub.items[0].label.as_str(), &sub.items[0].cmd), ("probe", &MenuCmd::LaunchSplit(pane, 0)));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.tabs.len(), 1);
     let panes = app.tabs[0].panes();
     assert_eq!(panes.len(), 2, "split expected");
@@ -770,6 +779,69 @@ fn launcher_in_split_and_palette_targets() {
         assert!(std::time::Instant::now() < deadline, "launcher output never appeared");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Equalize, swap and move to a new tab: the pane menu offers them once a tab has two panes, and each
+/// keeps the shells running where they went.
+#[test]
+fn pane_arranging_actions() {
+    use noble::app::{MenuCmd, Overlay};
+    let mut app = demo_app(120, 32);
+    app.new_tab(std::env::temp_dir(), None, Some("arrange".into()));
+    let first = app.tabs[0].focus;
+    let labels = |app: &noble::app::App| match &app.overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(),
+        _ => panic!("pane menu not open"),
+    };
+    // One pane: nothing to arrange, so the menu leaves the rows out and the actions only say why.
+    app.open_pane_menu(first, 10, 5);
+    assert!(!labels(&app).iter().any(|l| l == "Equalize splits" || l == "Move to new tab"), "{:?}", labels(&app));
+    app.overlay = None;
+    for a in [Action::EqualizePanes, Action::SwapPane, Action::MovePaneToTab] {
+        app.run(a);
+    }
+    assert_eq!((app.tabs.len(), app.tabs[0].panes(), app.tabs[0].focus), (1, vec![first], first));
+
+    app.run(Action::SplitRight);
+    let second = app.tabs[0].focus;
+    app.run(Action::SplitDown);
+    let third = app.tabs[0].focus;
+    assert_eq!(app.tabs[0].panes(), vec![first, second, third]);
+    app.open_pane_menu(third, 10, 5);
+    let l = labels(&app);
+    for want in ["Equalize splits", "Swap with next pane", "Move to new tab"] {
+        assert!(l.iter().any(|x| x == want), "{want} missing: {l:?}");
+    }
+    app.overlay = None;
+
+    // Equalize: a lopsided divider goes back to even halves, and a zoomed tab shows its layout.
+    app.tabs[0].root.set_ratio(&[], 0.8);
+    app.tabs[0].zoomed = true;
+    app.run(Action::EqualizePanes);
+    assert!(!app.tabs[0].zoomed);
+    let body = app.body();
+    let width = |app: &noble::app::App, id| {
+        app.tabs[0].root.layout(body).0.into_iter().find(|(p, _)| *p == id).map(|(_, r)| r.width).unwrap()
+    };
+    assert!(width(&app, first).abs_diff(width(&app, second)) <= 1, "{} vs {}", width(&app, first), width(&app, second));
+
+    // Swap: the last pane trades places with the first, and the focus goes along with it.
+    app.run(Action::SwapPane);
+    assert_eq!(app.tabs[0].panes(), vec![third, second, first]);
+    assert_eq!(app.tabs[0].focus, third);
+
+    // Move to a new tab, from the pane menu: the pane keeps its shell and gets a tab right after this one.
+    app.run_menu(MenuCmd::PaneAction(second, Action::MovePaneToTab));
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.tabs[0].panes(), vec![third, first]);
+    assert_eq!(app.tabs[1].panes(), vec![second]);
+    assert_eq!(app.view, View::Term(1));
+    assert!(app.panes.contains_key(&second), "the moved pane keeps running");
+    render(&mut app, 120, 32);
+    app.run(Action::CloseTab);
+    app.run(Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.tabs.is_empty());
 }
 
 /// Closing a tab with several panes asks first, idle or not; a single idle pane still closes at once.

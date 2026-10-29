@@ -1274,3 +1274,70 @@ fn command_output_follows_the_shell_marks() {
     app.run(Action::NextCommand);
     assert_eq!(app.panes[&id].scroll_offset(), 0, "past the newest command the view is live");
 }
+
+/// A progress report (OSC 9;4) a real program prints reaches the pane while its command runs, shows in the pane title,
+/// and the prompt that comes back after the command clears it. cmd.exe has no way to print an escape sequence from its
+/// command line, so it is not checked here (the parser tests cover the report itself).
+#[test]
+fn progress_report_from_a_real_program_reaches_the_pane() {
+    check_progress("");
+    let mut checked = vec!["default"];
+    if cfg!(windows) {
+        let git_bash = std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            check_progress(&git_bash.display().to_string());
+            checked.push("git bash");
+        }
+        if noble::util::which("pwsh").is_some()
+            && let Some(ps) = noble::util::which("powershell")
+        {
+            check_progress(&ps.display().to_string());
+            checked.push("powershell");
+        }
+    } else {
+        for shell in ["bash", "zsh", "fish", "pwsh"] {
+            if let Some(path) = noble::util::which(shell) {
+                check_progress(&path.display().to_string());
+                checked.push(shell);
+            }
+        }
+    }
+    assert_checked(&checked, "progress_report_from_a_real_program_reaches_the_pane");
+}
+
+fn check_progress(shell: &str) {
+    use noble::term::pane::{Progress, ProgressState};
+    let mut app = demo_app(110, 30);
+    if !shell.is_empty() {
+        let mut cfg = app.cfg.clone();
+        cfg.terminal.shell = shell.into();
+        app.apply_config(cfg);
+    }
+    let kind = app.shell.label().to_lowercase();
+    app.new_tab(std::env::temp_dir(), None, Some("progress".into()));
+    let id = app.tabs[0].focus;
+    pump_until(&mut app, &format!("{kind}: first prompt"), |a| a.panes[&id].prompted);
+    // pwsh prints its prompt before PSReadLine is ready (slowest on macOS): let it settle before typing.
+    wait_idle(&mut app, id);
+    // The command prints the report and sleeps, so the report is on screen while it runs.
+    let line = match kind.as_str() {
+        "pwsh" | "powershell" => "Write-Host -NoNewline ([char]27 + ']9;4;1;42' + [char]7); Start-Sleep -Seconds 3",
+        _ => "printf '\\e]9;4;1;42\\a'; sleep 3",
+    };
+    for c in line.chars() {
+        app.handle(AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+    }
+    app.handle(AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))));
+    pump_until(&mut app, &format!("{kind}: a progress report"), |a| a.panes[&id].progress().is_some());
+    assert_eq!(
+        app.panes[&id].progress(),
+        Some(Progress { state: ProgressState::Normal, percent: Some(42) }),
+        "{kind}: the report"
+    );
+    let row = render(&mut app, 110, 30).lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string();
+    assert!(row.contains("42%"), "{kind}: {row}");
+    // The command ends and the prompt comes back: the prompt mark clears the report.
+    pump_until(&mut app, &format!("{kind}: the prompt back"), |a| a.panes[&id].last_result.is_some());
+    assert_eq!(app.panes[&id].progress(), None, "{kind}: the prompt clears the report");
+    app.run(Action::CloseTab);
+}

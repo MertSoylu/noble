@@ -75,6 +75,10 @@ impl App {
         if let Some(d) = self.focus_dwell_due() {
             want(d);
         }
+        // A quota window past its warning resets at its cached reset time: the loop wakes for it (`quota.rs`).
+        if let Some(d) = self.quota_reset_wake() {
+            want(d);
+        }
         // Search matches that output made stale: recomputed when the refresh interval has passed.
         if let Some(s) = self.search.as_ref().filter(|s| s.stale) {
             want(s.refreshed.map_or(Duration::ZERO, |t| search::SEARCH_REFRESH.saturating_sub(t.elapsed())));

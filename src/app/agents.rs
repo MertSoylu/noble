@@ -192,7 +192,30 @@ impl App {
         let kind = crate::ai::agent_kind(command, &p.label())?;
         // Only a notice (bell, notification) means the agent asks for the user; a finished or failed command does not.
         let alert = self.tabs.iter().any(|t| t.alert == Some(TabAlert::Notice) && t.root.contains(pane));
-        Some((kind, if alert { AgentState::NeedsYou } else { AgentState::Running }))
+        // Without hooks the progress report (OSC 9;4) is the only sign that the agent works.
+        let state = if alert {
+            AgentState::NeedsYou
+        } else if self.pane_busy(pane) {
+            AgentState::Working
+        } else {
+            AgentState::Running
+        };
+        Some((kind, state))
+    }
+
+    /// The pane's program reports work in progress (OSC 9;4 states 1 and 3, `Progress::busy`).
+    pub fn pane_busy(&self, pane: PaneId) -> bool {
+        self.pane_progress(pane).is_some_and(|g| g.busy())
+    }
+
+    /// The pane's progress report, if it has one (`Pane::progress`).
+    pub fn pane_progress(&self, pane: PaneId) -> Option<crate::term::pane::Progress> {
+        self.panes.get(&pane)?.progress()
+    }
+
+    /// A tab with a busy progress report in any of its panes: a busy marker on the tab strip.
+    pub fn tab_busy(&self, tab: usize) -> bool {
+        self.tabs.get(tab).is_some_and(|t| t.panes().into_iter().any(|p| self.pane_busy(p)))
     }
 
     /// The agent part of a pane's title: its state, how long it has been working and its subagents.
@@ -202,13 +225,24 @@ impl App {
         let working_since = (state == AgentState::Working)
             .then(|| self.agent_working_since.get(&pane).copied().or(rec.map(|r| r.ts)))
             .flatten();
-        Some(AgentBadge { kind, state, working_since, subagents: rec.map_or(0, |r| r.subagents) })
+        let quota = self.agent_quota_warning(kind);
+        Some(AgentBadge { kind, state, working_since, subagents: rec.map_or(0, |r| r.subagents), quota })
     }
 
     /// The most urgent agent state among a tab's panes (the dot in the tab strip).
     pub fn tab_agent_state(&self, tab: usize) -> Option<AgentState> {
         let tab = self.tabs.get(tab)?;
         tab.panes().into_iter().filter_map(|p| self.agent_state(p).map(|(_, s)| s)).max_by_key(AgentState::urgency)
+    }
+
+    /// Agents that wait for the user (`AgentState::NeedsYou`) in any tab, visible or not: the outer terminal's
+    /// progress pause and the count in its title (`App::outer_sequences`).
+    pub fn agents_waiting(&self) -> usize {
+        self.tabs
+            .iter()
+            .flat_map(|t| t.panes())
+            .filter(|&p| matches!(self.agent_state(p), Some((_, AgentState::NeedsYou))))
+            .count()
     }
 
     /// Panes drawn in the visible terminal tab (only the focused one while zoomed).
@@ -222,8 +256,14 @@ impl App {
 
     /// Working agents spin (`hud::agent_spinner`) only while one in a visible pane is live
     /// (`agent_live`) and not on battery; otherwise they show a static "…" and ask for no extra frames.
+    /// A busy progress report with no percentage (`progress_spins`) spins the same way.
     pub fn agent_spinning(&self) -> bool {
-        !self.on_battery() && self.visible_panes().into_iter().any(|p| self.agent_live(p))
+        !self.on_battery() && self.visible_panes().into_iter().any(|p| self.agent_live(p) || self.progress_spins(p))
+    }
+
+    /// The pane's progress report is busy with no percentage to show (`Progress::spins`).
+    pub fn progress_spins(&self, pane: PaneId) -> bool {
+        self.pane_progress(pane).is_some_and(|g| g.spins())
     }
 
     /// The pane's agent is working and shows it: its pane printed something within `AGENT_LIVE`
@@ -459,5 +499,90 @@ mod tests {
         // A record of a pane that does not exist is dropped.
         apply(&mut app, 9999, rec("prompt", 100, 0));
         assert!(!app.agent_hooks.contains_key(&9999));
+    }
+
+    /// Output of a pane, as the reader thread would feed it (the main loop then takes the change).
+    fn feed_pane(app: &App, pane: PaneId, bytes: &[u8]) {
+        app.panes[&pane].parser().process(bytes);
+    }
+
+    /// An agent without hooks (guessed from its command) counts as working while its progress report is busy; a clear
+    /// (state 0) brings it back to running. A plain shell's busy report marks its tab but names no agent, and the
+    /// shell's prompt ends whatever report the program left.
+    #[test]
+    fn a_busy_progress_report_marks_an_agent_without_hooks() {
+        let (mut app, pane) = app_with_pane();
+        let tab = app.tabs.iter().position(|t| t.root.contains(pane)).expect("tab");
+        app.panes.get_mut(&pane).unwrap().command = Some("codex".into());
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)));
+        assert!(!app.tab_busy(tab));
+        feed_pane(&app, pane, b"\x1b]9;4;3;0\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Working)));
+        assert!(app.tab_busy(tab));
+        assert!(app.progress_spins(pane), "busy with no percentage: a spinner");
+        // A percentage is shown in the title instead of a spinner, and the agent still works.
+        feed_pane(&app, pane, b"\x1b]9;4;1;40\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Working)));
+        assert!(!app.progress_spins(pane));
+        feed_pane(&app, pane, b"\x1b]9;4;0\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)));
+        assert!(!app.tab_busy(tab));
+        // A paused or failed report is no sign of work.
+        feed_pane(&app, pane, b"\x1b]9;4;4;10\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)));
+        feed_pane(&app, pane, b"\x1b]9;4;2;10\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Running)));
+        // The shell's prompt ends the report (the agent's exit itself is handled on the main loop).
+        feed_pane(&app, pane, b"\x1b]9;4;3;0\x07\x1b]133;A\x07");
+        assert!(app.panes[&pane].progress().is_none());
+        assert!(!app.tab_busy(tab));
+
+        // A plain shell: no agent state, but its tab is busy while the report is.
+        app.open_project_shell(std::env::temp_dir());
+        let shell_tab = app.tabs.len() - 1;
+        let shell = app.tabs[shell_tab].focus;
+        feed_pane(&app, shell, b"\x1b]9;4;1;5\x07");
+        assert_eq!(app.agent_state(shell), None);
+        assert!(app.tab_busy(shell_tab));
+        feed_pane(&app, shell, b"\x1b]9;4;0\x07");
+        assert!(!app.tab_busy(shell_tab));
+    }
+
+    /// The dev build's outer title says `NOBLE dev`, like its top bar.
+    #[test]
+    fn outer_title_names_the_dev_build() {
+        let (mut app, _) = app_with_pane();
+        app.dev = true;
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]0;NOBLE dev\x07"));
+    }
+
+    /// The outer terminal's progress pause and title follow the agents that need you; only a change is written.
+    #[test]
+    fn outer_status_follows_the_agents_that_need_you() {
+        let (mut app, pane) = app_with_pane();
+        app.open_project_shell(std::env::temp_dir());
+        let other = app.tabs.last().expect("tab").focus;
+        // Both records in one snapshot: a snapshot replaces the records it does not list.
+        let both = |app: &mut App, a: &str, b: &str| {
+            app.apply_hook_records(HashMap::from([(pane, rec(a, 100, 0)), (other, rec(b, 100, 0))]));
+        };
+        // The first write sets the title; nothing waits, so no pause.
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]0;NOBLE\x07"));
+        assert_eq!(app.outer_sequences(true), None, "nothing changed");
+        both(&mut app, "notification", "stop");
+        assert_eq!(app.agents_waiting(), 1);
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]9;4;4;0\x1b\\\x1b]0;NOBLE · ◆ 1\x07"));
+        assert_eq!(app.outer_sequences(true), None);
+        // A second agent waits: the count moves, the pause is not repeated.
+        both(&mut app, "notification", crate::hooks::PERMISSION_REQUEST);
+        assert_eq!(app.agents_waiting(), 2);
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]0;NOBLE · ◆ 2\x07"));
+        // Both finish: the pause is cleared with the last one.
+        both(&mut app, "stop", "stop");
+        assert_eq!(app.agents_waiting(), 0);
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]9;4;0;0\x1b\\\x1b]0;NOBLE\x07"));
+        // A terminal without the progress report (Windows console host) gets the title only.
+        both(&mut app, "notification", "stop");
+        assert_eq!(app.outer_sequences(false).as_deref(), Some("\x1b]0;NOBLE · ◆ 1\x07"));
     }
 }

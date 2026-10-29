@@ -638,3 +638,130 @@ fn agent_hooks_popup_lists_every_agent() {
     assert!(!app.hooks_on(Agent::Codex), "headless never touches the agent files");
     assert!(matches!(app.overlay, Some(Overlay::AgentHooks { selected: 1 })), "the clicked row is selected");
 }
+
+/// A progress report (OSC 9;4) shows in the pane title and on the tab. A percentage reads in the title, busy work
+/// with no percentage spins there (a static "…" on battery) and marks its tab, and a paused or failed report shows
+/// its mark. An agent without hooks reads as working while its report is busy. A changed report asks for a frame,
+/// also from a background tab; only a spinner that turns asks for fast frames; the clear (state 0) removes the report.
+#[test]
+fn progress_report_shows_in_the_title_and_on_the_tab() {
+    use noble::app::App;
+    use noble::term::layout::PaneId;
+    let mut app = demo_app(110, 30);
+    set_power(&mut app, true);
+    app.new_tab(std::env::temp_dir(), None, Some("build".into()));
+    app.new_tab(std::env::temp_dir(), None, Some("other".into()));
+    app.view = View::Term(0);
+    let pane = app.tabs[0].focus;
+    // The output as the reader thread hands it over: the answer says whether the app asks for a frame.
+    let feed = |app: &mut App, pane: PaneId, bytes: &[u8]| {
+        app.panes[&pane].parser().process(bytes);
+        app.panes[&pane].dirty.store(true, std::sync::atomic::Ordering::Release);
+        app.handle(AppEvent::PtyOutput)
+    };
+    let title_row = |text: &str| text.lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string();
+    let top_row = |text: &str| text.lines().next().unwrap_or_default().to_string();
+    // The tab is named after the folder its pane started in: the temp dir's last part (`Temp` on Windows, `T` on
+    // macOS, `tmp` on Linux).
+    let folder = std::env::temp_dir().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // The shell's prompt marks clear a report, so the reports are fed only once the first prompt is shown and the
+    // shell's startup output has settled.
+    pump_until(&mut app, "the shell's first prompt", |a| a.panes[&pane].prompted);
+    wait_idle(&mut app, pane);
+
+    assert!(feed(&mut app, pane, b"\x1b]9;4;1;42\x07"), "a visible report asks for a frame");
+    let text = render(&mut app, 110, 30);
+    save("pane-progress-110x30", &text);
+    assert!(title_row(&text).contains("42%"), "{}", title_row(&text));
+    // Narrow panes keep their buttons and their width; the report goes before the folder is cut (`fit_title`).
+    for (w, h) in [(60, 20), (40, 12), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("pane-progress-{w}x{h}"), &text);
+        let row = text.lines().find(|l| l.contains(" ✕ ├")).unwrap_or_default().to_string();
+        assert_eq!(unicode_width::UnicodeWidthStr::width(row.as_str()), w as usize, "{w}x{h}: {row}");
+    }
+    // Busy with no percentage: a spinner that turns (a static "…" on battery, and then no fast frames).
+    feed(&mut app, pane, b"\x1b]9;4;3;0\x07");
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.chars().any(|c| SPIN.contains(c)), "{row}");
+    assert!(!row.contains('%'), "{row}");
+    assert!(app.redraw_after().unwrap() <= Duration::from_millis(150), "the spinner turns");
+    set_power(&mut app, false);
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.contains('…') && !row.chars().any(|c| SPIN.contains(c)), "{row}");
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    set_power(&mut app, true);
+    // The paused and failed marks, each with its percentage.
+    feed(&mut app, pane, b"\x1b]9;4;4;30\x07");
+    assert!(title_row(&render(&mut app, 110, 30)).contains("‖ 30%"));
+    feed(&mut app, pane, b"\x1b]9;4;2;60\x07");
+    assert!(title_row(&render(&mut app, 110, 30)).contains("✗ 60%"));
+    feed(&mut app, pane, b"\x1b]9;4;0\x07");
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(!row.contains('%') && !row.contains('✗') && !row.contains('‖'), "cleared: {row}");
+
+    // A busy report in a background tab marks its tab; the change redraws the tab strip, and nothing spins.
+    app.view = View::Term(1);
+    assert!(feed(&mut app, pane, b"\x1b]9;4;1;7\x07"), "a background tab's report redraws the tab strip");
+    let top = top_row(&render(&mut app, 110, 30));
+    assert!(top.contains(&format!("… {folder}")), "the busy tab's marker: {top}");
+    assert!(idle_redraw(&app), "{:?}", app.redraw_after());
+    assert!(feed(&mut app, pane, b"\x1b]9;4;0\x07"));
+    assert!(!top_row(&render(&mut app, 110, 30)).contains(&format!("… {folder}")), "cleared");
+
+    // An agent without hooks, typed at the prompt: the shell marks the command started (`133;C`) and the agent names
+    // itself in its title. Busy reads as working, its percentage in the title.
+    app.view = View::Term(0);
+    feed(&mut app, pane, b"\x1b]133;C\x07\x1b]0;codex\x07\x1b]9;4;3;0\x07");
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.contains("codex · working"), "{row}");
+    assert!(row.chars().any(|c| SPIN.contains(c)), "a working agent spins: {row}");
+    feed(&mut app, pane, b"\x1b]9;4;1;55\x07");
+    let row = title_row(&render(&mut app, 110, 30));
+    assert!(row.contains("codex · working") && row.contains("55%"), "{row}");
+}
+
+/// A busy report in one pane marks its tab over the tab's idle agent (its open dot `○`), and the agent itself stays
+/// running: the report belongs to the pane that sent it.
+#[test]
+fn a_busy_pane_marks_its_tab_over_an_idle_agent() {
+    use noble::app::{AgentState, App};
+    let mut app = demo_app(110, 30);
+    set_power(&mut app, false);
+    app.new_tab(std::env::temp_dir(), None, Some("split".into()));
+    let tab = app.tabs.len() - 1;
+    let agent = app.tabs[tab].focus;
+    app.panes.get_mut(&agent).unwrap().command = Some("codex".into());
+    app.run(Action::SplitRight);
+    let shell = app.tabs[tab].panes().into_iter().find(|p| *p != agent).expect("the split pane");
+    let top = |app: &mut App| render(app, 110, 30).lines().next().unwrap_or_default().to_string();
+    assert!(top(&mut app).contains('○'), "the idle agent's dot: {}", top(&mut app));
+    app.panes[&shell].parser().process(b"\x1b]9;4;3;0\x07");
+    let row = top(&mut app);
+    assert!(!row.contains('○') && row.contains('…'), "the busy pane marks the tab: {row}");
+    assert_eq!(app.agent_state(agent), Some(("codex", AgentState::Running)));
+}
+
+/// The progress report before a failed command's result is no part of its click target: a click on the percentage
+/// does not jump to the output, the result (`✗ 1`) still does.
+#[test]
+fn a_progress_report_is_no_part_of_the_failed_command_button() {
+    use noble::app::Hit;
+    use noble::term::pane::CommandResult;
+    let mut app = demo_app(110, 30);
+    set_power(&mut app, true);
+    app.new_tab(std::env::temp_dir(), None, Some("build".into()));
+    let pane = app.tabs[0].focus;
+    app.panes[&pane].parser().process(b"\x1b]9;4;1;42\x07");
+    let took = Duration::from_secs(2);
+    app.panes.get_mut(&pane).unwrap().last_result = Some(CommandResult { code: Some(1), took, at: Instant::now() });
+    let text = render(&mut app, 110, 30);
+    let row = text.lines().find(|l| l.contains("✗ 1")).unwrap_or_default().to_string();
+    let col = |needle: &str| {
+        let at = row.find(needle).unwrap_or_else(|| panic!("{needle} in {row}"));
+        unicode_width::UnicodeWidthStr::width(&row[..at]) as u16
+    };
+    let button = find_hit(&app, |h| *h == Hit::CommandBadge(pane)).expect("the ✗ badge is clickable");
+    assert_eq!(button.x, col("✗ 1"), "the button starts at the result: {row}");
+    assert!(col("42%") < button.x, "the percentage is not part of it: {row}");
+}

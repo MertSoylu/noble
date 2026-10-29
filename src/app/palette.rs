@@ -143,6 +143,9 @@ impl App {
                 | Action::SplitDown
                 | Action::ClosePane
                 | Action::Zoom
+                | Action::EqualizePanes
+                | Action::SwapPane
+                | Action::MovePaneToTab
                 | Action::FocusLeft
                 | Action::FocusRight
                 | Action::FocusUp

@@ -170,6 +170,9 @@ on macOS, or compare it with `Get-FileHash noble-windows-x86_64.zip` in PowerShe
 cargo install noble
 ```
 
+Or skip the compile with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), which downloads the same
+prebuilt archive for Windows, Linux or macOS: `cargo binstall noble`.
+
 **From source:**
 
 ```sh
@@ -251,6 +254,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
 | | | `T` | reopen the last closed tab |
 | `alt+m` | system monitor | `z` | zoom pane |
+| | | `=` `}` `!` | equalize splits · swap with the next pane · move the pane to a new tab |
 | `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
@@ -284,7 +288,8 @@ badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such mark
   palette lists them; a launcher on `T` keeps the key). The selected project's card: click `PR #…` to open its pull request in the
   browser, or a port (`⇄ :3000`) to open http://localhost:<port>; click a task chip to run it. A `↻ claude · 2h ago`
   line shows when Claude Code has a conversation in that folder (the time its `~/.claude/projects` folder changed);
-  click it to open a tab that runs `claude --continue` there.
+  click it to open a tab that runs `claude --continue` there. Claude Code background sessions (`claude --bg`) are listed
+  in the AI usage panel under the agent sessions; a click attaches to one in a new tab (`claude attach <id>`), the same on Windows, Linux and macOS.
 - **Settings:** `↑↓` move · `⏎`/space change · `←` / `→` turn a switch off / on and step through values · `/` filter the rows by name
   (`⏎` keeps the filter, `esc` clears it) · click the left half of a value or right-click to step back · the wheel scrolls the page ·
   `esc` back to the page you came from. The selected setting's description shows in a panel on the right on a terminal
@@ -295,10 +300,14 @@ badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such mark
   The newest 10,000 matches are kept (the bar then shows `10000+`).
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
-  (needs an outer terminal that reports Shift). The pane menu and palette can launch an agent in a split.
+  (needs an outer terminal that reports Shift). The pane menu (its "Launch in split ›" row lists the quick
+  launchers) and the palette can launch an agent in a split.
 - **Notifications:** clicking one that came from a pane (a toast, or `⏎` in the notification list) goes to that tab
   and pane; `ctrl+y` in the list copies its text. Background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
   while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
+  While an agent waits for you, the window title reads `NOBLE · ◆ 1` with the number of agents waiting, and the
+  terminal's progress report pauses (OSC 9;4: Windows Terminal, Ghostty and the like; Linux and macOS always, on Windows only in Windows
+  Terminal or when `TERM_PROGRAM` is set). Both return to normal when nothing waits.
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
   VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
   Settings → Pointer reports ctrl-click to apps) and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
@@ -306,7 +315,7 @@ badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such mark
   tabs that do not fit · drag tabs to reorder, double-click to rename, middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
-  drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste) · wheel scrolls ·
+  drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste; an app that captures the mouse gets the clicks, drags and wheel instead) · wheel scrolls ·
   scrolled back, click the position bar in the pane's last column to jump there, or the `↓ live` chip (any key
   typed into the pane works too) to return to the newest output; the wheel keeps scrolling over both ·
   `shift+drag` selects even inside apps that capture the mouse.
@@ -376,7 +385,7 @@ exclude = []             # folder names the scan skips
 enabled = true
 refresh_minutes = 5
 providers = ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
-warn_at = 90             # warn once when a quota window reaches this percent (0 = off)
+warn_at = 90             # warn once when a quota window reaches this percent, and when it resets (0 = off)
 
 [[launchers]]            # Home quick launch; hidden when `command` is not on PATH
 key = "c"
@@ -388,11 +397,11 @@ show = true              # false hides it from Home (Settings → Quick launch)
 ```
 
 **Actions** for bindings: `bridge system settings new_tab close_tab reopen_tab next_tab prev_tab tab_1…tab_9 move_tab_left
-move_tab_right split_right split_down close_pane zoom focus_left focus_right focus_up focus_down focus_next
+move_tab_right split_right split_down close_pane zoom equalize_panes swap_pane move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
-dismiss_hooks_offer notifications`.
+dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output`.
 
 </details>
 
@@ -415,6 +424,11 @@ Only providers you are signed in to (and that have a quota plan) are shown. Quot
 the Home screen is open**: right away when you come back to it and then every `refresh_minutes`. While you work
 in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
 fill up before it resets.
+
+The same cached numbers drive three more warnings, with no extra request: an agent whose quota is full (100%) gets a
+`⚠` on its launcher on Home, and launching it says when the quota resets (`resets in 1h12m`). An agent's pane title
+shows the fullest window past `warn_at` (`⚠ 5h 92%`). When a window that passed `warn_at` resets, NOBLE says so
+(`Claude Code 5h quota reset`) at the reset time it was given.
 
 <details>
 <summary><b>Agent status hooks (optional)</b></summary>
@@ -458,7 +472,8 @@ older NOBLE get the new events on the next start.
 
 The pane title leads with the same state: `⠋ claude · working 2m +2` (a spinner, how long it has been working
 and its running subagents), `◆ claude · needs you`, `● claude · your turn`, `✗ claude · error`, or `○ codex` for an
-agent without hooks on, which NOBLE recognizes by name only. Narrow panes keep the glyph and name, then the glyph
+agent without hooks on, which NOBLE recognizes by name only. An agent without hooks reads as working while its
+progress report (OSC 9;4) says busy work. Narrow panes keep the glyph and name, then the glyph
 alone. Each tab starts with a dot for the most urgent state among its panes (◆ needs you, ✗ error, ● your turn,
 spinner working, ○ running). The spinner
 only turns while a working agent is visible, its pane is printing (an interrupted session stays "working" until
@@ -508,6 +523,10 @@ The pane title shows the result of the last command typed at the prompt: `✓ 2.
 `✗ 1 · 12s` with its exit code when it failed, `· 12s` in cmd.exe. It stays until the next command starts. A
 command that runs longer than 2 s shows a live timer there instead (`◷ 0:07`, then `◷ 3m` updated once a
 minute; on battery the first minute shows `◷` alone, so an idle pane still redraws at most once a minute).
+A program can also report its progress with OSC 9;4 (Claude Code does, and so do other tools that use ConEmu's
+form). The pane title shows it as the percentage (`42%`), a spinner while busy work has no percentage, `✗` on an
+error and `‖` while paused. While it reports busy work, the tab's dot shows the working glyph (the spinner, or a still
+`…` on battery), also over an idle agent's `○`. The report ends with state 0 or with the shell's next prompt.
 The command start mark (OSC 133;C) tells a command that ran from an Enter on an empty, cleared or
 continuation line, which records nothing; the time counts from when the command started, not from the first
 line typed. cmd.exe and bash 3.2 (macOS `/bin/bash`) send no such mark: there the last Enter starts the
@@ -542,6 +561,15 @@ Windows, Linux and macOS, never opens the terminal, and is what a bug report ask
   or Terminal.app before macOS 26; in
   tmux add `set -ag terminal-overrides ",*:RGB"`. Panes get `COLORTERM=truecolor`; their palette is Settings →
   Terminal colors (`terminal.colors`).
+- **Claude Code's fullscreen view shows stale or misplaced text:** Claude Code's fullscreen view sends only the cells
+  that changed between frames, and some ConPTY-backed hosts (Windows Terminal among them) can leave fragments of
+  earlier output on screen until the window is resized. NOBLE's tests of full and partial redraws, resizes and
+  synchronized blocks in a Windows (ConPTY) pty found no such leftovers, so the problem was not reproduced here. The
+  workarounds Claude Code documents: start it with `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1` (repaint every cell on every
+  frame; PowerShell `$env:CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT = "1"`, cmd `set CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1`,
+  fish `set -x CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT 1`, bash and zsh the same prefix form before `claude`), press
+  `Ctrl+L` to redraw the screen, or run `/tui default` (or set `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`) to use the
+  classic renderer.
 - **Copy does not reach your clipboard over SSH:** with no system clipboard NOBLE sends the text with OSC 52,
   which the terminal on your own machine has to allow (on by default in Windows Terminal, WezTerm and Kitty;
   tmux needs `set -g set-clipboard on`).

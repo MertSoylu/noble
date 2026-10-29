@@ -241,8 +241,10 @@ fn full_session_lifecycle() {
     h.send(b"t");
     h.wait_for("ctrl+a menu", 10);
     h.wait_shell_ready(20);
+    // One command, then wait for its output: a second line sent right after the first can arrive in the same input
+    // burst, and Windows then reads the two as a paste (a confirmation dialog, nothing runs). The typed line spells
+    // the result as `$((6*7))`, so only the output matches.
     h.send(b"echo e2e-marker-$((6*7))\r");
-    h.send(b"echo e2e-marker-42\r");
     let s = h.wait_for("e2e-marker-42", 20);
     save("terminal", &s);
 

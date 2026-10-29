@@ -14,6 +14,8 @@ pub enum MenuCmd {
     Split(PaneId, Dir),
     /// Launcher index run in a new split next to the pane.
     LaunchSplit(PaneId, usize),
+    /// Opens the list of launchers that can run in a split next to the pane (`LaunchSplit`).
+    LaunchMenu(PaneId),
     Zoom(PaneId),
     Search(PaneId),
     Passthrough(PaneId),
@@ -114,6 +116,14 @@ impl App {
             item("Split down", &hint(A::SplitDown), MenuCmd::Split(pane, Dir::Col)),
             item("Zoom / restore", &hint(A::Zoom), MenuCmd::Zoom(pane)),
         ]);
+        // Arranging needs a second pane in the tab.
+        if self.tabs.iter().any(|t| t.root.contains(pane) && t.panes().len() > 1) {
+            items.extend([
+                item("Equalize splits", &hint(A::EqualizePanes), MenuCmd::PaneAction(pane, A::EqualizePanes)),
+                item("Swap with next pane", &hint(A::SwapPane), MenuCmd::PaneAction(pane, A::SwapPane)),
+                item("Move to new tab", &hint(A::MovePaneToTab), MenuCmd::PaneAction(pane, A::MovePaneToTab)),
+            ]);
+        }
         // The commands the shell marked in this pane: jumps, copy, and the send to an agent (see `app/blocks.rs`).
         if p.last_output_block().is_some() {
             items.extend([
@@ -126,9 +136,9 @@ impl App {
                 items.push(item("Send last output to agent", &hint(A::SendLastOutput), send));
             }
         }
-        // Quick launchers run next to this pane, in its directory.
-        for (i, l) in self.quick_launchers() {
-            items.push(item(&format!("Launch {} in split", l.name), "", MenuCmd::LaunchSplit(pane, i)));
+        // Quick launchers run next to this pane, in its directory: one row opens their list.
+        if self.quick_launchers().next().is_some() {
+            items.push(item("Launch in split ›", "", MenuCmd::LaunchMenu(pane)));
         }
         items.extend([
             item(pass_label, &hint(A::Passthrough), MenuCmd::Passthrough(pane)),
@@ -138,6 +148,16 @@ impl App {
             item("Close pane", &hint(A::ClosePane), MenuCmd::ClosePane(pane)),
         ]);
         self.open_menu(label, x, y, items);
+    }
+
+    /// The launchers a pane menu offers to run in a split next to the pane, at the same place.
+    pub fn open_launch_menu(&mut self, pane: PaneId, x: u16, y: u16) {
+        if !self.panes.contains_key(&pane) {
+            return;
+        }
+        let items: Vec<MenuItem> =
+            self.quick_launchers().map(|(i, l)| item(&l.name, "", MenuCmd::LaunchSplit(pane, i))).collect();
+        self.open_menu("Launch in split".into(), x, y, items);
     }
 
     pub fn open_project_menu(&mut self, path: PathBuf, x: u16, y: u16) {
@@ -161,6 +181,11 @@ impl App {
     }
 
     pub fn run_menu(&mut self, cmd: MenuCmd) {
+        // A sub-list opens where its menu was.
+        let at = match &self.overlay {
+            Some(Overlay::Menu(m)) => (m.x, m.y),
+            _ => (0, 0),
+        };
         self.overlay = None;
         match cmd {
             MenuCmd::Paste(pane) => self.paste_clipboard(pane),
@@ -174,6 +199,7 @@ impl App {
                     self.launch_in_split(i);
                 }
             }
+            MenuCmd::LaunchMenu(pane) => self.open_launch_menu(pane, at.0, at.1),
             MenuCmd::Zoom(pane) => {
                 if let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) {
                     self.toggle_zoom(ti, pane);

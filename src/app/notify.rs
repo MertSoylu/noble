@@ -1,4 +1,5 @@
-//! Notifications: toasts and their history, the update notice, and the pane output that raises them.
+//! Notifications: toasts and their history, the update notice, the pane output that raises them, and the outer
+//! terminal's status (the progress pause and the window title while agents wait for you).
 
 use super::*;
 
@@ -61,12 +62,15 @@ impl App {
         };
         let mut clip: Option<String> = None;
         let mut signals = Vec::new();
+        // A changed progress report redraws too, also in a background tab: its busy marker is on the tab strip.
+        let mut progress = false;
         for (id, pane) in &self.panes {
             if pane.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 // Taken either way (the request is spent); ignored when the setting is off.
                 if let Some(c) = pane.take_clipboard().filter(|_| self.cfg.terminal.osc52_write) {
                     clip = Some(c);
                 }
+                progress |= pane.take_progress_changed();
                 let started = pane.take_started();
                 let prompt = pane.take_prompt();
                 signals.push(PaneSignal {
@@ -82,7 +86,7 @@ impl App {
                 });
             }
         }
-        let mut shown = signals.iter().any(|s| s.visible);
+        let mut shown = progress || signals.iter().any(|s| s.visible);
         for mut sig in signals {
             if let Some(p) = self.panes.get_mut(&sig.id) {
                 p.last_output = Some(Instant::now());
@@ -187,6 +191,19 @@ impl App {
             self.toast_target(ToastLevel::Info, message, target);
             self.outer_bell = true;
         }
+    }
+
+    /// The sequences that bring the outer terminal's progress pause and window title up to date with the agents
+    /// waiting for the user (`outer::changes`), `None` when nothing changed since the last call. `progress`: the
+    /// outer terminal shows the progress report (`outer::progress_supported`).
+    pub fn outer_sequences(&mut self, progress: bool) -> Option<String> {
+        let next = crate::outer::Status::new(self.dev, self.agents_waiting());
+        if next == self.outer_shown {
+            return None;
+        }
+        let seq = crate::outer::changes(&self.outer_shown, &next, progress);
+        self.outer_shown = next;
+        (!seq.is_empty()).then_some(seq)
     }
 
     /// Sets up the update check: the previous check's result shows right away,

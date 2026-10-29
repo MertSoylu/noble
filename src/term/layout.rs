@@ -99,6 +99,49 @@ impl Node {
         }
     }
 
+    /// Exchanges the places of two panes in the tree; the sizes stay where they are.
+    /// `false` (and unchanged) unless both are leaves of this tree.
+    pub fn swap(&mut self, x: PaneId, y: PaneId) -> bool {
+        if x == y || !self.contains(x) || !self.contains(y) {
+            return false;
+        }
+        self.swap_ids(x, y);
+        true
+    }
+
+    fn swap_ids(&mut self, x: PaneId, y: PaneId) {
+        match self {
+            Node::Leaf(id) if *id == x => *id = y,
+            Node::Leaf(id) if *id == y => *id = x,
+            Node::Leaf(_) => {}
+            Node::Split { a, b, .. } => {
+                a.swap_ids(x, y);
+                b.swap_ids(x, y);
+            }
+        }
+    }
+
+    /// Gives every pane the same share of its axis: a run of splits in one direction (`a | (b | c)`)
+    /// divides the space evenly between its parts, the way tmux's even layouts do. The ratios are not
+    /// clamped like `set_ratio` and `nudge`: both sides weigh at least one part, so each ratio stays
+    /// strictly inside 0..1, and `split_rect` keeps every side at least one cell.
+    pub fn equalize(&mut self) {
+        if let Node::Split { dir, ratio, a, b } = self {
+            let (wa, wb) = (a.weight(*dir), b.weight(*dir));
+            *ratio = wa as f32 / (wa + wb) as f32;
+            a.equalize();
+            b.equalize();
+        }
+    }
+
+    /// How many parts this node adds to a run of splits in direction `dir`.
+    fn weight(&self, dir: Dir) -> usize {
+        match self {
+            Node::Split { dir: d, a, b, .. } if *d == dir => a.weight(dir) + b.weight(dir),
+            _ => 1,
+        }
+    }
+
     /// A copy in which pane `id` gets only `share` (0..1) of its size within its split: a new pane
     /// unfolding from the divider. Unchanged when `id` is not directly in a split.
     pub fn growing(&self, id: PaneId, share: f32) -> Node {
@@ -406,6 +449,56 @@ mod tests {
         if let Node::Split { ratio, .. } = &n {
             assert!((ratio - 0.9).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn swap_exchanges_places_and_keeps_sizes() {
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Row);
+        n.split(2, 3, Dir::Col);
+        n.set_ratio(&[], 0.3);
+        let before = n.layout(area()).0;
+        assert!(n.swap(1, 3));
+        assert_eq!(n.leaves(), vec![3, 2, 1]);
+        let after = n.layout(area()).0;
+        assert_eq!(after[0], (3, before[0].1));
+        assert_eq!(after[2], (1, before[2].1));
+        assert!(!n.swap(1, 1));
+        assert!(!n.swap(1, 9));
+        assert_eq!(n.leaves(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn equalize_evens_out_runs_of_one_direction() {
+        // 1 | (2 | 3) with a lopsided divider: three equal columns after.
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Row);
+        n.split(2, 3, Dir::Row);
+        n.set_ratio(&[], 0.8);
+        n.equalize();
+        let widths: Vec<u16> = n.layout(Rect::new(0, 0, 90, 10)).0.iter().map(|(_, r)| r.width).collect();
+        assert_eq!(widths, vec![30, 30, 30]);
+        // A split in the other direction counts as one part: 1 | (2 / 3) halves the width.
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Row);
+        n.split(2, 3, Dir::Col);
+        n.set_ratio(&[], 0.2);
+        n.set_ratio(&[true], 0.9);
+        n.equalize();
+        let rects: Vec<Rect> = n.layout(area()).0.iter().map(|(_, r)| *r).collect();
+        assert_eq!(rects, vec![Rect::new(0, 0, 50, 40), Rect::new(50, 0, 50, 20), Rect::new(50, 20, 50, 20)]);
+        // A single pane is left alone.
+        let mut leaf = Node::Leaf(1);
+        leaf.equalize();
+        assert_eq!(leaf, Node::Leaf(1));
+        // Long runs stay even: 16 panes in a row get 1/16 each, not a clamped 0.1 for the outer divider.
+        let mut row = Node::Leaf(1);
+        for id in 2..=16 {
+            row.split(id - 1, id, Dir::Row);
+        }
+        row.equalize();
+        let widths: Vec<u16> = row.layout(Rect::new(0, 0, 160, 10)).0.iter().map(|(_, r)| r.width).collect();
+        assert_eq!(widths, vec![10; 16]);
     }
 
     #[test]

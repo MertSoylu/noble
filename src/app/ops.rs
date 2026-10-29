@@ -74,6 +74,12 @@ impl App {
                 (View::Term(ti), Some(id)) => self.toggle_zoom(ti, id),
                 _ => self.no_op("no pane here — open a terminal tab first"),
             },
+            Action::EqualizePanes => self.equalize_panes(),
+            Action::SwapPane => self.swap_pane(),
+            Action::MovePaneToTab => match self.focused_pane() {
+                Some(id) => self.move_pane_to_tab(id),
+                None => self.no_op("no pane here — open a terminal tab first"),
+            },
             Action::FocusLeft => self.focus_dir(Direction::Left),
             Action::FocusRight => self.focus_dir(Direction::Right),
             Action::FocusUp => self.focus_dir(Direction::Up),
@@ -292,6 +298,8 @@ impl App {
             && tab.focus != pane
         {
             tab.zoomed = false;
+            // A zoom animation still running would draw its pane over the tiled layout.
+            self.zoom_anim = None;
         }
         self.focus_pane(pane);
     }
@@ -491,6 +499,8 @@ impl App {
             tab.root.split(focus, new, dir);
             tab.focus = new;
             tab.zoomed = false;
+            // A zoom animation still running would draw its pane over the tiled layout.
+            self.zoom_anim = None;
         }
         Some(new)
     }
@@ -505,6 +515,7 @@ impl App {
             );
             return;
         }
+        self.warn_full_quota(&launcher.command);
         let command = self.shell.invocation(&launcher.command);
         // Side by side, like "Split right"; the pane remembers the launcher so a restored session runs it again.
         if let Some(new) = self.split_with(Dir::Row, Some(&command))
@@ -575,6 +586,56 @@ impl App {
         }
         self.panes.remove(&id);
         self.forget_agent(id);
+        self.detach_pane(ti, id);
+    }
+
+    /// Gives the panes of the visible tab equal sizes (see `Node::equalize`); a zoomed tab shows its layout again.
+    pub fn equalize_panes(&mut self) {
+        match self.current_tab_mut() {
+            Some(tab) if tab.panes().len() > 1 => {
+                tab.root.equalize();
+                tab.zoomed = false;
+                // A zoom animation still running would draw its pane over the tiled layout.
+                self.zoom_anim = None;
+            }
+            Some(_) => self.no_op("only one pane — nothing to equalize"),
+            None => self.no_op("no pane here — open a terminal tab first"),
+        }
+    }
+
+    /// Swaps the focused pane with the next one in pane order (the last with the first); the focus
+    /// moves with the pane.
+    pub fn swap_pane(&mut self) {
+        let Some(tab) = self.current_tab_mut() else {
+            return self.no_op("no pane here — open a terminal tab first");
+        };
+        let panes = tab.panes();
+        if panes.len() < 2 {
+            return self.no_op("only one pane — nothing to swap");
+        }
+        let i = panes.iter().position(|p| *p == tab.focus).unwrap_or(0);
+        tab.root.swap(tab.focus, panes[(i + 1) % panes.len()]);
+        tab.zoomed = false;
+        // A zoom animation still running would draw its pane over the tiled layout.
+        self.zoom_anim = None;
+    }
+
+    /// Takes a pane out of its tab into a new tab of its own, opened right after it; the shell and
+    /// what runs in it go along unchanged.
+    pub fn move_pane_to_tab(&mut self, id: PaneId) {
+        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
+        if self.tabs[ti].panes().len() < 2 {
+            return self.no_op("only one pane — it already has the tab to itself");
+        }
+        self.detach_pane(ti, id);
+        let origin = self.panes.get(&id).map(|p| dir_name(&p.cwd())).unwrap_or_default();
+        self.tabs.insert(ti + 1, Tab::new(id, origin));
+        self.view = View::Term(ti + 1);
+    }
+
+    /// Takes pane `id` out of tab `ti`'s tree (it must have another pane); a focused pane hands the
+    /// focus to its neighbour, as tmux does.
+    fn detach_pane(&mut self, ti: usize, id: PaneId) {
         let body = self.body();
         let tab = &mut self.tabs[ti];
         let (rects, _) = tab.root.layout(body);
@@ -583,6 +644,8 @@ impl App {
             .find_map(|d| neighbor(&rects, id, *d));
         tab.root.remove(id);
         tab.zoomed = false;
+        // A zoom animation still running would draw its pane over the tiled layout.
+        self.zoom_anim = None;
         if tab.focus == id {
             tab.focus = fallback.filter(|f| tab.root.contains(*f)).unwrap_or_else(|| tab.root.leaves()[0]);
         }
@@ -611,10 +674,14 @@ impl App {
     fn focus_dir(&mut self, d: Direction) {
         let body = self.body();
         if let Some(tab) = self.current_tab_mut() {
-            tab.zoomed = false;
+            let was_zoomed = std::mem::replace(&mut tab.zoomed, false);
             let (rects, _) = tab.root.layout(body);
             if let Some(n) = neighbor(&rects, tab.focus, d) {
                 tab.focus = n;
+            }
+            if was_zoomed {
+                // A zoom animation still running would draw its pane over the tiled layout.
+                self.zoom_anim = None;
             }
         }
     }
@@ -687,6 +754,27 @@ impl App {
         }
     }
 
+    /// Attaches to a background Claude session from Home (`claude attach <id>`) in a new tab, in the folder the
+    /// session was started in when that folder still exists.
+    pub fn attach_bg_session(&mut self, i: usize) {
+        let Some((cwd, line, origin)) = self.bg_attach(i) else { return };
+        if self.claude_launcher().is_none() {
+            return self.toast(ToastLevel::Warn, "claude is not installed ('claude' not on PATH)");
+        }
+        let command = self.shell.invocation(&line);
+        self.new_tab(cwd, Some(&command), Some(origin));
+    }
+
+    /// The folder, command line and tab title `attach_bg_session` opens session `i` with.
+    pub fn bg_attach(&self, i: usize) -> Option<(PathBuf, String, String)> {
+        let s = self.bg_sessions.get(i)?;
+        let line = crate::bg::attach_command(&s.id)?;
+        // `cwd` never names a network path (`bg::parse`), so the check touches only local folders.
+        let cwd = s.cwd.clone().filter(|c| c.is_dir()).unwrap_or_else(home);
+        let origin = format!("{} · claude bg", dir_name(&cwd));
+        Some((cwd, line, origin))
+    }
+
     /// `launch`; with `continue_last` the command also gets Claude's `--continue` (unless the launcher already picks a
     /// conversation). The tab is remembered with the launcher's own command, as `launch` does.
     fn launch_with(&mut self, idx: usize, dir: Option<PathBuf>, continue_last: bool) {
@@ -703,6 +791,7 @@ impl App {
             self.toast(ToastLevel::Warn, "select a project first");
             return;
         };
+        self.warn_full_quota(&launcher.command);
         let origin = format!("{} · {}", dir_name(&path), launcher.name);
         let line = if continue_last {
             crate::hooks::resume::continue_command(&launcher.command).unwrap_or_else(|| launcher.command.clone())

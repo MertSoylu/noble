@@ -16,6 +16,7 @@ mod notify;
 mod ops;
 mod palette;
 mod power;
+mod quota;
 mod redraw;
 mod reload;
 mod reports;
@@ -444,6 +445,8 @@ pub enum Hit {
     ProjectTask(usize),
     /// Home's card line "↻ claude · 2h ago" of the selected project: a tab that continues its last Claude conversation.
     ClaudeContinue,
+    /// A background Claude session row on Home (`App::bg_sessions` index): attaches to it in a new tab.
+    BgSession(usize),
     AiRefresh,
     Setting(usize),
     /// Row in the scheme selector (`scheme_options` order).
@@ -653,7 +656,7 @@ impl AgentState {
 }
 
 /// What a pane's title shows about the agent running in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentBadge {
     pub kind: &'static str,
     pub state: AgentState,
@@ -661,6 +664,8 @@ pub struct AgentBadge {
     pub working_since: Option<i64>,
     /// Subagents of the session still running.
     pub subagents: usize,
+    /// The fullest quota window past `warn_at`, as "5h 92%" (`App::agent_quota_warning`).
+    pub quota: Option<String>,
 }
 
 /// The pane "jump to waiting agent" goes to: in `order` (every pane, in tab order, with its
@@ -722,6 +727,8 @@ pub struct Services {
     pub ports_req: Sender<Vec<PathBuf>>,
     /// A project folder whose branch's pull request is looked up (answered with `AppEvent::Pr`).
     pub pr_req: Sender<PathBuf>,
+    /// Asks for Claude Code's background sessions (answered with `AppEvent::BgSessions`).
+    pub bg_req: Sender<()>,
 }
 
 pub struct App {
@@ -868,10 +875,14 @@ pub struct App {
     battery_warned: u8,
     /// Quota windows already warned about (provider, window, reset time).
     quota_warned: std::collections::HashSet<(String, String, Option<i64>)>,
+    /// Quota windows past `warn_at` that have not reset yet: (provider id, window) → (provider name, reset time).
+    quota_armed: std::collections::BTreeMap<(&'static str, String), (&'static str, i64)>,
     /// Send BEL once to the outer terminal (flashes the taskbar).
     pub outer_bell: bool,
     /// Text of the notification to forward to the outer terminal (OSC 9 / 777, see `outer`); taken by the frame loop.
     pub outer_notice: Option<String>,
+    /// What the outer terminal was last told (progress pause, window title); `outer_sequences` writes only changes.
+    outer_shown: crate::outer::Status,
     /// Whether the NOBLE window has focus, as far as the outer terminal reports it (`None`: no report yet).
     pub window_focused: Option<bool>,
     /// The pane that held the focus at the last focus-report sync (`sync_focus_reports`), `None` when no pane did.
@@ -900,6 +911,12 @@ pub struct App {
     ports_in_flight: bool,
     /// The pull request request on its way: the folder and the branch it is for.
     pr_in_flight: Option<(PathBuf, String)>,
+    /// Claude Code's background sessions from the last answer (`bg` thread), newest first.
+    pub bg_sessions: Vec<crate::bg::BgSession>,
+    /// When the background sessions were last asked for.
+    bg_asked: Option<Instant>,
+    /// A background session request is on its way.
+    bg_in_flight: bool,
 }
 
 fn launcher_availability(list: &[Launcher]) -> Vec<(Launcher, bool)> {
@@ -985,6 +1002,8 @@ impl App {
         crate::ports::spawn(tx.clone(), ports_rx);
         let (pr_tx, pr_rx) = std::sync::mpsc::channel();
         crate::pr::spawn(tx.clone(), pr_rx);
+        let (bg_tx, bg_rx) = std::sync::mpsc::channel();
+        crate::bg::spawn(tx.clone(), bg_rx);
 
         let services = Services {
             sensor_req: sensor_tx,
@@ -995,6 +1014,7 @@ impl App {
             ai_cfg,
             ports_req: ports_tx,
             pr_req: pr_tx,
+            bg_req: bg_tx,
         };
         let cache = ai::load_cache(&paths.data_file("ai-cache.json"));
         let mut app = App::build(cfg, paths, Some(services), tx, size, recent, workspaces);
@@ -1146,8 +1166,10 @@ impl App {
             term_schemes: crate::wt::all_schemes(None),
             battery_warned: 100,
             quota_warned: Default::default(),
+            quota_armed: Default::default(),
             outer_bell: false,
             outer_notice: None,
+            outer_shown: Default::default(),
             window_focused: None,
             focus_held: None,
             colors: Default::default(),
@@ -1162,6 +1184,9 @@ impl App {
             ports_asked: None,
             ports_in_flight: false,
             pr_in_flight: None,
+            bg_sessions: Vec::new(),
+            bg_asked: None,
+            bg_in_flight: false,
             cfg,
         }
     }
@@ -1189,11 +1214,15 @@ impl App {
             | AppEvent::Quit => true,
             AppEvent::PtyOutput => false,
             AppEvent::SensorStatic(_) | AppEvent::Sensors(_) => matches!(self.view, View::Bridge | View::System),
-            AppEvent::Projects(_) | AppEvent::Git(..) | AppEvent::Ai(_) => {
-                self.view == View::Bridge || self.overlay.is_some()
-            }
+            AppEvent::Projects(_) | AppEvent::Git(..) => self.view == View::Bridge || self.overlay.is_some(),
+            // A pane's title shows the quota warning too (`quota.rs`), so new quota numbers count in a terminal.
+            AppEvent::Ai(_) => true,
             // Decided by `apply`: only a value that Home shows counts.
-            AppEvent::Ports(_) | AppEvent::Pr(..) | AppEvent::AddDecided { .. } | AppEvent::PaneCwd { .. } => false,
+            AppEvent::Ports(_)
+            | AppEvent::Pr(..)
+            | AppEvent::BgSessions(_)
+            | AppEvent::AddDecided { .. }
+            | AppEvent::PaneCwd { .. } => false,
         };
         let before = self.ui_fingerprint();
         // Switching to or from battery changes what every screen draws (clock seconds, cursor blink).
@@ -1268,6 +1297,7 @@ impl App {
                 }
             }
             AppEvent::Pr(path, info) => return self.set_pr(path, info),
+            AppEvent::BgSessions(list) => return self.set_bg_sessions(list),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();
                 self.edit_ui_state(|d| {
@@ -1294,7 +1324,8 @@ impl App {
         })
     }
 
-    /// New quota data: recorded in history, warns once per window over the threshold.
+    /// New quota data: recorded in history, warns once per window over the threshold and arms the reset notice
+    /// of the windows over it (`quota.rs`).
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
         let ts = state.fetched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -1306,6 +1337,7 @@ impl App {
         if limit == 0 {
             return;
         }
+        self.arm_quota_resets(state, &usage.windows, chrono::Utc::now().timestamp());
         for w in &usage.windows {
             let key = (state.id.to_string(), w.label.clone(), w.resets_at);
             if w.used < limit || self.quota_warned.contains(&key) {
@@ -1415,6 +1447,7 @@ impl App {
         let now = Instant::now();
         let linger = self.toast_linger();
         self.toasts.retain(|t| t.expires_at().is_none_or(|u| u + linger > now));
+        self.check_quota_resets(chrono::Utc::now().timestamp());
         self.request_visible_git();
         self.sync_power_state();
         self.request_home_live_data();

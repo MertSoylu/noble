@@ -6,6 +6,47 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-29
+
+### Added
+- Smarter quota warnings, from the cached numbers (no new request). A window that passed `warn_at` announces its
+  reset ("Claude Code 5h quota reset") at its reset time, also while you work in a terminal. A full quota (100%)
+  marks the agent's launcher on Home with `⚠`, and launching it says when the quota resets ("resets in 1h12m"). An
+  agent pane's title shows the fullest window past `warn_at` ("⚠ 5h 92%"). The launcher and pane parts apply to the
+  Claude Code, Codex, Antigravity, Kilo Code and Command Code agents; the reset notice applies to every provider.
+- Awareness while NOBLE is in the background: while an agent waits for you, the terminal NOBLE runs in shows a paused
+  progress report (OSC 9;4; Windows Terminal on the tab and the taskbar icon, Ghostty as a progress bar) and the window
+  title reads `NOBLE · ◆ 1` with the number of agents waiting (`NOBLE dev` in the dev build). Both are cleared or
+  set back when nothing waits, and the title the terminal had before NOBLE is restored on exit. On Windows the progress
+  report is sent only to Windows Terminal or a terminal that sets `TERM_PROGRAM`; the title goes everywhere.
+- Progress reports from the programs in a pane (OSC 9;4, as Claude Code sends them): the pane title shows the
+  percentage (`42%`), a spinner while busy work has no percentage, `✗` on an error and `‖` while paused, and the tab
+  shows a busy marker. An agent without hooks reads as working while its report is busy. The report ends with state 0
+  or with the shell's next prompt.
+- Pane operations: Equalize Splits (prefix `=`; a run of splits in one direction shares the space evenly), Swap With
+  Next Pane (prefix `}`; the focus moves with the pane) and Move Pane to New Tab (prefix `!`; the shell keeps running in
+  a tab opened right after). They are in the palette and, once a tab has two panes, in the pane menu. A notification
+  from a moved pane still leads to it.
+- Claude Code background sessions (`claude --bg`) are listed on Home in the AI usage panel, under the agent sessions:
+  running and waiting ones, and finished ones for a day. A click attaches to one in a new tab (`claude attach <id>`).
+- `cargo binstall noble` downloads the prebuilt release archive for the platform instead of compiling (the
+  `[package.metadata.binstall]` section maps each target to its archive, as `release.yml` names them).
+
+### Changed
+- The pane menu lists the quick launchers under one "Launch in split ›" row (it opens the list at the same place) instead
+  of a row per installed launcher.
+- A tall project card on Home shows more recent commits (up to 30): the first 8 come first as before, more only fill
+  the rows the changed files leave free.
+
+### Fixed
+- A resize while a program's synchronized output block is open (Claude Code's fullscreen view, for one) no longer draws
+  the half of the new frame that has arrived. The pane shows the last complete frame, cut or padded to the new size,
+  until the block ends or runs past the 150 ms sync timeout (then the live screen is drawn, as before). A resize that
+  rewraps the lines of the main screen still draws the live screen for one frame when the last complete frame was
+  drawn from the main screen; the alternate screen is not affected.
+- A right or middle button press, drag and release in a pane whose program reports the mouse (Claude Code's fullscreen
+  view, for one) reach the program in full: the drag and the release were dropped before.
+
 ## [1.12.0] - 2026-10-26
 
 ### Added
@@ -738,7 +779,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.1...HEAD
+[1.12.1]: https://github.com/MertSoylu/noble/compare/v1.12.0...v1.12.1
 [1.12.0]: https://github.com/MertSoylu/noble/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/MertSoylu/noble/compare/v1.10.2...v1.11.0
 [1.10.2]: https://github.com/MertSoylu/noble/compare/v1.10.1...v1.10.2
