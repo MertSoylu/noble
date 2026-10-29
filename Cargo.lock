@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "noble"
-version = "1.12.1"
+version = "1.12.2"
 dependencies = [
  "anyhow",
  "arboard",

@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.12.2] - 2026-10-30
+
 ### Documentation
 - README: a new "AI agents" section covers the agent status hooks of Claude Code, Codex, GitHub Copilot and OpenCode,
   conversation resume, command blocks, sending the last output to an agent, progress reports, background Claude
@@ -789,7 +791,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.1...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.2...HEAD
+[1.12.2]: https://github.com/MertSoylu/noble/compare/v1.12.1...v1.12.2
 [1.12.1]: https://github.com/MertSoylu/noble/compare/v1.12.0...v1.12.1
 [1.12.0]: https://github.com/MertSoylu/noble/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/MertSoylu/noble/compare/v1.10.2...v1.11.0

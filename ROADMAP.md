@@ -175,7 +175,7 @@ Installing is the biggest barrier for new users:
    - Release: v1.12.1
 5. **Stage 5 (done)**
    - Focus: Docs, website, screenshots
-   - Release: —
+   - Release: v1.12.2
 
 Every release: CI green on Windows, Linux and macOS; the idle cost
 (`cargo test --release --test e2e idle -- --ignored --nocapture`) no worse than the README's figures; the
