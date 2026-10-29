@@ -661,6 +661,13 @@ fn progress_report_shows_in_the_title_and_on_the_tab() {
     };
     let title_row = |text: &str| text.lines().find(|l| l.contains(" ✕ ")).unwrap_or_default().to_string();
     let top_row = |text: &str| text.lines().next().unwrap_or_default().to_string();
+    // The tab is named after the folder its pane started in: the temp dir's last part (`Temp` on Windows, `T` on
+    // macOS, `tmp` on Linux).
+    let folder = std::env::temp_dir().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // The shell's prompt marks clear a report, so the reports are fed only once the first prompt is shown and the
+    // shell's startup output has settled.
+    pump_until(&mut app, "the shell's first prompt", |a| a.panes[&pane].prompted);
+    wait_idle(&mut app, pane);
 
     assert!(feed(&mut app, pane, b"\x1b]9;4;1;42\x07"), "a visible report asks for a frame");
     let text = render(&mut app, 110, 30);
@@ -697,15 +704,15 @@ fn progress_report_shows_in_the_title_and_on_the_tab() {
     app.view = View::Term(1);
     assert!(feed(&mut app, pane, b"\x1b]9;4;1;7\x07"), "a background tab's report redraws the tab strip");
     let top = top_row(&render(&mut app, 110, 30));
-    assert!(top.contains("… Temp"), "the busy tab's marker: {top}");
+    assert!(top.contains(&format!("… {folder}")), "the busy tab's marker: {top}");
     assert!(idle_redraw(&app), "{:?}", app.redraw_after());
     assert!(feed(&mut app, pane, b"\x1b]9;4;0\x07"));
-    assert!(!top_row(&render(&mut app, 110, 30)).contains("… Temp"), "cleared");
+    assert!(!top_row(&render(&mut app, 110, 30)).contains(&format!("… {folder}")), "cleared");
 
-    // An agent without hooks (its command says what it is): busy reads as working, its percentage in the title.
+    // An agent without hooks, typed at the prompt: the shell marks the command started (`133;C`) and the agent names
+    // itself in its title. Busy reads as working, its percentage in the title.
     app.view = View::Term(0);
-    app.panes.get_mut(&pane).unwrap().command = Some("codex".into());
-    feed(&mut app, pane, b"\x1b]9;4;3;0\x07");
+    feed(&mut app, pane, b"\x1b]133;C\x07\x1b]0;codex\x07\x1b]9;4;3;0\x07");
     let row = title_row(&render(&mut app, 110, 30));
     assert!(row.contains("codex · working"), "{row}");
     assert!(row.chars().any(|c| SPIN.contains(c)), "a working agent spins: {row}");
