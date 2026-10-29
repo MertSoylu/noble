@@ -1,6 +1,6 @@
 [package]
 name = "noble"
-version = "1.12.0"
+version = "1.12.1"
 edition = "2024"
 rust-version = "1.95"
 description = "NOBLE — retro-futurist HUD terminal workspace: real shells, projects, system sensors and AI quota in one cockpit"
@@ -12,7 +12,7 @@ homepage = "https://github.com/MertSoylu/noble"
 keywords = ["terminal", "tui", "ratatui", "workspace", "multiplexer"]
 categories = ["command-line-utilities", "development-tools"]
 # The crates.io package only ships what is needed to build.
-exclude = [".github/", ".claude/", "docs/", "tests/", "examples/", "install.cmd", "install.sh", "CLAUDE.md", "AGENTS.md"]
+exclude = [".github/", ".claude/", "docs/", "packaging/", "tests/", "examples/", "install.cmd", "install.sh", "CLAUDE.md", "AGENTS.md"]
 
 [lib]
 name = "noble"
@@ -60,6 +60,37 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# `cargo binstall noble` downloads the archives `.github/workflows/release.yml` publishes instead of compiling. Each
+# archive holds the binary at its root (plus README.md and LICENSE), and the names are not the target triples, so every
+# published target is listed in an override. Other targets have no archive and fall back to building from source.
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-linux-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-linux-aarch64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-macos-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-macos-aarch64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-windows-x86_64.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/noble-windows-aarch64.zip"
+pkg-fmt = "zip"
 
 [profile.release]
 opt-level = 3

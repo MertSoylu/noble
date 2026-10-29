@@ -265,7 +265,7 @@ fn key_encoding_never_panics() {
 fn terminal_queries_never_panic() {
     use noble::term::colors::{ColorReport, OscScan, SharedColors, Terminator};
     use noble::term::pane::{Callbacks, feed};
-    const BITS: [&str; 40] = [
+    const BITS: [&str; 47] = [
         "\x1b[?2026h",
         "\x1b[?2026l",
         "\x1b[?2026$p",
@@ -288,6 +288,13 @@ fn terminal_queries_never_panic() {
         "\x1b]4;1;?;256;?;-1;?;x;?\x07",
         "\x1b]4;\x07",
         "\x1b]4;1;rgb:ff/00/00\x07",
+        "\x1b]9;4;1;50\x07",
+        "\x1b]9;4;3;0\x1b\\",
+        "\x1b]9;4;1;99999999999999999999999;7\x07",
+        "\x1b]9;4;2;-1\x07",
+        "\x1b]9;4;\x07",
+        "\x1b]9;4;9;4\x07",
+        "\x1b]9;4;0\x07",
         "\x1b]104\x07",
         "\x1b]11;#zzzz\x07",
         "\x1b]",
@@ -331,6 +338,10 @@ fn terminal_queries_never_panic() {
         }
         for b in bytes {
             let _ = scan.push(*b);
+        }
+        // A progress report never shows more than 100 percent, whatever the bytes were.
+        if let Some(progress) = parser.callbacks().progress {
+            assert!(progress.percent.is_none_or(|p| p <= 100), "{progress:?}");
         }
         parser.callbacks_mut().seal_color_replies(Terminator::St);
         queued += parser.callbacks().responses.len();

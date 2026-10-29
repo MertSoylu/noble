@@ -48,7 +48,18 @@ fn restore_terminal() {
     let _ = execute!(out, crossterm::event::DisableBracketedPaste);
     let _ = execute!(out, crossterm::event::DisableFocusChange);
     let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, crossterm::cursor::Show);
+    // The outer terminal: the progress report is cleared and the title it had before NOBLE comes back.
+    let _ = out.write_all(noble::outer::exit_sequences(outer_progress()).as_bytes());
     let _ = out.flush();
+}
+
+/// Whether the outer terminal shows the progress report (`outer::progress_supported`), read from the environment.
+fn outer_progress() -> bool {
+    noble::outer::progress_supported(
+        cfg!(windows),
+        std::env::var_os("TERM_PROGRAM").is_some(),
+        std::env::var_os("WT_SESSION").is_some(),
+    )
 }
 
 /// Reported before the terminal is touched: without a home folder NOBLE has nowhere for its files.
@@ -135,8 +146,11 @@ fn main() -> anyhow::Result<()> {
         EnableMouseCapture,
         // Focus reports (FocusGained / FocusLost) let notifications skip a window that is in front.
         crossterm::event::EnableFocusChange,
-        crossterm::terminal::SetTitle(if noble::util::is_dev_build() { "NOBLE dev" } else { "NOBLE" })
     )?;
+    // The title the terminal has now goes on its title stack; `restore_terminal` pops it. From the first frame on,
+    // NOBLE sets the title itself (`App::outer_sequences`: "NOBLE", or "NOBLE · ◆ N" while agents wait).
+    let _ = out.write_all(noble::outer::SAVE_TITLE.as_bytes());
+    let _ = out.flush();
     // Unix: pastes arrive as one `Event::Paste`. crossterm's Windows console input has no
     // bracketed paste; there a paste arrives as a burst of key events, which the input thread turns back
     // into a paste (`event::coalesce_paste`).
@@ -233,6 +247,7 @@ fn event_loop(
     rx: &mpsc::Receiver<AppEvent>,
     colors_256: bool,
 ) -> Option<std::io::Error> {
+    let progress = outer_progress();
     let mut last_draw = Instant::now() - FRAME;
     let mut pending = true;
     let mut draw_error = None;
@@ -256,6 +271,13 @@ fn event_loop(
             }
         }
         app.tick();
+        // The outer terminal's progress pause and window title follow the agents waiting for you; only a change is
+        // written (`App::outer_sequences`).
+        if let Some(seq) = app.outer_sequences(progress) {
+            let mut out = stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
+        }
         pending |= app.take_dirty();
         if app.quit {
             break;

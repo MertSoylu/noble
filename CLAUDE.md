@@ -25,7 +25,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `cargo install cargo-deny --locked`). A new dependency's license must be added to `deny.toml` after review.
 - CI: `.github/workflows/` — `ci.yml` (fmt, clippy `-D warnings` and tests on Windows/Linux/macOS, `shellcheck
   install.sh`, a static linux-musl build, MSRV, cargo-deny), `audit.yml`,
-  `release.yml` (`gh workflow run release.yml --ref <branch>` builds without publishing)
+  `release.yml` (`gh workflow run release.yml --ref <branch>` builds without publishing; on a tag its `winget` job
+  submits the release to winget-pkgs, see `packaging/winget/README.md`)
 - MSRV: `rust-version` in `Cargo.toml` is the oldest Rust the CI `msrv` job builds with; raise it (and the
   README/CONTRIBUTING mentions) when a dependency needs a newer one
 - `cargo run --example screenshots` — regenerates the README SVG screenshots
@@ -80,7 +81,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **App submodules:** `app/mod.rs` holds the state types and the event dispatch (`App::handle`, `apply`, `tick`);
   `notify.rs` (toasts, notices, the update notice, PTY output → notifications), `redraw.rs` (animations and the
   next wake-up), `session.rs` (auto-save, restore, shutdown), `power.rs` (battery, clock, sensor rate), `reload.rs`
-  (live config reload) and `git.rs` (git status requests) hold the methods on `App`.
+  (live config reload), `git.rs` (git status requests) and `quota.rs` (quota warnings from the cached numbers: a full
+  quota on a launcher, the agent pane's `⚠ 5h 92%`, the reset notice) hold the methods on `App`.
 - **Redraw (battery-friendly):** there is no fixed frame rate. `App::handle` returns `true` if the event changed
   something visible (e.g. a sensor event while in a terminal returns `false`); anything that changes over time
   (clock, animation, spinner, toast timeout, cursor blink) must be added to `App::redraw_after`, otherwise it
@@ -159,6 +161,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`Pane::command_ran`: the C mark, or for cmd.exe and bash 3.2 a typed line and the last Enter) becomes
   `Pane::last_result`, shown in the pane title (`ui/terminal.rs` `result_badge`), and a running one shows a
   live timer whose redraws `App::redraw_after` schedules (`pane::live_timer_next`).
+- **Progress reports:** `term/osc.rs` stores OSC 9;4 (`Progress`: states 1 normal, 2 error, 3 indeterminate, 4 paused;
+  state 0 clears) in `Callbacks::progress`, and the prompt marks clear it (`shell_prompt`). `Pane::progress` and
+  `take_progress_changed` read it on the main thread; a change redraws in `on_pty_output`, also from a background tab.
+  `App::agent_state` makes an agent without hooks Working while its report is busy (`pane_busy`); the title badge is
+  `ui/terminal.rs` `progress_badge`, the tab's busy dot `ui/mod.rs` `tab_cell`. A busy report with no percentage spins
+  through `agent_spinning` (`redraw_after`), never on battery.
 - **Command blocks:** `term/blocks.rs` (pure: `CommandBlock`, the epoch and history pruning, the context line, the
   agent size cap) and `Callbacks::blocks` (`osc.rs`: `133;C` opens a block with the typed line above the cursor, `133;D`
   closes it with the exit code). Line numbers are `screen_base` based; a column change (reflow) drops every block.
@@ -186,6 +194,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
 - **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
   skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
+  The same terminal shows the agents waiting for you (`App::agents_waiting`, `NeedsYou`): `App::outer_sequences`
+  (`app/notify.rs`) returns the OSC 9;4 pause (state 4, cleared with state 0) and the window title (`NOBLE · ◆ N`,
+  OSC 0; `NOBLE dev` in the dev build) only when they changed, and the frame loop writes them after each `tick`.
+  The progress report goes out on Windows only with `WT_SESSION` or `TERM_PROGRAM` (`progress_supported`). The
+  title the terminal had is pushed at start (`SAVE_TITLE`, XTWINOPS 22) and `exit_sequences` clears the report and
+  pops it on exit (XTWINOPS 23), from `restore_terminal` on every exit path.
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
   (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
   no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
@@ -252,6 +266,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `None`. `app/live.rs` schedules the requests (`request_home_live_data`) and handles `AppEvent::Ports` and
   `AppEvent::Pr`. Tests never run `gh`: `ai::isolated` turns it off in e2e, and headless apps have no `services`,
   so they send no request.
+- **Background Claude sessions:** `bg.rs` runs `claude agents --json --all` through `ai::run_command` (10 s) on a
+  background thread (`AppEvent::BgSessions`) and keeps the `background` entries. `app/live.rs` asks for them only while
+  Home is open, at most once a minute (every 3 minutes on battery), and only with a `claude` launcher. Any failure gives
+  an empty list, and `ai::isolated` turns the program off. Home lists them in the AI panel (`ui/bridge.rs`,
+  `Hit::BgSession`); a click runs `attach_bg_session` (`app/ops.rs`: `claude attach <id>` in a new tab).
 - **Updates:** `update.rs` — `App` asks GitHub's latest release once a day in the background
   (`AppEvent::Update`, result cached in `state.json`; not for `noble-dev`, not when `NOBLE_NO_UPDATE_CHECK`
   is set, as in e2e). A newer version shows a notice at the bottom right (`Hit::Update` opens a tab running

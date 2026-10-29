@@ -104,6 +104,52 @@ pub fn window_name(label: &str) -> String {
     }
 }
 
+/// The quota provider an agent runs on (its kind as `agent_kind` names it). `None`: NOBLE tracks no quota for it.
+pub fn quota_provider(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "antigravity" => Some("antigravity"),
+        "kilo" => Some("kilo"),
+        "command code" => Some("command-code"),
+        _ => None,
+    }
+}
+
+/// Time until a reset as "1h12m" (no spaces); "now" once it has passed.
+pub fn reset_in(reset: i64, now: i64) -> String {
+    if reset <= now {
+        return "now".into();
+    }
+    util::fmt_duration(Duration::from_secs((reset - now) as u64)).replace(' ', "")
+}
+
+/// The window that is full now: at 100% and not yet past its reset time (a cached reset time that has passed says
+/// nothing about the quota now). Of several full windows, the one that resets last, when the quota is usable again.
+pub fn full_window(state: &ProviderState, now: i64) -> Option<&Window> {
+    state
+        .usage
+        .as_ref()?
+        .windows
+        .iter()
+        .filter(|w| w.used >= 100 && w.resets_at.is_none_or(|t| t > now))
+        .max_by_key(|w| w.resets_at.unwrap_or(i64::MAX))
+}
+
+/// The fullest window at or past `warn_at` that has not reset yet (`warn_at` 0 is off).
+pub fn warned_window(state: &ProviderState, warn_at: u8, now: i64) -> Option<&Window> {
+    if warn_at == 0 {
+        return None;
+    }
+    state
+        .usage
+        .as_ref()?
+        .windows
+        .iter()
+        .filter(|w| w.used >= warn_at && w.resets_at.is_none_or(|t| t > now))
+        .max_by_key(|w| w.used)
+}
+
 /// AI agent running in a pane: from the launcher command or the window title.
 pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
     // When opened from a launcher the command's file name is authoritative.
@@ -798,6 +844,45 @@ mod tests {
         assert!(states[0].is_stale());
         let none = initial_states(&AiCfg { providers: vec!["codex".into()], ..AiCfg::default() }, &cache);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn quota_windows_full_and_warned() {
+        let state = |windows: Vec<Window>| ProviderState {
+            id: "claude",
+            name: "Claude Code",
+            login_hint: "claude",
+            presence: Presence::Ready,
+            status: Status::Ok,
+            usage: Some(Usage { windows, plan: None, note: None }),
+            fetched_at: Some(1),
+        };
+        let win = |label: &str, used: u8, resets_at: Option<i64>| Window { label: label.into(), used, resets_at };
+        let now = 1_000;
+        // Full: 100% and the reset is still ahead (or unknown). The later reset is the one that counts.
+        let s = state(vec![win("5H", 100, Some(1_500)), win("WEEK", 100, Some(9_000)), win("OPUS", 100, None)]);
+        assert_eq!(full_window(&s, now).map(|w| w.label.as_str()), Some("OPUS"));
+        let s = state(vec![win("5H", 100, Some(1_500)), win("WEEK", 100, Some(9_000))]);
+        assert_eq!(full_window(&s, now).map(|w| w.label.as_str()), Some("WEEK"));
+        // A cached reset that has passed says nothing about the quota now; 99% is not full.
+        assert!(full_window(&state(vec![win("5H", 100, Some(999))]), now).is_none());
+        assert!(full_window(&state(vec![win("5H", 99, Some(1_500))]), now).is_none());
+        // Warned: at or past warn_at, not reset; the fullest one is named. 0 turns the warning off.
+        let s = state(vec![win("5H", 92, Some(1_500)), win("WEEK", 95, Some(9_000)), win("OPUS", 99, Some(900))]);
+        assert_eq!(warned_window(&s, 90, now).map(|w| w.label.as_str()), Some("WEEK"));
+        assert!(warned_window(&s, 0, now).is_none());
+        assert!(warned_window(&state(vec![win("5H", 89, Some(1_500))]), 90, now).is_none());
+        assert_eq!(warned_window(&state(vec![win("5H", 91, None)]), 90, now).map(|w| w.used), Some(91));
+    }
+
+    #[test]
+    fn quota_provider_and_reset_text() {
+        assert_eq!(quota_provider("claude"), Some("claude"));
+        assert_eq!(quota_provider("command code"), Some("command-code"));
+        assert_eq!(quota_provider("opencode"), None, "OpenCode's own plan is not the OpenCode Go quota");
+        assert_eq!(reset_in(1_000 + 72 * 60, 1_000), "1h12m");
+        assert_eq!(reset_in(1_000 + 2 * 86_400 + 3 * 3600, 1_000), "2d3h");
+        assert_eq!(reset_in(1_000, 1_000), "now");
     }
 
     /// A directory under the system temp dir, removed when dropped (also when the test fails).

@@ -368,7 +368,12 @@ fn tab_cell(app: &App, i: usize, compact: bool, working: &'static str) -> TabCel
     let active = app.view == View::Term(i);
     // The most urgent agent state among the tab's panes leads the title as a one-cell dot
     // (two cells with its space; the title gives them up so the tab keeps its width).
-    let state = app.tab_agent_state(i);
+    let state = match app.tab_agent_state(i) {
+        // A program that reports busy work (OSC 9;4) marks its tab with the working glyph, also when the tab's only
+        // agent just runs (`Running`) or when it has no agent at all.
+        Some(AgentState::Running) | None if app.tab_busy(i) => Some(AgentState::Working),
+        state => state,
+    };
     let dot = state.map(|s| terminal::agent_glyph(s, working, th));
     let max = if compact { 12 } else { 24 } - if dot.is_some() { 2 } else { 0 };
     let panes = tab.panes().len();

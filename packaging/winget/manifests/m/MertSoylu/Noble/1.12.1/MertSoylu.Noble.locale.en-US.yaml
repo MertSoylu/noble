@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+
+PackageIdentifier: MertSoylu.Noble
+PackageVersion: 1.12.1
+PackageLocale: en-US
+Publisher: Mert Soylu
+PublisherUrl: https://github.com/MertSoylu/noble
+PublisherSupportUrl: https://github.com/MertSoylu/noble/issues
+PackageName: NOBLE
+PackageUrl: https://noble.mertsoylu.dev
+License: MIT
+LicenseUrl: https://github.com/MertSoylu/noble/blob/main/LICENSE
+ShortDescription: "NOBLE — retro-futurist HUD terminal workspace: real shells, projects, system sensors and AI quota in one cockpit"
+Tags:
+  - terminal
+  - ai
+  - tui
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

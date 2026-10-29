@@ -7,6 +7,7 @@ mod animation;
 mod common;
 mod crash_hunt;
 mod focus;
+mod fullscreen;
 mod hints;
 mod home;
 mod overlays;

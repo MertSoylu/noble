@@ -41,6 +41,8 @@ pub enum AppEvent {
     Ports(Vec<(PathBuf, Vec<u16>)>),
     /// Pull request of a project's branch (`pr`): the folder and the pull request, when there is one.
     Pr(PathBuf, Option<PrInfo>),
+    /// Claude Code's background sessions (`bg`), newest first; empty when there are none or `claude` could not tell.
+    BgSessions(Vec<crate::bg::BgSession>),
     /// The add prompt's auto mode found out whether a folder holds repositories: `scan` folders are
     /// scanned for them, the others are added as projects (`settings::add_by_mode`).
     AddDecided {

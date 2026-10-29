@@ -38,6 +38,12 @@ pub struct Callbacks {
     pub blocks: std::collections::VecDeque<CommandBlock>,
     /// Desktop notification sent by the app (OSC 9 text, OSC 777;notify).
     pub notice: Option<String>,
+    /// The progress report the program set with OSC 9;4 (see `Progress`). Cleared by state 0 and by the next
+    /// prompt mark (`shell_prompt`), like a shell's own title.
+    pub progress: Option<Progress>,
+    /// `progress` changed since the app last took the flag (`Pane::take_progress_changed`): the pane's title and
+    /// tab need a redraw.
+    pub progress_changed: bool,
     /// OSC 8 links (newest last, capped in number).
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
@@ -83,6 +89,8 @@ impl Callbacks {
     fn shell_prompt(&mut self) {
         self.prompt = true;
         self.title.clear();
+        // The program that reported its progress has exited with the prompt (a bar left behind would read as busy).
+        self.store_progress(None);
     }
 }
 
@@ -111,6 +119,42 @@ pub struct Hyperlink {
 
 /// Maximum number of OSC 8 links kept.
 const MAX_HYPERLINKS: usize = 1000;
+
+/// A progress report from OSC 9;4 (`9;4;<state>[;<progress>]`, ConEmu's form that Windows Terminal, Ghostty and
+/// Claude Code send). A pane shows it in its title and its tab shows it as busy; an agent without hooks counts as
+/// working while it reports busy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub state: ProgressState,
+    /// Percent done, 0 to 100 (values past 100 are clamped); `None` when the report has none, and always for the
+    /// busy-without-percent state.
+    pub percent: Option<u8>,
+}
+
+/// The states of a progress report (the number after `9;4;`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    /// 1: work in progress, with a percentage when the report has one.
+    Normal,
+    /// 2: the work failed.
+    Error,
+    /// 3: busy, no percentage.
+    Indeterminate,
+    /// 4: paused, or a warning.
+    Paused,
+}
+
+impl Progress {
+    /// Work is going on (states 1 and 3).
+    pub fn busy(&self) -> bool {
+        matches!(self.state, ProgressState::Normal | ProgressState::Indeterminate)
+    }
+
+    /// A busy report with no percentage to show: a spinner stands for it.
+    pub fn spins(&self) -> bool {
+        self.busy() && self.percent.is_none()
+    }
+}
 
 impl crate::vt100::Callbacks for Callbacks {
     fn set_window_title(&mut self, _: &mut crate::vt100::Screen, title: &[u8]) {
@@ -161,8 +205,10 @@ impl crate::vt100::Callbacks for Callbacks {
                 self.cwd = (!is_network_path(dir)).then(|| dir.to_string());
                 self.shell_prompt();
             }
-            // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (ConEmu
-            // extensions such as 9;4 progress) are not notifications.
+            // OSC 9;4;<state>[;<progress>]: ConEmu's progress report (`Progress`). It is no notification.
+            [b"9", b"4", state, rest @ ..] => self.set_progress(state, rest.first().copied()),
+            // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (other ConEmu
+            // extensions) are not notifications.
             [b"9", rest @ ..] if !rest.is_empty() && !rest[0].iter().all(u8::is_ascii_digit) => {
                 self.set_notice(join(rest));
             }
@@ -417,6 +463,40 @@ impl Callbacks {
             self.notice = Some(util::truncate(&text, 120));
         }
     }
+
+    /// An OSC 9;4 report: state 0 clears the bar, 1 to 4 set it. A state that is not a number from 0 to 4 changes
+    /// nothing, so the bar is only ever set or cleared by a state the report names.
+    fn set_progress(&mut self, state: &[u8], percent: Option<&[u8]>) {
+        let Some(state) = parse_number(state) else { return };
+        let percent = percent.and_then(parse_number).map(|p| p.min(100) as u8);
+        let next = match state {
+            0 => None,
+            1 => Some(Progress { state: ProgressState::Normal, percent }),
+            2 => Some(Progress { state: ProgressState::Error, percent }),
+            // Busy: the report's percentage, if it sends one, is not shown.
+            3 => Some(Progress { state: ProgressState::Indeterminate, percent: None }),
+            4 => Some(Progress { state: ProgressState::Paused, percent }),
+            _ => return,
+        };
+        self.store_progress(next);
+    }
+
+    /// Stores a progress report and flags the change when it differs from the stored one.
+    fn store_progress(&mut self, next: Option<Progress>) {
+        if next != self.progress {
+            self.progress = next;
+            self.progress_changed = true;
+        }
+    }
+}
+
+/// A decimal number in an OSC parameter; anything else is `None`. A number past `u32::MAX` saturates, so an
+/// absurd percentage reads as 100 rather than as no percentage.
+fn parse_number(raw: &[u8]) -> Option<u32> {
+    if raw.is_empty() || !raw.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(raw.iter().fold(0u32, |n, &d| n.saturating_mul(10).saturating_add(u32::from(d - b'0'))))
 }
 
 /// Turns an OSC 7 URL into a local path: `file://host/C:/x` → `C:/x`.
@@ -820,5 +900,94 @@ mod tests {
         p.screen_mut().set_size(crate::term::vt_size(4), crate::term::vt_size(20));
         p.process(b"\x1b]133;D;0\x07");
         assert!(p.callbacks().blocks.is_empty(), "its start is in the old numbering");
+    }
+
+    fn report(state: ProgressState, percent: Option<u8>) -> Option<Progress> {
+        Some(Progress { state, percent })
+    }
+
+    /// OSC 9;4: each state sets the bar, state 0 clears it. A percentage is clamped to 100 and one that is not a
+    /// number is dropped; an unknown state, a state that is not a number and a missing state change nothing.
+    #[test]
+    fn progress_reports_set_and_clear_the_bar() {
+        let mut p = parser(10, 40);
+        assert_eq!(p.callbacks().progress, None);
+        p.process(b"\x1b]9;4;1;42\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Normal, Some(42)));
+        // Busy without a percentage, even when the report sends one.
+        p.process(b"\x1b]9;4;3;0\x1b\\");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Indeterminate, None));
+        p.process(b"\x1b]9;4;2;7\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Error, Some(7)));
+        p.process(b"\x1b]9;4;4\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Paused, None));
+        p.process(b"\x1b]9;4;1\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Normal, None), "no percentage");
+        p.process(b"\x1b]9;4;1;150\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Normal, Some(100)), "clamped");
+        p.process(b"\x1b]9;4;1;99999999999999999999999\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Normal, Some(100)), "saturates");
+        p.process(b"\x1b]9;4;1;x\x07");
+        assert_eq!(p.callbacks().progress, report(ProgressState::Normal, None), "not a number");
+        p.process(b"\x1b]9;4;1;30\x07");
+        for ignored in [&b"\x1b]9;4;5;90\x07"[..], b"\x1b]9;4;x;90\x07", b"\x1b]9;4;\x07", b"\x1b]9;4\x07"] {
+            p.process(ignored);
+            assert_eq!(p.callbacks().progress, report(ProgressState::Normal, Some(30)), "{ignored:?}");
+        }
+        p.process(b"\x1b]9;4;0\x07");
+        assert_eq!(p.callbacks().progress, None);
+        // A clear with a percentage clears too.
+        p.process(b"\x1b]9;4;1;5\x07\x1b]9;4;0;50\x07");
+        assert_eq!(p.callbacks().progress, None);
+    }
+
+    /// A progress report is no notification and no prompt mark, and the busy states are the ones an agent or a tab
+    /// shows as working.
+    #[test]
+    fn progress_is_neither_a_notice_nor_a_prompt_and_busy_states_spin() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b]9;4;1;50\x07\x1b]9;4;3;0\x07");
+        assert_eq!(p.callbacks().notice, None);
+        assert!(!p.callbacks().prompt);
+        let busy = |state, percent| Progress { state, percent }.busy();
+        assert!(busy(ProgressState::Normal, Some(5)) && busy(ProgressState::Normal, None));
+        assert!(busy(ProgressState::Indeterminate, None));
+        assert!(!busy(ProgressState::Error, None) && !busy(ProgressState::Paused, Some(3)));
+        // A spinner stands for a busy report with no percentage only.
+        let spins = |state, percent| Progress { state, percent }.spins();
+        assert!(!spins(ProgressState::Normal, Some(5)));
+        assert!(spins(ProgressState::Normal, None) && spins(ProgressState::Indeterminate, None));
+        assert!(!spins(ProgressState::Paused, None));
+    }
+
+    /// Every prompt mark (the shell is back) clears the bar, the way it ends a title the program set.
+    #[test]
+    fn a_prompt_mark_clears_the_progress_report() {
+        for mark in [&b"\x1b]7;file://h/tmp\x07"[..], b"\x1b]9;9;C:\\x\x1b\\", b"\x1b]133;A\x07", b"\x1b]133;D;0\x07"] {
+            let mut p = parser(10, 40);
+            p.process(b"\x1b]9;4;3;0\x07");
+            assert!(p.callbacks().progress.is_some());
+            p.process(mark);
+            assert_eq!(p.callbacks().progress, None, "{mark:?}");
+        }
+    }
+
+    /// `progress_changed` is set when the stored report changes and only then; the app takes it once.
+    #[test]
+    fn a_progress_change_is_flagged_and_a_repeat_is_not() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b]9;4;3;0\x07");
+        assert!(std::mem::take(&mut p.callbacks_mut().progress_changed));
+        assert!(!p.callbacks().progress_changed, "taken");
+        p.process(b"\x1b]9;4;3;0\x07");
+        assert!(!p.callbacks().progress_changed, "the same report again");
+        p.process(b"\x1b]9;4;1;10\x07");
+        assert!(p.callbacks().progress_changed);
+        p.callbacks_mut().progress_changed = false;
+        p.process(b"\x1b]9;4;0\x07");
+        assert!(p.callbacks().progress_changed, "cleared");
+        p.callbacks_mut().progress_changed = false;
+        p.process(b"\x1b]9;4;0\x07");
+        assert!(!p.callbacks().progress_changed, "clearing nothing changes nothing");
     }
 }

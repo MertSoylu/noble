@@ -893,23 +893,31 @@ impl App {
     /// Whether a notification still leads somewhere: a pane's notification needs its tab and pane to be open.
     pub fn toast_target_open(&self, target: &ToastTarget) -> bool {
         match target {
-            ToastTarget::Pane { tab, pane } => {
-                self.tab_index(*tab).is_some_and(|ti| self.tabs[ti].root.contains(*pane))
-            }
+            ToastTarget::Pane { tab, pane } => self.toast_pane_tab(*tab, *pane).is_some(),
             ToastTarget::Config { .. } => true,
         }
+    }
+
+    /// The tab a notification's pane is in now: the tab it was raised in, or the one the pane was moved to
+    /// (`move_pane_to_tab`); pane ids are never reused.
+    fn toast_pane_tab(&self, tab: crate::term::TabId, pane: PaneId) -> Option<usize> {
+        self.tab_index(tab)
+            .filter(|&ti| self.tabs[ti].root.contains(pane))
+            .or_else(|| self.tabs.iter().position(|t| t.root.contains(pane)))
     }
 
     /// Shows a notification's pane: its tab is switched to and the pane focused. A zoomed tab that shows
     /// another pane goes back to its layout first, so the pane is visible (as `jump_to_agent`). Nothing moves
     /// when the tab or the pane has closed.
     fn show_toast_pane(&mut self, tab: crate::term::TabId, pane: PaneId) {
-        let Some(ti) = self.tab_index(tab).filter(|&ti| self.tabs[ti].root.contains(pane)) else {
+        let Some(ti) = self.toast_pane_tab(tab, pane) else {
             self.toast(ToastLevel::Info, "that pane has closed");
             return;
         };
         if self.tabs[ti].zoomed && self.tabs[ti].focus != pane {
             self.tabs[ti].zoomed = false;
+            // A zoom animation still running would draw its pane over the tiled layout.
+            self.zoom_anim = None;
         }
         self.focus_pane(pane);
     }
@@ -1109,6 +1117,8 @@ impl App {
                     MouseButton::Right | MouseButton::Middle => {
                         if wants {
                             self.forward_mouse(pane, inner, m);
+                            // Its drag and release reach the program too (`mouse_up`), as the left button's do.
+                            self.drag = Some(Drag::Forward { pane, inner });
                         } else {
                             self.paste_clipboard(pane);
                         }
@@ -1206,6 +1216,7 @@ impl App {
             }
             Hit::ProjectTask(i) => self.run_project_task(i),
             Hit::ClaudeContinue => self.continue_claude(),
+            Hit::BgSession(i) => self.attach_bg_session(i),
             Hit::OpenFiles => self.open_selected_folder(),
             Hit::Proc(pid) => self.system.selected_pid = Some(pid),
             Hit::SortCol(k) => self.set_sort(k),

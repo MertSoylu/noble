@@ -214,6 +214,9 @@ pub enum Action {
     SplitDown,
     ClosePane,
     Zoom,
+    EqualizePanes,
+    SwapPane,
+    MovePaneToTab,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -259,7 +262,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 63] = [
+    pub const ALL: [Action; 66] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -281,6 +284,9 @@ impl Action {
         Action::SplitDown,
         Action::ClosePane,
         Action::Zoom,
+        Action::EqualizePanes,
+        Action::SwapPane,
+        Action::MovePaneToTab,
         Action::FocusLeft,
         Action::FocusRight,
         Action::FocusUp,
@@ -342,6 +348,9 @@ impl Action {
                     Action::SplitDown => "split_down",
                     Action::ClosePane => "close_pane",
                     Action::Zoom => "zoom",
+                    Action::EqualizePanes => "equalize_panes",
+                    Action::SwapPane => "swap_pane",
+                    Action::MovePaneToTab => "move_pane_to_tab",
                     Action::FocusLeft => "focus_left",
                     Action::FocusRight => "focus_right",
                     Action::FocusUp => "focus_up",
@@ -412,6 +421,9 @@ impl Action {
             Action::SplitDown => "Split Pane Down".into(),
             Action::ClosePane => "Close Pane".into(),
             Action::Zoom => "Zoom / Restore Pane".into(),
+            Action::EqualizePanes => "Equalize Splits".into(),
+            Action::SwapPane => "Swap With Next Pane".into(),
+            Action::MovePaneToTab => "Move Pane to New Tab".into(),
             Action::FocusLeft => "Focus Pane Left".into(),
             Action::FocusRight => "Focus Pane Right".into(),
             Action::FocusUp => "Focus Pane Up".into(),
@@ -480,6 +492,9 @@ impl Action {
             | Action::SplitDown
             | Action::ClosePane
             | Action::Zoom
+            | Action::EqualizePanes
+            | Action::SwapPane
+            | Action::MovePaneToTab
             | Action::FocusLeft
             | Action::FocusRight
             | Action::FocusUp
@@ -543,6 +558,9 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("-"), Action::SplitDown),
         (c("x"), Action::ClosePane),
         (c("z"), Action::Zoom),
+        (c("="), Action::EqualizePanes),
+        (c("}"), Action::SwapPane),
+        (c("!"), Action::MovePaneToTab),
         (c("left"), Action::FocusLeft),
         (c("right"), Action::FocusRight),
         (c("up"), Action::FocusUp),

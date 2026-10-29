@@ -22,7 +22,8 @@ use super::blocks::{CommandBlock, retain_live};
 #[cfg(test)]
 use super::osc::same_host;
 pub use super::osc::{
-    Callbacks, FOCUS_REPORTS, Hyperlink, cwd_url_host, is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
+    Callbacks, FOCUS_REPORTS, Hyperlink, Progress, ProgressState, cwd_url_host, is_network_path, msys_to_windows,
+    parse_cwd_url, windows_cwd,
 };
 
 /// The stable number of the first line of the live screen: lines scrolled out so far plus the scrollback length.
@@ -662,8 +663,27 @@ struct CwdCheck {
     usable: Option<bool>,
 }
 
-/// A copy of drawn pane content and the cursor cell it had (`Pane::remember_view`).
-type HeldView = (Buffer, Option<(u16, u16)>);
+/// A copy of drawn pane content, the cursor cell it had, and whether it showed the main screen (`Pane::remember_view`).
+type HeldView = (Buffer, Option<(u16, u16)>, bool);
+
+/// Draws a copy kept by `Pane::remember_view` into `inner` of `buf`. A copy of another size (the pane was resized
+/// since) is cut from its top left corner or padded: the cells it does not cover keep what `buf` has, the pane's
+/// background. The cursor keeps its place in the pane; a cursor the new size cuts off is not drawn. The emulator may
+/// scroll a shrinking screen up instead when its cursor is low, so the copy and the screen can differ for a frame.
+fn draw_copy(buf: &mut Buffer, inner: Rect, copy: &Buffer, cursor: Option<(u16, u16)>) -> Option<(u16, u16)> {
+    for y in 0..inner.height {
+        for x in 0..inner.width {
+            let from = copy.cell((copy.area.x + x, copy.area.y + y));
+            if let (Some(from), Some(to)) = (from, buf.cell_mut((inner.x + x, inner.y + y))) {
+                *to = from.clone();
+            }
+        }
+    }
+    cursor.and_then(|(x, y)| {
+        let (rx, ry) = (x.checked_sub(copy.area.x)?, y.checked_sub(copy.area.y)?);
+        (rx < inner.width && ry < inner.height).then_some((inner.x + rx, inner.y + ry))
+    })
+}
 
 pub struct Pane {
     pub id: PaneId,
@@ -680,8 +700,8 @@ pub struct Pane {
     /// Output arrived inside a synchronized-output block and its `PtyOutput` event is held back
     /// (`process_output`, `release_sync`).
     held: Arc<AtomicBool>,
-    /// The pane's content as it was last drawn outside a synchronized block, and the cursor cell: drawn instead of the
-    /// half-written frame while a block is open (`remember_view`, `held_view`).
+    /// The pane's content as it was last drawn outside a synchronized block, its cursor cell and whether it is the main
+    /// screen: drawn instead of the half-written frame while a block is open (`remember_view`, `held_view`).
     view: Mutex<Option<HeldView>>,
     /// Counts the output chunks the reader thread has fed the parser (`scroll_text` keys its copy on it).
     output_gen: Arc<AtomicU64>,
@@ -1054,10 +1074,16 @@ impl Pane {
             // The lines were renumbered: the count of lines that arrived while scrolled back starts over.
             let offset = self.scroll_offset();
             self.scroll_mark.set(if offset == 0 { (0, 0) } else { (offset, 0) });
+            // The width change rewrapped the main screen's lines. A copy of the main screen (`remember_view`) shows the
+            // old wrap, so a synchronized block that is open now draws the live screen for one frame instead. The
+            // alternate screen never reflows: its copy is kept and cut or padded to the new size when it is drawn.
+            let mut view = lock(&self.view);
+            if view.as_ref().is_some_and(|(_, _, main)| *main) {
+                *view = None;
+            }
         }
-        // The width change rewrapped the lines: the copy of the last frame (`remember_view`) shows the old wrap, so a
-        // synchronized block that is open now draws the live screen for one frame instead.
-        *lock(&self.view) = None;
+        // Otherwise the copy is cut or padded to the new size when it is drawn (`held_view`): a block still open then
+        // keeps showing the last complete frame, not a half of the new one.
         true
     }
 
@@ -1082,8 +1108,9 @@ impl Pane {
         Some(lock(&self.parser).callbacks().sync_left().unwrap_or_default())
     }
 
-    /// Keeps a copy of the content just drawn (`inner` of `buf`) and its cursor cell, for `held_view`.
-    pub fn remember_view(&self, buf: &Buffer, inner: Rect, cursor: Option<(u16, u16)>) {
+    /// Keeps a copy of the content just drawn (`inner` of `buf`), its cursor cell, and whether it is the main screen
+    /// (`main`), for `held_view`.
+    pub fn remember_view(&self, buf: &Buffer, inner: Rect, cursor: Option<(u16, u16)>, main: bool) {
         let mut copy = Buffer::empty(inner);
         for y in inner.top()..inner.bottom() {
             for x in inner.left()..inner.right() {
@@ -1092,25 +1119,19 @@ impl Pane {
                 }
             }
         }
-        *lock(&self.view) = Some((copy, cursor));
+        *lock(&self.view) = Some((copy, cursor, main));
     }
 
     /// While a synchronized block is open: draws the last complete content into `buf` and returns its cursor cell
-    /// (`Some(cursor)`). `None` when no block is open, or no copy of that size exists (the first block of the pane).
+    /// (`Some(cursor)`). `None` when no block is open, or no copy exists (the first block of the pane). A copy of
+    /// another size is cut or padded to `inner` (`draw_copy`).
     pub fn held_view(&self, buf: &mut Buffer, inner: Rect) -> Option<Option<(u16, u16)>> {
         if !lock(&self.parser).callbacks().sync_open() {
             return None;
         }
         let view = lock(&self.view);
-        let (copy, cursor) = view.as_ref().filter(|(copy, _)| copy.area == inner)?;
-        for y in inner.top()..inner.bottom() {
-            for x in inner.left()..inner.right() {
-                if let (Some(from), Some(to)) = (copy.cell((x, y)), buf.cell_mut((x, y))) {
-                    *to = from.clone();
-                }
-            }
-        }
-        Some(*cursor)
+        let (copy, cursor, _) = view.as_ref()?;
+        Some(draw_copy(buf, inner, copy, *cursor))
     }
 
     pub fn parser(&self) -> MutexGuard<'_, crate::vt100::Parser<Callbacks>> {
@@ -1275,6 +1296,16 @@ impl Pane {
 
     pub fn take_notice(&self) -> Option<String> {
         lock(&self.parser).callbacks_mut().notice.take()
+    }
+
+    /// The progress report the program set (OSC 9;4): `None` after state 0 or once the shell prompt came back.
+    pub fn progress(&self) -> Option<Progress> {
+        lock(&self.parser).callbacks().progress
+    }
+
+    /// Whether the progress report changed since the last call (a changed bar redraws the pane's title and tab).
+    pub fn take_progress_changed(&self) -> bool {
+        std::mem::take(&mut lock(&self.parser).callbacks_mut().progress_changed)
     }
 
     /// Whether the program in the pane set focus reports (`CSI ? 1004 h`, not reset since).
@@ -2198,6 +2229,33 @@ Claude needs your permission",
         lock(&parser).screen_mut().set_scrollback(5);
         set_screen_size(&parser, &output_gen, 4, 10);
         assert_eq!(lock(&parser).screen().scrollback(), 5);
+    }
+
+    /// A kept copy drawn into another size is cut from its top left corner, padded with what the caller drew, and its
+    /// cursor keeps its place when the new size still has it. No PTY is needed.
+    #[test]
+    fn a_kept_copy_is_cut_or_padded_to_the_new_size() {
+        let mut copy = Buffer::empty(Rect::new(2, 1, 4, 3));
+        for y in 0..3u16 {
+            for x in 0..4u16 {
+                copy[(2 + x, 1 + y)].set_symbol(&char::from(b'a' + (y * 4 + x) as u8).to_string());
+            }
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+        for y in 0..4 {
+            for x in 0..8 {
+                buf[(x, y)].set_symbol(".");
+            }
+        }
+        // Two rows and six columns from column 1: the copy's third row is cut, and its columns past 4 are padded.
+        let inner = Rect::new(1, 0, 6, 2);
+        // The copy's cursor (row 1, column 2 of the copy) keeps its place: column 1 + 2, row 0 + 1.
+        assert_eq!(draw_copy(&mut buf, inner, &copy, Some((4, 2))), Some((3, 1)));
+        let rows: Vec<String> = (0..4).map(|y| (0..8).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect();
+        assert_eq!(rows, [".abcd...", ".efgh...", "........", "........"]);
+        // A cursor the new size cuts off is not drawn: left of or above the copy, or below the new height.
+        assert_eq!(draw_copy(&mut buf, inner, &copy, Some((1, 1))), None);
+        assert_eq!(draw_copy(&mut buf, inner, &copy, Some((3, 3))), None);
     }
 
     /// Color queries are answered with the pane's colors and end the way the query ended (BEL or ST), also when the

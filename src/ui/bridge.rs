@@ -74,14 +74,16 @@ fn draw_columns(
     projects(buf, Rect::new(left.x, left.y + hero_h, left.width, left.height - hero_h), app, agents, hits);
 
     let signed_in = signed_in(app);
+    // Claude Code's background sessions (`claude --bg`) are listed in the AI panel, under the agent sessions.
+    let bg = app.shown_bg_sessions();
     let room = right.height.saturating_sub(hero_h + 10);
-    let shown = !signed_in.is_empty() || !sessions.is_empty();
-    let ai_h = if shown { ai_height(app, &signed_in, sessions.len()).min(room + hero_h) } else { 0 };
+    let shown = !signed_in.is_empty() || !sessions.is_empty() || !bg.is_empty();
+    let ai_h = if shown { ai_height(app, &signed_in, sessions.len(), bg.len()).min(room + hero_h) } else { 0 };
     // The right column starts under the clock: in line with the project panel on the left.
     let top = right.y + hero_h;
     let avail = right.height.saturating_sub(hero_h);
     if ai_h >= 5 {
-        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, sessions, hits);
+        ai_panel(buf, Rect::new(right.x, top, right.width, ai_h), app, &signed_in, sessions, &bg, hits);
         system_panel(buf, Rect::new(right.x, top + ai_h, right.width, avail - ai_h), app, hits);
     } else {
         system_panel(buf, Rect::new(right.x, top, right.width, avail), app, hits);
@@ -518,7 +520,9 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
     };
     button(&mut cx, "⏎", "Open", Hit::OpenSelected, true);
     for (i, l) in app.quick_launchers() {
-        button(&mut cx, &l.key, &capitalize(&l.name), Hit::Launcher(i), true);
+        // A full quota of the agent's subscription marks its chip (`App::launcher_quota_full`).
+        let full = if app.launcher_quota_full(&l.command) { " ⚠" } else { "" };
+        button(&mut cx, &l.key, &format!("{}{full}", capitalize(&l.name)), Hit::Launcher(i), true);
     }
     button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
 }
@@ -546,6 +550,9 @@ fn search_label(buf: &mut Buffer, area: Rect, tag: &str, th: &Theme, hits: &mut 
 
 /// Minimum height of a project card (separator + title + a few rows).
 const CARD_MIN: u16 = 6;
+
+/// Commits the project card shows before the changed files get their rows; a taller card shows more.
+const CARD_COMMITS: u16 = 8;
 
 /// The selected project's card: recent commits and changed files. The data comes
 /// from the `git status` / `git log` output the project scan already runs.
@@ -580,8 +587,11 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     // A "+N more" cell for files missing from the list (e.g. the `MAX_CHANGES` cap).
     let entries = g.changes.len() + usize::from(g.dirty as usize > g.changes.len());
     let change_want = entries.div_ceil(cols).max(1) as u16;
-    // Give commits room first; files keep at least 3 rows (or as many as needed).
-    let commit_rows = (g.commits.len() as u16).min(rows.saturating_sub(4 + change_want.min(3)));
+    // The first `CARD_COMMITS` commits get room first; files keep at least 3 rows (or as many as needed). More
+    // commits only take the rows the files leave free, so a tall card shows more history without hiding files.
+    let first = (g.commits.len() as u16).min(CARD_COMMITS).min(rows.saturating_sub(4 + change_want.min(3)));
+    let spare = rows.saturating_sub(4 + change_want + first);
+    let commit_rows = (g.commits.len() as u16).min(first + spare);
     let change_rows = rows.saturating_sub(if commit_rows > 0 { commit_rows + 2 } else { 0 } + 2).min(change_want);
 
     if commit_rows > 0 {
@@ -922,10 +932,18 @@ fn state_glyph(state: AgentState, th: &crate::theme::Theme) -> (&'static str, ra
 /// Maximum rows shown in the session list.
 const MAX_SESSION_ROWS: usize = 4;
 
-fn ai_height(app: &App, list: &[&ProviderState], sessions: usize) -> u16 {
+/// Maximum background Claude rows (`claude --bg`) shown under the session rows.
+const MAX_BG_ROWS: usize = 3;
+
+fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, bg: usize) -> u16 {
     let mut h: u16 = 2;
-    if sessions > 0 {
-        h += sessions.min(MAX_SESSION_ROWS) as u16 + 1 + u16::from(sessions > MAX_SESSION_ROWS);
+    // Agent and background rows share one spacer row under the session block.
+    let rows = sessions.min(MAX_SESSION_ROWS)
+        + usize::from(sessions > MAX_SESSION_ROWS)
+        + bg.min(MAX_BG_ROWS)
+        + usize::from(bg > MAX_BG_ROWS);
+    if rows > 0 {
+        h += rows as u16 + 1;
     }
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
@@ -937,11 +955,7 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize) -> u16 {
 }
 
 fn reset_in(ts: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
-    if ts <= now {
-        return "now".into();
-    }
-    util::fmt_duration(Duration::from_secs((ts - now) as u64)).replace(' ', "")
+    crate::ai::reset_in(ts, chrono::Utc::now().timestamp())
 }
 
 /// "At this pace 5h fills in 1h20m": the warning text shown when the 5 hour
@@ -976,12 +990,35 @@ fn expired_hint(p: &ProviderState, w: u16) -> String {
     if util::width(&full) as u16 <= w { full } else { format!("expired · run {}", p.login_hint) }
 }
 
+/// One background Claude session: `● claude bg · Fix the build`, its state at the right edge in the glyph's color.
+/// The name is the session's name, or its folder when it has none.
+fn bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, s: &crate::bg::BgSession, th: &Theme) {
+    use crate::bg::BgKind;
+    let (glyph, color) = match s.kind() {
+        BgKind::Working => ("●", th.accent2),
+        BgKind::NeedsYou => ("◆", th.warn),
+        BgKind::Done => ("○", th.ok),
+        BgKind::Failed => ("✗", th.crit),
+        BgKind::Other => ("·", th.dim),
+    };
+    let cx = hud::put(buf, x, y, glyph, Style::default().fg(color), 1);
+    let cx = hud::put(buf, cx + 1, y, "claude bg", th.text().add_modifier(Modifier::BOLD), w);
+    let folder = s.cwd.as_ref().and_then(|c| c.file_name()).map(|n| n.to_string_lossy().into_owned());
+    let place = if s.name.is_empty() { folder.unwrap_or_default() } else { s.name.clone() };
+    let room = (x + w).saturating_sub(cx + util::width(&s.state) as u16 + 4);
+    if !place.is_empty() {
+        hud::put(buf, cx, y, &format!(" · {}", util::truncate(&place, room as usize)), th.dim(), room + 3);
+    }
+    hud::put_right(buf, x + w, y, &s.state, Style::default().fg(color));
+}
+
 fn ai_panel(
     buf: &mut Buffer,
     area: Rect,
     app: &App,
     list: &[&ProviderState],
     sessions: &[crate::app::AgentSession],
+    bg: &[(usize, &crate::bg::BgSession)],
     hits: &mut Vec<(Rect, Hit)>,
 ) {
     let th = &app.theme;
@@ -997,8 +1034,9 @@ fn ai_panel(
     let w = inner.width.saturating_sub(2);
     let bottom = inner.bottom();
     let mut y = inner.y;
-    // Open AI sessions: clicking one jumps to that tab.
-    if !sessions.is_empty() {
+    // Open AI sessions: clicking one jumps to that tab. Background Claude sessions follow them, under the same
+    // spacer row; clicking one attaches to it in a new tab.
+    if !sessions.is_empty() || !bg.is_empty() {
         for sess in sessions.iter().take(MAX_SESSION_ROWS) {
             if y >= bottom {
                 break;
@@ -1020,6 +1058,22 @@ fn ai_panel(
         }
         if sessions.len() > MAX_SESSION_ROWS && y < bottom {
             hud::put(buf, x, y, &format!("+{} more", sessions.len() - MAX_SESSION_ROWS), th.dim(), w);
+            y += 1;
+        }
+        // Running, waiting and unknown sessions take the rows first; finished ones only fill what is left (stable,
+        // so each group keeps its newest-first order).
+        let mut rows: Vec<(usize, &crate::bg::BgSession)> = bg.to_vec();
+        rows.sort_by_key(|(_, s)| matches!(s.kind(), crate::bg::BgKind::Done | crate::bg::BgKind::Failed));
+        for &(index, s) in rows.iter().take(MAX_BG_ROWS) {
+            if y >= bottom {
+                break;
+            }
+            bg_row(buf, x, y, w, s, th);
+            hits.push((Rect::new(inner.x, y, inner.width, 1), Hit::BgSession(index)));
+            y += 1;
+        }
+        if bg.len() > MAX_BG_ROWS && y < bottom {
+            hud::put(buf, x, y, &format!("+{} more", bg.len() - MAX_BG_ROWS), th.dim(), w);
             y += 1;
         }
         y += 1;

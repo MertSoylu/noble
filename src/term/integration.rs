@@ -321,7 +321,13 @@ mod tests {
                     for _ in 0..200 {
                         match std::fs::read_to_string(&zshrc) {
                             Ok(text) => assert_eq!(text, ZSHRC, "a partial .zshrc was visible"),
-                            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}"),
+                            // Windows: while a replace runs the file can refuse to open (access denied); it shows no
+                            // text then, so only another error or partial text fails the test.
+                            Err(e) => assert!(
+                                e.kind() == std::io::ErrorKind::NotFound
+                                    || (cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied),
+                                "{e}"
+                            ),
                         }
                     }
                 });

@@ -49,8 +49,9 @@ pub struct Commit {
     pub subject: String,
 }
 
-/// How many commits and files are kept for the project card.
-pub const MAX_COMMITS: usize = 8;
+/// How many commits and files are kept for the project card (a tall card shows more commits, see
+/// `ui/bridge.rs` `project_card`).
+pub const MAX_COMMITS: usize = 30;
 pub const MAX_CHANGES: usize = 40;
 /// How many quick tasks are kept per project.
 pub const MAX_TASKS: usize = 12;

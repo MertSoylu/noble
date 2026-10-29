@@ -52,9 +52,9 @@ v1.10.0 shipped as a minor release.
   (vim's autoread, tools that notify only while in the background).
 - **T4 · Identity and mode queries (done):** XTVERSION (`CSI > q` → `NOBLE 1.x`) and DECRQM for the modes NOBLE
   knows, so programs can recognize it.
-- **T5 · OSC 9;4 progress:** ignored today (`src/term/osc.rs`); show it in the pane title and on the tab.
-  Claude Code already sends it, and it gives agents without hooks a generic "busy" signal.
-- **T6 · Claude Code's fullscreen renderer:** now the default for new Claude Code users. Check the wheel,
+- **T5 · OSC 9;4 progress (done):** the pane title shows the percentage, a spinner or a mark (`✗`, `‖`), and the tab
+  a busy marker. Claude Code already sends it, and it gives agents without hooks a generic "busy" signal.
+- **T6 · Claude Code's fullscreen renderer (done):** now the default for new Claude Code users. Check the wheel,
   clicks, shift+drag selection and ctrl+click inside NOBLE on Windows, Linux and macOS. Claude's docs warn that
   ConPTY-based hosts can leave stale fragments on screen, and NOBLE's panes run on ConPTY on Windows: add a render or
   PTY test, and a documented fix if needed.
@@ -118,34 +118,34 @@ A restored quick-launch tab starts `claude` again today: a new, empty conversati
 - The same marks give the terminal more: jump to the previous / next command, copy the last output, and a click on
   a `✗` badge scrolls to the failed command.
 
-### A5 · Smarter quota (no new network calls)
+### A5 · Smarter quota (no new network calls) (done)
 
 - When a window that passed `warn_at` resets: "Claude 5h quota reset" (from the cached `resets_at`).
 - A full quota shows `⚠` on its launcher chip, and launching says when it resets ("resets in 1h12m").
 - An agent pane's title shows `⚠ 5h 92%` only past `warn_at`, so the warning is where you work.
-- Optional: GitHub Copilot's premium request quota (`api.github.com/copilot_internal/user`, an undocumented
-  endpoint: verify first; any failure is a silent `None`).
+- Skipped: GitHub Copilot's premium request quota (`api.github.com/copilot_internal/user`). It is an undocumented
+  endpoint, so it is not used; the other providers' quotas stay as they are.
 
-### A6 · Awareness while NOBLE is in the background
+### A6 · Awareness while NOBLE is in the background (done)
 
 - While an agent waits for you, NOBLE sends OSC 9;4 "paused" to the terminal it runs in: Windows Terminal shows it
   on the tab and the taskbar icon, Ghostty as a progress bar, and terminals that do not know it ignore it. It is
   cleared when nothing waits.
-- The window title follows the state (`NOBLE · ◆ 1`); today it is fixed (`SetTitle` in `src/main.rs`).
+- The window title follows the state (`NOBLE · ◆ 1`); the title the terminal had is pushed at start and restored on exit.
 
-### A7 · Background Claude sessions (optional, to be decided)
+### A7 · Background Claude sessions (done)
 
 Sessions started with `claude --bg` listed with the existing session rows on Home (`claude agents --json --all`,
 only while Home is open, at most once a minute); a click attaches to one in a new tab (`claude attach <id>`).
 
 ## 4 · UX and interface
 
-- **A shorter pane menu:** every installed agent adds its own "Launch X in split" row (`src/app/menu.rs`), 19
-  rows in the render test. One "Launch Agent in Split ›" sub-list instead.
-- **Missing pane operations:** Equalize Splits, Swap With Next Pane and Move Pane to New Tab, as actions with
+- **A shorter pane menu (done):** every installed agent adds its own "Launch X in split" row (`src/app/menu.rs`), 19
+  rows in the render test. One "Launch in split ›" sub-list instead.
+- **Missing pane operations (done):** Equalize Splits, Swap With Next Pane and Move Pane to New Tab, as actions with
   pane menu and palette entries (no new UI).
-- **Home card:** use the empty space on tall screens: the number of commits follows the height (`MAX_COMMITS`
-  is a fixed 8 in `src/projects.rs`), plus the `↻` resume line from A3.
+- **Home card (done):** use the empty space on tall screens: the number of commits follows the height (`MAX_COMMITS`
+  in `src/projects.rs` keeps up to 30; the first 8 come first, from `CARD_COMMITS` in `src/ui/bridge.rs`), plus the `↻` resume line from A3.
 - **`noble doctor` (done):** version, OS, outer terminal and truecolor, shells and their integration, agent hooks, AI
   provider detection (never a token), config and data paths, `gh` state. The bug report template asks for its
   output.
@@ -154,9 +154,9 @@ only while Home is open, at most once a minute); a click attaches to one in a ne
 
 Installing is the biggest barrier for new users:
 
-- `cargo binstall noble` (`[package.metadata.binstall]`, mapping the release archive names).
-- A Scoop bucket and a winget manifest (Windows), a Homebrew tap (macOS and Linux; it also avoids the macOS
-  quarantine step), kept up to date by `release.yml`.
+- `cargo binstall noble` (`[package.metadata.binstall]`, mapping the release archive names) (done).
+- winget (`MertSoylu.Noble`, Windows): done. The `winget` job in `release.yml` submits each tag release to
+  microsoft/winget-pkgs (`packaging/winget/README.md`). Scoop, Homebrew and AUR are not planned.
 - An "AI agents" page in the docs: hooks per agent, resume, send to agent.
 
 ## Plan
@@ -170,9 +170,9 @@ Installing is the biggest barrier for new users:
 3. **Stage 3 (done)**
    - Focus: A3 resume, A4 command blocks and send to agent
    - Release: v1.12.0
-4. **Stage 4**
-   - Focus: A5, A6, T5–T6, pane operations and menu, T7 spike, packaging
-   - Release: v1.12.x
+4. **Stage 4 (done)**
+   - Focus: A5, A6, T5–T6, pane operations and menu, T7 spike, A7, packaging
+   - Release: v1.12.1
 5. **Stage 5**
    - Focus: Docs, website, screenshots
    - Release: —
@@ -196,8 +196,7 @@ reflow implementation wait for a later stage.
 
 ## Open decisions
 
-1. A7 (background Claude sessions on Home): yes or no?
-2. Which package managers: winget, Scoop, Homebrew, AUR?
+None.
 
 ## References
 

@@ -102,7 +102,7 @@ pub struct AiCfg {
     pub enabled: bool,
     pub refresh_minutes: u64,
     pub providers: Vec<String>,
-    /// Warn when a quota window reaches this percent (0 = off).
+    /// Warn when a quota window reaches this percent, and when that window resets (0 = off).
     pub warn_at: u8,
 }
 
@@ -293,7 +293,7 @@ exclude = []
 enabled = true
 refresh_minutes = 5      # only while Home is open; refreshed immediately when Home opens
 providers = ["claude", "codex", "antigravity", "opencode-go", "kilo", "command-code"]
-warn_at = 90             # warn when a quota window reaches this percent (0 = off)
+warn_at = 90             # warn when a quota window reaches this percent, and when it resets (0 = off)
 
 # One-key commands for the selected project on Home. Only those found on PATH
 # are visible; `show = false` hides one (Settings → Quick launch).
