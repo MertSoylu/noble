@@ -164,9 +164,6 @@ with `curl` or `noble update`). Each archive has a `.sha256` file next to it: ch
 `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, `shasum -a 256 -c noble-macos-aarch64.tar.gz.sha256`
 on macOS, or compare it with `Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
 
-**With winget** (Windows): `winget install MertSoylu.Noble`. It is available once the package is accepted into
-[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs); the package is the same portable Windows archive.
-
 **With Cargo** (Rust 1.95+):
 
 ```sh

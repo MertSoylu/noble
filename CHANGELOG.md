@@ -31,8 +31,6 @@ All notable changes to NOBLE are documented here. The format is based on
   running and waiting ones, and finished ones for a day. A click attaches to one in a new tab (`claude attach <id>`).
 - `cargo binstall noble` downloads the prebuilt release archive for the platform instead of compiling (the
   `[package.metadata.binstall]` section maps each target to its archive, as `release.yml` names them).
-- `winget install MertSoylu.Noble` on Windows, once the package is accepted in microsoft/winget-pkgs. The release
-  workflow's `winget` job submits each tag release to winget; it needs the `WINGET_TOKEN` secret and skips without it.
 
 ### Changed
 - The pane menu lists the quick launchers under one "Launch in split ›" row (it opens the list at the same place) instead

@@ -155,8 +155,8 @@ only while Home is open, at most once a minute); a click attaches to one in a ne
 Installing is the biggest barrier for new users:
 
 - `cargo binstall noble` (`[package.metadata.binstall]`, mapping the release archive names) (done).
-- winget (`MertSoylu.Noble`, Windows): done. The `winget` job in `release.yml` submits each tag release to
-  microsoft/winget-pkgs (`packaging/winget/README.md`). Scoop, Homebrew and AUR are not planned.
+- winget (`MertSoylu.Noble`, Windows): next version, not done yet. A `winget` job in `release.yml` will submit each
+  tag release to microsoft/winget-pkgs. Scoop, Homebrew and AUR are not planned.
 - An "AI agents" page in the docs: hooks per agent, resume, send to agent.
 
 ## Plan

@@ -25,8 +25,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `cargo install cargo-deny --locked`). A new dependency's license must be added to `deny.toml` after review.
 - CI: `.github/workflows/` — `ci.yml` (fmt, clippy `-D warnings` and tests on Windows/Linux/macOS, `shellcheck
   install.sh`, a static linux-musl build, MSRV, cargo-deny), `audit.yml`,
-  `release.yml` (`gh workflow run release.yml --ref <branch>` builds without publishing; on a tag its `winget` job
-  submits the release to winget-pkgs, see `packaging/winget/README.md`)
+  `release.yml` (`gh workflow run release.yml --ref <branch>` builds without publishing)
 - MSRV: `rust-version` in `Cargo.toml` is the oldest Rust the CI `msrv` job builds with; raise it (and the
   README/CONTRIBUTING mentions) when a dependency needs a newer one
 - `cargo run --example screenshots` — regenerates the README SVG screenshots

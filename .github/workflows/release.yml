@@ -108,32 +108,3 @@ jobs:
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
           body_path: notes.md
-
-  # Submits this release to winget (package MertSoylu.Noble) after the build legs have published the archives:
-  # the `build` matrix creates the GitHub release, so `needs: build` waits for every leg. Runs only on a tag, never on
-  # a workflow_dispatch dry run. Skips cleanly (no failure) when the WINGET_TOKEN secret is not set.
-  # WINGET_TOKEN is a classic GitHub PAT with the public_repo scope: winget-releaser opens its pull request against
-  # microsoft/winget-pkgs with it. winget-releaser only updates a package that already exists in winget-pkgs, so the
-  # very first version must be submitted to microsoft/winget-pkgs once by hand, and WINGET_TOKEN is set only after
-  # that submission (see packaging/winget/README.md).
-  winget:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    # winget-releaser runs on Windows only.
-    runs-on: windows-latest
-    env:
-      # Secrets cannot be read in a job-level `if`: the job passes the secret on as an env value and the steps check it.
-      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-    steps:
-      - name: Skip without WINGET_TOKEN
-        if: env.WINGET_TOKEN == ''
-        shell: bash
-        run: echo "::notice::WINGET_TOKEN is not set, so the winget package is not updated."
-      - uses: vedantmgoyal9/winget-releaser@v2
-        if: env.WINGET_TOKEN != ''
-        with:
-          identifier: MertSoylu.Noble
-          # The two Windows archives only (not the Linux or macOS archives, nor the .sha256 files).
-          installers-regex: 'noble-windows-(x86_64|aarch64)\.zip$'
-          release-tag: ${{ github.ref_name }}
-          token: ${{ secrets.WINGET_TOKEN }}
