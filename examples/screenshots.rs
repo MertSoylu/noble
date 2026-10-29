@@ -18,8 +18,10 @@ use ratatui::style::{Color, Modifier};
 use chrono::TimeZone;
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
 use noble::app::{App, PrEntry, View};
+use noble::bg::BgSession;
 use noble::config::Config;
 use noble::event::AppEvent;
+use noble::hooks::{Agent, HookRecord, NOTIFICATION, PROMPT, SESSION_START};
 use noble::keys::Action;
 use noble::pr::{Checks, PrInfo, PrState};
 use noble::projects::{Commit, GitInfo, Project};
@@ -51,7 +53,7 @@ fn main() {
     app.view = View::Settings;
     write(&out, "settings", &window_svg(&snapshot(&mut app, sw, sh), &app, "noble — settings"));
 
-    // Komut paleti.
+    // Command palette.
     let (pw, ph) = (120, 34);
     let mut app = demo("amber", pw, ph);
     app.run(Action::Palette);
@@ -158,9 +160,9 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     for (l, ok) in app.launchers.iter_mut() {
         *ok = matches!(l.command.as_str(), "claude" | "codex");
     }
-    // The agent hooks row shows the same two agents, with Claude's hooks on.
-    app.agents_found = vec![noble::hooks::Agent::Claude, noble::hooks::Agent::Codex];
-    app.hooks_on = vec![noble::hooks::Agent::Claude];
+    // Every agent has its status hooks installed, so their states show in the panes and on Home.
+    app.agents_found = Agent::ALL.to_vec();
+    app.hooks_on = Agent::ALL.to_vec();
     app.handle(AppEvent::SensorStatic(Box::new(StaticInfo {
         host: "workstation".into(),
         os: "Windows 11 Pro".into(),
@@ -250,34 +252,39 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         claude: None,
     };
     app.handle(AppEvent::Projects(vec![
-        mk(
-            "noble",
-            "main",
-            2,
-            Some(GitInfo {
-                dirty: 4,
-                untracked: 1,
-                ahead: 2,
-                branch: Some("main".into()),
-                last_subject: Some("feat: project card on Home".into()),
-                last_commit: Some(ts - 1500),
-                commits: vec![
-                    commit("7c1e9a2", 1500, "feat: project card on Home"),
-                    commit("b24f0d8", 3 * 3600, "feat: quick launch for 13 AI CLIs"),
-                    commit("e91c3b4", 20 * 3600, "fix: keep git status visible on hover"),
-                    commit("5a0d7e1", 2 * 86_400, "perf: redraw only when something changes"),
-                    commit("c3f8b62", 4 * 86_400, "docs: keyboard reference"),
-                ],
-                changes: vec![
-                    (" M".into(), "src/ui/bridge.rs".into()),
-                    (" M".into(), "src/app/settings.rs".into()),
-                    ("M ".into(), "README.md".into()),
-                    (" D".into(), "docs/old-notes.md".into()),
-                    ("??".into(), "examples/screenshots.rs".into()),
-                ],
-                ..Default::default()
-            }),
-        ),
+        // Its last Claude conversation (the `↻ claude` line) and its quick tasks.
+        Project {
+            claude: Some(now - Duration::from_secs(2 * 3600 + 14 * 60)),
+            tasks: vec!["cargo test".into(), "cargo clippy --all-targets".into(), "cargo fmt".into()],
+            ..mk(
+                "noble",
+                "main",
+                2,
+                Some(GitInfo {
+                    dirty: 4,
+                    untracked: 1,
+                    ahead: 2,
+                    branch: Some("main".into()),
+                    last_subject: Some("feat: project card on Home".into()),
+                    last_commit: Some(ts - 1500),
+                    commits: vec![
+                        commit("7c1e9a2", 1500, "feat: project card on Home"),
+                        commit("b24f0d8", 3 * 3600, "feat: quick launch for 13 AI CLIs"),
+                        commit("e91c3b4", 20 * 3600, "fix: keep git status visible on hover"),
+                        commit("5a0d7e1", 2 * 86_400, "perf: redraw only when something changes"),
+                        commit("c3f8b62", 4 * 86_400, "docs: keyboard reference"),
+                    ],
+                    changes: vec![
+                        (" M".into(), "src/ui/bridge.rs".into()),
+                        (" M".into(), "src/app/settings.rs".into()),
+                        ("M ".into(), "README.md".into()),
+                        (" D".into(), "docs/old-notes.md".into()),
+                        ("??".into(), "examples/screenshots.rs".into()),
+                    ],
+                    ..Default::default()
+                }),
+            )
+        },
         mk(
             "api-gateway",
             "feature/rate-limit",
@@ -308,6 +315,30 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
         },
     );
     app.ports.insert(noble_path, vec![5173]);
+    // Claude Code's background sessions: running, waiting for input, and one finished today.
+    app.handle(AppEvent::BgSessions(vec![
+        BgSession {
+            id: "a1f3c9e2".into(),
+            cwd: Some(PathBuf::from(r"D:\dev\noble")),
+            name: "fix flaky pane reflow test".into(),
+            state: "running".into(),
+            started: ts - 1800,
+        },
+        BgSession {
+            id: "b7e20d41".into(),
+            cwd: Some(PathBuf::from(r"D:\dev\api-gateway")),
+            name: "rate limit headers".into(),
+            state: "waiting".into(),
+            started: ts - 3600,
+        },
+        BgSession {
+            id: "c04a9f77".into(),
+            cwd: Some(PathBuf::from(r"D:\dev\website")),
+            name: "update pricing page copy".into(),
+            state: "done".into(),
+            started: ts - 7200,
+        },
+    ]));
 
     let reset = ts + 2 * 3600 + 14 * 60;
     let provider = |id: &'static str, name: &'static str, plan: &str, windows: Vec<Window>| ProviderState {
@@ -340,11 +371,17 @@ fn terminals(app: &mut App) {
     }
     let idle = if cfg!(windows) { "ping -n 30 127.0.0.1 >nul" } else { "sleep 30" };
     let cwd = std::env::temp_dir();
-    app.new_tab(cwd.clone(), Some(idle), Some("api-gateway".into()));
-    app.new_tab(cwd, Some(idle), Some("noble".into()));
+    // Tabs are named explicitly, so the names do not depend on the folder the demo runs in.
+    tab_named(app, "api-gateway", &cwd, idle);
+    tab_named(app, "noble", &cwd, idle);
+    let tab = app.tabs.len() - 1;
     app.run(Action::SplitRight);
+    // Two more tabs, each running one agent: their states show as the tab strip's dots.
+    tab_named(app, "docs", &cwd, idle);
+    tab_named(app, "infra", &cwd, idle);
     // The first draw brings the panes to their final size; since ConPTY redraws
     // the screen when the size changes, the fake content is written afterwards.
+    app.view = View::Term(tab);
     let (w, h) = app.size;
     snapshot(app, w, h);
     let deadline = Instant::now() + Duration::from_millis(2500);
@@ -352,7 +389,6 @@ fn terminals(app: &mut App) {
         app.pump();
         std::thread::sleep(Duration::from_millis(50));
     }
-    let tab = app.tabs.len() - 1;
     let ids = app.tabs[tab].panes();
     // Claude Code in the left pane, Codex on the right: content is drawn to the pane's real size.
     let screens: [(&str, Screen); 2] = [("claude", claude_screen), ("codex", codex_screen)];
@@ -362,13 +398,41 @@ fn terminals(app: &mut App) {
         let seq = format!("\x1b]0;{title}\x07\x1b[2J\x1b[H{body}");
         app.panes[id].parser().process(seq.as_bytes());
     }
+    // Claude Code reports its progress (OSC 9;4): the title shows 42%.
+    app.panes[&ids[0]].parser().process(b"\x1b]9;4;1;42\x07");
     if let Some(&first) = app.tabs[0].panes().first() {
         let seq = "\x1b]0;node\x07\x1b[2J\x1b[H";
         app.panes[&first].parser().process(seq.as_bytes());
     }
     // The long command in the background tab finished: the ✓ marker.
     app.tabs[0].alert = Some(noble::term::TabAlert::Done);
+    // Hook records as the agents write them: Claude working, Codex waiting for you (its pane is visible, so no
+    // notice), Copilot idle at its prompt, OpenCode working. `apply_hook_records` reads them like the real ones.
+    let ts = chrono::Utc::now().timestamp();
+    let record = |agent: Agent, event: &str| HookRecord {
+        event: event.into(),
+        message: None,
+        ts,
+        agent: Some(agent),
+        session: None,
+        subagents: 0,
+    };
+    let states = [
+        (ids[0], record(Agent::Claude, PROMPT)),
+        (ids[1], record(Agent::Codex, NOTIFICATION)),
+        (app.tabs[2].focus, record(Agent::Copilot, SESSION_START)),
+        (app.tabs[3].focus, record(Agent::OpenCode, PROMPT)),
+    ];
+    app.apply_hook_records(states.into_iter().collect());
     app.tabs[tab].focus = ids[0];
+}
+
+/// Opens a tab running `command` in `cwd` and names it.
+fn tab_named(app: &mut App, name: &str, cwd: &Path, command: &str) {
+    app.new_tab(cwd.to_path_buf(), Some(command), Some(name.into()));
+    if let Some(tab) = app.tabs.last_mut() {
+        tab.name = Some(name.into());
+    }
 }
 
 /// A function producing screen content from a pane size (rows, cols).
@@ -381,33 +445,6 @@ fn fg(r: u8, g: u8, b: u8) -> String {
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
-
-/// Rounded-corner box: every row is padded to `width` columns.
-fn boxed(lines: &[String], width: usize, border: &str) -> String {
-    let inner = width.saturating_sub(2);
-    let mut out = format!("{border}╭{}╮{RESET}\n", "─".repeat(inner));
-    for line in lines {
-        let visible = strip_ansi(line).chars().count();
-        let pad = inner.saturating_sub(visible + 1);
-        out.push_str(&format!("{border}│{RESET} {line}{}{border}│{RESET}\n", " ".repeat(pad)));
-    }
-    out.push_str(&format!("{border}╰{}╯{RESET}\n", "─".repeat(inner)));
-    out
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (false, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            _ => out.push(c),
-        }
-    }
-    out
-}
 
 /// Writes the top content, places the bottom block at the screen floor and moves
 /// the cursor to `cursor` (row, col) inside that bottom block.
@@ -423,76 +460,70 @@ fn finish(top: String, bottom: String, rows: u16, cursor: (u16, u16)) -> String 
     )
 }
 
-/// Claude Code session: welcome box, one request, tool calls and the input box.
+/// The project folder and the file shown in the agent screens.
+const CWD: &str = r"D:\dev\noble";
+const SRC: &str = r"src\config.rs";
+
+/// Claude Code 2.1 at work, as it draws in a pane: the logo header, the request, a finished read, a reply,
+/// a running tool call with the spinner below it, and the prompt between two rules.
 fn claude_screen(rows: u16, cols: u16) -> String {
     let orange = fg(215, 119, 87);
     let gray = fg(153, 153, 153);
-    let dim = fg(110, 110, 110);
-    let green = fg(78, 186, 101);
-    let w = (cols as usize).saturating_sub(1).min(64);
-    let mut top = boxed(
-        &[
-            format!("{orange}✻{RESET} {BOLD}Welcome to Claude Code!{RESET}"),
-            String::new(),
-            format!("  {gray}/help for help, /status for your current setup{RESET}"),
-            String::new(),
-            format!(r"  {gray}cwd: D:\dev\noble{RESET}"),
-        ],
-        w,
-        &orange,
+    let rule_c = fg(136, 136, 136);
+    let white = fg(255, 255, 255);
+    let code = fg(177, 185, 249);
+    let amber = fg(255, 193, 7);
+    let black_bg = "\x1b[48;2;0;0;0m";
+    let msg_bg = "\x1b[48;2;55;55;55m";
+    let cols = cols as usize;
+    let mut top = String::from("\n");
+    // The logo: its eyes are cells with a black background.
+    top.push_str(&format!(" {orange}▐{black_bg}▛███▛█{RESET}   {BOLD}Claude Code{RESET} {gray}v2.1.312{RESET}\n"));
+    top.push_str(&format!(
+        "{orange}▝▜{black_bg}█████{RESET}{orange}█▀{RESET}  {gray}Opus 5.5 with high effort · Claude Max{RESET}\n"
+    ));
+    top.push_str(&format!(" {orange}▝▝   ▝▝{RESET}   {gray}{CWD}{RESET}\n\n\n"));
+    let request = "add opencode to the quick-launch defaults";
+    let pad = cols.saturating_sub(request.chars().count() + 3);
+    top.push_str(&format!("{msg_bg}{gray}❯ {white}{request}{}{RESET}\n\n", " ".repeat(pad)));
+    top.push_str(&format!("  {gray}Read {BOLD}2{RESET}{gray} files{RESET}\n\n"));
+    top.push_str(&format!(
+        "{white}●{RESET} The defaults live in {code}DEFAULT_LAUNCHERS{RESET} in {code}src/config.rs{RESET}. I'll\n"
+    ));
+    top.push_str(&format!("  add {code}opencode{RESET} next to {code}codex{RESET} and cover it with a test.\n\n"));
+    top.push_str(&format!("  Reading {SRC}\n"));
+    top.push_str(&format!("  {gray}⎿  {SRC}{RESET}\n"));
+    let rule = format!("{rule_c}{}{RESET}", "─".repeat(cols));
+    let bottom = format!(
+        "{orange}✽ Meandering…{RESET} {gray}(42s · ↓ 1.2k tokens · thinking with high effort){RESET}\n\n{rule}\n\
+         {gray}❯{RESET} \n{rule}\n  {amber}⏵⏵ auto mode on{RESET} {gray}(shift+tab to cycle){RESET}\n"
     );
-    let tool = |name: &str, arg: &str| format!("{green}●{RESET} {BOLD}{name}{RESET}({arg})\n");
-    let result = |text: &str| format!("  {dim}⎿{RESET}  {text}\n");
-    top.push_str(&format!("\n{gray}> add opencode to the quick-launch defaults{RESET}\n\n"));
-    top.push_str("● I'll add OpenCode to the default launchers and cover it\n  with a test.\n\n");
-    top.push_str(&tool("Read", "src/config.rs"));
-    top.push_str(&result(&format!("Read {BOLD}598{RESET} lines")));
-    top.push('\n');
-    top.push_str(&tool("Update", "src/config.rs"));
-    top.push_str(&result(&format!("Updated {BOLD}src/config.rs{RESET} with {BOLD}1{RESET} addition")));
-    top.push_str(&format!("       {dim}461{RESET}      (\"x\", \"codex\", \"codex\"),\n"));
-    top.push_str(&format!("       {dim}462{RESET} {green}+    (\"e\", \"opencode\", \"opencode\"),{RESET}\n"));
-    top.push('\n');
-    top.push_str(&tool("Bash", "cargo test --lib config"));
-    top.push_str(&result(&format!("test result: {green}ok{RESET}. 9 passed; 0 failed")));
-    top.push('\n');
-    top.push_str("● Done. Press e on Home to start OpenCode in the selected\n  project.\n");
-    let mut bottom = boxed(&[format!("{gray}>{RESET} ")], (cols as usize).saturating_sub(1), &dim);
-    bottom.push_str(&format!("  {dim}? for shortcuts{RESET}\n"));
-    finish(top, bottom, rows, (1, 5))
+    finish(top, bottom, rows, (3, 3))
 }
 
-/// Codex session: title box, starting hints, a review and the prompt line.
-fn codex_screen(rows: u16, cols: u16) -> String {
-    let dim = fg(128, 128, 128);
-    let cyan = fg(86, 182, 194);
-    let green = fg(78, 186, 101);
-    let red = fg(220, 90, 90);
-    let w = (cols as usize).saturating_sub(1).min(48);
-    let mut top = boxed(
-        &[format!("{BOLD}>_ OpenAI Codex{RESET}"), String::new(), format!(r"{dim}directory:{RESET} D:\dev\noble")],
-        w,
-        &dim,
-    );
-    top.push_str(&format!("\n  {dim}To get started, describe a task or try one of these commands:{RESET}\n\n"));
-    for (cmd, what) in [
-        ("/init", "create an AGENTS.md file with instructions for Codex"),
-        ("/status", "show current session configuration"),
-        ("/review", "review any changes and find issues"),
-    ] {
-        top.push_str(&format!("  {cyan}{cmd}{RESET} {dim}- {what}{RESET}\n"));
-    }
-    top.push_str(&format!("\n{BOLD}›{RESET} review battery.rs for edge cases in the time estimate\n\n"));
-    top.push_str(&format!("{dim}•{RESET} {BOLD}Explored{RESET}\n"));
-    top.push_str(&format!("  {dim}└ Read{RESET} battery.rs\n    {dim}Search{RESET} charge_rate in src\n\n"));
+/// Codex 0.159 after a turn, as it draws in a pane: the header, the request, the reply with its timing,
+/// the composer and the status line.
+fn codex_screen(rows: u16, _cols: u16) -> String {
+    let dim = "\x1b[2m";
+    let blue = fg(99, 168, 248);
+    let model = fg(246, 226, 183);
+    let path = fg(171, 223, 167);
+    let title = fg(245, 194, 231);
+    let mut top = String::from("\n");
+    top.push_str(&format!("  {blue}>_{RESET} {BOLD}OpenAI Codex{RESET} {dim}(v0.159.0){RESET}\n"));
+    top.push_str(&format!("     {dim}{CWD}{RESET}\n\n"));
+    top.push_str(&format!("  {blue}Use /review to check your changes before you commit.{RESET}\n\n\n"));
+    top.push_str(&format!("{dim}›{RESET} review battery.rs for edge cases in the time estimate\n\n\n"));
     top.push_str(&format!("{dim}•{RESET} Two edge cases in the estimate:\n\n"));
-    top.push_str("  1. A charge rate of 0 divides by zero; guard it and fall\n");
-    top.push_str("     back to the time reported by the OS.\n");
+    top.push_str("  1. A charge rate of 0 divides by zero; guard it and fall back\n");
+    top.push_str("     to the time the OS reports.\n");
     top.push_str("  2. Readings older than 10 minutes skew the rate; drop them\n");
     top.push_str("     before averaging.\n\n");
-    top.push_str(&format!("{green}•{RESET} {BOLD}Edited{RESET} src/battery.rs ({green}+6{RESET} {red}-2{RESET})\n"));
+    top.push_str("  Should I fix both and add tests for them?\n\n");
+    top.push_str(&format!("  {dim}Worked for 38s • 18:19{RESET}\n"));
     let bottom = format!(
-        "{BOLD}›{RESET} {dim}Ask Codex to do anything{RESET}\n\n  {dim}⏎ send   ⇧⏎ newline   ctrl+c quit{RESET}\n"
+        "{BOLD}›{RESET} {dim}Ask Codex to do anything{RESET}\n\n  {model}GPT-6-Luna high{RESET} · {path}{CWD}{RESET} · \
+         {title}Battery estimate edge cases{RESET}\n  {BOLD}←{RESET} for agents · {BOLD}?{RESET} for shortcuts\n"
     );
     finish(top, bottom, rows, (0, 3))
 }
@@ -758,8 +789,7 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
             let rev = cell.modifier.contains(Modifier::REVERSED);
             let mut color = if rev { resolve(cell.bg, bg) } else { resolve(cell.fg, fg) };
             if cell.modifier.contains(Modifier::DIM) {
-                let mix = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
-                color = (mix(color.0, bg.0), mix(color.1, bg.1), mix(color.2, bg.2));
+                color = dim(color, bg);
             }
             let chex = hex(color);
             let px = x as f64 * CW;
@@ -780,7 +810,10 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
                 let s2 = c2.symbol();
                 let w2 = unicode_width::UnicodeWidthStr::width(s2).max(1) as u16;
                 let rev2 = c2.modifier.contains(Modifier::REVERSED);
-                let col2 = if rev2 { resolve(c2.bg, bg) } else { resolve(c2.fg, fg) };
+                let mut col2 = if rev2 { resolve(c2.bg, bg) } else { resolve(c2.fg, fg) };
+                if c2.modifier.contains(Modifier::DIM) {
+                    col2 = dim(col2, bg);
+                }
                 let f2 = s2.chars().next().unwrap_or(' ');
                 let same = c2.modifier == cell.modifier && (col2 == color || s2.trim().is_empty());
                 if !same || (!s2.trim().is_empty() && (box_arms(f2).is_some() || is_graphic(f2))) {
@@ -821,6 +854,12 @@ fn buffer_svg(buf: &Buffer, bg: (u8, u8, u8), fg: (u8, u8, u8)) -> String {
         area.height as f64 * CH,
         hex(bg)
     )
+}
+
+/// Dim text: halfway between its color and the background.
+fn dim(c: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
+    let mix = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+    (mix(c.0, bg.0), mix(c.1, bg.1), mix(c.2, bg.2))
 }
 
 fn is_graphic(c: char) -> bool {
