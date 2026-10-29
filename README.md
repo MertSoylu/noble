@@ -25,6 +25,7 @@
   <a href="#-screens">Screens</a> ·
   <a href="#-keys">Keys</a> ·
   <a href="#-configuration">Configuration</a> ·
+  <a href="#-ai-agents">AI agents</a> ·
   <a href="#-ai-quota">AI quota</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -125,8 +126,8 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
 (a dead network share) opens in home instead. With several NOBLE windows open, each one saves its own tabs and
 the next launch brings back all of them; a window opened while another is running starts empty. Quick-launch
-tabs run their command (e.g. `claude`) again. An agent pane (Claude Code, Codex, Copilot CLI, OpenCode) picks its last
-conversation up again on the same path: `claude --resume`, `codex resume`, `copilot --resume`, `opencode --session`,
+tabs run their command (e.g. `claude`) again. An agent pane (Claude Code, Codex, GitHub Copilot, OpenCode) picks its last
+conversation up again on the same path: `claude --resume`, `codex resume`, `copilot --resume=<id>`, `opencode --session`,
 added to its own launcher (Settings → Resume agent conversations; `resume_agents`, on by default). Saved workspaces and
 reopened tabs (prefix `T`) do the same. The session is saved a couple of seconds after every change and
 when the window closes, the process is terminated or the OS logs off. Save named workspaces, reopen or delete
@@ -215,9 +216,12 @@ To open NOBLE in its own tab from the Windows Terminal dropdown:
 ```
 
 ```
-noble [--config <path>] [--no-boot]
+noble [--config <path>] [--no-boot] [<dir>]   open NOBLE; <dir> opens a shell tab in that folder
+noble update [--check]                        download and install the latest release (--check only reports)
+noble doctor [--config <path>]                print a setup report for bug reports (never opens the terminal)
       --paths      print config and data locations
       --version    print version
+      -h, --help   print the help
 ```
 
 </details>
@@ -264,15 +268,16 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | | | `pgup` `pgdn` `[` `]` | scroll up / down (page) |
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass keys to the app (lock / next key) |
-| | | `a` | jump to the next agent waiting for you (needs you first, then your turn) |
+| | | `a` | jump to the next agent waiting for you (needs you first, then your turn, then error) |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
 | | | `y` | send the last command's output to the agent pane (pasted, not run: press ⏎ yourself) |
 | | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
 
 A shell with NOBLE's hooks (PowerShell, bash 4.4+, zsh, fish) marks where each command's output starts and ends, so a
 terminal tab can jump between commands (pane menu, palette: Jump to Previous / Next Command), copy the last output, or
-send it to the agent in the same tab with its context line (`~/app $ cargo test → exit 101`). A failed command's ✗
-badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such marks, so these actions do nothing there.
+send it to the agent in the same tab (or else the one last sent to) with its context line (`~/app $ cargo test → exit 101`). A failed command's ✗
+badge scrolls to its output when clicked. cmd.exe sends no marks, and bash 3.2 no command-start mark (OSC 133;C),
+so these actions do nothing there.
 
 <details>
 <summary><b>Per-screen keys and mouse</b></summary>
@@ -309,8 +314,7 @@ badge scrolls to its output when clicked. cmd.exe and bash 3.2 send no such mark
   terminal's progress report pauses (OSC 9;4: Windows Terminal, Ghostty and the like; Linux and macOS always, on Windows only in Windows
   Terminal or when `TERM_PROGRAM` is set). Both return to normal when nothing waits.
 - **Mouse:** `ctrl+click` opens a URL (including OSC 8 hyperlinks) in the browser or a `path:line:col` in
-  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 (unless
-  Settings → Pointer reports ctrl-click to apps) and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
+  VS Code (else Cursor, Windsurf or Zed, whichever is on the PATH; else the default app); on macOS, iTerm2 and Terminal.app keep ctrl+click for their own menu, so use prefix `u`
   there · right-click a tab, pane title or project for a menu · the `+N` chip at the end of the tab bar lists the
   tabs that do not fit · drag tabs to reorder, double-click to rename, middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
@@ -405,30 +409,37 @@ dismiss_hooks_offer notifications prev_command next_command copy_last_output sen
 
 </details>
 
-## 🤖 AI quota
+## 🧩 AI agents
 
-Usage is read from the logins that the official CLIs already keep on your machine. **Tokens are sent only to
-their own provider, never displayed or logged, and never refreshed by NOBLE** (so it cannot race the CLI's
-own token rotation). The last good numbers are cached and shown with `~` until the next successful fetch.
+NOBLE does not run an agent of its own. It hosts the ones you already use, shows what each one is doing and keeps
+their conversations across restarts. The full reference (every agent's events and settings files, the states and the
+keys) is in the [AI agents docs](https://noble.mertsoylu.dev/docs/ai-agents).
 
-| Provider | Shown | Source |
-|---|---|---|
-| Claude Code | 5-hour and weekly limits, plan | `~/.claude/.credentials.json` → Anthropic OAuth usage endpoint |
-| Codex / ChatGPT | 5-hour and weekly limits, plan | `~/.codex/auth.json` + `codex app-server` (`account/rateLimits/read`) |
-| Antigravity | 5-hour and weekly limits (the fuller pool) | `agy --print /usage --output-format json`; only runs when an `agy` login exists |
-| OpenCode Go | 5-hour, weekly and monthly limits | `~/.local/share/opencode/auth.json` → `opencode.ai/zen/go/v1/usage` |
-| Kilo Code | Kilo Pass credits this billing period | `~/.local/share/kilo/auth.json` → `api.kilo.ai` `kiloPass.getState` |
-| Command Code | 5-hour and weekly limits, plan | `~/.commandcode/auth.json` → `api.commandcode.ai/alpha/billing/credits` |
-
-Only providers you are signed in to (and that have a quota plan) are shown. Quotas are fetched **only while
-the Home screen is open**: right away when you come back to it and then every `refresh_minutes`. While you work
-in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
-fill up before it resets.
-
-The same cached numbers drive three more warnings, with no extra request: an agent whose quota is full (100%) gets a
-`⚠` on its launcher on Home, and launching it says when the quota resets (`resets in 1h12m`). An agent's pane title
-shows the fullest window past `warn_at` (`⚠ 5h 92%`). When a window that passed `warn_at` resets, NOBLE says so
-(`Claude Code 5h quota reset`) at the reset time it was given.
+- **Real state for each agent:** Claude Code, Codex, GitHub Copilot and OpenCode report their prompts, answers,
+  permission requests and, where the agent has them, errors, through their own hooks. Turn them on in
+  **Settings → Terminal → Agent status hooks** (listed when an agent is installed here). The state shows on the tab
+  dots, in each pane's title and on Home, and **prefix `a`** jumps to the next agent waiting for you.
+- **Conversations come back:** with **Resume agent conversations** on (the default), a restored, saved or reopened pane
+  whose launcher is an agent starts it again on its last conversation: `claude --resume <id>`, `codex resume <id>`,
+  `copilot --resume=<id>` or `opencode --session <id>`. The id comes from that agent's hooks, so they must be on for it.
+  A shell pane where you typed `claude` by hand restores as a plain shell. The Home card's `↻ claude · 2h ago` line
+  runs `claude --continue` in a project and needs no hooks.
+- **Command blocks:** a PowerShell, bash 4.4+, zsh or fish pane marks where each command starts and ends, and NOBLE
+  keeps the last 200 per pane. Jump to the previous or next command, copy the last output, or click a `✗` badge to go
+  to a failed one. cmd.exe sends no marks, and bash 3.2 no command-start mark (OSC 133;C): these actions do
+  nothing there.
+- **Send to the agent:** **Send Last Output to Agent** (prefix `y`) pastes the selection, or else the newest command's
+  output (at most 400 lines and 64 KiB), into the agent pane of the same tab (or else the one last sent to), led by a
+  context line such as `~/app $ cargo test → exit 101`. It is pasted, never run: read it, then press ⏎ yourself. A multi-line paste into a
+  shell that has not enabled bracketed paste asks first.
+- **Progress:** a program's progress report (OSC 9;4, which Claude Code sends) shows in the pane title as `42%`, a
+  spinner, `✗` on an error or `‖` when paused, and as a busy dot on the tab.
+- **Background Claude sessions:** `claude --bg` sessions are listed in Home's AI usage panel, and a click attaches to
+  one in a new tab (`claude attach <id>`). NOBLE lists and attaches only; it does not start them.
+- **Outside NOBLE:** while an agent waits for you, the window title reads `NOBLE · ◆ 1` and the terminal NOBLE runs in
+  gets a paused progress report (on Windows only in Windows Terminal or when `TERM_PROGRAM` is set). Background
+  alerts also reach your desktop as OSC 9 / OSC 777 notifications while NOBLE is not in front (on Windows only when
+  `TERM_PROGRAM` is set); **Notify from background tabs** (`notify`) switches them off.
 
 <details>
 <summary><b>Agent status hooks (optional)</b></summary>
@@ -436,7 +447,7 @@ shows the fullest window past `warn_at` (`⚠ 5h 92%`). When a window that passe
 <br>
 
 Without help NOBLE can only guess whether an agent is busy. Turn on **Settings → Terminal → Agent status hooks**:
-NOBLE opens a popup with one row per agent it found on this machine (**Claude Code**, **Codex**, **Copilot CLI**
+NOBLE opens a popup with one row per agent it found on this machine (**Claude Code**, **Codex**, **GitHub Copilot**
 and **OpenCode**; a row that is not found is shown as such). Click a row, or press ⏎ or space on it, to install
 or remove that agent's hooks. The first time you launch an agent that has no hooks yet, NOBLE offers to turn them
 on for every agent it found. Installing keeps the hooks you already have and writes a backup of the settings file
@@ -446,20 +457,22 @@ own plugin file).
 | Agent | Settings file (Windows, Linux and macOS alike) |
 |---|---|
 | Claude Code | `~/.claude/settings.json` |
-| Codex | `hooks.json` in `$CODEX_HOME` when set, else `~/.codex` |
-| Copilot CLI | `noble.json` in `$COPILOT_HOME/hooks` when set, else `~/.copilot/hooks` |
+| Codex | `hooks.json` in `$CODEX_HOME` when set to an existing folder, else `~/.codex` |
+| GitHub Copilot | `noble.json` in `$COPILOT_HOME/hooks` when set, else `~/.copilot/hooks` |
 | OpenCode | `plugins/noble.js` in `$XDG_CONFIG_HOME/opencode` when set, else `~/.config/opencode` |
 
 On Windows these are in your user profile (`%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`, and so on). Each
-agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on its own
-events: prompt, stop, permission request, notification, subagent start and stop, session start and end. The
-command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
+agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on the
+events it reports: prompt, stop, permission request, notification, error, subagent start and stop, session start
+and end. Codex has no notification or error event, and OpenCode has no notification, subagent or session start and end
+event. The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
+The hooks apply to sessions started after the install: restart an agent that is already running.
 
-- **Claude Code:** also reports a failed turn (an API error or a rate limit) as an error, and a permission request
+- **Claude Code:** also reports a failed turn (`StopFailure`: an API error or a rate limit) as an error, and a permission request
   as "needs you" at once. The notifications name the request: "Claude asks to run Bash", "Claude asks a question".
 - **Codex:** Codex runs user-level hooks only after you trust them once. After an install NOBLE says
   "Codex: open /hooks once to trust NOBLE's hooks"; open `/hooks` in Codex and trust them. NOBLE cannot do this for you.
-- **Copilot CLI:** NOBLE's hooks are in its own file, so turning them off deletes that one file.
+- **GitHub Copilot:** NOBLE's hooks are in its own file, `noble.json`. Turning them off deletes that file when nothing else is in it; otherwise NOBLE removes only its own entries.
 - **OpenCode:** a plugin forwards session status, idle, errors and permission requests to NOBLE, and it runs NOBLE
   only in a NOBLE pane. A child session is not told apart from its parent, so a parent tab can show idle while a
   child still works.
@@ -479,9 +492,34 @@ spinner working, ○ running). The spinner
 only turns while a working agent is visible, its pane is printing (an interrupted session stays "working" until
 its next prompt, but stops spinning) and the laptop is plugged in; otherwise it is a still `…`.
 **Prefix `a`** (Jump to Waiting Agent) goes to the next pane, across tabs, whose agent needs you, else to the
-next one whose agent finished its answer.
+next one whose agent finished its answer, else to the next one whose agent failed.
 
 </details>
+
+## 🤖 AI quota
+
+Usage is read from the logins that the official CLIs already keep on your machine. **Tokens are sent only to
+their own provider, never displayed or logged, and never refreshed by NOBLE** (so it cannot race the CLI's
+own token rotation). The last good numbers are cached and shown with `~` until the next successful fetch.
+
+| Provider | Shown | Source |
+|---|---|---|
+| Claude Code | 5-hour and weekly limits, plan | `~/.claude/.credentials.json` → Anthropic OAuth usage endpoint |
+| Codex / ChatGPT | 5-hour and weekly limits, plan | `~/.codex/auth.json` + `codex app-server` (`account/rateLimits/read`) |
+| Antigravity | 5-hour and weekly limits (the fuller pool) | `agy --print /usage --output-format json`; only runs when an `agy` login exists |
+| OpenCode Go | 5-hour, weekly and monthly limits | `~/.local/share/opencode/auth.json` → `opencode.ai/zen/go/v1/usage` |
+| Kilo Code | Kilo Pass credits this billing period | `~/.local/share/kilo/auth.json` → `api.kilo.ai` `kiloPass.getState` |
+| Command Code | 5-hour and weekly limits, plan | `~/.commandcode/auth.json` → `api.commandcode.ai/alpha/billing/credits` |
+
+Only providers you are signed in to (and that have a quota plan) are shown. Quotas are fetched **only while
+the Home screen is open**: right away when you come back to it (if the last fetch is 30 s or older) and then every `refresh_minutes`. While you work
+in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
+fill up before it resets.
+
+The same cached numbers drive three more warnings, with no extra request: an agent whose quota is full (100%) gets a
+`⚠` on its launcher on Home, and launching it says when the quota resets (`resets in 1h12m`). An agent's pane title
+shows the fullest window past `warn_at` (`⚠ 5h 92%`). When a window that passed `warn_at` resets, NOBLE says so
+(`Claude Code 5h quota reset`) at the reset time it was given.
 
 <details>
 <summary><b>Shell integration</b></summary>

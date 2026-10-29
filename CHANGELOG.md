@@ -6,6 +6,16 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Documentation
+- README: a new "AI agents" section covers the agent status hooks of Claude Code, Codex, GitHub Copilot and OpenCode,
+  conversation resume, command blocks, sending the last output to an agent, progress reports, background Claude
+  sessions and what NOBLE shows outside its window. It links to the AI agents docs page; the AI quota section follows it.
+- README: the command line lists `update`, `doctor`, `<dir>` and `-h`; prefix `a` also reaches an agent whose turn
+  failed; the hooks section says which events each agent reports; the macOS ctrl+click note drops a setting that
+  NOBLE does not have.
+- The Copilot resume command in the 1.12.0 entry is `copilot --resume=<id>`, the form NOBLE runs.
+- Screenshots regenerated: agent states, background Claude sessions, a progress report and a project's tasks.
+
 ## [1.12.1] - 2026-10-29
 
 ### Added
@@ -55,7 +65,7 @@ All notable changes to NOBLE are documented here. The format is based on
   Last Output to Agent (prefix `y`), which pastes the output with its context line (`~/app $ cargo test → exit 101`) into
   the agent pane of the same tab, never running it. A click on a failed command's ✗ badge scrolls to its output.
 - Agent conversations come back: a restored pane running Claude Code, Codex, Copilot CLI or OpenCode resumes its last
-  conversation (`claude --resume <id>`, `codex resume <id>`, `copilot --resume <id>`, `opencode --session <id>`), with
+  conversation (`claude --resume <id>`, `codex resume <id>`, `copilot --resume=<id>`, `opencode --session <id>`), with
   the launcher's own command. Session restore, saved workspaces and reopened tabs (prefix `T`) do the same. The session
   id comes from the agent's hook payload and is kept only when it is a plain id (letters, digits, `-` and `_`).
 - Setting "Resume agent conversations" (`[terminal] resume_agents`, on by default): off starts agents fresh, as before.

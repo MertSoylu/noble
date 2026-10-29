@@ -157,7 +157,7 @@ Installing is the biggest barrier for new users:
 - `cargo binstall noble` (`[package.metadata.binstall]`, mapping the release archive names) (done).
 - winget (`MertSoylu.Noble`, Windows): next version, not done yet. A `winget` job in `release.yml` will submit each
   tag release to microsoft/winget-pkgs. Scoop, Homebrew and AUR are not planned.
-- An "AI agents" page in the docs: hooks per agent, resume, send to agent.
+- An "AI agents" page in the docs: hooks per agent, resume, send to agent (done).
 
 ## Plan
 
@@ -173,7 +173,7 @@ Installing is the biggest barrier for new users:
 4. **Stage 4 (done)**
    - Focus: A5, A6, T5–T6, pane operations and menu, T7 spike, A7, packaging
    - Release: v1.12.1
-5. **Stage 5**
+5. **Stage 5 (done)**
    - Focus: Docs, website, screenshots
    - Release: —
 
