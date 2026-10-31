@@ -36,6 +36,8 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # SHA-256 of `noble update` downloads; already in the tree as ureq's TLS backend (rustls), so no new crate.
 ring = { version = "0.17.14", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
+# Config typos: the keys the config structs do not read, found while `config::parse` deserializes (`config::unknown_keys`).
+serde_ignored = "0.1.14"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
 toml = "1.1.6"

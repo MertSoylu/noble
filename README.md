@@ -60,7 +60,8 @@ get the whole screen: the bars come back while the prefix is armed or the pointe
 `◆ 2` chip on the bottom row shows the markers of the other tabs.
 Programs can rely on the usual terminal queries: synchronized output (no half-drawn frames), the pane's colors
 (OSC 4 / 10 / 11 / 12, `COLORFGBG`, color scheme notices) so AI CLIs pick the right light or dark theme, focus
-reports, XTVERSION and DECRQM.
+reports, XTVERSION, DECRQM, the kitty keyboard protocol (flag 1 only, one flag stack per screen) and, on Windows,
+ConPTY's win32-input-mode.
 
 </td>
 <td width="50%" valign="top">
@@ -83,7 +84,7 @@ chip, or press `T` (shift+t) for the list, to run it in a new tab in the project
 
 **🤖 AI quota and sessions**<br>
 5-hour and weekly limits for Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code, read
-from the logins the CLIs already keep. See which Claude session is working and which one is waiting for you,
+from the logins the CLIs already keep. See which agent is working and which one is waiting for you (every agent with status hooks on),
 on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you.
 
 </td>
@@ -310,8 +311,11 @@ so these actions do nothing there.
   The newest 10,000 matches are kept (the bar then shows `10000+`).
 - **Prompts and dialogs:** single-line prompts edit at a cursor (arrows, `home`/`end`, `del`, `ctrl+a/e/u`);
   confirmation dialogs need `y` (`n` or `esc` cancels), never `⏎`. `shift+⏎` sends a newline to AI CLIs
-  (needs an outer terminal that reports Shift). The pane menu (its "Launch in split ›" row lists the quick
-  launchers) and the palette can launch an agent in a split.
+  (see [AI agents](#-ai-agents) for the terminals that report it). The pane menu (its "Launch in split ›" row lists the
+  quick launchers) and the palette can launch an agent in a split.
+- **Keys in a pane:** in a pane whose program asked for the kitty keyboard protocol, Alt with a shifted symbol such as
+  `alt+!` is sent with that symbol's own code. On Linux and macOS, a terminal that answers neither the keyboard query
+  nor the device attributes query can delay startup by up to 2 s (`TERM=dumb` is not asked).
 - **Notifications:** clicking one that came from a pane (a toast, or `⏎` in the notification list) goes to that tab
   and pane; `ctrl+y` in the list copies its text. Background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
   while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
@@ -340,7 +344,10 @@ not as `ctrl+alt` chords.
 Linux: `~/.config/noble/config.toml`, data in `~/.local/share/noble`; macOS: both in
 `~/Library/Application Support/noble`; `NOBLE_HOME` moves both). On Linux and macOS NOBLE creates its data folder
 for your user only (0700) and its files 0600. The file is created with comments on first launch and **reloaded live** when saved.
-Errors show up as a toast and never crash the app. Most options can also be changed from the Settings screen.
+Errors show up as a toast and never crash the app. A key or section that NOBLE does not read (a typo such as
+`scrolback`) gets one warning toast that names it and its line, at startup and on each reload; clicking the toast opens
+the file at that line. Sections NOBLE has removed (`[island]`) are ignored silently. Most options can also be changed
+from the Settings screen.
 
 <details>
 <summary><b>Full <code>config.toml</code> reference</b></summary>
@@ -420,6 +427,15 @@ NOBLE does not run an agent of its own. It hosts the ones you already use, shows
 their conversations across restarts. The full reference (every agent's events and settings files, the states and the
 keys) is in the [AI agents docs](https://noble.mertsoylu.dev/docs/ai-agents).
 
+Shift+Enter starts a new line in Claude Code and Codex inside NOBLE instead of submitting the prompt. NOBLE passes
+Enter on with its modifiers in the form each program reads: the kitty keyboard protocol for a program that asks for it
+(Claude Code), console input records on Windows for a program that reads those (Codex, PowerShell). When a program asked
+for the protocol but missed NOBLE's answer (Claude Code can, in its first-run folder-trust dialog), Shift+Enter still
+goes in the kitty form. Ctrl+Enter is passed on the same way; what it does is up to the program. On Linux and macOS
+NOBLE has to see Shift itself: it works when the outer terminal supports the kitty keyboard protocol (for example kitty,
+Ghostty, WezTerm or foot), which NOBLE turns on at startup and off on exit. Any other terminal sends NOBLE a plain
+Enter, which submits.
+
 - **Real state for each agent:** Claude Code, Codex, GitHub Copilot and OpenCode report their prompts, answers,
   permission requests and, where the agent has them, errors, through their own hooks. Antigravity CLI and Cursor CLI
   report work and the end of a turn, but no permission requests (see their bullets below). Turn them on in
@@ -469,7 +485,7 @@ own plugin file).
 | GitHub Copilot | `noble.json` in `$COPILOT_HOME/hooks` when set, else `~/.copilot/hooks` |
 | OpenCode | `plugins/noble.js` in `$XDG_CONFIG_HOME/opencode` when set, else `~/.config/opencode` |
 | Antigravity CLI | `~/.gemini/config/hooks.json` (its `noble` key; no documented variable moves it) |
-| Cursor CLI | `~/.cursor/hooks.json` (NOBLE's entries in its `hooks` lists; the docs give this path for every platform, not yet confirmed on Windows) |
+| Cursor CLI | `~/.cursor/hooks.json` (NOBLE's entries in its `hooks` lists; the docs give this path for every platform) |
 
 On Windows these are in your user profile (`%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`, and so on). Each
 agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on the

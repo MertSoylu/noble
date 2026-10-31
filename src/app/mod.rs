@@ -339,7 +339,7 @@ pub enum ToastLevel {
 /// Where a notification leads when it is clicked (besides being dismissed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToastTarget {
-    /// A config error: opens the config file at this line (the Edit Config File action without one).
+    /// A config error or unknown key: opens the config file at this line (the Edit Config File action without one).
     Config { line: Option<u32> },
     /// A pane's notification (an agent needs you, a finished command, an alert): goes to the pane in its tab.
     /// Both ids are stable: a tab's index and a pane's place in the layout change when other tabs close. A tab
@@ -1050,6 +1050,8 @@ impl App {
         }
         if let Some(err) = loaded.error {
             app.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
+        } else if let Some((text, line)) = config::unknown_keys_warning(&loaded.unknown) {
+            app.toast_target(ToastLevel::Warn, text, Some(ToastTarget::Config { line }));
         }
         for w in app.keymap.warnings.clone() {
             app.toast(ToastLevel::Warn, w);

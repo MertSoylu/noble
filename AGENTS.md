@@ -145,6 +145,28 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   but holds back `PtyOutput` (`Pane::release_sync` from `App::tick` after `SYNC_TIMEOUT` 150 ms); drawing shows
   the pane's copy of its last view (`Pane::remember_view`/`held_view`) meanwhile. Focus reports are sent by
   `App::sync_focus_reports` after every event and action when the focused pane or window focus changes.
+  Kitty keyboard protocol: `Callbacks::kitty` holds one flag stack per screen (index 0 main, 1 alternate;
+  `kitty_stack`): push `CSI > f u`, pop `CSI < n u`, set `CSI = f ; m u`; the query `CSI ? u` is answered from
+  `kitty_flags` (the top of the shown screen's stack, 0 when empty). Flags pass `kitty_mask`, so only
+  `KITTY_DISAMBIGUATE` (flag 1) is stored; the depth is `KITTY_MAX_DEPTH` 16 (a push onto a full stack drops the
+  oldest). `reset_modes` (RIS, from `pane::feed`) and `shell_prompt` clear both stacks. Kitty ask (`Callbacks::kitty_asked`, one
+  flag for both screens): the query `CSI ? u` sets it, a push or a set (`CSI = f ; m u`) on either screen clears it even
+  when the masked flags are 0 (the program manages the protocol itself), `reset_modes` and `shell_prompt` clear it, and a
+  pop leaves it alone. It says a program asked but NOBLE's answer may have been lost (Claude Code's first-run trust
+  dialog), so `encode_key` sends a Shift-only Enter as `CSI 13 ; 2 u` while flag 1 is off and the ask is set. Ctrl+Enter
+  is not part of it. win32-input-mode (`WIN32_INPUT`,
+  `CSI ? 9001 h`) is set once by ConPTY at startup and `reset_modes` keeps it: the program did not ask for it, and the
+  console records must not stop when a program resets. A program's own `CSI ? 9001 l` turns it off. `pane::key_mode`
+  reads the shown screen into `term/input.rs` `KeyMode { app_cursor, kitty, kitty_asked, win32 }`; `encode_key(ev, mode)`
+  applies the precedence: kitty flag 1 first, then the Shift+Enter ask fallback, then the win32 key-down and key-up
+  records (`win32_key`: Enter with Shift or Ctrl, Esc, Ctrl+Tab, Ctrl+Backspace), then the legacy bytes.
+- **Outer keyboard:** `main.rs` `enter_terminal` (Unix only) asks `crossterm::terminal::supports_keyboard_enhancement()`
+  (not for `TERM=dumb`) and, when it answers, pushes `DISAMBIGUATE_ESCAPE_CODES | REPORT_ALTERNATE_KEYS` (`CSI > 5 u`),
+  recording `KEYBOARD_PUSHED`. `restore_terminal` pops it before it leaves the alternate screen, because the outer kitty
+  stack is kept per screen. Windows pushes nothing (the console API reports Shift and Ctrl with Enter).
+  `keys::legacy_key` folds Ctrl+i, Ctrl+m and Ctrl+[ back to Tab, Enter and Esc for NOBLE's own screens and bindings (a
+  pane keeps the event as it came); `App::on_key` (`app/input.rs`) drops Super, Hyper and Meta there;
+  `Chord::from_event` normalizes Alt+Shift+letter chords.
 - **Notifications to panes:** every pane notification goes through `App::notify` with a `ToastTarget::Pane { tab,
   pane }`; a click (`toast_clicked`) or `⏎` in the notification list (`PaletteCmd::Notice`) switches to it, a closed
   tab or pane only dismisses; `ctrl+y` copies.
@@ -190,7 +212,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   fallback (`session_save`, `session_begin`). Saved tabs that could not start stay in the file (`App::unrestored`).
   `App::shutdown` ends the background commands before it saves; `main.rs` runs the frame loop under `catch_unwind`,
   so a main-thread panic saves (only when the session lock is had within 500 ms; otherwise the last saved file stays) and ends them as well (the panic hook uses `ai::kill_background_children_if_free`,
-  which never waits for the registry lock).
+  which never waits for the registry lock). The panic hook appends its line to `noble.log` with
+  `util::append_log_line` (nothing once the file holds `LOG_HARD_CAP`, 1 MiB); `main.rs` calls `util::rotate_log` at
+  startup, which moves a `noble.log` over `LOG_ROTATE_SIZE` (256 KiB) to `noble.log.1`, replacing an older one.
   `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
 - **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
@@ -233,7 +257,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `PreToolUse`, whose reply would decide the tool's permission) and `cursor.rs` (`~/.cursor/hooks.json`: `version` 1
   and flat entries under sessionStart, beforeSubmitPrompt, postToolUse, afterShellExecution, afterFileEdit and stop; no
   permission hooks; `cursor::program` finds `cursor-agent` on PATH or in `%LOCALAPPDATA%\cursor-agent`; the docs' path
-  is read on Windows too, and the prompt event is not verified for the CLI). Antigravity
+  is read on Windows too (a live Windows run in 1.12.3 confirmed that cursor-agent reads it there), and the prompt event
+  is not verified for the CLI). Antigravity
   and Cursor have no "needs you" state: NOBLE registers no event for a permission prompt with either, so a prompt
   waiting for approval reads as working. Their commands differ from their ids: `Agent::on_path` checks `agy` and
   `cursor-agent` (not `antigravity`, and not Cursor's IDE launcher `cursor`). `hooks::hook_reply` is the stdout reply of
@@ -253,7 +278,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`Pane::launch_running`). Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files
   (`SubagentStart`/`SubagentStop`); while any exist the session stays Working after `Stop`. Idle-reminder and
   `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `upgrade_installed` (every agent) adds
-  newly added events to an older install at startup. `hooks::prune` runs at startup. Never touch the real files in
+  newly added events to an older install at startup. `hooks::prune` runs at startup: a file named after this instance
+  goes at once; a file whose `<pid>-` owner is still running is kept (`prune_with`, `owner_running`: the process must
+  have started before the file was written, within `START_SLACK_SECS`,
+  so a reused pid keeps nothing); any other file goes
+  after `STALE_FILE_SECS` (a day). Never touch the real files in
   tests: install/uninstall/upgrade take an explicit path, and `NOBLE_HOME` does not move `~/.claude`, `~/.codex`,
   `~/.copilot`, `~/.config/opencode`, `~/.gemini` or `~/.cursor`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS`
   (`ai::isolated`), which turns off every agent's settings path (`settings_path` returns None) and AI credential
@@ -264,7 +293,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `util::private_file_options`, `store::write_text`); existing files keep their mode. Windows: the profile's ACL applies.
   `Paths::resolve` returns `None` without a home folder (never a relative `.noble`); `main` reports it.
 - **Persistence:** `config.rs` live-reloaded `config.toml` (`App::tick` polls its mtime every 2 s; error =
-  toast, never a crash); `store.rs` stores recent dirs, the session, workspaces, AI usage history and UI state
+  toast, never a crash); `config::unknown_keys` (serde_ignored, the lines found in the text) lists the keys and sections
+  the structs do not read, `RETIRED` (`island`) is dropped silently, and `config::unknown_keys_warning` gives one Warn
+  toast with `ToastTarget::Config { line }` at startup (`app/mod.rs`) and on reload (`app/reload.rs`); `store.rs` stores
+  recent dirs, the session, workspaces, AI usage history and UI state
   (`state.json`: welcome seen, pinned, hidden and manually added projects — the scan thread gets the last two as
   `projects::Manual`) with atomic writes (`store::write_bytes`: temp file, `sync_all`, rename, folder fsync on Unix;
   `store::write_json` for JSON, also used for `ai-cache.json`; Windows retries a rename over an open file

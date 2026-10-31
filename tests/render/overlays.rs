@@ -354,6 +354,47 @@ fn config_error_toast_stays_until_dismissed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An unknown key is a warning on reload that opens the file at its line; a reload without it clears the warning.
+#[test]
+fn unknown_key_toast_on_reload() {
+    use noble::app::ToastTarget;
+    let mut app = demo_app(110, 30);
+    let dir = std::env::temp_dir().join(format!("noble-unknown-key-toast-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[terminal]\nscrolback = 10000\n").unwrap();
+    app.paths.config = path.clone();
+    app.toasts.clear();
+    app.reload_config(false);
+    let toast = app.toasts.last().expect("unknown key toast");
+    assert_eq!(toast.text, "config: unknown key terminal.scrolback (line 2)");
+    assert_eq!(toast.level, ToastLevel::Warn);
+    assert_eq!(toast.target, Some(ToastTarget::Config { line: Some(2) }));
+    std::fs::write(&path, "[terminal]\nscrollback = 10000\n").unwrap();
+    app.reload_config(false);
+    assert!(!app.toasts.iter().any(|t| t.text.starts_with("config: unknown")), "{:?}", toast_texts(&app));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reload that does not parse drops the unknown-key warning of the file that loaded before, and shows the error.
+#[test]
+fn unknown_key_toast_goes_when_the_file_stops_loading() {
+    let mut app = demo_app(110, 30);
+    let dir = std::env::temp_dir().join(format!("noble-unknown-key-broken-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[terminal]\nscrolback = 10000\n").unwrap();
+    app.paths.config = path.clone();
+    app.toasts.clear();
+    app.reload_config(false);
+    assert!(app.toasts.iter().any(|t| t.text.starts_with("config: unknown")), "{:?}", toast_texts(&app));
+    std::fs::write(&path, "[terminal\nscrolback = 10000\n").unwrap();
+    app.reload_config(false);
+    assert!(!app.toasts.iter().any(|t| t.text.starts_with("config: unknown")), "{:?}", toast_texts(&app));
+    assert!(app.toasts.iter().any(|t| t.level == ToastLevel::Error), "{:?}", toast_texts(&app));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Errors stay until dismissed; the other notifications leave once their time is up.
 #[test]
 fn error_toast_does_not_expire() {

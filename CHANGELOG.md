@@ -6,6 +6,49 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Kitty keyboard protocol in panes: a program that pushes flags (`CSI > f u`) gets Esc, Ctrl and Shift+Enter as CSI u
+  keys. NOBLE keeps the pushed flags per screen (the main one and the alternate one), up to 16 deep, and supports only
+  flag 1 (disambiguate escape codes); the other flags are masked off.
+- Shift+Enter fallback, on every platform: a program that asked for the protocol (`CSI ? u`) and has pushed or set no
+  flags since gets Shift+Enter as `CSI 13 ; 2 u`, so a lost answer does not turn it into a plain Enter. Claude Code can
+  lose the answer in its first-run folder-trust dialog (once in six such starts) and then submitted the prompt. The
+  fallback ends when the program pushes or sets flags, on RIS and at the shell prompt.
+- win32-input-mode for ConPTY on Windows: programs that read console input records get Esc, Shift+Enter, Ctrl+Enter,
+  Ctrl+Tab and Ctrl+Backspace with their modifiers. Every other key keeps its bytes.
+- Shift+Enter and Ctrl+Enter reach panes from a kitty-protocol outer terminal on Linux and macOS. NOBLE asks the outer
+  terminal for the protocol at startup and, when it answers, pushes disambiguated escape codes with alternate keys
+  (`CSI > 5 u`), which it pops before it leaves the alternate screen. Windows pushes nothing, since the console already
+  reports Shift and Ctrl with Enter.
+- Warning toast for unknown config keys: a key or section that the config does not read (a typo such as `scrolback`)
+  gets one toast at startup and on each reload, naming the first keys and their lines. A click opens the file at that
+  line. Sections NOBLE has removed (`[island]`) are ignored silently.
+- Known limits: in a pane that asked for the kitty protocol, Alt with a shifted symbol (Alt+!) is sent with the
+  symbol's own code. On Linux and macOS, Shift+Enter needs a kitty-protocol outer terminal; any other terminal gives a
+  pane only a plain Enter. On Linux and macOS, a terminal that answers neither the keyboard query nor the device
+  attributes query can delay startup by up to 2 s (`TERM=dumb` is not asked).
+
+### Changed
+- On NOBLE's own screens and bindings, Ctrl+i, Ctrl+m and Ctrl+[ are read as Tab, Enter and Esc, and Super, Hyper and
+  Meta keys are ignored; a pane gets those three only in the kitty form its program asked for. Alt+Shift+letter reads
+  as one chord whichever key form the terminal sends.
+
+### Fixed
+- The cleanup of agent status records at startup keeps the records of a NOBLE window that is still running, even when
+  they are older than a day. Records of windows that are gone are still removed after a day.
+- `noble.log` is rotated and capped: at startup a log larger than 256 KiB moves to `noble.log.1`, replacing an older
+  one, and the panic hook stops appending at 1 MiB.
+- On Windows, Esc, Shift+Enter, Ctrl+Enter, Ctrl+Tab and Ctrl+Backspace reach console programs such as PSReadLine and
+  Codex with their modifiers (see win32-input-mode above).
+
+### Documentation
+- README: the AI agents section says where Shift+Enter starts a new line in Claude Code and Codex; the
+  terminal queries list names the kitty keyboard protocol and win32-input-mode; the configuration section describes the
+  unknown-key warning. The AI quota card says every agent with status hooks reports its state, not only Claude
+  sessions, and the Cursor CLI settings file no longer says its Windows path is unconfirmed (a live run on Windows
+  confirmed that cursor-agent reads it).
+- The bug report template asks for `noble.log.1` as well, when it is present.
+
 ## [1.12.3] - 2026-10-31
 
 ### Added

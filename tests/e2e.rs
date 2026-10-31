@@ -24,6 +24,11 @@ fn screen_text(screen: &noble::vt100::Screen) -> String {
     screen.rows(0, cols).collect::<Vec<_>>().join("\n")
 }
 
+/// The first place `needle` occurs in `haystack` at or after `from`.
+fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    haystack.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|at| at + from)
+}
+
 /// Whether `word` is a whole word of some line. Text stuck to it, such as a title's `├──word`, does not count.
 fn has_word(text: &str, word: &str) -> bool {
     text.lines().any(|line| line.split_whitespace().any(|w| w == word))
@@ -31,6 +36,10 @@ fn has_word(text: &str, word: &str) -> bool {
 
 struct Harness {
     parser: Arc<Mutex<noble::vt100::Parser<Callbacks>>>,
+    /// Every byte NOBLE wrote to the terminal, in order: for the sequences the screen does not show.
+    raw: Arc<Mutex<Vec<u8>>>,
+    /// One entry per read of NOBLE's output: the length of `raw` after it and when the read came (`arrived`).
+    arrivals: Arc<Mutex<Vec<(usize, Instant)>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
@@ -47,6 +56,9 @@ impl Harness {
         // `NOBLE_HOME` does not move the real home: without this the binary would read the developer's AI
         // credentials, call the providers and upgrade the hooks in the real ~/.claude/settings.json.
         cmd.env(noble::ai::ISOLATED_ENV, "1");
+        // The runner's own TERM is not inherited as is: `TERM=dumb` (GitHub Actions and many CI shells) makes NOBLE
+        // skip the keyboard query, so the tests that expect the push would fail there. portable-pty does not set it.
+        cmd.env("TERM", "xterm-256color");
         cmd.cwd(home);
         let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
@@ -58,15 +70,25 @@ impl Harness {
             0,
             Callbacks::default(),
         )));
+        let raw = Arc::new(Mutex::new(Vec::new()));
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
         {
             let parser = parser.clone();
             let writer = writer.clone();
+            let raw = raw.clone();
+            let arrivals = arrivals.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 65536];
                 while let Ok(n) = reader.read(&mut buf) {
                     if n == 0 {
                         break;
                     }
+                    // The arrival is logged while the bytes are still locked, so `arrived` finds it once it finds them.
+                    let at = Instant::now();
+                    let mut log = raw.lock().unwrap();
+                    log.extend_from_slice(&buf[..n]);
+                    arrivals.lock().unwrap().push((log.len(), at));
+                    drop(log);
                     let resp = {
                         let mut p = parser.lock().unwrap();
                         p.process(&buf[..n]);
@@ -80,7 +102,7 @@ impl Harness {
                 }
             });
         }
-        Harness { parser, writer, child, _master: pair.master }
+        Harness { parser, raw, arrivals, writer, child, _master: pair.master }
     }
 
     fn screen(&self) -> String {
@@ -100,6 +122,24 @@ impl Harness {
         w.flush().unwrap();
         drop(w);
         std::thread::sleep(Duration::from_millis(150));
+    }
+
+    /// Waits until `bytes` appear in NOBLE's output and returns their position in it.
+    fn wait_raw(&self, bytes: &[u8], secs: u64) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if let Some(at) = find_bytes(&self.raw.lock().unwrap(), bytes, 0) {
+                return at;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {bytes:02x?} in the output");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// When the read that completed the first `bytes` in NOBLE's output came in, if it has come in yet.
+    fn arrived(&self, bytes: &[u8]) -> Option<Instant> {
+        let end = find_bytes(&self.raw.lock().unwrap(), bytes, 0)? + bytes.len();
+        self.arrivals.lock().unwrap().iter().find(|(len, _)| *len >= end).map(|(_, at)| *at)
     }
 
     fn wait_for(&self, what: &str, secs: u64) -> String {
@@ -613,4 +653,73 @@ fn a_long_line_stays_whole_when_the_window_is_resized() {
     h.send(b"q");
     h.wait_for("QUIT NOBLE", 5);
     h.send(b"y");
+}
+
+/// Unix: NOBLE pushes the kitty flags at startup (`CSI > 5 u`: disambiguate escape codes, report alternate keys) and
+/// pops them at exit (`CSI < 1 u`), and the pop comes before the alternate screen is left: the kitty stack is kept per
+/// screen and NOBLE pushed on the alternate one. The harness answers the query as a terminal with the protocol does
+/// (`CSI ? 0 u`), so crossterm reads the answer at once: the push follows the query within a second, where a wait out
+/// of crossterm's two-second timeout would not.
+#[test]
+fn keyboard_flags_are_pushed_at_startup_and_popped_before_exit() {
+    // Windows pushes nothing: the console API already reports Shift and Ctrl with Enter.
+    if cfg!(windows) {
+        return;
+    }
+    let home = Home::new("noble-e2e-kitty");
+    let mut h = Harness::start(&home, 34, 120);
+    h.wait_raw(b"\x1b[>5u", 20);
+    let asked = h.arrived(b"\x1b[?u").expect("the flags were not queried");
+    let pushed = h.arrived(b"\x1b[>5u").expect("the flags were not pushed");
+    let gap = pushed.duration_since(asked);
+    assert!(gap < Duration::from_secs(1), "the push came {gap:?} after the query: startup waited for the answer");
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    h.wait_for("Projects", 20);
+    h.send(b"q");
+    h.wait_for("QUIT NOBLE", 5);
+    h.send(b"y");
+    assert!(h.wait_exit(15), "noble did not exit");
+    let leave = h.wait_raw(b"\x1b[?1049l", 5);
+    let popped = h.wait_raw(b"\x1b[<1u", 5);
+    assert!(popped < leave, "the flags were popped after the alternate screen was left");
+    let raw = h.raw.lock().unwrap();
+    assert_eq!(raw.windows(5).filter(|w| *w == b"\x1b[<1u").count(), 1, "popped more than once");
+    assert_eq!(raw.windows(5).filter(|w| *w == b"\x1b[>5u").count(), 1, "pushed more than once");
+}
+
+/// Unix: Shift+Enter reaches a shell pane as the bytes that pane asked for. The outer terminal sends the kitty form
+/// (`CSI 13 ; 2 u`, once NOBLE has pushed its flag); a shell that pushed nothing gets the plain carriage return, and a
+/// shell that pushed `CSI > 1 u` gets the seven bytes of the CSI u form. The shell reads the bytes back with `od`.
+/// On Windows the console reports the key as a key record: `win32_input_keys_reach_a_console_reader` covers it.
+#[test]
+fn shift_enter_reaches_a_shell_pane_as_its_bytes() {
+    if cfg!(windows) {
+        return;
+    }
+    let home = Home::new("noble-e2e-shift-enter");
+    // The test types POSIX shell syntax, so the pane runs `sh` whatever the runner's default shell is (fish has no
+    // `$((...))`). The config is written before NOBLE starts, so it is read instead of the template.
+    std::fs::write(home.join("config.toml"), "[terminal]\nshell = \"sh\"\n").unwrap();
+    let h = Harness::start(&home, 34, 120);
+    h.wait_for("WELCOME TO NOBLE", 20);
+    h.send(b"\x1b");
+    h.wait_for("Projects", 20);
+    h.send(b"t");
+    h.wait_for("ctrl+a menu", 10);
+    h.wait_shell_ready(20);
+    // Raw mode is on before the marker prints, so `od` gets the key's bytes as they come. The last `stty sane` prints
+    // a marker of its own: the next step waits for it, so the shell has left raw mode before the second command.
+    h.send(
+        b"stty raw -echo; printf 'A-%s\\r\\n' $((6*7)); echo \"SHIFT=$(od -An -tx1 -N1 | tr -d ' \\n')\"; stty sane; echo \"after-$((6*7))\"\r",
+    );
+    h.wait_for("A-42", 20);
+    h.send(b"\x1b[13;2u");
+    h.wait_for("SHIFT=0d", 10);
+    h.wait_for("after-42", 10);
+    // The same read after the shell pushed the flag: the CSI u form, `ESC [ 1 3 ; 2 u`.
+    h.send(b"printf '\\033[>1u'; stty raw -echo; printf 'B-%s\\r\\n' $((6*7)); echo \"SHIFT=$(od -An -tx1 -N7 | tr -d ' \\n')\"; printf '\\033[<1u'; stty sane\r");
+    h.wait_for("B-42", 20);
+    h.send(b"\x1b[13;2u");
+    h.wait_for("SHIFT=1b5b31333b3275", 10);
 }

@@ -140,14 +140,15 @@ impl App {
             Action::CopyLastOutput => self.copy_last_output(),
             Action::SendLastOutput => self.send_last_output(),
             Action::SendPrefix => {
-                let bytes = crate::term::input::encode_key(
-                    &crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods),
-                    false,
-                );
+                let prefix = crossterm::event::KeyEvent::new(self.keymap.prefix.code, self.keymap.prefix.mods);
                 if let Some(id) = self.focused_pane()
-                    && !self.panes.get(&id).is_some_and(|p| p.write(&bytes))
+                    && let Some(p) = self.panes.get(&id)
                 {
-                    self.input_refused();
+                    // In the encoding the focused program asked for, like any key the user types there.
+                    let bytes = crate::term::input::encode_key(&prefix, crate::term::pane::key_mode(&p.parser()));
+                    if !p.write(&bytes) {
+                        self.input_refused();
+                    }
                 }
             }
             Action::MoveTabLeft | Action::MoveTabRight => match self.view {

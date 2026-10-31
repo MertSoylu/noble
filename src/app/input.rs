@@ -7,11 +7,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Mou
 use ratatui::layout::{Position, Rect};
 
 use super::{App, Confirm, ConfirmAction, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
-use crate::keys::{Action, Chord};
+use crate::keys::{Action, Chord, legacy_key};
 use crate::sensors::ProcInfo;
 use crate::term::input::{encode_key, encode_mouse};
 use crate::term::layout::{PaneId, ratio_from_point};
-use crate::term::pane::Selection;
+use crate::term::pane::{Selection, key_mode};
 use crate::theme::THEMES;
 
 /// Ctrl held as a shortcut modifier. A character typed with AltGr (Ctrl+Alt on
@@ -97,10 +97,21 @@ impl App {
         }
     }
 
-    pub fn on_key(&mut self, k: KeyEvent) {
+    pub fn on_key(&mut self, raw: KeyEvent) {
         if self.boot.take().is_some() {
             return;
         }
+        // Super, Hyper and Meta are never NOBLE's keys. A pane gets them only in the kitty form its program asked for
+        // (`encode_key` sends nothing for them otherwise), and nothing else reads them.
+        if raw.modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+            self.prefix_armed = false;
+            if self.overlay.is_none() && self.search.is_none() && matches!(self.view, View::Term(_)) {
+                self.term_key(raw);
+            }
+            return;
+        }
+        // NOBLE's screens and bindings see the legacy key (Ctrl+i is Tab, `keys::legacy_key`); a pane gets `raw`.
+        let k = legacy_key(raw);
         if self.overlay.is_some() {
             // A prefix armed before the overlay opened must not fire after it closes.
             self.prefix_armed = false;
@@ -113,7 +124,7 @@ impl App {
         let in_term = matches!(self.view, View::Term(_));
         // Only while the same pane is focused in a terminal; anything else drops it.
         if self.pass_next.take().is_some_and(|id| in_term && self.focused_pane() == Some(id)) {
-            self.term_key(k);
+            self.term_key(raw);
             return;
         }
         let chord = Chord::from_event(&k);
@@ -122,14 +133,14 @@ impl App {
             if chord == self.keymap.prefix {
                 // Prefix twice: the key itself goes to the shell (routed like a typed key, so the scrollback resets).
                 if in_term {
-                    self.term_key(k);
+                    self.term_key(raw);
                 }
             } else if k.code != KeyCode::Esc {
                 match self.keymap.prefix_map.get(&chord).copied() {
                     Some(a) => self.run(a),
                     // "once": prefix + a direct shortcut sends that key to the app.
                     None if in_term && self.pass_once() && self.keymap.direct_map.contains_key(&chord) => {
-                        self.term_key(k)
+                        self.term_key(raw)
                     }
                     None => self
                         .toast(ToastLevel::Warn, format!("{} {chord} is not bound — ? for keys", self.keymap.prefix)),
@@ -157,7 +168,7 @@ impl App {
             View::Bridge => self.bridge_key(k),
             View::System => self.system_key(k),
             View::Settings => self.settings_key(k),
-            View::Term(_) => self.term_key(k),
+            View::Term(_) => self.term_key(raw),
         }
     }
 
@@ -181,9 +192,9 @@ impl App {
         let Some(p) = self.panes.get_mut(&id) else { return };
         p.selection = None;
         p.scroll_reset();
-        let (app_cursor, alt) = {
+        let (mode, alt) = {
             let parser = p.parser();
-            (parser.screen().application_cursor(), parser.screen().alternate_screen())
+            (key_mode(&parser), parser.screen().alternate_screen())
         };
         // A shell that marks command starts (OSC 133;C) times them itself. For one that does not
         // (cmd.exe, bash 3.2) the last Enter starts the clock, so a continuation line of a
@@ -196,7 +207,7 @@ impl App {
                 p.edited = !(interrupt && p.command_started.is_none());
             }
         }
-        if !p.write(&encode_key(&k, app_cursor)) {
+        if !p.write(&encode_key(&k, mode)) {
             self.input_refused();
         }
     }
@@ -1422,14 +1433,14 @@ impl App {
                     return;
                 }
                 let Some(p) = self.panes.get(&pane) else { return };
-                let (alt, app_cursor) = {
+                let (alt, mode) = {
                     let parser = p.parser();
-                    (parser.screen().alternate_screen(), parser.screen().application_cursor())
+                    (parser.screen().alternate_screen(), key_mode(&parser))
                 };
                 if alt {
                     // On the alternate screen (less, man…) the wheel becomes arrow keys.
                     let code = if dir > 0 { KeyCode::Up } else { KeyCode::Down };
-                    let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), app_cursor);
+                    let bytes = encode_key(&KeyEvent::new(code, KeyModifiers::NONE), mode);
                     let mut sent = true;
                     for _ in 0..3 {
                         sent &= p.write(&bytes);

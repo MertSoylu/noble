@@ -60,6 +60,7 @@ body:
     attributes:
       label: Log or config
       description: |
-        Relevant parts of `noble.log` or `config.toml` (`noble --paths` shows where they are).
+        Relevant parts of `noble.log` (and `noble.log.1` if present) or `config.toml`
+        (`noble --paths` shows where they are).
         Never paste tokens or credential files.
       render: text

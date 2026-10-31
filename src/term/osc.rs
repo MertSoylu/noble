@@ -3,6 +3,7 @@
 
 use super::blocks::{CommandBlock, MAX_BLOCKS, retain_live};
 use super::colors::{OscScan, SCHEME_NOTICES, SharedColors, Terminator};
+use super::input::KITTY_DISAMBIGUATE;
 use super::pane::{screen_base, span_text};
 use crate::util;
 
@@ -59,6 +60,32 @@ pub struct Callbacks {
     sync_timeout: Option<std::time::Duration>,
     /// The last chunk of output ended in ESC, so a `c` at the start of the next one is a full reset (RIS).
     pub(super) ended_in_esc: bool,
+    /// The kitty keyboard protocol flags a program pushed (`CSI > f u`): one stack per screen, index 0 the main
+    /// screen and 1 the alternate one (`kitty_stack`). Only the flags NOBLE supports are stored.
+    kitty: [Vec<u8>; 2],
+    /// The program asked for the kitty flags (`CSI ? u`) and has not pushed or set any since, on either screen. A
+    /// program that asked and then sends nothing is one whose answer may have been lost (Claude Code's first-run
+    /// folder-trust dialog did lose it once in six starts), so `term::input::encode_key` keeps its Shift+Enter in
+    /// the CSI u form for it. Set by the query, cleared by a push or a set, by a reset and by the prompt mark; a pop
+    /// leaves it alone (see `kitty_asked`).
+    kitty_asked: bool,
+    /// win32-input-mode (`CSI ? 9001 h`, see `WIN32_INPUT`) is on. ConPTY sets it once at startup and its own
+    /// input parser stays in that mode, so a full reset (`reset_modes`) does not clear it: a program's reset must
+    /// not take the console records away from the keys it reads. A program's own `CSI ? 9001 l` does turn it off.
+    win32_input: bool,
+}
+
+/// win32-input-mode (DECSET 9001): the program gets each key as a Windows console input record, `CSI Vk ; Sc ; Uc ;
+/// Kd ; Cs ; Rc _` (`term::input::win32_key`). ConPTY turns it on for NOBLE at startup, for the programs that read
+/// console input records. Not tracked in `TRACKED_MODES`: it is not reset by RIS (see `Callbacks::win32_input`).
+pub const WIN32_INPUT: u16 = 9001;
+
+/// Deepest kitty push stack per screen; a push onto a full stack drops the oldest entry.
+const KITTY_MAX_DEPTH: usize = 16;
+
+/// The kitty flags NOBLE supports, as stored: a flag it does not support is masked off.
+fn kitty_mask(flags: u16) -> u8 {
+    (flags & u16::from(KITTY_DISAMBIGUATE)) as u8
 }
 
 /// Synchronized output (DECSET 2026): the program brackets a frame in `CSI ? 2026 h` … `l`, and the terminal shows
@@ -91,6 +118,10 @@ impl Callbacks {
         self.title.clear();
         // The program that reported its progress has exited with the prompt (a bar left behind would read as busy).
         self.store_progress(None);
+        // A program that exited without popping its keyboard flags must not leave the shell with CSI u keys, and the
+        // ask that went with it must not make the shell's Shift+Enter a CSI u either (`kitty_asked`).
+        self.kitty = Default::default();
+        self.kitty_asked = false;
     }
 }
 
@@ -324,9 +355,54 @@ impl crate::vt100::Callbacks for Callbacks {
             // DECRQM for ANSI modes: `CSI Ps $ p` → `CSI Ps ; Pm $ y`. NOBLE tracks no ANSI mode yet, so none is
             // recognized.
             (Some(b'$'), None, 'p') => self.responses.extend_from_slice(format!("\x1b[{first};0$y").as_bytes()),
+            // Kitty keyboard protocol, on the stack of the screen that is shown now: push (`CSI > f u`), pop
+            // (`CSI < n u`), set (`CSI = f ; m u`) and query (`CSI ? u`, answered even with nothing pushed). A push or a
+            // set on either screen means the program manages the protocol itself, so it clears `kitty_asked`.
+            (Some(b'>'), None, 'u') => {
+                self.kitty_asked = false;
+                let stack = self.kitty_stack(screen.alternate_screen());
+                if stack.len() == KITTY_MAX_DEPTH {
+                    stack.remove(0);
+                }
+                stack.push(kitty_mask(first));
+            }
+            (Some(b'<'), None, 'u') => {
+                let n = usize::from(first.max(1));
+                let stack = self.kitty_stack(screen.alternate_screen());
+                let keep = stack.len().saturating_sub(n);
+                stack.truncate(keep);
+            }
+            (Some(b'='), None, 'u') => {
+                self.kitty_asked = false;
+                let mode = params.get(1).and_then(|p| p.first()).copied().unwrap_or(1);
+                let flags = kitty_mask(first);
+                let stack = self.kitty_stack(screen.alternate_screen());
+                let top = stack.last().copied().unwrap_or(0);
+                let next = match mode {
+                    1 => Some(flags),
+                    2 => Some(top | flags),
+                    3 => Some(top & !flags),
+                    // Any other mode changes nothing, not even an empty stack.
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    match stack.last_mut() {
+                        Some(top) => *top = next,
+                        None => stack.push(next),
+                    }
+                }
+            }
+            (Some(b'?'), None, 'u') => {
+                self.kitty_asked = true;
+                let flags = self.kitty_flags(screen.alternate_screen());
+                self.responses.extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+            }
             // Set and reset of a tracked private mode. vt100 hands over each unhandled mode of a sequence with the
             // whole parameter list, so the modes that are not tracked are skipped here.
             (Some(b'?'), None, 'h' | 'l') => {
+                if params.iter().any(|p| p.first() == Some(&WIN32_INPUT)) {
+                    self.win32_input = c == 'h';
+                }
                 for mode in params.iter().filter_map(|p| p.first()).filter(|m| TRACKED_MODES.contains(*m)) {
                     if c == 'h' {
                         self.tracked_modes.insert(*mode);
@@ -384,11 +460,39 @@ impl Callbacks {
     pub fn reset_modes(&mut self) {
         self.tracked_modes.clear();
         self.sync_since = None;
+        self.kitty = Default::default();
+        self.kitty_asked = false;
+        // `win32_input` is deliberately kept: ConPTY asked for it once at startup, not the program (see the field).
     }
 
     /// Whether a `TRACKED_MODES` mode is set (`CSI ? Ps h` seen and not reset since).
     pub fn mode_on(&self, mode: u16) -> bool {
         self.tracked_modes.contains(&mode)
+    }
+
+    /// Whether win32-input-mode (`WIN32_INPUT`) is on: the keys `term::input::encode_key` sends go as console input
+    /// records (`KeyMode::win32`). Set by ConPTY at startup; a program's `CSI ? 9001 l` turns it off.
+    pub fn win32_input(&self) -> bool {
+        self.win32_input
+    }
+
+    /// The stack of the main (`false`) or the alternate (`true`) screen.
+    fn kitty_stack(&mut self, alternate: bool) -> &mut Vec<u8> {
+        &mut self.kitty[usize::from(alternate)]
+    }
+
+    /// The kitty keyboard flags in effect on a screen: the top of its stack, 0 when nothing was pushed. Only the
+    /// flags NOBLE supports can be set, so this is what the program may rely on (`term::input::KeyMode`).
+    pub fn kitty_flags(&self, alternate: bool) -> u8 {
+        self.kitty[usize::from(alternate)].last().copied().unwrap_or(0)
+    }
+
+    /// Whether the program asked for the kitty flags (`CSI ? u`) and has neither pushed nor set them since, on either
+    /// screen (see the field). It says NOBLE's answer may not have reached a program that parses the protocol, so
+    /// `term::input::encode_key` sends Shift+Enter as `CSI 13 ; 2 u` when the flag 1 is off (a plain `\r` would
+    /// submit a prompt).
+    pub fn kitty_asked(&self) -> bool {
+        self.kitty_asked
     }
 
     /// Whether a private DEC mode is set, for DECRQM. `None` when NOBLE does not recognize the mode.
@@ -410,6 +514,9 @@ impl Callbacks {
             1006 => encoding == MouseProtocolEncoding::Sgr,
             47 | 1049 => screen.alternate_screen(),
             2004 => screen.bracketed_paste(),
+            // Windows: ConPTY turns the mode on and NOBLE answers the state it has. Elsewhere no PTY turns it on, so
+            // the mode is not recognized (falls to the `None` arm): a program that probes it does not switch it on.
+            WIN32_INPUT if cfg!(windows) => self.win32_input,
             _ if TRACKED_MODES.contains(&mode) => self.mode_on(mode),
             _ => return None,
         })
@@ -989,5 +1096,245 @@ mod tests {
         p.callbacks_mut().progress_changed = false;
         p.process(b"\x1b]9;4;0\x07");
         assert!(!p.callbacks().progress_changed, "clearing nothing changes nothing");
+    }
+
+    /// Kitty keyboard protocol: a push is the active flags, a pop removes the top, and the query is answered even
+    /// when nothing was pushed. A pop past the bottom empties the stack and never panics.
+    #[test]
+    fn kitty_push_pop_and_query() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "nothing pushed: still answered");
+        p.process(b"\x1b[>1u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u");
+        p.process(b"\x1b[>0u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "the top entry is the active one");
+        p.process(b"\x1b[<u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "a pop without a count pops one");
+        p.process(b"\x1b[<0u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "a zero count pops one too");
+        p.process(b"\x1b[>1u\x1b[>1u\x1b[<9u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "popping more than present empties it");
+        p.process(b"\x1b[<u");
+        assert!(p.callbacks().kitty[0].is_empty());
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+    }
+
+    /// Only the flags NOBLE supports are stored, so a query reports what NOBLE does: push 5 reports 1.
+    #[test]
+    fn kitty_flags_are_masked_to_the_supported_ones() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[>5u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "push 5 reports 1");
+        p.process(b"\x1b[>2u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+        p.process(b"\x1b[=65535u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "replace with all bits reports 1");
+        p.process(b"\x1b[>65534u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "65534 has no supported bit");
+    }
+
+    /// `CSI = f ; m u`: mode 1 (or none) replaces the top entry, 2 sets its bits, 3 clears them. Any other mode
+    /// changes nothing.
+    #[test]
+    fn kitty_set_replaces_sets_and_clears_the_top() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[>0u\x1b[=1u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "no mode is replace");
+        p.process(b"\x1b[=0;2u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "set no bits");
+        p.process(b"\x1b[=1;3u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "clear bit 1");
+        p.process(b"\x1b[=1;2u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "set bit 1");
+        p.process(b"\x1b[=0;1u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "replace with 0");
+        p.process(b"\x1b[=1;4u\x1b[=1;9u\x1b[=1;0u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "other modes change nothing");
+        assert_eq!(p.callbacks().kitty[0].len(), 1, "and push nothing");
+    }
+
+    /// On an empty stack a set pushes its result, one entry; an ignored mode pushes nothing.
+    #[test]
+    fn kitty_set_on_an_empty_stack_pushes_the_result() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[=1;2u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u");
+        assert_eq!(p.callbacks().kitty[0].len(), 1);
+        p.process(b"\x1b[<u");
+        p.process(b"\x1b[=1;3u");
+        assert_eq!(p.callbacks().kitty[0].len(), 1, "a clear on empty pushes the (empty) result");
+        p.process(b"\x1b[<u");
+        p.process(b"\x1b[=1;4u");
+        assert!(p.callbacks().kitty[0].is_empty(), "an ignored mode on an empty stack pushes nothing");
+    }
+
+    /// Each screen has its own stack: a push on the alternate screen leaves the main one at 0, and the main stack
+    /// is active again after the alternate screen is left.
+    #[test]
+    fn kitty_stacks_are_per_screen() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?1049h\x1b[>1u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "pushed on the alternate screen");
+        p.process(b"\x1b[?1049l");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u", "the main stack is still empty");
+        p.process(b"\x1b[>1u");
+        p.process(b"\x1b[?1049h");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "the alternate stack kept its entry");
+        p.process(b"\x1b[<u\x1b[?1049l");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u", "a pop on the alternate screen leaves main alone");
+        p.process(b"\x1b[<u");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+    }
+
+    /// The stack keeps 16 entries: a push past that drops the oldest, so the bottom 1 is gone after 17 pushes.
+    #[test]
+    fn kitty_stack_keeps_the_newest_sixteen() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[>1u");
+        p.process(&b"\x1b[>0u".repeat(16));
+        assert_eq!(p.callbacks().kitty[0].len(), 16);
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+        p.process(b"\x1b[<16u");
+        assert!(p.callbacks().kitty[0].is_empty(), "the oldest entry, the 1, was dropped by the cap");
+    }
+
+    /// A full reset (RIS, as `pane::feed` sees it) and the shell's prompt mark both clear the stacks of both
+    /// screens: a program that exited without popping leaves nothing behind.
+    #[test]
+    fn kitty_stacks_are_cleared_by_a_reset_and_by_the_prompt() {
+        let mut p = parser(10, 40);
+        let push_both = b"\x1b[>1u\x1b[?1049h\x1b[>1u\x1b[?1049l";
+        p.process(push_both);
+        crate::term::pane::feed(&mut p, b"\x1bc");
+        assert!(p.callbacks().kitty[0].is_empty() && p.callbacks().kitty[1].is_empty(), "RIS");
+        p.process(push_both);
+        p.process(b"\x1b]133;A\x07");
+        assert!(p.callbacks().kitty[0].is_empty() && p.callbacks().kitty[1].is_empty(), "the prompt mark");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+    }
+
+    /// Sequences that only look like kitty ones (modifyOtherKeys, a CSI u with no intermediate) push nothing.
+    #[test]
+    fn kitty_ignores_other_sequences() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[>4;2m\x1b[1u");
+        assert!(p.callbacks().kitty[0].is_empty() && p.callbacks().kitty[1].is_empty());
+        assert!(!p.callbacks().kitty_asked(), "and a CSI u that is not a query does not ask");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+    }
+
+    /// The query `CSI ? u` sets `kitty_asked`, whether or not anything is pushed; the answer is unchanged.
+    #[test]
+    fn kitty_query_sets_asked() {
+        let mut p = parser(10, 40);
+        assert!(!p.callbacks().kitty_asked());
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?0u");
+        assert!(p.callbacks().kitty_asked(), "a query with nothing pushed asks");
+        p.process(b"\x1b[>1u");
+        assert!(!p.callbacks().kitty_asked(), "the push below cleared it");
+        assert_eq!(answer(&mut p, b"\x1b[?u"), "\x1b[?1u");
+        assert!(p.callbacks().kitty_asked(), "and a query with flag 1 pushed asks again");
+    }
+
+    /// A push clears `kitty_asked` even when the masked flags are 0: the program manages the protocol itself.
+    #[test]
+    fn kitty_push_or_set_clears_asked_on_either_screen() {
+        let mut p = parser(10, 40);
+        let sequences: [&[u8]; 8] = [
+            b"\x1b[>1u",
+            b"\x1b[>0u",
+            b"\x1b[>5u",
+            b"\x1b[=1;2u",
+            b"\x1b[=0;3u",
+            b"\x1b[=1;9u",
+            b"\x1b[?1049h\x1b[>1u\x1b[?1049l",
+            b"\x1b[?1049h\x1b[=0;1u\x1b[?1049l",
+        ];
+        for sequence in sequences {
+            p.process(b"\x1b[?u");
+            assert!(p.callbacks().kitty_asked());
+            p.process(sequence);
+            assert!(!p.callbacks().kitty_asked(), "{sequence:?} clears it");
+        }
+    }
+
+    /// A pop does not set `kitty_asked`, and it leaves an ask that is already there alone.
+    #[test]
+    fn kitty_pop_neither_sets_nor_clears_asked() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[<u\x1b[<3u");
+        assert!(!p.callbacks().kitty_asked(), "a pop alone does not ask");
+        p.process(b"\x1b[?u\x1b[<u");
+        assert!(p.callbacks().kitty_asked(), "a pop after the query keeps the ask");
+    }
+
+    /// The ask does not depend on the shown screen: a query on the alternate screen is seen on the main one, and a
+    /// push on the main screen clears it on the alternate one.
+    #[test]
+    fn kitty_asked_is_independent_of_the_shown_screen() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?1049h\x1b[?u\x1b[?1049l");
+        assert!(p.callbacks().kitty_asked(), "asked on the alternate screen, shown main");
+        p.process(b"\x1b[?1049h");
+        assert!(p.callbacks().kitty_asked(), "and still asked back on the alternate screen");
+        p.process(b"\x1b[?1049l\x1b[>0u");
+        assert!(!p.callbacks().kitty_asked(), "a push on the main screen clears it everywhere");
+        p.process(b"\x1b[?1049h");
+        assert!(!p.callbacks().kitty_asked());
+    }
+
+    /// RIS and the prompt mark both clear `kitty_asked`, as they clear the stacks.
+    #[test]
+    fn kitty_asked_is_cleared_by_a_reset_and_by_the_prompt() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?u");
+        crate::term::pane::feed(&mut p, b"\x1bc");
+        assert!(!p.callbacks().kitty_asked(), "RIS");
+        p.process(b"\x1b[?u");
+        p.process(b"\x1b]133;A\x07");
+        assert!(!p.callbacks().kitty_asked(), "the prompt mark");
+    }
+
+    /// The DECRQM answer for DECSET 9001. On Windows the mode is answered: 1 on, 2 off. Elsewhere nothing turns it on,
+    /// so NOBLE does not recognize it (0) and a program that probes it does not switch it on.
+    fn win32_reply(on: bool) -> &'static str {
+        match (cfg!(windows), on) {
+            (true, true) => "\x1b[?9001;1$y",
+            (true, false) => "\x1b[?9001;2$y",
+            (false, _) => "\x1b[?9001;0$y",
+        }
+    }
+
+    /// win32-input-mode (DECSET 9001) is set and reset by `h` and `l` (also among other modes of one sequence), and
+    /// DECRQM answers it on Windows (see `win32_reply`).
+    #[test]
+    fn win32_input_mode_is_set_reset_and_answered() {
+        let mut p = parser(10, 40);
+        assert_eq!(answer(&mut p, b"\x1b[?9001$p"), win32_reply(false), "supported, off");
+        p.process(b"\x1b[?9001h");
+        assert!(p.callbacks().win32_input());
+        assert_eq!(answer(&mut p, b"\x1b[?9001$p"), win32_reply(true));
+        p.process(b"\x1b[?9001l");
+        assert!(!p.callbacks().win32_input());
+        assert_eq!(answer(&mut p, b"\x1b[?9001$p"), win32_reply(false));
+        p.process(b"\x1b[?1004;9001h");
+        assert!(p.callbacks().win32_input() && p.callbacks().mode_on(FOCUS_REPORTS));
+        p.process(b"\x1b[?1004;9001l");
+        assert!(!p.callbacks().win32_input() && !p.callbacks().mode_on(FOCUS_REPORTS));
+    }
+
+    /// The mode is not one of the modes a reset clears: a full reset (RIS, as `pane::feed` sees it) keeps it, while the
+    /// other tracked modes are cleared. ConPTY sets it once at startup, so a program's reset must not take it away.
+    #[test]
+    fn win32_input_mode_survives_a_reset() {
+        let mut p = parser(10, 40);
+        p.process(b"\x1b[?9001h\x1b[?1004h");
+        crate::term::pane::feed(&mut p, b"\x1bc");
+        assert!(p.callbacks().win32_input(), "RIS keeps it");
+        assert!(!p.callbacks().mode_on(FOCUS_REPORTS), "RIS still clears the other tracked modes");
+        p.callbacks_mut().reset_modes();
+        assert!(p.callbacks().win32_input(), "the end of the program keeps it too");
+        p.process(b"\x1b[?9001l");
+        assert!(!p.callbacks().win32_input());
     }
 }
