@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-31
+
 ### Added
 - Kitty keyboard protocol in panes: a program that pushes flags (`CSI > f u`) gets Esc, Ctrl and Shift+Enter as CSI u
   keys. NOBLE keeps the pushed flags per screen (the main one and the alternate one), up to 16 deep, and supports only
@@ -860,7 +862,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.3...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.13.0...HEAD
+[1.13.0]: https://github.com/MertSoylu/noble/compare/v1.12.3...v1.13.0
 [1.12.3]: https://github.com/MertSoylu/noble/compare/v1.12.2...v1.12.3
 [1.12.2]: https://github.com/MertSoylu/noble/compare/v1.12.1...v1.12.2
 [1.12.1]: https://github.com/MertSoylu/noble/compare/v1.12.0...v1.12.1
