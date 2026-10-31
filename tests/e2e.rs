@@ -676,9 +676,8 @@ fn keyboard_flags_are_pushed_at_startup_and_popped_before_exit() {
     h.wait_for("WELCOME TO NOBLE", 20);
     h.send(b"\x1b");
     h.wait_for("Projects", 20);
+    // No pane is open, so q quits without the confirmation window (`request_quit`).
     h.send(b"q");
-    h.wait_for("QUIT NOBLE", 5);
-    h.send(b"y");
     assert!(h.wait_exit(15), "noble did not exit");
     let leave = h.wait_raw(b"\x1b[?1049l", 5);
     let popped = h.wait_raw(b"\x1b[<1u", 5);
