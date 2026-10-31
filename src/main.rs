@@ -3,10 +3,11 @@
 use std::io::{Write, stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, PopKeyboardEnhancementFlags};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
@@ -19,6 +20,10 @@ use noble::event::AppEvent;
 const FRAME: Duration = Duration::from_millis(16);
 /// Longest sleep without events: config and hook checks run on this interval.
 const IDLE_TICK: Duration = Duration::from_secs(2);
+/// `noble.log` larger than this is moved to `noble.log.1` at startup (`util::rotate_log`).
+const LOG_ROTATE_SIZE: u64 = 256 * 1024;
+/// The panic hook stops appending to `noble.log` at this size, so a run that panics in a loop cannot fill the disk.
+const LOG_HARD_CAP: u64 = 1024 * 1024;
 
 fn usage() {
     println!(
@@ -41,12 +46,21 @@ fn usage() {
     );
 }
 
+/// Set when `enter_terminal` pushed the keyboard flags (Unix only; Windows never sets it). `restore_terminal` swaps it
+/// back to false, so a second restore (the panic hook, then `main`) pops nothing more.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut out = stdout();
     #[cfg(not(windows))]
     let _ = execute!(out, crossterm::event::DisableBracketedPaste);
     let _ = execute!(out, crossterm::event::DisableFocusChange);
+    // Popped before the alternate screen is left: the kitty stack is kept per screen and NOBLE pushed on the
+    // alternate one. Windows pushes nothing (`enter_terminal`), so the flag stays false there and nothing is popped.
+    if KEYBOARD_PUSHED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, crossterm::cursor::Show);
     // The outer terminal: the progress report is cleared and the title it had before NOBLE comes back.
     let _ = out.write_all(noble::outer::exit_sequences(outer_progress()).as_bytes());
@@ -143,6 +157,40 @@ fn main() -> anyhow::Result<()> {
     };
     let paths = Paths::resolve(config_override).ok_or_else(no_folder_error)?;
 
+    // Restore the terminal if the main thread panics; background panics are
+    // written only to the log file so they never corrupt the screen.
+    let default_hook = std::panic::take_hook();
+    let log_file = paths.data_file("noble.log");
+    // Still single-threaded here, before the hook is replaced: an oversized log from an earlier run moves aside.
+    noble::util::rotate_log(&log_file, LOG_ROTATE_SIZE);
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            restore_terminal();
+            // Background commands end now if the lock is free; otherwise the unwinding reaches `run`.
+            noble::ai::kill_background_children_if_free();
+            default_hook(info);
+        } else {
+            // At the hard cap nothing more is appended: a run that panics in a loop cannot fill the disk.
+            let thread = std::thread::current().name().unwrap_or("?").to_string();
+            let line = format!("[{}] panic in thread '{thread}': {info}", chrono::Local::now().format("%F %T"));
+            noble::util::append_log_line(&log_file, LOG_HARD_CAP, &line);
+        }
+    }));
+
+    // After the hook, so a panic here restores too. A failed setup still gives the terminal back (raw mode and the
+    // alternate screen may already be on).
+    if let Err(e) = enter_terminal() {
+        restore_terminal();
+        return Err(e.into());
+    }
+    let result = run(paths, no_boot, start_dir);
+    restore_terminal();
+    result
+}
+
+/// Puts the terminal in NOBLE's mode: raw input, the alternate screen, mouse and focus reports, the title stack and
+/// bracketed paste. An error leaves the caller to restore the terminal.
+fn enter_terminal() -> std::io::Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(
@@ -152,6 +200,26 @@ fn main() -> anyhow::Result<()> {
         // Focus reports (FocusGained / FocusLost) let notifications skip a window that is in front.
         crossterm::event::EnableFocusChange,
     )?;
+    // Unix: the keyboard flags go on after the alternate screen is up and before the input thread reads the terminal
+    // (the query below reads the terminal's answer itself). Windows: nothing is pushed, since the console API already
+    // reports Shift and Ctrl with Enter and crossterm's enhancement flags are Unsupported there.
+    #[cfg(not(windows))]
+    {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        // `TERM=dumb` answers neither query, and crossterm would wait out its two-second timeout for an answer that
+        // never comes, so it is not asked there.
+        let dumb = std::env::var_os("TERM").is_some_and(|term| term == "dumb");
+        // The query gets `CSI ? u` or the device attributes answer; a terminal that gives neither, or an error,
+        // pushes nothing and startup goes on.
+        let supported = !dumb && matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+        // Disambiguated escape codes: Shift+Enter, Esc and the Ctrl and Alt keys arrive as CSI u sequences. Report
+        // alternate keys: a shifted key also carries the character it types, so Alt+! is not read as Alt+1 with Shift.
+        let flags =
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+        if supported && execute!(out, PushKeyboardEnhancementFlags(flags)).is_ok() {
+            KEYBOARD_PUSHED.store(true, Ordering::SeqCst);
+        }
+    }
     // The title the terminal has now goes on its title stack; `restore_terminal` pops it. From the first frame on,
     // NOBLE sets the title itself (`App::outer_sequences`: "NOBLE", or "NOBLE · ◆ N" while agents wait).
     let _ = out.write_all(noble::outer::SAVE_TITLE.as_bytes());
@@ -161,30 +229,7 @@ fn main() -> anyhow::Result<()> {
     // into a paste (`event::coalesce_paste`).
     #[cfg(not(windows))]
     execute!(out, crossterm::event::EnableBracketedPaste)?;
-    // Restore the terminal if the main thread panics; background panics are
-    // written only to the log file so they never corrupt the screen.
-    let default_hook = std::panic::take_hook();
-    let log_file = paths.data_file("noble.log");
-    std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().name() == Some("main") {
-            restore_terminal();
-            // Background commands end now if the lock is free; otherwise the unwinding reaches `run`.
-            noble::ai::kill_background_children_if_free();
-            default_hook(info);
-        } else {
-            if let Some(dir) = log_file.parent() {
-                let _ = noble::util::create_private_dir(dir);
-            }
-            if let Ok(mut f) = noble::util::private_file_options().create(true).append(true).open(&log_file) {
-                let thread = std::thread::current().name().unwrap_or("?").to_string();
-                let _ = writeln!(f, "[{}] panic in thread '{thread}': {info}", chrono::Local::now().format("%F %T"));
-            }
-        }
-    }));
-
-    let result = run(paths, no_boot, start_dir);
-    restore_terminal();
-    result
+    Ok(())
 }
 
 fn run(paths: Paths, no_boot: bool, start_dir: Option<PathBuf>) -> anyhow::Result<()> {

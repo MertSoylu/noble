@@ -13,6 +13,29 @@ pub struct Chord {
     pub mods: KeyModifiers,
 }
 
+/// The key a legacy terminal sends for the same press, for NOBLE's own screens and bindings. With the kitty flags NOBLE
+/// pushes (`main::enter_terminal`), Ctrl+i, Ctrl+m and Ctrl+[ arrive as `Char` with CONTROL, where legacy input sent
+/// Tab, Enter and Esc (the same bytes), so they get those keys back and match as they always did. Ctrl+h needs no
+/// change: legacy crossterm reads 0x08 as `Char('h')` with CONTROL too. A pane keeps the event as it came (the kitty
+/// form is told apart by `term::input::encode_key`), so this is applied to NOBLE's input only.
+pub fn legacy_key(mut ev: KeyEvent) -> KeyEvent {
+    // Shift is dropped as legacy input drops it. Alt keeps its meaning, and AltGr (Ctrl+Alt) is never folded.
+    let ctrl_only = ev.modifiers.contains(KeyModifiers::CONTROL)
+        && !ev.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META);
+    if !ctrl_only {
+        return ev;
+    }
+    let code = match ev.code {
+        KeyCode::Char('i' | 'I') => KeyCode::Tab,
+        KeyCode::Char('m' | 'M') => KeyCode::Enter,
+        KeyCode::Char('[') => KeyCode::Esc,
+        _ => return ev,
+    };
+    ev.code = code;
+    ev.modifiers = KeyModifiers::NONE;
+    ev
+}
+
 impl Chord {
     pub fn new(code: KeyCode, mods: KeyModifiers) -> Self {
         Self { code, mods }.normalized()
@@ -24,16 +47,25 @@ impl Chord {
 
     /// For character keys the SHIFT info is carried by the character itself
     /// ("A", "|"), so it is dropped when matching.
+    ///
+    /// The same key has two shapes. Legacy input sends Ctrl+C as `Char('C')`, Ctrl+Shift+C as `Char('C')` with
+    /// CONTROL|SHIFT, and Alt+Shift+x as `ESC X`. The kitty protocol sends `Char('c')` with CONTROL|SHIFT
+    /// (`CSI 99 ; 6 u`) and `Char('x')` with ALT|SHIFT (`CSI 120 ; 4 u`). Both shapes give one chord: with Ctrl the
+    /// letter is lower case (Ctrl+Shift is Ctrl), and with Alt and Shift it is upper case, as legacy input has it.
     fn normalized(mut self) -> Self {
         self.mods &= KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT;
         if let KeyCode::Char(c) = self.code {
+            let shift = self.mods.contains(KeyModifiers::SHIFT);
             self.mods.remove(KeyModifiers::SHIFT);
             // A symbol produced with AltGr (Ctrl+Alt) counts as a plain character.
             if crate::term::input::is_altgr_char(self.mods, c) {
                 self.mods = KeyModifiers::NONE;
             }
-            if self.mods.contains(KeyModifiers::CONTROL) && c.is_ascii_uppercase() {
+            let ctrl = self.mods.contains(KeyModifiers::CONTROL);
+            if ctrl && c.is_ascii_uppercase() {
                 self.code = KeyCode::Char(c.to_ascii_lowercase());
+            } else if !ctrl && shift && self.mods.contains(KeyModifiers::ALT) && c.is_ascii_lowercase() {
+                self.code = KeyCode::Char(c.to_ascii_uppercase());
             }
         }
         if self.code == KeyCode::Tab && self.mods.contains(KeyModifiers::SHIFT) {
@@ -773,6 +805,79 @@ mod tests {
         assert_eq!(Chord::parse("f5"), Some(Chord::new(KeyCode::F(5), KeyModifiers::NONE)));
         assert_eq!(Chord::parse("hyper+x"), None);
         assert_eq!(Chord::parse("abc"), None);
+    }
+
+    /// The keys arrive in two shapes: legacy input (`Char('C')`, `ESC x`, a bare CR) and the kitty protocol the outer
+    /// terminal sends once NOBLE pushes `CSI > 1 u` (`CSI 99 ; 6 u` = `Char('c')` with CONTROL|SHIFT, `CSI 27 u`,
+    /// `CSI 120 ; 4 u`, `CSI 13 ; 2 u`). Each pair must be one chord, and Shift+Enter must stay its own chord.
+    #[test]
+    fn from_event_reads_legacy_and_kitty_shapes_alike() {
+        let (ctrl, alt, shift) = (KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SHIFT);
+        let key = |code, mods| Chord::from_event(&KeyEvent::new(code, mods));
+        // Ctrl+C, and Ctrl+Shift+C, which the default keymap treats as the same chord as Ctrl+C.
+        for legacy_or_kitty in [
+            key(KeyCode::Char('c'), ctrl),
+            key(KeyCode::Char('C'), ctrl),
+            key(KeyCode::Char('c'), ctrl | shift),
+            key(KeyCode::Char('C'), ctrl | shift),
+        ] {
+            assert_eq!(legacy_or_kitty, c("ctrl+c"));
+        }
+        // The prefix (ctrl+a) comes both ways too: `CSI 97 ; 5 u` and `CSI 97 ; 6 u` included.
+        let prefix = c("ctrl+a");
+        assert_eq!(key(KeyCode::Char('a'), ctrl), prefix);
+        assert_eq!(key(KeyCode::Char('a'), ctrl | shift), prefix);
+        assert_eq!(key(KeyCode::Char('A'), ctrl | shift), prefix);
+        // Esc is the same event from `0x1b` and from `CSI 27 u`.
+        assert_eq!(key(KeyCode::Esc, KeyModifiers::NONE), c("esc"));
+        // Alt+x: `ESC x` (legacy) and `CSI 120 ; 3 u` (kitty) are the same chord.
+        assert_eq!(key(KeyCode::Char('x'), alt), c("alt+x"));
+        assert_eq!(c("alt+x").config_name(), "alt+x");
+        // Alt+Shift+x: `ESC X` (legacy) and `CSI 120 ; 4 u` (kitty, lower case with SHIFT) are one chord, the one
+        // "alt+X" spells, and it is not alt+x.
+        for alt_shift_x in
+            [key(KeyCode::Char('X'), alt), key(KeyCode::Char('x'), alt | shift), key(KeyCode::Char('X'), alt | shift)]
+        {
+            assert_eq!(alt_shift_x, c("alt+X"));
+            assert_eq!(alt_shift_x.config_name(), "alt+X");
+        }
+        assert_ne!(c("alt+x"), c("alt+X"));
+        // With Ctrl too, the letter is lower case as Ctrl+letter always is.
+        let ctrl_alt = ctrl | alt;
+        assert_eq!(key(KeyCode::Char('X'), ctrl_alt | shift), c("ctrl+alt+x"));
+        assert_eq!(key(KeyCode::Char('x'), ctrl_alt | shift), c("ctrl+alt+x"));
+        // Shift+Enter is only reported by the kitty shape (`CSI 13 ; 2 u`); legacy input sends the plain Enter.
+        assert_eq!(key(KeyCode::Enter, shift), c("shift+enter"));
+        assert_ne!(key(KeyCode::Enter, shift), key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::NONE), c("enter"));
+    }
+
+    /// Ctrl+i, Ctrl+m and Ctrl+[ come from the kitty form as `Char` with CONTROL; `legacy_key` gives back the keys
+    /// legacy input sent (Tab, Enter, Esc), so the chords match as before. Other keys, Alt and AltGr are untouched.
+    #[test]
+    fn legacy_key_gives_back_tab_enter_and_esc_for_ctrl_i_m_and_bracket() {
+        let ev = |code, mods| KeyEvent::new(code, mods);
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(legacy_key(ev(KeyCode::Char('i'), ctrl)).code, KeyCode::Tab);
+        assert_eq!(legacy_key(ev(KeyCode::Char('I'), ctrl | KeyModifiers::SHIFT)).code, KeyCode::Tab);
+        assert_eq!(legacy_key(ev(KeyCode::Char('m'), ctrl)).code, KeyCode::Enter);
+        assert_eq!(legacy_key(ev(KeyCode::Char('['), ctrl)).code, KeyCode::Esc);
+        assert_eq!(legacy_key(ev(KeyCode::Char('i'), ctrl)).modifiers, KeyModifiers::NONE);
+        // Ctrl+h stays Ctrl+h (legacy crossterm reads 0x08 as Char('h') with CONTROL).
+        assert_eq!(legacy_key(ev(KeyCode::Char('h'), ctrl)), ev(KeyCode::Char('h'), ctrl));
+        // Plain keys, Alt+i and the AltGr pair (Ctrl+Alt) are not changed.
+        assert_eq!(legacy_key(ev(KeyCode::Char('i'), KeyModifiers::NONE)), ev(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(legacy_key(ev(KeyCode::Char('i'), KeyModifiers::ALT)), ev(KeyCode::Char('i'), KeyModifiers::ALT));
+        assert_eq!(legacy_key(ev(KeyCode::Char('i'), ctrl | KeyModifiers::ALT)).code, KeyCode::Char('i'));
+        // The folded key is the chord the legacy key gives.
+        assert_eq!(Chord::from_event(&legacy_key(ev(KeyCode::Char('m'), ctrl))), c("enter"));
+    }
+
+    /// Alt+! (`CSI 49 : 33 ; 4 u` with the alternate-keys flag) is `Char('!')` with ALT, the chord "alt+!" that legacy
+    /// input gives as `ESC !`.
+    #[test]
+    fn alt_symbol_chord_is_the_same_in_both_shapes() {
+        assert_eq!(Chord::from_event(&KeyEvent::new(KeyCode::Char('!'), KeyModifiers::ALT)), c("alt+!"));
     }
 
     #[test]

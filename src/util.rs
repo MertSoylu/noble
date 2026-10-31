@@ -377,6 +377,35 @@ pub fn private_file_options() -> std::fs::OpenOptions {
     options
 }
 
+/// Moves `path` to `path` + ".1" when it is larger than `max` bytes, replacing an older ".1" (`store::replace_file`
+/// renames over it on every platform). The next file at `path` starts empty. A missing or smaller file is left
+/// alone, and every error is ignored: a log that cannot be moved is no reason to fail a start.
+pub fn rotate_log(path: &Path, max: u64) {
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if meta.len() <= max {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let _ = crate::store::replace_file(path, Path::new(&rotated));
+}
+
+/// Appends `line` and a newline to the log at `path`, creating the folder and the file (0600 on Unix) when they are
+/// missing. Nothing is written once the file has reached `cap` bytes, so a run that panics in a loop cannot fill the
+/// disk. Errors are ignored: this runs inside the panic hook, and a log line is never a reason to fail.
+pub fn append_log_line(path: &Path, cap: u64, line: &str) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() >= cap) {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = create_private_dir(dir);
+    }
+    if let Ok(mut f) = private_file_options().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Finds an executable on PATH (checks PATHEXT on Windows).
 pub fn which(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
@@ -597,6 +626,74 @@ mod tests {
             assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A fresh folder for a log rotation test; named after the test, since the tests run in parallel.
+    fn log_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("noble-rotate-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rotate_log_leaves_a_log_up_to_the_limit_alone() {
+        let dir = log_test_dir("small");
+        let log = dir.join("noble.log");
+        std::fs::write(&log, "0123456789").unwrap();
+        // Exactly `max` bytes is not larger than `max`.
+        rotate_log(&log, 10);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "0123456789");
+        assert!(!dir.join("noble.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_moves_a_big_log_to_dot_one() {
+        let dir = log_test_dir("big");
+        let log = dir.join("noble.log");
+        std::fs::write(&log, "x".repeat(200)).unwrap();
+        rotate_log(&log, 100);
+        assert!(!log.exists(), "the log must start again empty or absent");
+        assert_eq!(std::fs::read_to_string(dir.join("noble.log.1")).unwrap(), "x".repeat(200));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_replaces_an_older_dot_one() {
+        let dir = log_test_dir("replace");
+        let log = dir.join("noble.log");
+        std::fs::write(dir.join("noble.log.1"), "older rotated text").unwrap();
+        std::fs::write(&log, "the newer log, larger than the limit").unwrap();
+        rotate_log(&log, 10);
+        assert!(!log.exists());
+        assert_eq!(std::fs::read_to_string(dir.join("noble.log.1")).unwrap(), "the newer log, larger than the limit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_log_line_stops_at_the_cap() {
+        let dir = log_test_dir("append");
+        // A folder that does not exist yet is created.
+        let log = dir.join("logs").join("noble.log");
+        append_log_line(&log, 40, "first line");
+        append_log_line(&log, 40, "second");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "first line\nsecond\n");
+        // At the cap nothing more is written, and the file is left as it was.
+        std::fs::write(&log, "x".repeat(40)).unwrap();
+        append_log_line(&log, 40, "never written");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "x".repeat(40));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_ignores_a_missing_log() {
+        let dir = log_test_dir("missing");
+        let log = dir.join("noble.log");
+        rotate_log(&log, 10);
+        assert!(!log.exists());
+        assert!(!dir.join("noble.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

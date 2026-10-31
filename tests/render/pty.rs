@@ -790,6 +790,124 @@ fn identity_and_mode_answers_reach_the_program() {
     assert!(app.tabs.is_empty());
 }
 
+/// Runs `script` (POSIX `sh`) in a new tab until `want` shows on its screen. With `shift_enter`, Shift+Enter is typed
+/// into the pane as soon as the program has printed `READY`, which it does after its keyboard setup, so the key
+/// comes after the flags it pushed and after its raw mode.
+fn key_program(script: &str, shift_enter: bool, want: &str) {
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "sh".into();
+    cfg.terminal.shell_args = vec!["-c".into(), script.into()];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
+    let id = app.tabs[0].focus;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut sent = false;
+    loop {
+        app.pump();
+        let screen = app.panes[&id].parser().screen().contents();
+        if shift_enter && !sent && screen.contains("READY") {
+            sent = true;
+            app.handle(AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))));
+        }
+        if screen.contains(want) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{want} did not come back:\n{screen}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
+/// Kitty keyboard protocol, flag 1, through a real PTY and the key path a user types on: a program that pushed
+/// `CSI > 1 u` gets Shift+Enter as `CSI 13 ; 2 u` (7 bytes), a program that pushed nothing gets the plain carriage
+/// return, and a program that asks for the flags (`CSI ? u`) reads the reply `CSI ? 0 u` (5 bytes). The programs read
+/// their bytes back with POSIX `sh`, `stty`, `dd` and `od`, so this runs on Unix. On Windows ConPTY hands a program
+/// that reads console input records no CSI u at all, so the Windows behavior is covered by its own tests.
+#[test]
+fn kitty_keyboard_flags_reach_the_program() {
+    if cfg!(windows) {
+        return;
+    }
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    // Each program prints READY once its raw mode and its flags are set, then reads the key's bytes back.
+    let pushed = "stty raw -echo; printf '\\033[>1u'; printf READY; dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d ' \n'; sleep 3";
+    key_program(pushed, true, &format!("READY{}", hex("\x1b[13;2u")));
+    let plain = "stty raw -echo; printf READY; dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'; sleep 3";
+    key_program(plain, true, &format!("READY{}", hex("\r")));
+    // The query is answered with the flags in effect: none pushed, so 0.
+    let asks = "stty raw -echo; printf '\\033[?u'; dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d ' \n'; sleep 3";
+    key_program(asks, false, &hex("\x1b[?0u"));
+}
+
+/// ConPTY's win32-input-mode (`CSI ? 9001 h`), through a real ConPTY: the pane has the mode after startup, and a program
+/// that reads console input records (Windows PowerShell 5.1, `[Console]::ReadKey`) gets Shift+Enter, Ctrl+Enter and Esc
+/// the way the console reports them (`term::input::win32_key`), from keys typed through the App. The program is
+/// PowerShell, which every Windows runner has. On Unix there is no ConPTY, so the test returns early there.
+#[test]
+fn win32_input_keys_reach_a_console_reader() {
+    if !cfg!(windows) {
+        return;
+    }
+    let script = "Write-Output READY; 1..3 | ForEach-Object { $k = [Console]::ReadKey($true); \
+                  Write-Output ('K:' + $k.Key + ':' + $k.Modifiers + ':' + [int]$k.KeyChar) }; Start-Sleep -Seconds 60";
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "powershell.exe".into();
+    cfg.terminal.shell_args = vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script.into()];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("win32".into()));
+    let id = app.tabs[0].focus;
+    pump_until(&mut app, "the console reader is ready", |app| screen_text(app, id).contains("READY"));
+    // ConPTY turned the mode on before the program printed anything: the pane's own accessor says so.
+    assert!(app.panes[&id].parser().callbacks().win32_input(), "{}", screen_text(&app, id));
+    // Each key is sent once the previous one was read, so the lines come out in the order of the keys.
+    let keys = [
+        (KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), "K:Enter:Shift:13"),
+        (KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), "K:Enter:Control:10"),
+        (KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), "K:Escape:0:27"),
+    ];
+    for (key, line) in keys {
+        app.handle(AppEvent::Input(Event::Key(key)));
+        pump_until(&mut app, line, |app| screen_text(app, id).contains(line));
+    }
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
+/// The kitty keyboard flags through ConPTY, on Windows: a program pushes `CSI > 1 u` and the pane's flags become 1
+/// (ConPTY passes the push through to NOBLE), then it pops with `CSI < u` and the flags are 0 again. The program holds
+/// the pushed state until the test has seen flag 1 and sends a key (`[Console]::ReadKey` returns it), so the check does
+/// not depend on how fast the runner is. The program is PowerShell, which writes the sequences itself. Windows only: on
+/// Unix the same flags are checked by `kitty_keyboard_flags_reach_the_program`, and there is no ConPTY to pass them
+/// through.
+#[test]
+fn kitty_flags_pushed_through_conpty_reach_the_pane() {
+    if !cfg!(windows) {
+        return;
+    }
+    let script = "[Console]::Write([char]27 + '[>1u'); Write-Output READY; [Console]::ReadKey($true) | Out-Null; \
+                  [Console]::Write([char]27 + '[<u'); Write-Output POPPED; Start-Sleep -Seconds 60";
+    let mut app = demo_app(110, 30);
+    let mut cfg = app.cfg.clone();
+    cfg.terminal.shell = "powershell.exe".into();
+    cfg.terminal.shell_args = vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script.into()];
+    app.apply_config(cfg);
+    app.new_tab(std::env::temp_dir(), None, Some("kitty-conpty".into()));
+    let id = app.tabs[0].focus;
+    let flags = |app: &App| noble::term::pane::key_mode(&app.panes[&id].parser()).kitty;
+    pump_until(&mut app, "the program is ready", |app| screen_text(app, id).contains("READY"));
+    pump_until(&mut app, "the pushed flags reach the pane", |app| flags(app) == 1);
+    // The program is waiting in ReadKey: this key lets it pop the flags.
+    app.handle(AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))));
+    pump_until(&mut app, "the popped flags leave the pane", |app| {
+        flags(app) == 0 && screen_text(app, id).contains("POPPED")
+    });
+    app.run(Action::CloseTab);
+    assert!(app.tabs.is_empty());
+}
+
 /// Focus reports (DECSET 1004): a program that set the mode gets `CSI O` when its pane loses the focus and `CSI I`
 /// when it gets it back, for a focus move between panes and for NOBLE's own window. A repeated event sends nothing.
 /// The programs are this test binary again: the `#[ignore]`d `focus_child_*` tests below print each focus event

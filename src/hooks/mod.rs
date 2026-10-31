@@ -13,9 +13,11 @@ pub mod cursor;
 pub mod opencode;
 pub mod resume;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -603,26 +605,72 @@ pub fn read_records(data: &Path, instance: u32) -> HashMap<PaneId, HookRecord> {
     out
 }
 
-/// Startup cleanup of the agents folder: files older than a day (left behind by NOBLE
-/// instances that crashed or were killed), and every file named after this `instance`.
-/// No pane of this instance exists yet, so such a file can only come from an earlier
-/// process that had the same id (process ids are reused) and would otherwise mark a
-/// fresh pane as running an agent. Records of other running instances stay.
+/// Age after which a file of the agents folder goes when its instance is not running (a crashed or killed NOBLE
+/// leaves its records behind).
+const STALE_FILE_SECS: u64 = 86_400;
+
+/// Clock slack when a process start is compared with a file's write time. Starts are whole seconds, Linux derives
+/// them from the boot time (which can drift by a second or two), and some file systems keep modified times to 2 s
+/// (FAT), so a start can look a little later than the write it owns. A reused pid starting this soon after the old
+/// owner's last write is vanishingly rare.
+const START_SLACK_SECS: u64 = 5;
+
+/// Startup cleanup of the agents folder. A file named after this `instance` goes: no pane of this instance exists
+/// yet, so it can only come from an earlier process that had the same id (process ids are reused) and would
+/// otherwise mark a fresh pane as running an agent. A file of another instance stays while that instance runs,
+/// whatever its age (see [`started_before_write`]). Every other file goes once it is a day old: the files of an
+/// instance that crashed or was killed, and files whose name has no instance prefix.
 pub fn prune(data: &Path, instance: u32) {
+    // Each pid is looked up once for the whole pass, not once per file.
+    let started = RefCell::new(HashMap::new());
+    prune_with(data, instance, SystemTime::now(), |pid, written| owner_running(&started, pid, written));
+}
+
+/// [`prune`] with the clock and the owner check passed in, so tests can run a pass a day later and without real
+/// processes. `alive(pid, written)` tells whether the instance `pid` is running and owns a file written at `written`.
+pub(crate) fn prune_with(data: &Path, instance: u32, now: SystemTime, alive: impl Fn(u32, SystemTime) -> bool) {
     let Ok(entries) = std::fs::read_dir(agents_dir(data)) else { return };
     let prefix = format!("{instance}-");
     for e in entries.flatten() {
-        let mine = e.file_name().to_string_lossy().starts_with(&prefix);
-        let old = mine
-            || e.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age.as_secs() > 86_400);
-        if old {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
+        // Without a modified time neither rule can apply, so the file stays.
+        let Ok(written) = e.metadata().and_then(|m| m.modified()) else { continue };
+        if owner_pid(&name).is_some_and(|pid| alive(pid, written)) {
+            continue;
+        }
+        if now.duration_since(written).is_ok_and(|age| age.as_secs() > STALE_FILE_SECS) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// The instance a file belongs to, read from the `<digits>-` prefix of its name (records, subagent markers and temp
+/// files all have one). `None` for any other name.
+fn owner_pid(name: &str) -> Option<u32> {
+    let (pid, _) = name.split_once('-')?;
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Whether instance `pid` is running and owns a file written at `written`: the process exists and started before
+/// the write. `started` caches the process lookups of one pass.
+fn owner_running(started: &RefCell<HashMap<u32, Option<u64>>>, pid: u32, written: SystemTime) -> bool {
+    let start = *started.borrow_mut().entry(pid).or_insert_with(|| crate::util::process_start(pid));
+    start.is_some_and(|start| started_before_write(start, written))
+}
+
+/// Whether a process that started at `start` (seconds since the epoch) started before a file was written at
+/// `written`, within `START_SLACK_SECS`. A process that started after the write got its pid later (the pid was
+/// reused), so the file is not its own.
+fn started_before_write(start: u64, written: SystemTime) -> bool {
+    let written = written.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    start <= written + START_SLACK_SECS
 }
 
 /// Deletes a pane's record and its subagent markers.
@@ -812,25 +860,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// Startup cleanup: records a day old (crashed instances) and leftovers of an earlier
-    /// process with this instance's id go; another running instance's records stay.
+    /// Startup cleanup: leftovers of an earlier process with this instance's id go, and so do
+    /// records a day old whose instance is not running (crashed); a running instance's records
+    /// stay, and so does a file with no instance prefix that is not a day old. Liveness is
+    /// injected here (only instance 420 runs); `prune_keeps_old_records_of_a_running_instance`
+    /// checks the real process table.
     #[test]
     fn prune_removes_stale_and_reused_instance_records() {
         let data = temp("prune");
         run_cli(Agent::Claude, "prompt", "{}", &data, Some("42"), Some("1")); // an earlier process with our id
-        run_cli(Agent::Claude, "stop", "{}", &data, Some("420"), Some("1")); // another instance (shares the prefix digits)
+        run_cli(Agent::Claude, "stop", "{}", &data, Some("420"), Some("1")); // running instance, shares the digits
         run_cli(Agent::Claude, "notification", "{}", &data, Some("7"), Some("2")); // crashed long ago
         let dir = agents_dir(&data);
         std::fs::write(dir.join("42-5.tmp"), "{").unwrap(); // write cut short by a crash
-        let day_old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
-        std::fs::File::options().write(true).open(dir.join("7-2.json")).unwrap().set_modified(day_old).unwrap();
-        prune(&data, 42);
+        std::fs::write(dir.join("notes.json"), "{}").unwrap(); // no instance prefix
+        let day_old = SystemTime::now() - std::time::Duration::from_secs(2 * STALE_FILE_SECS);
+        for name in ["7-2.json", "notes.json"] {
+            std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(day_old).unwrap();
+        }
+        prune_with(&data, 42, SystemTime::now(), |pid, _| pid == 420);
         assert!(read_records(&data, 42).is_empty());
         assert!(!dir.join("42-5.tmp").exists());
         assert!(read_records(&data, 7).is_empty(), "day-old record of a crashed instance");
-        assert_eq!(read_records(&data, 420)[&1].event, "stop", "another live instance is untouched");
+        assert!(!dir.join("notes.json").exists(), "no instance prefix: only the day limit applies");
+        assert_eq!(read_records(&data, 420)[&1].event, "stop", "another running instance is untouched");
         // Without an agents folder there is nothing to do.
         prune(&data.join("missing"), 42);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A record of a running instance is kept past the day limit (checked against the real process
+    /// table); once that process has exited the same record goes.
+    #[test]
+    fn prune_keeps_old_records_of_a_running_instance() {
+        let data = temp("prune-live");
+        let mut child = long_lived_child();
+        let pid = child.id();
+        // Written after the child started, so the child owns it.
+        run_cli(Agent::Claude, "prompt", "{}", &data, Some(&pid.to_string()), Some("1"));
+        let later = SystemTime::now() + std::time::Duration::from_secs(2 * STALE_FILE_SECS);
+        let cache = RefCell::new(HashMap::new());
+        prune_with(&data, std::process::id(), later, |p, w| owner_running(&cache, p, w));
+        assert_eq!(read_records(&data, pid)[&1].event, "prompt", "a running instance's record is kept");
+        let _ = child.kill();
+        let _ = child.wait();
+        let cache = RefCell::new(HashMap::new());
+        prune_with(&data, std::process::id(), later, |p, w| owner_running(&cache, p, w));
+        assert!(read_records(&data, pid).is_empty(), "the instance has exited: the day limit applies");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A process that started after a file was written got its pid later: the file is not its own.
+    #[test]
+    fn owner_must_have_started_before_the_write() {
+        let written = UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        assert!(started_before_write(900, written), "started long before the write");
+        assert!(started_before_write(1_005, written), "within the clock slack");
+        assert!(!started_before_write(1_006, written), "started after the write: the pid was reused");
+    }
+
+    #[test]
+    fn owner_pid_reads_the_instance_prefix() {
+        assert_eq!(owner_pid("42-5.tmp"), Some(42));
+        assert_eq!(owner_pid("420-1.agent-002.sub"), Some(420));
+        assert_eq!(owner_pid("notes.json"), None, "no prefix");
+        assert_eq!(owner_pid("-1.json"), None, "empty instance");
+        assert_eq!(owner_pid("42x-1.json"), None, "not digits");
+    }
+
+    /// A child process that runs about 30 seconds (the test kills it earlier).
+    fn long_lived_child() -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            // `ping` waits without reading input (`timeout` fails when stdin is not a console).
+            let mut cmd = std::process::Command::new("ping");
+            cmd.args(["-n", "30", "127.0.0.1"]);
+            cmd
+        } else {
+            // Unix and macOS: `sleep`.
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30");
+            cmd
+        };
+        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap()
     }
 }

@@ -405,6 +405,8 @@ pub struct Loaded {
     pub config: Config,
     pub error: Option<ConfigError>,
     pub mtime: Option<SystemTime>,
+    /// Keys and sections the config does not read (`unknown_keys`); empty when the file has an error.
+    pub unknown: Vec<UnknownKey>,
 }
 
 /// A config that does not load: the message (one line, shown as a toast) and the 1-based line of the
@@ -466,6 +468,229 @@ fn add_missing_launchers(list: &mut Vec<Launcher>) {
     }
 }
 
+/// A key or section the config structs do not read (`unknown_keys`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownKey {
+    /// As written: `terminal.scrolback`, `launchers[0].comand` (array indexes count from 0) or `termnal`.
+    pub path: String,
+    /// 1-based line of the key, or of the header of an unknown section; `None` when the text has no such line.
+    pub line: Option<u32>,
+}
+
+/// Config paths that were removed. A key or section under one of them (`island.x`) is not reported.
+const RETIRED: [&str; 1] = ["island"];
+
+/// One step of a config path: a key of a table, or an element of an array of tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Seg {
+    Key(String),
+    Index(usize),
+}
+
+/// The keys and sections of `text` that the config structs do not read (a typo such as `scrolback`), in
+/// line order. Free-form maps (`keys.prefix_bindings` …) take any key, so their keys are never reported. A text
+/// that does not parse gives none: `parse` reports that error alone.
+///
+/// The known set is whatever the structs deserialize: serde_ignored reports every field they skip, and the
+/// lines are found in the text afterwards (serde does not know them).
+pub fn unknown_keys(text: &str) -> Vec<UnknownKey> {
+    let Ok(de) = toml::Deserializer::parse(text) else { return Vec::new() };
+    let mut skipped: Vec<Vec<Seg>> = Vec::new();
+    let read: Result<Config, toml::de::Error> = serde_ignored::deserialize(de, |path| {
+        let mut segs = Vec::new();
+        push_segments(&path, &mut segs);
+        skipped.push(segs);
+    });
+    // A value of the wrong type stops the read part way, so the reports so far are not the whole list.
+    if read.is_err() {
+        return Vec::new();
+    }
+    let mut found: Vec<UnknownKey> = skipped
+        .iter()
+        .map(|segs| UnknownKey { path: render_path(segs), line: locate(text, segs) })
+        .filter(|k| !is_retired(&k.path))
+        .collect();
+    found.sort_by_key(|k| k.line.unwrap_or(u32::MAX));
+    found
+}
+
+/// The toast text for `unknown_keys` results, with the line to open (`None` when there are none): the first
+/// three keys, then `…`. The line is the first key's line, so a click opens the file there.
+pub fn unknown_keys_warning(keys: &[UnknownKey]) -> Option<(String, Option<u32>)> {
+    if keys.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = keys
+        .iter()
+        .take(3)
+        .map(|k| match k.line {
+            Some(line) => format!("{} (line {line})", k.path),
+            None => k.path.clone(),
+        })
+        .collect();
+    let more = if keys.len() > 3 { ", …" } else { "" };
+    let text = if keys.len() == 1 {
+        format!("config: unknown key {}", items[0])
+    } else {
+        format!("config: {} unknown keys: {}{more}", keys.len(), items.join(", "))
+    };
+    Some((text, keys.iter().find_map(|k| k.line)))
+}
+
+fn is_retired(path: &str) -> bool {
+    RETIRED.iter().any(|r| path.strip_prefix(*r).is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '['])))
+}
+
+/// The path serde_ignored reports, as segments. Options and newtypes add no step (the config has none).
+fn push_segments(path: &serde_ignored::Path, out: &mut Vec<Seg>) {
+    match path {
+        serde_ignored::Path::Root => {}
+        serde_ignored::Path::Seq { parent, index } => {
+            push_segments(parent, out);
+            out.push(Seg::Index(*index));
+        }
+        serde_ignored::Path::Map { parent, key } => {
+            push_segments(parent, out);
+            out.push(Seg::Key(key.clone()));
+        }
+        serde_ignored::Path::Some { parent }
+        | serde_ignored::Path::NewtypeStruct { parent }
+        | serde_ignored::Path::NewtypeVariant { parent } => push_segments(parent, out),
+    }
+}
+
+/// `launchers[0].comand`, `terminal.scrolback`.
+fn render_path(segs: &[Seg]) -> String {
+    let mut out = String::new();
+    for seg in segs {
+        match seg {
+            Seg::Key(key) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(key);
+            }
+            Seg::Index(i) => out.push_str(&format!("[{i}]")),
+        }
+    }
+    out
+}
+
+/// The dotted name of a table from its keys, and the element index when it is an element of an array of tables
+/// (a trailing index). `None` for an index anywhere else.
+fn table_of(segs: &[Seg]) -> Option<(String, Option<usize>)> {
+    let (element, keys) = match segs.split_last() {
+        Some((Seg::Index(i), rest)) => (Some(*i), rest),
+        _ => (None, segs),
+    };
+    let names: Option<Vec<&str>> = keys
+        .iter()
+        .map(|seg| match seg {
+            Seg::Key(key) => Some(key.as_str()),
+            Seg::Index(_) => None,
+        })
+        .collect();
+    names.map(|names| (names.join("."), element))
+}
+
+/// The 1-based line of an unknown key: its `key = …` line in the table it sits in, or else the header of a
+/// table named by the path (an unknown section). Lines are read from the text, not from serde.
+fn locate(text: &str, segs: &[Seg]) -> Option<u32> {
+    let (last, container) = segs.split_last()?;
+    let Seg::Key(key) = last else { return None };
+    let (table, element) = table_of(container)?;
+    let whole: Vec<&str> = segs
+        .iter()
+        .filter_map(|seg| match seg {
+            Seg::Key(k) => Some(k.as_str()),
+            Seg::Index(_) => None,
+        })
+        .collect();
+    let whole = whole.join(".");
+    // The table each line is in: its dotted name and, inside an array of tables, the element's index.
+    let mut current = (String::new(), None::<usize>);
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut header = None;
+    // A line whose whole dotted key is the path (`terminal.scrolback = …` at the top), and one that holds
+    // it inside an inline table or array (`launchers = [{ comand = … }]`): used when the key line is not found.
+    let (mut exact, mut holder) = (None, None);
+    // Brackets still open from earlier lines: their lines are values, never headers or keys.
+    let mut depth = 0;
+    for (n, line) in text.lines().enumerate() {
+        if depth == 0 && line.trim().starts_with('[') {
+            let array = array_header_name(line);
+            let plain = header_name(line);
+            if array.as_deref() == Some(whole.as_str()) || plain.as_deref() == Some(whole.as_str()) {
+                header.get_or_insert(n + 1);
+            }
+            current = match array {
+                Some(name) => {
+                    let count = counts.entry(name.clone()).or_insert(0);
+                    *count += 1;
+                    (name, Some(*count - 1))
+                }
+                None => (plain.unwrap_or_default(), None),
+            };
+            continue;
+        }
+        if depth == 0 {
+            if current.0 == table && current.1 == element && line_key(line).as_deref() == Some(key.as_str()) {
+                return Some((n + 1) as u32);
+            }
+            // A value spread over lines (`scrolback = """`, `x = [`) is not one line for `line_key`; its key
+            // is still read from the line itself.
+            if let Some(path) = key_path(line) {
+                let mut full: Vec<&str> = current.0.split('.').filter(|p| !p.is_empty()).collect();
+                full.extend(path.iter().map(String::as_str));
+                let full = full.join(".");
+                if full == whole {
+                    exact.get_or_insert(n + 1);
+                } else if whole.strip_prefix(full.as_str()).is_some_and(|rest| rest.starts_with('.')) {
+                    holder.get_or_insert(n + 1);
+                }
+            }
+        }
+        depth = bracket_depth(line, depth);
+    }
+    header.or(exact).or(holder).map(|n| n as u32)
+}
+
+/// The dotted key of a `key = value` line as its parts (`a."b.c" = 1` gives `a` and `b.c`); `None` for
+/// comments, headers, blank lines and lines without a key. Read as TOML from the key alone, so the value
+/// may continue on later lines.
+fn key_path(line: &str) -> Option<Vec<String>> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let rest = strip_value(t);
+    if rest.len() == t.len() {
+        return None;
+    }
+    let key = &t[..t.len() - rest.len() - 1];
+    let table: toml::Table = toml::from_str(&format!("{key} = 0")).ok()?;
+    let mut path = Vec::new();
+    let mut node = &table;
+    loop {
+        if node.len() != 1 {
+            return None;
+        }
+        let (name, value) = node.iter().next()?;
+        path.push(name.clone());
+        match value.as_table() {
+            Some(inner) => node = inner,
+            None => break,
+        }
+    }
+    Some(path)
+}
+
+/// The dotted name of an array-of-tables header (`[[launchers]]`); `None` for other lines.
+fn array_header_name(line: &str) -> Option<String> {
+    let inner = strip_comment(line.trim()).trim().strip_prefix("[[")?.strip_suffix("]]")?;
+    header_name(&format!("[{inner}]"))
+}
+
 /// Reads the config; writes the commented template when the file is missing.
 pub fn load(path: &Path) -> Loaded {
     if !path.exists() {
@@ -478,8 +703,8 @@ pub fn load(path: &Path) -> Loaded {
     let mtime = mtime_of(path);
     match std::fs::read_to_string(path) {
         Ok(text) => match parse(&text) {
-            Ok(config) => Loaded { config, error: None, mtime },
-            Err(error) => Loaded { config: Config::default(), error: Some(error), mtime },
+            Ok(config) => Loaded { config, error: None, mtime, unknown: unknown_keys(&text) },
+            Err(error) => Loaded { config: Config::default(), error: Some(error), mtime, unknown: Vec::new() },
         },
         // A dangling link (its target is missing): the link is not replaced, so it is reported, not silently defaulted.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::fs::symlink_metadata(path).is_ok() => {
@@ -487,14 +712,16 @@ pub fn load(path: &Path) -> Loaded {
                 text: format!("config: {} is a link to a missing file", crate::util::tilde(path)),
                 line: None,
             };
-            Loaded { config: Config::default(), error: Some(error), mtime }
+            Loaded { config: Config::default(), error: Some(error), mtime, unknown: Vec::new() }
         }
         // No file (and none could be written, e.g. a read-only home): the defaults, silently.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { config: Config::default(), error: None, mtime },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Loaded { config: Config::default(), error: None, mtime, unknown: Vec::new() }
+        }
         // Unreadable, or not UTF-8 (e.g. saved in a legacy code page): report it instead of hiding it.
         Err(e) => {
             let error = ConfigError { text: format!("config: {e}"), line: None };
-            Loaded { config: Config::default(), error: Some(error), mtime }
+            Loaded { config: Config::default(), error: Some(error), mtime, unknown: Vec::new() }
         }
     }
 }
@@ -1237,6 +1464,152 @@ theme = \"ice\"
         assert!(set_binding(inline_keys, "keys.prefix_bindings", "v", "zoom").is_err());
         // A file that does not parse is refused too.
         assert!(set_binding("[keys\n", "keys.prefix_bindings", "v", "zoom").is_err());
+    }
+
+    /// A misspelled key is reported with the line it is on.
+    #[test]
+    fn misspelled_key_is_reported_with_its_line() {
+        let text = "[general]\ntheme = \"ice\"\n\n[terminal]\nshell = \"\"\nscrolback = 10000\n";
+        assert_eq!(unknown_keys(text), vec![UnknownKey { path: "terminal.scrolback".into(), line: Some(6) }]);
+    }
+
+    /// The same key name in two tables is found in the table it is written in.
+    #[test]
+    fn same_key_name_in_two_tables_gets_its_own_line() {
+        let found = unknown_keys("[general]\nscrolback = 1\n[terminal]\nscrolback = 2\n");
+        assert_eq!(
+            found,
+            vec![
+                UnknownKey { path: "general.scrolback".into(), line: Some(2) },
+                UnknownKey { path: "terminal.scrolback".into(), line: Some(4) },
+            ]
+        );
+    }
+
+    /// A misspelled section is reported at its header line.
+    #[test]
+    fn misspelled_section_is_reported_at_its_header() {
+        let found = unknown_keys("[general]\ntheme = \"ice\"\n\n[termnal]\nshell = \"\"\n");
+        assert_eq!(found, vec![UnknownKey { path: "termnal".into(), line: Some(4) }]);
+    }
+
+    /// A table the structs do not have inside a known section is reported at its own header.
+    #[test]
+    fn unknown_table_inside_a_section_is_reported_at_its_header() {
+        let found = unknown_keys("[terminal]\nshell = \"\"\n\n[terminal.foo]\nx = 1\n");
+        assert_eq!(found, vec![UnknownKey { path: "terminal.foo".into(), line: Some(4) }]);
+    }
+
+    /// An unknown key inside a `[[launchers]]` block: the index counts the blocks from 0.
+    #[test]
+    fn unknown_key_inside_a_launcher_block() {
+        let text = "[[launchers]]\nkey = \"c\"\nname = \"claude\"\ncommand = \"claude\"\n\n\
+                    [[launchers]]\nkey = \"x\"\nname = \"codex\"\ncomand = \"codex\"\ncommand = \"codex\"\n";
+        assert_eq!(unknown_keys(text), vec![UnknownKey { path: "launchers[1].comand".into(), line: Some(9) }]);
+    }
+
+    /// A value spread over lines still gives its key's line (the key line is not one TOML line).
+    #[test]
+    fn key_with_a_multi_line_value_gets_its_line() {
+        let text = "[terminal]\nshell = \"\"\nscrolback = \"\"\"\nten thousand\n\"\"\"\n";
+        assert_eq!(unknown_keys(text), vec![UnknownKey { path: "terminal.scrolback".into(), line: Some(3) }]);
+        let text = "[terminal]\nshell = \"\"\nscrolback = [\n  1,\n  2,\n]\n";
+        assert_eq!(unknown_keys(text), vec![UnknownKey { path: "terminal.scrolback".into(), line: Some(3) }]);
+    }
+
+    /// A dotted key written at the top of the file is found by its whole dotted name.
+    #[test]
+    fn dotted_top_level_key_gets_its_line() {
+        assert_eq!(
+            unknown_keys("terminal.scrolback = 1\n"),
+            vec![UnknownKey { path: "terminal.scrolback".into(), line: Some(1) }]
+        );
+    }
+
+    /// A key inside an inline array of tables has no line of its own: the line that holds the array is given.
+    #[test]
+    fn key_inside_an_inline_array_gets_the_holding_line() {
+        let text = "\nlaunchers = [{ key = \"c\", name = \"x\", command = \"y\", comand = \"z\" }]\n";
+        assert_eq!(unknown_keys(text), vec![UnknownKey { path: "launchers[0].comand".into(), line: Some(2) }]);
+    }
+
+    /// `load` fills `unknown` for a file that parses, and leaves it empty for a file that does not.
+    #[test]
+    fn load_fills_unknown_keys_only_for_a_file_that_parses() {
+        let dir = std::env::temp_dir().join(format!("noble-cfg-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[terminal]\nscrolback = 1\n").unwrap();
+        let loaded = load(&path);
+        assert!(loaded.error.is_none());
+        assert_eq!(loaded.unknown, vec![UnknownKey { path: "terminal.scrolback".into(), line: Some(2) }]);
+        std::fs::write(&path, "[terminal\nscrolback = 1\n").unwrap();
+        let loaded = load(&path);
+        assert!(loaded.error.is_some());
+        assert!(loaded.unknown.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The free-form binding maps take any key, so nothing in them is reported.
+    #[test]
+    fn binding_maps_never_report_keys() {
+        let text = "[keys.prefix_bindings]\n\"x\" = \"split_v\"\n\"typo\" = \"nope\"\n\n\
+                    [keys.direct_bindings]\n\"ctrl+q\" = \"quit\"\n";
+        assert!(unknown_keys(text).is_empty());
+    }
+
+    /// `[island]` was removed: it is ignored without a warning, and so is a key with that name at the top.
+    #[test]
+    fn retired_island_section_is_ignored() {
+        assert!(unknown_keys("[island]\nenabled = true\nx = 1\n").is_empty());
+        assert!(unknown_keys("island = 1\n").is_empty());
+    }
+
+    /// The template NOBLE writes has nothing to warn about.
+    #[test]
+    fn default_template_has_no_unknown_keys() {
+        assert!(unknown_keys(DEFAULT_CONFIG).is_empty());
+    }
+
+    /// A file that does not read gives no unknown keys: the parse error is the report.
+    #[test]
+    fn a_file_that_does_not_read_reports_no_extra_keys() {
+        assert!(unknown_keys("[terminal\nscrolback = 1\n").is_empty());
+        // A wrong value type stops the read after the typo, so the typo is not reported on its own.
+        let text = "[terminal]\nscrolback = 1\nscrollback = \"ten\"\n";
+        assert!(parse(text).is_err());
+        assert!(unknown_keys(text).is_empty());
+    }
+
+    /// The warning names the keys and their lines, then stops after three with an ellipsis.
+    #[test]
+    fn warning_names_the_keys_and_caps_the_list() {
+        assert_eq!(unknown_keys_warning(&[]), None);
+        let one = [UnknownKey { path: "terminal.scrolback".into(), line: Some(12) }];
+        assert_eq!(
+            unknown_keys_warning(&one),
+            Some(("config: unknown key terminal.scrolback (line 12)".into(), Some(12)))
+        );
+        let three = [
+            UnknownKey { path: "terminal.scrolback".into(), line: Some(12) },
+            UnknownKey { path: "termnal".into(), line: None },
+            UnknownKey { path: "launchers[1].comand".into(), line: Some(40) },
+        ];
+        assert_eq!(
+            unknown_keys_warning(&three),
+            Some((
+                "config: 3 unknown keys: terminal.scrolback (line 12), termnal, launchers[1].comand (line 40)".into(),
+                Some(12)
+            ))
+        );
+        let mut four = three.to_vec();
+        four.push(UnknownKey { path: "ai.x".into(), line: Some(50) });
+        let (text, line) = unknown_keys_warning(&four).expect("a warning");
+        assert_eq!(
+            text,
+            "config: 4 unknown keys: terminal.scrolback (line 12), termnal, launchers[1].comand (line 40), …"
+        );
+        assert_eq!(line, Some(12));
     }
 
     #[test]

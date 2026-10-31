@@ -15,10 +15,14 @@ impl App {
         let loaded = config::load(&self.paths.config);
         self.cfg_mtime = loaded.mtime;
         if let Some(err) = loaded.error {
+            // The unknown-key warning of the file that loaded before is out of date too; errors stay.
+            self.toasts
+                .retain(|t| !(t.level == ToastLevel::Warn && matches!(t.target, Some(ToastTarget::Config { .. }))));
             self.toast_target(ToastLevel::Error, err.text, Some(ToastTarget::Config { line: err.line }));
             return;
         }
-        // The file loads now: an error toast about it is out of date (and errors never expire by themselves).
+        // The file loads now: the config toasts (an old error, the unknown keys) are out of date. Errors never
+        // expire by themselves, so they would stay otherwise.
         self.toasts.retain(|t| !matches!(t.target, Some(ToastTarget::Config { .. })));
         self.apply_config(loaded.config);
         // An open welcome card or theme/scheme selector previews on top of the old values: it starts
@@ -34,6 +38,9 @@ impl App {
         }
         for w in self.keymap.warnings.clone() {
             self.toast(ToastLevel::Warn, w);
+        }
+        if let Some((text, line)) = config::unknown_keys_warning(&loaded.unknown) {
+            self.toast_target(ToastLevel::Warn, text, Some(ToastTarget::Config { line }));
         }
     }
 

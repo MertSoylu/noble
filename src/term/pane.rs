@@ -19,6 +19,7 @@ use crate::term::layout::PaneId;
 use crate::util;
 
 use super::blocks::{CommandBlock, retain_live};
+use super::input::KeyMode;
 #[cfg(test)]
 use super::osc::same_host;
 pub use super::osc::{
@@ -859,6 +860,18 @@ pub fn feed(p: &mut crate::vt100::Parser<Callbacks>, chunk: &[u8]) {
     p.callbacks_mut().ended_in_esc = esc;
 }
 
+/// The key encoding a pane's program asked for, read from the emulator (see `KeyMode`): the cursor keys of the
+/// screen that is shown, the kitty keyboard flags of that same screen and whether the program asked for the flags.
+pub fn key_mode(parser: &crate::vt100::Parser<Callbacks>) -> KeyMode {
+    let screen = parser.screen();
+    KeyMode {
+        app_cursor: screen.application_cursor(),
+        kitty: parser.callbacks().kitty_flags(screen.alternate_screen()),
+        kitty_asked: parser.callbacks().kitty_asked(),
+        win32: parser.callbacks().win32_input(),
+    }
+}
+
 impl Pane {
     pub fn spawn(id: PaneId, spec: SpawnSpec<'_>, tx: Sender<AppEvent>) -> Result<Pane> {
         let rows = spec.rows.max(2);
@@ -1696,6 +1709,47 @@ mod tests {
         assert_eq!(cwd_url_host("file://box/home"), Some("box".into()));
         assert_eq!(cwd_url_host("file:///home"), None);
         assert!(same_host("Box", "box.lan") && !same_host("box", "other"));
+    }
+
+    /// `key_mode` reads the flags of the screen that is shown: a push on the main screen is not seen on the alternate
+    /// screen, and comes back when the main screen is shown again.
+    #[test]
+    fn key_mode_follows_the_shown_screen() {
+        let mut p = test_parser(10, 40, 0);
+        assert_eq!(key_mode(&p), KeyMode::default());
+        p.process(b"\x1b[>1u\x1b[?1h");
+        assert_eq!(key_mode(&p), KeyMode { app_cursor: true, kitty: 1, kitty_asked: false, win32: false });
+        p.process(b"\x1b[?1049h");
+        assert_eq!(key_mode(&p).kitty, 0, "the alternate screen has its own, empty, stack");
+        p.process(b"\x1b[>1u");
+        assert_eq!(key_mode(&p).kitty, 1);
+        p.process(b"\x1b[?1049l");
+        assert_eq!(key_mode(&p).kitty, 1, "the main stack is active again");
+    }
+
+    /// win32-input-mode is not per screen: `key_mode` reports it on the alternate screen too.
+    #[test]
+    fn key_mode_carries_win32_input_mode() {
+        let mut p = test_parser(10, 40, 0);
+        assert!(!key_mode(&p).win32);
+        p.process(b"\x1b[?9001h\x1b[?1049h");
+        assert!(key_mode(&p).win32);
+    }
+
+    /// `key_mode` carries the kitty ask: a query sets it, a push on the other screen clears it, and the prompt mark
+    /// clears it too, so the shell that follows a program gets its Shift+Enter as before.
+    #[test]
+    fn key_mode_carries_kitty_asked() {
+        let mut p = test_parser(10, 40, 0);
+        assert!(!key_mode(&p).kitty_asked);
+        p.process(b"\x1b[?u");
+        assert!(key_mode(&p).kitty_asked);
+        p.process(b"\x1b[?1049h");
+        assert!(key_mode(&p).kitty_asked, "the ask is not per screen");
+        p.process(b"\x1b[>0u");
+        assert!(!key_mode(&p).kitty_asked, "a push clears it");
+        p.process(b"\x1b[?u\x1b]133;A\x07");
+        assert!(!key_mode(&p).kitty_asked, "the prompt mark clears it");
     }
 
     /// OSC 9;9 (Windows Terminal's cwd report) never records a network path: the pane falls back to the folder

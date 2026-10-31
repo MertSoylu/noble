@@ -253,15 +253,33 @@ fn key_encoding_never_panics() {
         KeyModifiers::ALT,
         KeyModifiers::CONTROL | KeyModifiers::ALT,
         KeyModifiers::all(),
+        KeyModifiers::SUPER,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     ];
     for _ in 0..steps(20_000) {
         let code = match rng.below(4) {
             0 => KeyCode::F(rng.below(256) as u8),
-            1 => *rng.pick(&[KeyCode::Up, KeyCode::Home, KeyCode::BackTab, KeyCode::Null, KeyCode::Esc]),
+            1 => *rng.pick(&[
+                KeyCode::Up,
+                KeyCode::Home,
+                KeyCode::BackTab,
+                KeyCode::Null,
+                KeyCode::Esc,
+                KeyCode::Enter,
+                KeyCode::Tab,
+                KeyCode::Backspace,
+            ]),
             _ => KeyCode::Char(char::from_u32(rng.next() as u32 % 0x11_0000).unwrap_or('\u{fffd}')),
         };
         let ev = KeyEvent::new(code, *rng.pick(&mods));
-        let _ = noble::term::input::encode_key(&ev, rng.below(2) == 0);
+        // Any kitty flags a program may have pushed, with or without the cursor-key mode and the kitty ask.
+        let mode = noble::term::input::KeyMode {
+            app_cursor: rng.below(2) == 0,
+            kitty: rng.below(256) as u8,
+            kitty_asked: rng.below(2) == 0,
+            win32: rng.below(2) == 0,
+        };
+        let _ = noble::term::input::encode_key(&ev, mode);
         let _ = noble::keys::Chord::from_event(&ev).to_string();
     }
 }
@@ -273,7 +291,10 @@ fn key_encoding_never_panics() {
 fn terminal_queries_never_panic() {
     use noble::term::colors::{ColorReport, OscScan, SharedColors, Terminator};
     use noble::term::pane::{Callbacks, feed};
-    const BITS: [&str; 47] = [
+    const BITS: [&str; 66] = [
+        "\x1b[?9001h",
+        "\x1b[?9001l",
+        "\x1b[?9001$p",
         "\x1b[?2026h",
         "\x1b[?2026l",
         "\x1b[?2026$p",
@@ -321,6 +342,22 @@ fn terminal_queries_never_panic() {
         "\r\n",
         "abc",
         "\x1b[",
+        "\x1b[>1u",
+        "\x1b[>65535u",
+        "\x1b[<u",
+        "\x1b[<99u",
+        "\x1b[=1;2u",
+        "\x1b[=5;9u",
+        "\x1b[=u",
+        "\x1b[?u",
+        "\x1b[>99999999999999999999u",
+        "\x1b[=99999;99999999u",
+        "\x1b[<99999999999999999999u",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[=1;3u",
+        "\x1b[=1;1u",
+        "\x1b]133;A\x07",
     ];
     let mut rng = Rng::seeded(0x2026_1004_2031_0996);
     let colors = SharedColors::default();
