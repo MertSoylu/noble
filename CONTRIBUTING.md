@@ -43,7 +43,7 @@ Useful flags and variables:
 If you use NOBLE every day and also hack on it, install the working tree under a **different name**:
 
 ```sh
-install.cmd                     # Windows: builds --release and installs it as `noble-dev`
+cmd /c "%CD%\install.cmd"     # Windows PowerShell: builds --release and installs `noble-dev`
 ./install.sh                    # Linux / macOS: the same
 ```
 
@@ -63,7 +63,7 @@ place with a rename, which Unix allows for a running binary.
 ## Tests
 
 ```sh
-cargo test                        # everything: unit, headless render, real PTY, end-to-end and fuzz tests
+cargo test                        # unit, headless render, real PTY, end-to-end and fuzz test binaries
 cargo test --lib <name>           # unit tests in src/
 cargo test --test render          # render + PTY tests; add a test name to run one
 cargo test --test e2e             # runs the compiled binary inside a pseudo-terminal
@@ -90,8 +90,9 @@ cargo deny check                  # advisories, licenses, sources (`cargo instal
   cargo test --release --test render heavy_output -- --ignored --nocapture # 50k lines of output
   ```
 
-CI runs `fmt`, `clippy -D warnings` and the full suite on Windows, Linux and macOS, a static musl build, a check
-with the oldest supported Rust (`rust-version` in `Cargo.toml`) on all three, and `cargo deny check` (RustSec
+CI runs `fmt`, `clippy -D warnings` and the full suite on Windows, Linux and macOS; Linux also runs
+`shellcheck install.sh`. It builds a static musl binary, checks the oldest supported Rust (`rust-version` in
+`Cargo.toml`) on all three, and runs `cargo deny check` (RustSec
 advisories, the license allow-list in `deny.toml`, crates.io only). The advisory check also runs weekly
 (`audit.yml`). A new dependency with a license not yet in `deny.toml` fails CI until it is reviewed and added
 there.
@@ -136,8 +137,9 @@ src/
   projects.rs        repository scan and git status workers
   store.rs           recent dirs, session, workspaces, AI history, UI state (atomic JSON writes)
   hooks/             agent status hooks: mod.rs (records, `noble hook`, shared helpers) and one module per
-                     agent (claude.rs, codex.rs, copilot.rs, opencode.rs): install, uninstall, upgrade, state;
-                     resume.rs (session ids from hook payloads, resume and continue command lines)
+                     agent (claude.rs, codex.rs, copilot.rs, opencode.rs, antigravity.rs, cursor.rs): install,
+                     uninstall, upgrade, state; resume.rs (session ids from hook payloads, resume and continue
+                     command lines)
   wt.rs battery.rs   Windows Terminal color schemes · battery readers
   config.rs keys.rs theme.rs util.rs event.rs
 ```

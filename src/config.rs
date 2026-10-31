@@ -256,7 +256,7 @@ shell = ""               # empty = automatic (pwsh → powershell → cmd | $SHE
 shell_args = []
 scrollback = 5000
 restore_session = true   # save tabs on exit, restore them at startup
-resume_agents = true     # restored agent panes resume their conversation (claude --resume, codex resume, copilot --resume=, opencode --session)
+resume_agents = true     # restored agent panes resume their conversation (claude --resume, codex resume, copilot --resume=, opencode --session, agy --conversation)
 copy_on_select = true    # copy mouse-selected text to the clipboard
 osc52_write = true       # programs in a pane may set the clipboard (OSC 52); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)

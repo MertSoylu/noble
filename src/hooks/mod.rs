@@ -5,9 +5,11 @@
 //! Hooks are added to an agent's settings only when the user turns them on in Settings; the settings file is backed
 //! up the first time.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
+pub mod cursor;
 pub mod opencode;
 pub mod resume;
 
@@ -28,11 +30,14 @@ pub enum Agent {
     Codex,
     Copilot,
     OpenCode,
+    Antigravity,
+    Cursor,
 }
 
 impl Agent {
     /// Every agent, in the order Settings lists them.
-    pub const ALL: [Agent; 4] = [Agent::Claude, Agent::Codex, Agent::Copilot, Agent::OpenCode];
+    pub const ALL: [Agent; 6] =
+        [Agent::Claude, Agent::Codex, Agent::Copilot, Agent::OpenCode, Agent::Antigravity, Agent::Cursor];
 
     /// The id of `noble hook --agent <id>`, the record's `agent` field and the pane's agent name (the same
     /// names `ai::agent_kind` gives the agent's command).
@@ -42,6 +47,8 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
             Agent::OpenCode => "opencode",
+            Agent::Antigravity => "antigravity",
+            Agent::Cursor => "cursor",
         }
     }
 
@@ -52,6 +59,8 @@ impl Agent {
             Agent::Codex => "Codex",
             Agent::Copilot => "GitHub Copilot",
             Agent::OpenCode => "OpenCode",
+            Agent::Antigravity => "Antigravity CLI",
+            Agent::Cursor => "Cursor CLI",
         }
     }
 
@@ -90,6 +99,8 @@ impl Agent {
             Agent::Codex => codex::settings_path(),
             Agent::Copilot => copilot::settings_path(),
             Agent::OpenCode => opencode::settings_path(),
+            Agent::Antigravity => antigravity::settings_path(),
+            Agent::Cursor => cursor::settings_path(),
         }
     }
 
@@ -100,12 +111,21 @@ impl Agent {
             Agent::Codex => codex::settings_file(false, env.codex_home.as_deref(), home),
             Agent::Copilot => copilot::settings_file(false, env.copilot_home.as_deref(), home),
             Agent::OpenCode => opencode::settings_file(false, env.xdg_config_home.as_deref(), home),
+            Agent::Antigravity => antigravity::settings_file(false, home),
+            Agent::Cursor => cursor::settings_file(false, home),
         }
     }
 
-    /// Whether the agent's command is on PATH, which is how NOBLE tells the agent is installed here.
+    /// Whether the agent's command is on PATH, which is how NOBLE tells the agent is installed here. Antigravity's
+    /// command is `agy` (its id is not a program name, and `antigravity` is the desktop IDE), and the Windows
+    /// installer may leave `agy` out of PATH (see `ai::providers::agy_program`). Cursor's command is `cursor-agent`:
+    /// `cursor` is the Cursor IDE's own launcher, so the id would find the wrong program (see `cursor::program`).
     pub fn on_path(self) -> bool {
-        crate::util::which(self.id()).is_some()
+        match self {
+            Agent::Antigravity => crate::ai::providers::agy_program().is_some(),
+            Agent::Cursor => cursor::program().is_some(),
+            _ => crate::util::which(self.id()).is_some(),
+        }
     }
 
     /// Whether every hook is installed in `path`; a file that cannot be read or parsed is an error.
@@ -115,6 +135,8 @@ impl Agent {
             Agent::Codex => codex::installed_state(path),
             Agent::Copilot => copilot::installed_state(path),
             Agent::OpenCode => opencode::installed_state(path),
+            Agent::Antigravity => antigravity::installed_state(path),
+            Agent::Cursor => cursor::installed_state(path),
         }
     }
 
@@ -125,6 +147,8 @@ impl Agent {
             Agent::Codex => codex::install(path, base),
             Agent::Copilot => copilot::install(path, base),
             Agent::OpenCode => opencode::install(path, base),
+            Agent::Antigravity => antigravity::install(path, base),
+            Agent::Cursor => cursor::install(path, base),
         }
     }
 
@@ -135,6 +159,8 @@ impl Agent {
             Agent::Codex => codex::uninstall(path),
             Agent::Copilot => copilot::uninstall(path),
             Agent::OpenCode => opencode::uninstall(path),
+            Agent::Antigravity => antigravity::uninstall(path),
+            Agent::Cursor => cursor::uninstall(path),
         }
     }
 
@@ -146,6 +172,8 @@ impl Agent {
             Agent::Codex => codex::upgrade(path),
             Agent::Copilot => copilot::upgrade(path),
             Agent::OpenCode => opencode::upgrade(path),
+            Agent::Antigravity => antigravity::upgrade(path),
+            Agent::Cursor => cursor::upgrade(path),
         }
     }
 }
@@ -176,9 +204,11 @@ pub const SESSION_END: &str = "session-end";
 /// (`<instance>-<pane>.<agent_id>.sub`).
 pub const SUBAGENT_START: &str = "subagent-start";
 pub const SUBAGENT_STOP: &str = "subagent-stop";
+/// The agent ran a tool (a shell command, an edit, any other tool call) in the middle of a turn: it is working.
+pub const TOOL_USE: &str = "tool-use";
 
 /// Every argument `noble hook` takes; a hook command with any other one is not NOBLE's.
-pub const HOOK_ARGS: [&str; 9] = [
+pub const HOOK_ARGS: [&str; 10] = [
     PROMPT,
     STOP,
     STOP_FAILURE,
@@ -188,6 +218,7 @@ pub const HOOK_ARGS: [&str; 9] = [
     SESSION_END,
     SUBAGENT_START,
     SUBAGENT_STOP,
+    TOOL_USE,
 ];
 
 /// A subagent marker older than this no longer counts, in case the agent never reported the end (a crash, a
@@ -447,6 +478,9 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
             Some(arg) => arg,
             None => return,
         },
+        // Antigravity's and Cursor's Stop carry their error in the payload: an errored Stop is a failed turn.
+        Agent::Antigravity => antigravity::hook_arg(event, &input),
+        Agent::Cursor => cursor::hook_arg(event, &input),
         _ => event,
     };
     // The session is over (the agent exited, or `/clear` right before a new `session-start`):
@@ -483,6 +517,8 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
         Agent::Codex => codex::record_message(event, &input),
         Agent::Copilot => copilot::record_message(event, &input),
         Agent::OpenCode => opencode::record_message(event, &input),
+        Agent::Antigravity => antigravity::record_message(event, &input),
+        Agent::Cursor => cursor::record_message(event, &input),
     };
     let Some(message) = message else { return };
     let rec = HookRecord {
@@ -502,6 +538,17 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
         if crate::store::create_new_file(&tmp, &text).and_then(|()| crate::store::replace_file(&tmp, &file)).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+/// What `noble hook` prints on stdout for an event, for an agent that reads a reply (Antigravity, Cursor): `None`
+/// for the agents whose hooks print nothing. It is printed whether or not NOBLE runs the pane, so the reply is
+/// always valid.
+pub fn hook_reply(agent: Agent, arg: &str) -> Option<&'static str> {
+    match agent {
+        Agent::Antigravity => Some(antigravity::reply(arg)),
+        Agent::Cursor => Some(cursor::reply(arg)),
+        _ => None,
     }
 }
 
@@ -604,6 +651,9 @@ mod tests {
             "noble hook stop-failure",
             "noble hook stop --agent codex",
             "noble hook subagent-stop --agent copilot",
+            "noble hook prompt --agent antigravity",
+            "noble hook tool-use --agent cursor",
+            "noble hook stop --agent cursor",
             "\"C:/Users/me/.cargo/bin/noble.exe\" hook session-end",
             "\"/opt/my hook tools/noble\" hook notification",
             "& \"C:/Users/me/.cargo/bin/noble.exe\" hook session-end --agent copilot",
@@ -614,7 +664,7 @@ mod tests {
             "my-noble-notifier hook stop",
             "noblex hook stop",
             "noble hook unknown-event",
-            "noble hook stop --agent cursor",
+            "noble hook stop --agent zed",
             "noble hook stop --agent",
             "noble hook stop --verbose",
             "noble hook stop --agent codex extra",
@@ -652,8 +702,10 @@ mod tests {
         assert_eq!(agent_arg(&args(&[])), Some(Agent::Claude), "hooks without a flag are Claude's");
         assert_eq!(agent_arg(&args(&["--agent", "codex"])), Some(Agent::Codex));
         assert_eq!(agent_arg(&args(&["--agent", "opencode"])), Some(Agent::OpenCode));
+        assert_eq!(agent_arg(&args(&["--agent", "antigravity"])), Some(Agent::Antigravity));
+        assert_eq!(agent_arg(&args(&["--agent", "cursor"])), Some(Agent::Cursor));
         assert_eq!(agent_arg(&args(&["--agent"])), None, "a flag without an id");
-        assert_eq!(agent_arg(&args(&["--agent", "cursor"])), None, "an unknown agent records nothing");
+        assert_eq!(agent_arg(&args(&["--agent", "zed"])), None, "an unknown agent records nothing");
         for agent in Agent::ALL {
             assert_eq!(Agent::from_id(agent.id()), Some(agent));
         }
@@ -671,7 +723,7 @@ mod tests {
         std::fs::write(agents_dir(&data).join("42-5.json"), r#"{"event":"prompt","ts":1}"#).unwrap();
         assert_eq!(read_records(&data, 42)[&5].agent(), Agent::Claude);
         // A record of an agent this build does not know is not read.
-        std::fs::write(agents_dir(&data).join("42-6.json"), r#"{"event":"prompt","ts":1,"agent":"cursor"}"#).unwrap();
+        std::fs::write(agents_dir(&data).join("42-6.json"), r#"{"event":"prompt","ts":1,"agent":"zed"}"#).unwrap();
         assert!(!read_records(&data, 42).contains_key(&6));
         let _ = std::fs::remove_dir_all(&data);
     }

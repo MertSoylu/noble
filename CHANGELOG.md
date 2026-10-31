@@ -6,6 +6,32 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.12.3] - 2026-10-31
+
+### Added
+- Agent status hooks for Antigravity CLI (`agy`), next to Claude Code, Codex, GitHub Copilot and OpenCode. NOBLE keeps
+  its entry in `~/.gemini/config/hooks.json` (under the `noble` key) and shows the pane as working while a model call
+  runs, idle when the turn stops and an error when it stopped with one. Turning the hooks off removes only that entry,
+  and an entry turned off in agy's `/hooks` stays off across starts. agy has no permission, notification, subagent or
+  session-end event, so NOBLE shows none of those for it. A restored pane running `agy` resumes its conversation
+  (`agy --conversation <id>`). The states were confirmed in a live run on Windows; the resume id follows agy's hook
+  documentation and its binary.
+- Agent status hooks for Cursor CLI (`cursor-agent`), a partial integration: NOBLE keeps its entries in
+  `~/.cursor/hooks.json` (the `hooks` lists, with `"version": 1`) and shows the pane as working from each tool call (and
+  from a prompt, where the CLI sends that event), idle when the turn stops and an error when the stop reports one. The
+  CLI runs only some of Cursor's hook events and none of them reports a question, so there is no "needs you" for it.
+  Turning the hooks off removes only NOBLE's entries. A live run on Windows confirmed that cursor-agent reads that file
+  there; whether it sends the prompt event is not confirmed. A restored Cursor pane starts a new chat, since NOBLE keeps no id that
+  `cursor-agent --resume` is confirmed to take.
+- `noble hook` answers Cursor with a JSON object on stdout (`{"continue":true}` to a prompt, `{}` otherwise).
+- `noble hook` answers agy with a JSON object on stdout (`{"decision":"allow"}` for a Stop, `{}` otherwise), which agy
+  reads back.
+
+### Documentation
+- README and the AI agents docs cover the Antigravity CLI and Cursor CLI hooks (settings files and states). README
+  also says that `winget install MertSoylu.Noble` is not available yet, and its install section keeps the other install
+  methods.
+
 ## [1.12.2] - 2026-10-30
 
 ### Documentation
@@ -791,7 +817,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.2...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.12.3...HEAD
+[1.12.3]: https://github.com/MertSoylu/noble/compare/v1.12.2...v1.12.3
 [1.12.2]: https://github.com/MertSoylu/noble/compare/v1.12.1...v1.12.2
 [1.12.1]: https://github.com/MertSoylu/noble/compare/v1.12.0...v1.12.1
 [1.12.0]: https://github.com/MertSoylu/noble/compare/v1.11.0...v1.12.0

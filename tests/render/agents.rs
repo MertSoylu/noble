@@ -578,9 +578,10 @@ fn hook_cli_names_the_agent_it_runs_for() {
     let home = std::env::temp_dir().join(format!("noble-cli-agent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
-    let cases: [(&[&str], Option<Agent>); 3] = [
+    let cases: [(&[&str], Option<Agent>); 4] = [
         (&["hook", "prompt", "--agent", "codex"], Some(Agent::Codex)),
-        (&["hook", "prompt", "--agent", "cursor"], None),
+        (&["hook", "prompt", "--agent", "cursor"], Some(Agent::Cursor)),
+        (&["hook", "prompt", "--agent", "zed"], None),
         (&["hook", "stop"], Some(Agent::Claude)),
     ];
     for (args, want) in cases {
@@ -599,6 +600,87 @@ fn hook_cli_names_the_agent_it_runs_for() {
         assert!(child.wait().unwrap().success(), "{args:?}");
         let got = noble::hooks::read_records(&home, 42).get(&3).map(|r| r.agent());
         assert_eq!(got, want, "{args:?}");
+        noble::hooks::remove_record(&home, 42, 3);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Antigravity's hooks read a JSON reply from `noble hook` (a Stop says `allow`, the others `{}`), and the reply is
+/// printed outside NOBLE too; the same run records the state. The other agents' hooks print nothing.
+#[test]
+fn antigravity_hooks_answer_on_stdout() {
+    use noble::hooks::Agent;
+    use std::io::{Read as _, Write as _};
+    let home = std::env::temp_dir().join(format!("noble-cli-reply-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let payload =
+        br#"{"conversationId":"ec33ebf9-0cba-4100-8142-c61503f6c587","terminationReason":"model_stop","error":""}"#;
+    let cases: [(&[&str], &str, Option<Agent>); 3] = [
+        (&["hook", "stop", "--agent", "antigravity"], r#"{"decision":"allow"}"#, Some(Agent::Antigravity)),
+        (&["hook", "prompt", "--agent", "antigravity"], "{}", Some(Agent::Antigravity)),
+        (&["hook", "stop"], "", Some(Agent::Claude)),
+    ];
+    for (args, want_out, want_agent) in cases {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+            .args(args)
+            .env("NOBLE_HOME", &home)
+            .env("NOBLE_INSTANCE", "42")
+            .env("NOBLE_PANE", "3")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("noble hook");
+        let _ = child.stdin.take().unwrap().write_all(payload);
+        let mut out = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+        assert!(child.wait().unwrap().success(), "{args:?}");
+        assert_eq!(out.trim(), want_out, "{args:?}");
+        let got = noble::hooks::read_records(&home, 42).get(&3).map(|r| r.agent());
+        assert_eq!(got, want_agent, "{args:?}");
+        noble::hooks::remove_record(&home, 42, 3);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Cursor's hooks get a JSON object back from `noble hook` too: `beforeSubmitPrompt` continues the prompt, the other
+/// events answer `{}`, so every hook's output is valid JSON. Printed outside NOBLE as well, and the same run records
+/// the state (a tool the agent ran is working; a Stop with status `error` is a failed turn).
+#[test]
+fn cursor_hooks_answer_on_stdout() {
+    use noble::hooks::Agent;
+    use std::io::{Read as _, Write as _};
+    let home = std::env::temp_dir().join(format!("noble-cli-cursor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let payload = br#"{"conversation_id":"5f0c1a2b-9d3e-4c7a-8b1f-0e2d3c4b5a69","status":"error"}"#;
+    let cases: [(&[&str], &str, Option<&str>); 4] = [
+        (&["hook", "prompt", "--agent", "cursor"], r#"{"continue":true}"#, Some("prompt")),
+        (&["hook", "tool-use", "--agent", "cursor"], "{}", Some("tool-use")),
+        (&["hook", "stop", "--agent", "cursor"], "{}", Some("stop-failure")),
+        (&["hook", "stop"], "", Some("stop")),
+    ];
+    for (args, want_out, want_event) in cases {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
+            .args(args)
+            .env("NOBLE_HOME", &home)
+            .env("NOBLE_INSTANCE", "42")
+            .env("NOBLE_PANE", "3")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("noble hook");
+        let _ = child.stdin.take().unwrap().write_all(payload);
+        let mut out = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+        assert!(child.wait().unwrap().success(), "{args:?}");
+        assert_eq!(out.trim(), want_out, "{args:?}");
+        let rec = noble::hooks::read_records(&home, 42).remove(&3).expect("a record");
+        assert_eq!(Some(rec.event.as_str()), want_event, "{args:?}");
+        let want_agent = if args.contains(&"cursor") { Agent::Cursor } else { Agent::Claude };
+        assert_eq!(rec.agent(), want_agent, "{args:?}");
         noble::hooks::remove_record(&home, 42, 3);
     }
     let _ = std::fs::remove_dir_all(&home);
@@ -623,7 +705,7 @@ fn agent_hooks_popup_lists_every_agent() {
     assert!(matches!(app.overlay, Some(Overlay::AgentHooks { selected: 0 })));
     let text = render(&mut app, 160, 45);
     save("agent-hooks-160x45", &text);
-    for name in ["Claude Code", "Codex", "GitHub Copilot", "OpenCode"] {
+    for name in ["Claude Code", "Codex", "GitHub Copilot", "OpenCode", "Antigravity CLI", "Cursor CLI"] {
         assert!(text.contains(name), "{text}");
     }
     assert!(text.contains("not found") && text.contains(" on") && text.contains(" off"), "{text}");

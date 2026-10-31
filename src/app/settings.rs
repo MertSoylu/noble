@@ -135,7 +135,7 @@ impl SettingKey {
             SettingKey::Shell => "Program that new terminal panes start",
             SettingKey::Restore => "Reopen the tabs of the last session on launch",
             SettingKey::ResumeAgents => {
-                "Restored Claude, Codex, Copilot and OpenCode panes pick up their last conversation"
+                "Restored Claude, Codex, Copilot, OpenCode and Antigravity panes resume their conversation"
             }
             SettingKey::CopySelect => "Copy a mouse selection as soon as you release it",
             SettingKey::Osc52Write => "Let programs in a pane set the clipboard (OSC 52, e.g. over SSH)",
@@ -154,7 +154,9 @@ impl SettingKey {
             SettingKey::QuickLaunch => "Choose the AI CLIs offered as launchers",
             SettingKey::AiRefresh => "How often usage is fetched while Home is open",
             SettingKey::AiWarn => "Warn when a quota reaches this percentage",
-            SettingKey::AgentHooks => "Show each agent's live state (Claude Code, Codex, Copilot, OpenCode) on its tab",
+            SettingKey::AgentHooks => {
+                "Show each agent's live state (Claude Code, Codex, Copilot, OpenCode, Antigravity, Cursor) on its tab"
+            }
             SettingKey::Updates => "Look for a newer NOBLE release once a day",
         }
     }

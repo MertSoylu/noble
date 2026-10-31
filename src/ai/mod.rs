@@ -764,6 +764,13 @@ mod tests {
         assert_eq!(agent_kind(Some("codex"), "node"), Some("codex"));
         assert_eq!(agent_kind(Some(r"& 'C:\Users\a\AppData\Local\agy\bin\agy.exe'"), "pwsh"), Some("antigravity"));
         assert_eq!(agent_kind(Some("opencode"), "pwsh"), Some("opencode"));
+        // Cursor's agent is `cursor-agent`; the Cursor IDE's `cursor` launcher is not the agent.
+        assert_eq!(agent_kind(Some("cursor-agent"), "pwsh"), Some("cursor"));
+        assert_eq!(
+            agent_kind(Some(r"& 'C:\Users\a\AppData\Local\cursor-agent\cursor-agent.ps1'"), "pwsh"),
+            Some("cursor")
+        );
+        assert_eq!(agent_kind(Some("cursor"), "pwsh"), None);
         assert_eq!(agent_kind(None, "GitHub Copilot"), Some("copilot"));
         assert_eq!(agent_kind(None, "pwsh"), None);
         assert_eq!(agent_kind(None, "legacy agy notes"), None);

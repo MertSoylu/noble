@@ -50,7 +50,7 @@ body:
     attributes:
       label: noble doctor output
       description: |
-        Run `noble doctor` and paste its whole output here. It lists the OS, the terminal, the shells, the Claude Code
+        Run `noble doctor` and paste its whole output here. It lists the OS, the terminal, the shells, the agent status
         hooks, the AI providers and the config and data paths. It contains no tokens or credentials.
       render: text
     validations:

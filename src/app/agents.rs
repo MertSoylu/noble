@@ -7,11 +7,12 @@ use super::*;
 
 /// An agent session's state from its last hook event. While subagents still run the
 /// session is working even after the main answer ended (`stop`); a question from the agent
-/// or one of its subagents (a permission prompt) still needs you, at once; a failed turn is an error.
+/// or one of its subagents (a permission prompt) still needs you, at once; a failed turn is an error. A tool the
+/// agent ran (Cursor reports those) means it is working.
 pub(super) fn hook_state(rec: &crate::hooks::HookRecord) -> Option<AgentState> {
-    use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST, PROMPT, SESSION_START, STOP, STOP_FAILURE};
+    use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST, PROMPT, SESSION_START, STOP, STOP_FAILURE, TOOL_USE};
     let state = match rec.event.as_str() {
-        PROMPT => AgentState::Working,
+        PROMPT | TOOL_USE => AgentState::Working,
         NOTIFICATION | PERMISSION_REQUEST => AgentState::NeedsYou,
         STOP_FAILURE => return Some(AgentState::Error),
         STOP | SESSION_START => AgentState::Idle,
@@ -391,6 +392,17 @@ mod tests {
         assert!(!should_offer_hooks(true, true), "offered before");
     }
 
+    /// The launcher's command names the agent the offer is about: `cursor-agent` is Cursor's, and the IDE's `cursor`
+    /// is not (the offer and the pane's agent name read the same mapping).
+    #[test]
+    fn a_launched_agent_is_named_by_its_command() {
+        use crate::hooks::Agent;
+        let named = |cmd: &str| crate::ai::agent_kind(Some(cmd), "").and_then(Agent::from_id);
+        assert_eq!(named("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(named("cursor"), None);
+        assert_eq!(named("agy"), Some(Agent::Antigravity));
+    }
+
     #[test]
     fn headless_launch_never_offers() {
         let mut app = App::headless(Config::default(), (100, 30));
@@ -404,6 +416,9 @@ mod tests {
         assert_eq!(hook_state(&rec("notification", 1, 0)), Some(AgentState::NeedsYou));
         assert_eq!(hook_state(&rec("stop", 1, 0)), Some(AgentState::Idle));
         assert_eq!(hook_state(&rec("session-start", 1, 0)), Some(AgentState::Idle));
+        // A tool the agent ran (Cursor's tool events) is work, and a turn that ended after it is idle again.
+        assert_eq!(hook_state(&rec("tool-use", 1, 0)), Some(AgentState::Working));
+        assert_eq!(hook_state(&rec("tool-use", 1, 2)), Some(AgentState::Working));
         // Subagents still running keep the session working after the main answer; a question still needs you.
         assert_eq!(hook_state(&rec("stop", 1, 2)), Some(AgentState::Working));
         assert_eq!(hook_state(&rec("notification", 1, 2)), Some(AgentState::NeedsYou));

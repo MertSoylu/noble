@@ -203,9 +203,12 @@ fn codex_fetch(env: &Env) -> Result<Usage, String> {
 // CLI uses its own session. Since agy could open a browser login when signed out,
 // it only runs when a session already exists (existence check, no content read).
 
-fn agy_bin(env: &Env) -> Option<PathBuf> {
+/// The agy program: on PATH, else the copy the Windows installer puts in `%LOCALAPPDATA%\agy\bin` (LOCALAPPDATA is
+/// not set on Linux and macOS, so PATH is all that counts there). Also used by the agent hooks' `on_path`.
+pub(crate) fn agy_program() -> Option<PathBuf> {
     util::which("agy").or_else(|| {
-        let p = PathBuf::from(env.var("LOCALAPPDATA")?).join("agy").join("bin").join("agy.exe");
+        let local = std::env::var("LOCALAPPDATA").ok().filter(|v| !v.trim().is_empty())?;
+        let p = PathBuf::from(local).join("agy").join("bin").join("agy.exe");
         p.is_file().then_some(p)
     })
 }
@@ -286,7 +289,7 @@ fn keychain_secret(env: &Env, service: &str) -> Option<String> {
 }
 
 fn agy_detect(env: &Env) -> Presence {
-    let installed = agy_bin(env).is_some();
+    let installed = agy_program().is_some();
     if installed && agy_signed_in(env) {
         Presence::Ready
     } else if installed || env.at(&[".gemini", "antigravity-cli"]).is_dir() {
@@ -321,8 +324,8 @@ pub fn parse_agy(v: &Value) -> Result<Usage, String> {
     if windows.is_empty() { Err("no usage data".into()) } else { Ok(Usage { windows, plan: None, note: None }) }
 }
 
-fn agy_fetch(env: &Env) -> Result<Usage, String> {
-    let bin = agy_bin(env).ok_or("agy not on PATH")?;
+fn agy_fetch(_env: &Env) -> Result<Usage, String> {
+    let bin = agy_program().ok_or("agy not on PATH")?;
     let args = ["--print", "/usage", "--output-format", "json", "--print-timeout", "20s"];
     let out = run_capture(&bin, &args, bin.parent(), Duration::from_secs(25))?;
     // Skip possible warning lines: the JSON starts at the first '{'.

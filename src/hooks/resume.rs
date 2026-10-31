@@ -39,6 +39,12 @@ pub fn session_id(agent: Agent, input: &Value) -> Option<String> {
             .pointer("/properties/sessionID")
             .or_else(|| input.pointer("/properties/info/id"))
             .and_then(Value::as_str),
+        // Antigravity names the conversation `conversationId` on every event. `agy --conversation` starts a new
+        // conversation when it does not find the id, so a wrong id is harmless. A live run has not confirmed it.
+        Agent::Antigravity => input.get("conversationId").and_then(Value::as_str),
+        // Not kept: cursor-agent's `--resume` takes the CLI's session id, and its hooks carry `conversation_id` and
+        // `session_id` as separate fields. Which one `--resume` accepts is not verified, so no Cursor id is stored.
+        Agent::Cursor => None,
     }?;
     valid_id(raw.trim())
 }
@@ -50,6 +56,9 @@ fn taken_flags(agent: Agent) -> &'static [&'static str] {
         Agent::Codex => &["resume"],
         Agent::Copilot => &["--resume", "--continue"],
         Agent::OpenCode => &["--session", "-s", "--continue", "-c", "--fork"],
+        Agent::Antigravity => &["--conversation", "-c", "--continue"],
+        // Cursor has no resume (see `session_id`), so no launcher flag is consulted for it.
+        Agent::Cursor => &[],
     }
 }
 
@@ -62,7 +71,8 @@ fn picks_conversation(launch: &str, agent: Agent) -> bool {
 }
 
 impl Resume {
-    /// The arguments that resume this conversation with the agent's CLI; `None` when the id is not safe.
+    /// The arguments that resume this conversation with the agent's CLI; `None` when the id is not safe or the agent
+    /// has no resume (Cursor, see `session_id`).
     pub fn args(&self) -> Option<String> {
         let id = valid_id(&self.id)?;
         Some(match self.agent {
@@ -71,6 +81,8 @@ impl Resume {
             // Copilot's documented form takes the id after `=`.
             Agent::Copilot => format!("--resume={id}"),
             Agent::OpenCode => format!("--session {id}"),
+            Agent::Antigravity => format!("--conversation {id}"),
+            Agent::Cursor => return None,
         })
     }
 }
@@ -142,6 +154,16 @@ mod tests {
             session_id(Agent::OpenCode, &json!({ "properties": { "info": { "id": "ses_2" } } })).as_deref(),
             Some("ses_2")
         );
+        assert_eq!(
+            session_id(Agent::Antigravity, &json!({ "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587" }))
+                .as_deref(),
+            Some("ec33ebf9-0cba-4100-8142-c61503f6c587")
+        );
+        // Cursor keeps no id to resume: its `--resume` id is not the `conversation_id` its hooks carry (not verified).
+        assert_eq!(
+            session_id(Agent::Cursor, &json!({ "conversation_id": "5f0c1a2b-9d3e-4c7a-8b1f-0e2d3c4b5a69" })),
+            None
+        );
     }
 
     #[test]
@@ -153,6 +175,12 @@ mod tests {
         // Claude does not read another agent's field names.
         assert_eq!(session_id(Agent::Claude, &json!({ "sessionId": "abc" })), None);
         assert_eq!(session_id(Agent::OpenCode, &json!({ "session_id": "abc" })), None);
+        assert_eq!(
+            session_id(Agent::Antigravity, &json!({ "session_id": "abc" })),
+            None,
+            "agy names it conversationId"
+        );
+        assert_eq!(session_id(Agent::Antigravity, &json!({ "conversationId": "a b" })), None);
     }
 
     #[test]
@@ -161,6 +189,8 @@ mod tests {
         assert_eq!(res(Agent::Codex, "abc").args().as_deref(), Some("resume abc"));
         assert_eq!(res(Agent::Copilot, "abc").args().as_deref(), Some("--resume=abc"));
         assert_eq!(res(Agent::OpenCode, "abc").args().as_deref(), Some("--session abc"));
+        assert_eq!(res(Agent::Antigravity, "abc").args().as_deref(), Some("--conversation abc"));
+        assert_eq!(res(Agent::Cursor, "abc").args(), None, "Cursor has no resume");
         assert_eq!(res(Agent::Claude, "a b").args(), None, "an unsafe id builds no command");
     }
 
@@ -183,6 +213,11 @@ mod tests {
             resume_command("opencode", &res(Agent::OpenCode, "ses_1")).as_deref(),
             Some("opencode --session ses_1")
         );
+        assert_eq!(
+            resume_command("agy", &res(Agent::Antigravity, "abc")).as_deref(),
+            Some("agy --conversation abc"),
+            "agy is the Antigravity launcher"
+        );
         // A path to the program still names the agent.
         assert_eq!(
             resume_command("C:\\Tools\\claude.exe --verbose", &res(Agent::Claude, "abc")).as_deref(),
@@ -200,6 +235,11 @@ mod tests {
         assert_eq!(resume_command("codex resume --last", &res(Agent::Codex, "abc")), None);
         assert_eq!(resume_command("copilot --continue", &res(Agent::Copilot, "abc")), None);
         assert_eq!(resume_command("opencode --session x", &res(Agent::OpenCode, "abc")), None);
+        assert_eq!(resume_command("agy -c", &res(Agent::Antigravity, "abc")), None, "agy -c picks the last one");
+        assert_eq!(resume_command("agy --conversation=x", &res(Agent::Antigravity, "abc")), None);
+        assert_eq!(resume_command("agy", &res(Agent::Claude, "abc")), None, "agy is not Claude");
+        assert_eq!(resume_command("cursor-agent", &res(Agent::Cursor, "abc")), None, "Cursor has no resume");
+        assert_eq!(resume_command("cursor-agent", &res(Agent::Claude, "abc")), None, "cursor-agent is not Claude");
         // An unsafe id never reaches the command line.
         assert_eq!(resume_command("claude", &res(Agent::Claude, "x;y")), None);
     }

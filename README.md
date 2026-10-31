@@ -126,9 +126,10 @@ a command palette (`alt+p`, prefix `:` in a terminal) cover the keyboard side.
 Tabs, splits and each shell's folder are restored on the next launch; a folder that is gone or does not answer
 (a dead network share) opens in home instead. With several NOBLE windows open, each one saves its own tabs and
 the next launch brings back all of them; a window opened while another is running starts empty. Quick-launch
-tabs run their command (e.g. `claude`) again. An agent pane (Claude Code, Codex, GitHub Copilot, OpenCode) picks its last
-conversation up again on the same path: `claude --resume`, `codex resume`, `copilot --resume=<id>`, `opencode --session`,
-added to its own launcher (Settings → Resume agent conversations; `resume_agents`, on by default). Saved workspaces and
+tabs run their command (e.g. `claude`) again. An agent pane (Claude Code, Codex, GitHub Copilot, OpenCode, Antigravity
+CLI) picks its last conversation up again on the same path: `claude --resume`, `codex resume`,
+`copilot --resume=<id>`, `opencode --session`, `agy --conversation`, added to its own launcher
+(Settings → Resume agent conversations; `resume_agents`, on by default). Saved workspaces and
 reopened tabs (prefix `T`) do the same. The session is saved a couple of seconds after every change and
 when the window closes, the process is terminated or the OS logs off. Save named workspaces, reopen or delete
 them from the palette. `noble .` (or `noble <folder>`) opens a shell tab in that folder.
@@ -164,6 +165,10 @@ not notarized: a file downloaded with a browser needs `xattr -d com.apple.quaran
 with `curl` or `noble update`). Each archive has a `.sha256` file next to it: check it with
 `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, `shasum -a 256 -c noble-macos-aarch64.tar.gz.sha256`
 on macOS, or compare it with `Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
+
+**winget (Windows):** `winget install MertSoylu.Noble` is planned but not available yet: NOBLE is not in the winget
+community repository (microsoft/winget-pkgs) yet. Until then use the prebuilt archive above, Cargo or the source install
+below.
 
 **With Cargo** (Rust 1.95+):
 
@@ -358,7 +363,7 @@ shell = ""               # empty = pwsh → powershell → cmd on Windows, $SHEL
 shell_args = []
 scrollback = 5000
 restore_session = true
-resume_agents = true     # a restored Claude, Codex, Copilot or OpenCode pane picks its last conversation up again (false: starts fresh)
+resume_agents = true     # a restored Claude, Codex, Copilot, OpenCode or Antigravity pane picks its last conversation up again (false: starts fresh)
 copy_on_select = true
 osc52_write = true       # programs in a pane may set the clipboard (OSC 52, e.g. over SSH); false ignores them
 tab_follows_cwd = true   # name a tab after its current folder (false: the folder it was opened in)
@@ -416,12 +421,15 @@ their conversations across restarts. The full reference (every agent's events an
 keys) is in the [AI agents docs](https://noble.mertsoylu.dev/docs/ai-agents).
 
 - **Real state for each agent:** Claude Code, Codex, GitHub Copilot and OpenCode report their prompts, answers,
-  permission requests and, where the agent has them, errors, through their own hooks. Turn them on in
+  permission requests and, where the agent has them, errors, through their own hooks. Antigravity CLI and Cursor CLI
+  report work and the end of a turn, but no permission requests (see their bullets below). Turn them on in
   **Settings → Terminal → Agent status hooks** (listed when an agent is installed here). The state shows on the tab
   dots, in each pane's title and on Home, and **prefix `a`** jumps to the next agent waiting for you.
 - **Conversations come back:** with **Resume agent conversations** on (the default), a restored, saved or reopened pane
   whose launcher is an agent starts it again on its last conversation: `claude --resume <id>`, `codex resume <id>`,
-  `copilot --resume=<id>` or `opencode --session <id>`. The id comes from that agent's hooks, so they must be on for it.
+  `copilot --resume=<id>`, `opencode --session <id>` or `agy --conversation <id>`. The id comes from that agent's hooks,
+  so they must be on for it. A Cursor CLI pane starts a new chat: NOBLE keeps no id that `cursor-agent --resume` is
+  confirmed to take.
   A shell pane where you typed `claude` by hand restores as a plain shell. The Home card's `↻ claude · 2h ago` line
   runs `claude --continue` in a project and needs no hooks.
 - **Command blocks:** a PowerShell, bash 4.4+, zsh or fish pane marks where each command starts and ends, and NOBLE
@@ -447,9 +455,9 @@ keys) is in the [AI agents docs](https://noble.mertsoylu.dev/docs/ai-agents).
 <br>
 
 Without help NOBLE can only guess whether an agent is busy. Turn on **Settings → Terminal → Agent status hooks**:
-NOBLE opens a popup with one row per agent it found on this machine (**Claude Code**, **Codex**, **GitHub Copilot**
-and **OpenCode**; a row that is not found is shown as such). Click a row, or press ⏎ or space on it, to install
-or remove that agent's hooks. The first time you launch an agent that has no hooks yet, NOBLE offers to turn them
+NOBLE opens a popup with one row per agent it found on this machine (**Claude Code**, **Codex**, **GitHub Copilot**,
+**OpenCode**, **Antigravity CLI** and **Cursor CLI**; a row that is not found is shown as such). Click a row, or press
+⏎ or space on it, to install or remove that agent's hooks. The first time you launch an agent that has no hooks yet, NOBLE offers to turn them
 on for every agent it found. Installing keeps the hooks you already have and writes a backup of the settings file
 the first time; turning the hooks off removes only NOBLE's entries (Copilot: its own `noble.json`; OpenCode: its
 own plugin file).
@@ -460,12 +468,16 @@ own plugin file).
 | Codex | `hooks.json` in `$CODEX_HOME` when set to an existing folder, else `~/.codex` |
 | GitHub Copilot | `noble.json` in `$COPILOT_HOME/hooks` when set, else `~/.copilot/hooks` |
 | OpenCode | `plugins/noble.js` in `$XDG_CONFIG_HOME/opencode` when set, else `~/.config/opencode` |
+| Antigravity CLI | `~/.gemini/config/hooks.json` (its `noble` key; no documented variable moves it) |
+| Cursor CLI | `~/.cursor/hooks.json` (NOBLE's entries in its `hooks` lists; the docs give this path for every platform, not yet confirmed on Windows) |
 
 On Windows these are in your user profile (`%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`, and so on). Each
 agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on the
 events it reports: prompt, stop, permission request, notification, error, subagent start and stop, session start
-and end. Codex has no notification or error event, and OpenCode has no notification, subagent or session start and end
-event. The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE it does nothing.
+and end. Codex has no notification or error event, OpenCode has no notification, subagent or session start and end
+event, Antigravity CLI has session start, each model call and stop, and Cursor CLI has session start, each prompt (not
+confirmed for the CLI), each tool call and stop. The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE
+it writes nothing (Antigravity CLI and Cursor CLI still get their JSON reply on stdout).
 The hooks apply to sessions started after the install: restart an agent that is already running.
 
 - **Claude Code:** also reports a failed turn (`StopFailure`: an API error or a rate limit) as an error, and a permission request
@@ -476,6 +488,16 @@ The hooks apply to sessions started after the install: restart an agent that is 
 - **OpenCode:** a plugin forwards session status, idle, errors and permission requests to NOBLE, and it runs NOBLE
   only in a NOBLE pane. A child session is not told apart from its parent, so a parent tab can show idle while a
   child still works.
+- **Antigravity CLI:** NOBLE shows working from each model call, idle when the turn stops, and an error when the turn
+  stopped with one. agy has no permission, notification, subagent or session-end event, so an agent waiting for a
+  permission answer still shows as working. NOBLE clears the pane's state when the shell prompt comes back. The resume id
+  follows agy's hook documentation and binary.
+- **Cursor CLI:** NOBLE shows working from each tool call, and from each prompt where the CLI sends that event; idle when
+  the turn stops, and an error when the stop reports one. The CLI runs only some of Cursor's hook events, and none of the
+  ones NOBLE uses reports a question or a permission prompt, so NOBLE never shows "needs you" for it: a turn that waits
+  for an approval still shows as working. NOBLE registers no permission hook, so Cursor's own approval prompts are not
+  touched. Which hooks run depends on the cursor-agent version: a turn with no tool call may not show as working at all.
+  A restored Cursor pane starts a new chat.
 
 The Home screen then lists every session as **working**, **needs you**, **your turn** or **error**, and a
 background tab lights up the moment an agent asks for permission. A Claude session stays **working** while its

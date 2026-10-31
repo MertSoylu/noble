@@ -212,6 +212,14 @@ fn json_consumers_never_panic() {
             Some("7"),
             Some(&i.to_string()),
         );
+        // Antigravity's Stop payload (its error decides stop-failure) and the reply it is answered with.
+        noble::hooks::run_cli(noble::hooks::Agent::Antigravity, "stop", &text, &dir, Some("7"), Some(&i.to_string()));
+        let _ = noble::hooks::hook_reply(noble::hooks::Agent::Antigravity, "stop");
+        // Cursor's Stop payload (its status decides stop-failure), a tool event and the reply to the prompt.
+        for arg in ["stop", "tool-use", "prompt"] {
+            noble::hooks::run_cli(noble::hooks::Agent::Cursor, arg, &text, &dir, Some("7"), Some(&i.to_string()));
+            let _ = noble::hooks::hook_reply(noble::hooks::Agent::Cursor, arg);
+        }
     }
     let _ = noble::hooks::read_records(&dir, 7);
     let _ = std::fs::remove_dir_all(&dir);

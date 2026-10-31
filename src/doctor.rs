@@ -501,6 +501,16 @@ mod tests {
                 },
                 AgentHooks { agent: Agent::Copilot, state: Hooks::NotFound, settings: None },
                 AgentHooks { agent: Agent::OpenCode, state: Hooks::NotFound, settings: None },
+                AgentHooks {
+                    agent: Agent::Antigravity,
+                    state: Hooks::Installed,
+                    settings: Some(PathBuf::from("C:/elsewhere/.gemini/config/hooks.json")),
+                },
+                AgentHooks {
+                    agent: Agent::Cursor,
+                    state: Hooks::NotInstalled,
+                    settings: Some(PathBuf::from("C:/elsewhere/.cursor/hooks.json")),
+                },
             ],
             providers: Providers::Checked(vec![
                 ("Claude Code", Presence::Ready),

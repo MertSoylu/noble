@@ -172,9 +172,11 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `Pane::step_command` / `show_last_output` / `block_lines` read them; `app/blocks.rs` holds the actions (jump, copy,
   send to the agent of the tab or the last one used, pasted never run). The ✗ badge is `Hit::CommandBadge`.
 - **Agent resume:** `hooks/resume.rs` reads each agent's session id from its hook payload (`session_id`; Copilot
-  `sessionId`; OpenCode `properties.sessionID`) into `HookRecord.session`; `valid_id` keeps only `[A-Za-z0-9_-]` up to
-  128 characters, also when a session file is read back. `App::agent_resume` keeps the last id per pane (dropped in
-  `forget_agent`). `save_node` writes `SavedNode::Leaf.resume` only when the launcher runs that agent
+  `sessionId`; OpenCode `properties.sessionID`; Antigravity `conversationId`; Cursor keeps none, since its `--resume`
+  takes the CLI session id, not the `conversation_id` its hooks carry) into
+  `HookRecord.session`; `valid_id` keeps only `[A-Za-z0-9_-]` up to 128 characters, also when a session file is read
+  back. `App::agent_resume` keeps the last id per pane (dropped in `forget_agent`). `save_node` writes
+  `SavedNode::Leaf.resume` only when the launcher runs that agent
   (`resume_command`); `build_node` restores it through the launcher's own command, so session restore, workspaces and
   prefix `T` share it. `[terminal] resume_agents` (default on) turns both off. Home: `projects::claude_activity` stats
   `~/.claude/projects/<claude_folder_name>` in the scan thread (never a transcript; `None` under `ai::isolated`);
@@ -225,9 +227,21 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **Agent hooks:** `hooks/` — `mod.rs` holds what the agents share (`HookRecord` with its optional `agent`, the
   records folder, `run_cli`, `read_records`, `prune`, `remove_record`, `command_base`/`quote_for_shell`, the `Agent`
   registry and `HOOK_ARGS`); one module per agent: `claude.rs` (`~/.claude/settings.json`), `codex.rs`
-  (`hooks.json` under `$CODEX_HOME`), `copilot.rs` (its own `noble.json` under `$COPILOT_HOME/hooks`) and
-  `opencode.rs` (its own plugin file `plugins/noble.js`). Each offers `EVENTS`, `settings_path` (None when
-  `ai::isolated` or no home), `installed_state`, `install`, `uninstall`, `upgrade` and `record_message`; install
+  (`hooks.json` under `$CODEX_HOME`), `copilot.rs` (its own `noble.json` under `$COPILOT_HOME/hooks`), `opencode.rs`
+  (its own plugin file `plugins/noble.js`), `antigravity.rs` (`~/.gemini/config/hooks.json`: NOBLE's own `noble` key of
+  flat handler lists under SessionStart, PreInvocation and Stop; `enabled: false` counts as not installed; no
+  `PreToolUse`, whose reply would decide the tool's permission) and `cursor.rs` (`~/.cursor/hooks.json`: `version` 1
+  and flat entries under sessionStart, beforeSubmitPrompt, postToolUse, afterShellExecution, afterFileEdit and stop; no
+  permission hooks; `cursor::program` finds `cursor-agent` on PATH or in `%LOCALAPPDATA%\cursor-agent`; the docs' path
+  is read on Windows too, and the prompt event is not verified for the CLI). Antigravity
+  and Cursor have no "needs you" state: NOBLE registers no event for a permission prompt with either, so a prompt
+  waiting for approval reads as working. Their commands differ from their ids: `Agent::on_path` checks `agy` and
+  `cursor-agent` (not `antigravity`, and not Cursor's IDE launcher `cursor`). `hooks::hook_reply` is the stdout reply of
+  `noble hook` for the agents that read one: Antigravity's Stop gets `{"decision":"allow"}`, Cursor's
+  beforeSubmitPrompt gets `{"continue":true}`, every other event gets `{}`; `main.rs` prints it before the record is
+  written, so it is printed outside NOBLE too. `TOOL_USE` (`tool-use`) is what Cursor's tool events send: working. Each
+  offers `EVENTS`, `settings_path` (None when `ai::isolated` or no home), `installed_state`, `install`, `uninstall`,
+  `upgrade` and `record_message`; install
   keeps the user's own hooks, writes a backup once and removes only NOBLE's entries. When enabled in Settings
   (`app/agent_hooks.rs`, the "Agent status hooks" popup), an agent's hooks run `noble hook <event> [--agent <id>]`
   (no flag = Claude). `main.rs` handles this subcommand without opening the terminal; state is written to
@@ -241,8 +255,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `upgrade_installed` (every agent) adds
   newly added events to an older install at startup. `hooks::prune` runs at startup. Never touch the real files in
   tests: install/uninstall/upgrade take an explicit path, and `NOBLE_HOME` does not move `~/.claude`, `~/.codex`,
-  `~/.copilot` or `~/.config/opencode`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS` (`ai::isolated`), which turns
-  off every agent's settings path (`settings_path` returns None) and AI credential detection.
+  `~/.copilot`, `~/.config/opencode`, `~/.gemini` or `~/.cursor`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS`
+  (`ai::isolated`), which turns off every agent's settings path (`settings_path` returns None) and AI credential
+  detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
 - **Private files:** on Unix NOBLE's folders are 0700 and new files 0600 (`util::create_private_dir`,

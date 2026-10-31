@@ -6,6 +6,8 @@
 # browser needs `xattr -d com.apple.quarantine noble` once; curl and `noble update` do not.
 # Archive names are what `noble update` looks for (`update::asset_name`); keep them stable. Each archive
 # gets a `<archive>.sha256` next to it, which `noble update` verifies before unpacking.
+# On a tag the Windows archives are also submitted to winget (the `winget` job at the end of this file). That job
+# runs only when the repository variable WINGET_SUBMIT is `true`.
 name: Release
 
 on:
@@ -108,3 +110,91 @@ jobs:
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
           body_path: notes.md
+
+  # Submits the Windows archives of a tag to microsoft/winget-pkgs (package id MertSoylu.Noble), so that
+  # `winget install MertSoylu.Noble` offers the new version. It runs after every archive is uploaded, only for a
+  # tag push, and only when the repository variable WINGET_SUBMIT is `true` (the workflow_dispatch dry run skips
+  # it). It stays green when the secret is not set. Before turning it on:
+  # - The fork MertSoylu/winget-pkgs (of microsoft/winget-pkgs, owned by the WINGET_TOKEN account) must exist:
+  #   komac pushes the branch of the pull request there.
+  # - The first manifest (v1.12.2) is submitted by hand and merged first: `komac update` only updates a package
+  #   that already exists in winget-pkgs.
+  # - Secret WINGET_TOKEN is a classic personal access token with the public_repo scope (fine-grained tokens do
+  #   not work with komac). It can write to every public repository the account can push to, so it is only
+  #   handed to komac, which is pinned to a release and checked against its SHA-256.
+  # komac runs directly, not through an action: `komac update --submit` replaces the installers with its own
+  # analysis of the zips, which has no PortableCommandAlias, so winget would stop creating the `noble` command.
+  # The manifests are written to a folder first, the alias is added under each NestedInstallerFiles entry, and
+  # then that folder is submitted.
+  winget:
+    needs: build
+    if: vars.WINGET_SUBMIT == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    env:
+      KOMAC_VERSION: 2.17.1
+      KOMAC_SHA256: a97c002c5ffa15f232af117efac6774e755d27acc47eba00f1661033267d7438
+    steps:
+      # A job-level `if` cannot read secrets, so the check is a step and gates the submission steps.
+      - name: Check for the WINGET_TOKEN secret
+        id: token
+        shell: bash
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::WINGET_TOKEN is not set: the winget submission is skipped."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install komac
+        if: steps.token.outputs.present == 'true'
+        shell: pwsh
+        run: |
+          $exe = "komac-$env:KOMAC_VERSION-x86_64-pc-windows-msvc.exe"
+          $dir = Join-Path $env:RUNNER_TEMP komac
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Invoke-WebRequest "https://github.com/russellbanks/Komac/releases/download/v$env:KOMAC_VERSION/$exe" -OutFile "$dir\komac.exe"
+          $hash = (Get-FileHash "$dir\komac.exe" -Algorithm SHA256).Hash
+          if ($hash -ne $env:KOMAC_SHA256) { throw "komac checksum mismatch: $hash" }
+          Add-Content $env:GITHUB_PATH $dir
+      - name: Write the manifests
+        if: steps.token.outputs.present == 'true'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          $base = "https://github.com/${{ github.repository }}/releases/download/$env:TAG"
+          # The archive names of the build job above.
+          komac update MertSoylu.Noble --version $version `
+            --urls "$base/noble-windows-x86_64.zip" "$base/noble-windows-aarch64.zip" `
+            --release-notes-url "https://github.com/${{ github.repository }}/releases/tag/$env:TAG" `
+            --output "$env:RUNNER_TEMP\winget"
+          if ($LASTEXITCODE -ne 0) { throw "komac update failed" }
+      - name: Add the noble command alias
+        if: steps.token.outputs.present == 'true'
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "$env:RUNNER_TEMP\winget" -Recurse -Filter *.installer.yaml
+          if ($files.Count -ne 1) { throw "expected one installer manifest, found $($files.Count)" }
+          $path = $files[0].FullName
+          $text = Get-Content $path -Raw
+          if ($text -notmatch 'PortableCommandAlias') {
+            $text = [regex]::Replace($text, '(?m)^(\s*)- RelativeFilePath: noble\.exe\r?$',
+              { param($m) "$($m.Groups[1].Value)- RelativeFilePath: noble.exe`n$($m.Groups[1].Value)  PortableCommandAlias: noble" })
+            Set-Content $path $text -NoNewline -Encoding utf8NoBOM
+          }
+          $count = ([regex]::Matches($text, 'PortableCommandAlias: noble')).Count
+          # komac may hoist NestedInstallerFiles to the top level when both installers share it: one alias then.
+          if ($count -lt 1) { throw "PortableCommandAlias missing: no NestedInstallerFiles entry for noble.exe" }
+          Get-Content $path
+      - name: Submit to winget-pkgs
+        if: steps.token.outputs.present == 'true'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          komac submit "$env:RUNNER_TEMP\winget" --yes
+          if ($LASTEXITCODE -ne 0) { throw "komac submit failed" }
