@@ -1,6 +1,6 @@
 [package]
 name = "noble"
-version = "1.13.0"
+version = "1.14.0"
 edition = "2024"
 rust-version = "1.95"
 description = "NOBLE — retro-futurist HUD terminal workspace: real shells, projects, system sensors and AI quota in one cockpit"
@@ -29,7 +29,7 @@ arboard = { version = "3.7.0", default-features = false, features = ["wayland-da
 chrono = "0.4.45"
 crossterm = "0.29.0"
 dirs = "7.0.0"
-# Trait downcasts of the vendored PTY layer (`src/pty`); already in the tree through portable-pty, so no new crate.
+# Trait downcasts of the vendored PTY layer (`src/pty`); already in the tree through wayland-backend, so no new crate.
 downcast-rs = "1.2.1"
 # itoa and vte are the dependencies of the vendored vt100 emulator (`src/vt100`); vte/std as upstream enabled it.
 itoa = "1.0.18"

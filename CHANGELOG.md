@@ -6,16 +6,17 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-01
+
 ### Changed
 - A copy of NOBLE installed by winget is updated by winget, and NOBLE replaces nothing there. `noble update` says the copy
   is managed by winget, names `winget upgrade MertSoylu.Noble` and exits with status 1 (`noble update --check` names the
   same command), and the update notice opens a tab that runs it. The tab's toast says to quit NOBLE and run the command
   again if winget reports the file in use. Without winget on PATH the notice shows the command in a toast and stays.
   The release archive and cargo installs update as before.
-- Windows: a sideloaded `conpty.dll` is loaded only from the folder of `noble.exe` or from System32, not from the
-  current folder or PATH, where a planted copy would have been loaded. The PTY layer is vendored (`src/pty`, portable-pty
-  with wezterm's commit e68a8ec), which drops the nix 0.28 build warning and the duplicate `bitflags` and `thiserror`
-  crates.
+- The PTY layer is vendored (`src/pty`, portable-pty with wezterm's commit e68a8ec), which drops the nix 0.28 build
+  warning and the duplicate `bitflags` and `thiserror` crates, and brings in upstream's fix for an inverted
+  `TerminateProcess` check on Windows (wezterm#7709).
 - Focus mode: the alert chip that shows the other tabs' markers moves from the bottom row to the top row, the pane
   title row, at the rightmost place there that covers no pane button, so the terminal keeps its last row. A pointer
   rest on the bottom row no longer reveals the bottom bar; that bar comes back only while the prefix is armed. A rest
@@ -30,8 +31,14 @@ All notable changes to NOBLE are documented here. The format is based on
   its shell prompt where it was, and the rows added below it stay blank until the shell writes there, because ConPTY
   repaints from the top and does not pull its history down (Linux and macOS pull it down, so the prompt stays on the
   last row).
-- A winget update whose tab cannot start (for example, a missing shell) no longer says that winget runs in a new tab,
-  and the update notice stays for the next try.
+
+### Security
+- Windows: a sideloaded `conpty.dll` is loaded only from the folder of `noble.exe` or from System32, not from the current
+  folder or PATH, where a planted copy would have been loaded.
+
+### Documentation
+- README: a winget install is updated with `winget upgrade MertSoylu.Noble`; the contributor guide describes the
+  vendored PTY layer (`src/pty`).
 
 ## [1.13.0] - 2026-10-31
 
@@ -889,7 +896,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.13.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.0...HEAD
+[1.14.0]: https://github.com/MertSoylu/noble/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/MertSoylu/noble/compare/v1.12.3...v1.13.0
 [1.12.3]: https://github.com/MertSoylu/noble/compare/v1.12.2...v1.12.3
 [1.12.2]: https://github.com/MertSoylu/noble/compare/v1.12.1...v1.12.2
