@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use anyhow::{Context, Result};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -1382,7 +1382,7 @@ impl Pane {
 
     /// Kills the child unless the wait thread has reaped it. Its pid is free for reuse from then on, so a signal
     /// sent by pid could reach another process. The flag is set right after the reap: a kill in the instants
-    /// between the two is not excluded (closing that gap needs `waitid` with WNOWAIT, which portable-pty does not
+    /// between the two is not excluded (closing that gap needs `waitid` with WNOWAIT, which the vendored pty does not
     /// expose), but a pane closed long after its child exited never signals a reused pid.
     fn kill_child(&mut self) {
         if !self.exited.load(Ordering::Acquire) {

@@ -29,9 +29,12 @@ arboard = { version = "3.7.0", default-features = false, features = ["wayland-da
 chrono = "0.4.45"
 crossterm = "0.29.0"
 dirs = "7.0.0"
+# Trait downcasts of the vendored PTY layer (`src/pty`); already in the tree through portable-pty, so no new crate.
+downcast-rs = "1.2.1"
 # itoa and vte are the dependencies of the vendored vt100 emulator (`src/vt100`); vte/std as upstream enabled it.
 itoa = "1.0.18"
-portable-pty = "0.9.0"
+# Warnings and errors of the vendored PTY layer (`src/pty`); already in the tree, and NOBLE installs no logger.
+log = "0.4.34"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 # SHA-256 of `noble update` downloads; already in the tree as ureq's TLS backend (rustls), so no new crate.
 ring = { version = "0.17.14", default-features = false }
@@ -39,6 +42,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 # Config typos: the keys the config structs do not read, found while `config::parse` deserializes (`config::unknown_keys`).
 serde_ignored = "0.1.14"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+# `CommandBuilder::as_unix_command_line` of the vendored PTY layer (`src/pty`); already in the tree.
+shell-words = "1.1.1"
 sysinfo = "0.39.6"
 toml = "1.1.6"
 unicode-width = "0.2.2"
@@ -50,6 +55,8 @@ vte = { version = "0.15.0", default-features = false, features = ["std"] }
 signal-hook = "0.4.4"
 # Kills background commands' process groups (`ai::run_command`); already in the tree, so no new crate.
 libc = "0.2.191"
+# The vendored PTY layer's termios and `access` calls (`src/pty`). 0.31 is the newest release; it needs Rust 1.69.
+nix = { version = "0.31.3", features = ["fs", "term"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -57,8 +64,15 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Graphics_Gdi",
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Console",
+  "Win32_System_Environment",
+  "Win32_System_IO",
   "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }

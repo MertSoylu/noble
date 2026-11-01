@@ -1,5 +1,6 @@
 //! Updates: checking GitHub for the latest release (in the background, once a day)
 //! and `noble update` — downloads the ready-made binary and replaces the running one.
+//! A winget install is the exception: winget upgrades it, so NOBLE replaces nothing there (`install_source`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,43 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 /// Is the check enabled in this install: `noble-dev` is built from source, the env var turns it off.
 pub fn check_allowed() -> bool {
     !crate::util::is_dev_build() && std::env::var_os(DISABLE_ENV).is_none()
+}
+
+/// Where the running binary came from. winget keeps the files of its package and upgrades them itself, so a
+/// winget install is never replaced by NOBLE. Every other copy (the release archive, cargo, a folder of its
+/// own) is replaced by `noble update`, as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSource {
+    Direct,
+    Winget,
+}
+
+/// The winget package's upgrade command: the text NOBLE shows, and the arguments its tab runs after `winget`.
+pub const WINGET_UPGRADE: &str = "winget upgrade MertSoylu.Noble";
+pub const WINGET_UPGRADE_ARGS: &str = "upgrade MertSoylu.Noble";
+
+/// Is `path` inside a winget package folder, `…\WinGet\Packages\MertSoylu.Noble_<source>\…`? User scope puts it under
+/// `%LOCALAPPDATA%\Microsoft`, machine scope under `%ProgramFiles%`; only the folder names are checked. Pure text, so
+/// it works the same on every platform: `\` and `/` both separate the components, the case is ignored, and a `WinGet`
+/// folder must be directly followed by `Packages` and then the package folder. Lookalikes such as
+/// `…\WinGet-Packages\noble.exe` or another package do not match. `path` is the real path: a `WinGet\Links` command
+/// is resolved first (`install_source`).
+pub fn is_winget_package_path(path: &str) -> bool {
+    let parts: Vec<String> = path.split(['\\', '/']).map(str::to_ascii_lowercase).collect();
+    parts.windows(3).any(|w| w[0] == "winget" && w[1] == "packages" && w[2].starts_with("mertsoylu.noble_"))
+}
+
+/// The install source of the running binary. The real path is used: `canonicalize` resolves a `WinGet\Links`
+/// command to its package file, as `run_cli` does for the binary it replaces.
+pub fn install_source() -> InstallSource {
+    // Windows: winget installs packages under `WinGet\Packages` (`is_winget_package_path`). Linux and macOS have
+    // no winget, so every copy is a direct install, which `noble update` replaces as it always has.
+    if !cfg!(windows) {
+        return InstallSource::Direct;
+    }
+    let Ok(exe) = std::env::current_exe() else { return InstallSource::Direct };
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    if is_winget_package_path(&exe.to_string_lossy()) { InstallSource::Winget } else { InstallSource::Direct }
 }
 
 pub struct Release {
@@ -536,6 +574,40 @@ fn restart_hint(inside_noble: bool) -> &'static str {
     }
 }
 
+/// The last line of `noble update --check` when a newer release exists: the command that installs it.
+fn install_hint(source: InstallSource) -> String {
+    match source {
+        InstallSource::Direct => "Run `noble update` to install it.".into(),
+        InstallSource::Winget => format!("Run `{WINGET_UPGRADE}` to install it."),
+    }
+}
+
+/// What `noble update` does once it knows a newer release exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextStep {
+    /// `--check`: names the install command and stops.
+    Report,
+    /// `noble-dev` is built from source, so it is not replaced.
+    DevBuild,
+    /// A winget copy: winget upgrades it, so NOBLE replaces nothing.
+    Winget,
+    /// Downloads the release and replaces this binary.
+    Install,
+}
+
+/// The step for a newer release, decided from the flags and the install source alone (no network, no disk).
+fn next_step(check_only: bool, dev_build: bool, source: InstallSource) -> NextStep {
+    if check_only {
+        NextStep::Report
+    } else if dev_build {
+        NextStep::DevBuild
+    } else if source == InstallSource::Winget {
+        NextStep::Winget
+    } else {
+        NextStep::Install
+    }
+}
+
 /// `noble update [--check]`: returns an exit code.
 pub fn run_cli(args: &[String]) -> i32 {
     let check_only = match args.first().map(String::as_str) {
@@ -544,7 +616,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         Some("-h" | "--help") => {
             println!(
                 "USAGE: noble update [--check]\n\n\
-                 Downloads the latest release from GitHub and replaces this binary.\n  \
+                 Downloads the latest release from GitHub and replaces this binary.\n\
+                 A copy installed by winget is updated with `{WINGET_UPGRADE}` instead.\n  \
                    --check   only report whether a newer version exists"
             );
             return 0;
@@ -568,20 +641,29 @@ pub fn run_cli(args: &[String]) -> i32 {
         return 0;
     }
     println!("noble {} is available.", release.version);
-    if check_only {
-        println!("Run `noble update` to install it.");
-        return 0;
-    }
-    if crate::util::is_dev_build() {
-        eprintln!("noble-dev is built from source; update it with install.cmd / install.sh instead.");
-        return 1;
-    }
-    let exe = match std::env::current_exe() {
-        Ok(p) => std::fs::canonicalize(&p).unwrap_or(p),
-        Err(e) => {
-            eprintln!("error: could not locate this binary: {e}");
+    let source = install_source();
+    // Only `Install` reaches the download and the replacement: the other steps return here.
+    let exe = match next_step(check_only, crate::util::is_dev_build(), source) {
+        NextStep::Report => {
+            println!("{}", install_hint(source));
+            return 0;
+        }
+        NextStep::DevBuild => {
+            eprintln!("noble-dev is built from source; update it with install.cmd / install.sh instead.");
             return 1;
         }
+        NextStep::Winget => {
+            // Nothing is downloaded or replaced: winget owns these files and upgrades them itself.
+            eprintln!("This copy of noble is managed by winget. Update it with `{WINGET_UPGRADE}`.");
+            return 1;
+        }
+        NextStep::Install => match std::env::current_exe() {
+            Ok(p) => std::fs::canonicalize(&p).unwrap_or(p),
+            Err(e) => {
+                eprintln!("error: could not locate this binary: {e}");
+                return 1;
+            }
+        },
     };
     match install(&release, &exe) {
         Ok(()) => {
@@ -1161,5 +1243,77 @@ mod tests {
         }
         let _ = std::fs::remove_dir(&a);
         let _ = std::fs::remove_dir(&b);
+    }
+
+    const WINGET_USER: &str =
+        r"C:\Users\Mert\AppData\Local\Microsoft\WinGet\Packages\MertSoylu.Noble_Microsoft.Winget.Source_8wekyb3d8bbwe";
+    const WINGET_MACHINE: &str =
+        r"C:\Program Files\WinGet\Packages\MertSoylu.Noble_Microsoft.Winget.Source_8wekyb3d8bbwe";
+
+    /// User and machine scope, the canonical verbatim form `canonicalize` gives on Windows, forward slashes, and any
+    /// letter case: all winget installs.
+    #[test]
+    fn winget_package_paths_are_recognized() {
+        assert!(is_winget_package_path(&format!(r"{WINGET_USER}\noble.exe")));
+        assert!(is_winget_package_path(&format!(r"{WINGET_MACHINE}\noble.exe")));
+        assert!(is_winget_package_path(&format!(r"\\?\{WINGET_USER}\noble.exe")));
+        assert!(is_winget_package_path(&format!("{}/noble.exe", WINGET_USER.replace('\\', "/"))));
+        assert!(is_winget_package_path(&format!(r"{}\noble.exe", WINGET_USER.to_lowercase())));
+        assert!(is_winget_package_path(&format!(r"{}\NOBLE.EXE", WINGET_USER.to_uppercase())));
+    }
+
+    /// `WinGet\Links` holds the commands winget links to its packages. The pure check tests the real path, so the
+    /// link itself does not match and its target does (the live lookup canonicalizes before it looks).
+    #[test]
+    fn winget_link_target_is_the_package_path() {
+        let link = r"C:\Users\Mert\AppData\Local\Microsoft\WinGet\Links\noble.exe";
+        assert!(!is_winget_package_path(link), "the link is not the package");
+        assert!(is_winget_package_path(&format!(r"{WINGET_USER}\noble.exe")), "its target is");
+    }
+
+    /// Plain folders, cargo's bin folder, lookalike folder names and other packages are not winget installs.
+    #[test]
+    fn other_installs_are_not_winget() {
+        for path in [
+            r"C:\Users\Mert\.cargo\bin\noble.exe",
+            r"C:\Tools\noble.exe",
+            r"C:\Tools\WinGet-Packages\noble.exe",
+            r"C:\Tools\WinGet\Packages\MertSoylu.Noble-Fork\noble.exe",
+            r"C:\Tools\WinGet\Packages\MertSoylu.NobleX_src\noble.exe",
+            r"C:\Tools\WinGet\Packages\MertSoylu.Noble\noble.exe",
+            r"C:\Tools\Packages\MertSoylu.Noble_x\noble.exe",
+            r"C:\Tools\WinGet\Other\MertSoylu.Noble_x\noble.exe",
+            r"C:\Users\Mert\AppData\Local\Microsoft\WinGet\Packages\SomeVendor.Tool_Microsoft.Winget.Source_8wekyb3d8bbwe\noble.exe",
+            r"C:\Users\Mert\AppData\Local\Microsoft\WinGet\Packages\noble.exe",
+            "",
+            "noble.exe",
+        ] {
+            assert!(!is_winget_package_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn install_hint_names_the_command_of_the_source() {
+        assert_eq!(install_hint(InstallSource::Direct), "Run `noble update` to install it.");
+        assert_eq!(install_hint(InstallSource::Winget), "Run `winget upgrade MertSoylu.Noble` to install it.");
+    }
+
+    /// A winget copy is never replaced: only a direct install reaches the download. `--check` reports either way, and
+    /// the dev build is refused before the winget check (its own message).
+    #[test]
+    fn only_a_direct_install_reaches_the_replacement() {
+        assert_eq!(next_step(false, false, InstallSource::Direct), NextStep::Install);
+        assert_eq!(next_step(false, false, InstallSource::Winget), NextStep::Winget);
+        assert_eq!(next_step(false, true, InstallSource::Direct), NextStep::DevBuild);
+        assert_eq!(next_step(false, true, InstallSource::Winget), NextStep::DevBuild);
+        assert_eq!(next_step(true, false, InstallSource::Direct), NextStep::Report);
+        assert_eq!(next_step(true, false, InstallSource::Winget), NextStep::Report);
+        assert_eq!(next_step(true, true, InstallSource::Direct), NextStep::Report);
+    }
+
+    /// The live check reads the running binary. The test binary is in a cargo target folder, never a winget package.
+    #[test]
+    fn the_test_binary_is_a_direct_install() {
+        assert_eq!(install_source(), InstallSource::Direct);
     }
 }

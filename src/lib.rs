@@ -16,6 +16,7 @@ pub mod outer;
 pub mod ports;
 pub mod pr;
 pub mod projects;
+pub mod pty;
 pub mod sensors;
 pub mod store;
 pub mod term;

@@ -95,8 +95,8 @@ fn zoom_and_restore_keep_a_long_line_whole() {
     app.run(Action::CloseTab);
 }
 
-/// Focus mode takes the bars away: the pane gets two rows more, and two fewer when it ends. The lines that were in
-/// the pane stay in order, and the newest one stays on the screen.
+/// Focus mode takes the bars away and the pane's bottom line with them: the pane gets three rows more, and three fewer
+/// when it ends. The lines that were in the pane stay in order, and the newest one stays on the screen.
 #[test]
 fn focus_mode_toggle_keeps_the_lines() {
     let mut app = demo_app(110, 30);
@@ -124,7 +124,7 @@ fn focus_mode_toggle_keeps_the_lines() {
     check(&mut app, "before");
     app.run(Action::FocusMode);
     save("reflow-focus-on-110x30", &render(&mut app, 110, 30));
-    assert_eq!(app.panes[&id].size.0, rows + 2);
+    assert_eq!(app.panes[&id].size.0, rows + 3);
     check(&mut app, "focus mode on");
     app.run(Action::FocusMode);
     save("reflow-focus-off-110x30", &render(&mut app, 110, 30));

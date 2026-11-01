@@ -667,7 +667,7 @@ fn pane_title_rows_fit_every_layout() {
             }
             let body = app.body();
             for (id, tile) in app.tabs[0].root.layout(body).0 {
-                let frame = noble::ui::pane_outline(tile, body).rect;
+                let frame = noble::ui::pane_outline(tile, body, app.focus_mode_active()).rect;
                 let buttons = pane_buttons(&app, id);
                 if id != focus {
                     assert!(buttons.is_empty(), "{layout} {w}x{h}: buttons on an unfocused pane");

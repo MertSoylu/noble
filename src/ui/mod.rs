@@ -90,7 +90,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         status_bar(buf, Rect::new(0, area.height - 1, area.width, 1), app, &mut hits);
     }
-    if focus && !reveal_top && !reveal_bottom {
+    // The chip sits on the top row, which a revealed top bar covers (the bottom bar comes with the top one).
+    if focus && !reveal_top {
         focus_alert(buf, area, app, &mut hits);
     }
     update_notice(buf, area, app, &mut hits, reveal_bottom);
@@ -960,9 +961,10 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
     }
 }
 
-/// Focus mode's alert chip on the bottom row (" ◆ 2 "): the most urgent marker of the other terminal
-/// tabs and how many of them have one. The top bar, where these show, is hidden; a click goes to the tab
-/// with that marker. Not drawn when the window is too narrow.
+/// Focus mode's alert chip on the top row, the pane title row (" ◆ 2 "): the most urgent marker of the other
+/// terminal tabs and how many of them have one. The top bar, where these show, is hidden in focus mode; a click
+/// goes to the tab with that marker. The chip never covers a click target of that row (see `alert_slot`), and it
+/// is not drawn when the window is too narrow.
 fn focus_alert(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     const MIN_WIDTH: u16 = 20;
     let View::Term(current) = app.view else { return };
@@ -981,13 +983,35 @@ fn focus_alert(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hi
     if area.width < MIN_WIDTH || area.height == 0 {
         return;
     }
-    let y = area.bottom() - 1;
+    let y = area.y;
     let base = th.dim().bg(th.raised);
     let count = format!(" {count} ");
     let w = (1 + util::width(glyph) + util::width(&count)) as u16;
-    let x = area.right().saturating_sub(w + 1);
+    let Some(x) = alert_slot(hits, area, y, w) else { return };
     let end = hud::put_spans(buf, x, y, &[(" ", base), (glyph, style.bg(th.raised)), (count.as_str(), base)], w);
     hits.push((Rect::new(x, y, end - x, 1), Hit::FocusAlert(tab)));
+}
+
+/// The rightmost place for a `w`-cell chip on row `y` of `area`, one cell short of the corner, where the chip covers
+/// no click target of that row: a pane's buttons, a failed command's badge or a divider. A pane title is no target
+/// for this (its text is chrome, and the chip may sit on it), and the cell beside a target stays free too, where a
+/// button's bracket is. `None` when no such place is left on the row.
+fn alert_slot(hits: &[(Rect, Hit)], area: Rect, y: u16, w: u16) -> Option<u16> {
+    let blocked: Vec<(u16, u16)> = hits
+        .iter()
+        .filter(|(r, h)| r.y == y && r.width > 0 && !matches!(h, Hit::PaneTitle(_)))
+        .map(|(r, _)| (r.x.saturating_sub(1), r.right().saturating_add(1)))
+        .collect();
+    let end = area.right().checked_sub(1)?;
+    let mut x = end.checked_sub(w)?;
+    while x >= area.x {
+        let clear = blocked.iter().all(|&(from, to)| x + w <= from || x >= to);
+        if clear {
+            return Some(x);
+        }
+        x = x.checked_sub(1)?;
+    }
+    None
 }
 
 /// New version notice: bottom right, just above the status bar. On terminal tabs

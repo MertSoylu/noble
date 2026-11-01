@@ -56,8 +56,8 @@ position bar with the search matches on it and a `↓ live · 12` chip counting 
 or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
 In a split tab the panes without the focus fade a little (`dim_inactive`), so the focused one stands out.
 Focus mode (`prefix f`, or `focus_mode` in the config) hides the top and bottom bars on a terminal tab, so its panes
-get the whole screen: the bars come back while the prefix is armed or the pointer rests on the top or bottom row, and a
-`◆ 2` chip on the bottom row shows the markers of the other tabs.
+get the whole screen: the top bar comes back while the pointer rests on the top row, the bottom bar while the prefix is
+armed, and a `◆ 2` chip on the top row shows the markers of the other tabs.
 Programs can rely on the usual terminal queries: synchronized output (no half-drawn frames), the pane's colors
 (OSC 4 / 10 / 11 / 12, `COLORFGBG`, color scheme notices) so AI CLIs pick the right light or dark theme, focus
 reports, XTVERSION, DECRQM, the kitty keyboard protocol (flag 1 only, one flag stack per screen) and, on Windows,
@@ -200,6 +200,10 @@ stops the update and leaves the installed binary alone), refuses any address tha
 archive that holds links or paths outside its folder, and replaces the installed one; restart NOBLE afterwards. Turn the check off with
 `check_updates = false` or in Settings.
 
+A copy installed by winget is updated by winget, not by NOBLE, which replaces nothing there: the **update** button opens
+a tab running `winget upgrade MertSoylu.Noble`, and `noble update` only names that command (`--check` included). If
+winget says the file is in use, quit NOBLE and run the command again.
+
 <details>
 <summary><b>Terminal requirements and a Windows Terminal profile</b></summary>
 
@@ -223,7 +227,7 @@ To open NOBLE in its own tab from the Windows Terminal dropdown:
 
 ```
 noble [--config <path>] [--no-boot] [<dir>]   open NOBLE; <dir> opens a shell tab in that folder
-noble update [--check]                        download and install the latest release (--check only reports)
+noble update [--check]                        download and install the latest release (--check only reports; winget installs use winget upgrade)
 noble doctor [--config <path>]                print a setup report for bug reports (never opens the terminal)
       --paths      print config and data locations
       --version    print version

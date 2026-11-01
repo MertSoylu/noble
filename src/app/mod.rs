@@ -490,7 +490,7 @@ pub enum Hit {
     HooksOfferDismiss,
     /// "+N" chip of the tab bar: opens the command palette listing the hidden tabs.
     HiddenTabs,
-    /// The alert chip on the bottom row in focus mode: goes to this tab (the one with the most urgent marker).
+    /// The alert chip on the top row in focus mode: goes to this tab (the one with the most urgent marker).
     FocusAlert(usize),
     /// A bar revealed over the terminal in focus mode (top or bottom row): an inert blocker pushed before the
     /// bar, so a click on its empty cells does not reach the pane hits underneath. The bar's own hits come later
@@ -779,8 +779,8 @@ pub struct App {
     /// Focus mode (see `focus.rs`): terminal tabs show neither the top nor the bottom bar. Starts from
     /// `terminal.focus_mode`; prefix f toggles it for the run.
     pub focus_mode: bool,
-    /// The screen edge the pointer rests on in focus mode, and since when (see `focus.rs`).
-    pub(crate) focus_edge: Option<(focus::FocusEdge, Instant)>,
+    /// Since when the pointer has rested on the top row in focus mode (see `focus.rs`).
+    pub(crate) focus_top_since: Option<Instant>,
     pub slide: Option<Slide>,
     pub zoom_anim: Option<ZoomAnim>,
     /// Short UI effects (fades, flashes, glides, tweens); see `fx`.
@@ -1117,7 +1117,7 @@ impl App {
             hits: Vec::new(),
             hover: None,
             focus_mode: cfg.terminal.focus_mode,
-            focus_edge: None,
+            focus_top_since: None,
             slide: None,
             zoom_anim: None,
             fx: fx::Effects::default(),

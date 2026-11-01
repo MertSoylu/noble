@@ -523,3 +523,33 @@ fn wheel_is_arrow_keys_on_the_alternate_screen() {
     app.run(noble::keys::Action::CloseTab);
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 }
+
+/// In focus mode the terminal reaches the screen's last row, and a program's mouse clicks on that row reach the program:
+/// no bar takes them. A pointer that rests on the row past the dwell brings no bar up (the bottom bar comes with the prefix).
+#[test]
+fn mouse_clicks_on_the_last_row_reach_the_program_in_focus_mode() {
+    use crossterm::event::{MouseButton, MouseEventKind as K};
+    let (mut app, id, _) = start_input_child("mouse_child");
+    app.run(noble::keys::Action::FocusMode);
+    render(&mut app, 110, 30);
+    let inner = find_hit_inner(&app).expect("pane inner");
+    assert_eq!(inner.bottom(), 30, "the content reaches the screen's last row");
+
+    send_mouse(&mut app, K::Moved, 40, 29, KeyModifiers::NONE);
+    std::thread::sleep(Duration::from_millis(450));
+    let text = render(&mut app, 110, 30);
+    assert_eq!(app.focus_reveal(), (false, false), "a rest on the last row reveals no bar");
+    assert!(!text.lines().next().unwrap_or_default().contains("NOBLE"), "{text}");
+    assert!(!text.lines().last().unwrap_or_default().contains("commands"), "{text}");
+
+    // The program's last row is the screen's last row: a press, a release and a right press on it reach the program.
+    let last = 29 - inner.y;
+    send_mouse(&mut app, K::Down(MouseButton::Left), inner.x + 3, 29, KeyModifiers::NONE);
+    send_mouse(&mut app, K::Up(MouseButton::Left), inner.x + 3, 29, KeyModifiers::NONE);
+    send_mouse(&mut app, K::Down(MouseButton::Right), inner.x + 5, 29, KeyModifiers::NONE);
+    wait_on_screen(&mut app, id, &format!("EV Down(Left) 3,{last} m0"));
+    wait_on_screen(&mut app, id, &format!("EV Up(Left) 3,{last} m0"));
+    wait_on_screen(&mut app, id, &format!("EV Down(Right) 5,{last} m0"));
+    app.run(noble::keys::Action::CloseTab);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+}

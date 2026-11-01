@@ -67,7 +67,7 @@ impl App {
             Event::FocusGained => self.window_focused = Some(true),
             Event::FocusLost => {
                 self.window_focused = Some(false);
-                self.focus_edge = None;
+                self.focus_top_since = None;
                 self.update_link_hover(None, KeyModifiers::NONE);
             }
         }

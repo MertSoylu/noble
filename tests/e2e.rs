@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use noble::pty::{CommandBuilder, PtySize, native_pty_system};
 
 use noble::term::pane::Callbacks;
 
@@ -41,8 +41,8 @@ struct Harness {
     /// One entry per read of NOBLE's output: the length of `raw` after it and when the read came (`arrived`).
     arrivals: Arc<Mutex<Vec<(usize, Instant)>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    _master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn noble::pty::Child + Send + Sync>,
+    _master: Box<dyn noble::pty::MasterPty + Send>,
 }
 
 impl Harness {
@@ -57,7 +57,8 @@ impl Harness {
         // credentials, call the providers and upgrade the hooks in the real ~/.claude/settings.json.
         cmd.env(noble::ai::ISOLATED_ENV, "1");
         // The runner's own TERM is not inherited as is: `TERM=dumb` (GitHub Actions and many CI shells) makes NOBLE
-        // skip the keyboard query, so the tests that expect the push would fail there. portable-pty does not set it.
+        // skip the keyboard query, so the tests that expect the push would fail there. The vendored pty
+        // (`noble::pty`) does not set it.
         cmd.env("TERM", "xterm-256color");
         cmd.cwd(home);
         let child = pair.slave.spawn_command(cmd).unwrap();

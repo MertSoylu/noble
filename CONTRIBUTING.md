@@ -130,6 +130,9 @@ src/
                      link.rs (URL / file:line detection), input.rs (xterm key/mouse encoding, AltGr)
   vt100/             the terminal emulator: vt100 0.18.1 (MIT, Jesse Luehrs; `LICENSE-MIT` stays) vendored and
                      extended with reflow (`reflow.rs`, `Grid::set_size`); owned code, it does not follow upstream
+  pty/               the PTY layer: portable-pty 0.9.0 with wezterm's commit e68a8ec (MIT, Wez Furlong; `LICENSE.md`
+                     stays in `pty/` and `pty/filedescriptor/`) vendored, `filedescriptor` as a submodule; every
+                     difference from upstream is listed in the header of `pty/mod.rs`
   ui/                hud.rs (bounds-safe drawing primitives), bridge.rs (Home), terminal.rs,
                      system.rs, settings.rs, overlay.rs, boot.rs
   ai/                providers.rs (one adapter per provider), json.rs (tolerant parsing), collector
