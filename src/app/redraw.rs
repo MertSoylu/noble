@@ -71,7 +71,7 @@ impl App {
         if let Some(t) = self.toasts.iter().filter_map(|t| t.expires_at()).min() {
             want(t.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
         }
-        // Focus mode: the bar of an edge the pointer rests on appears when its dwell is over.
+        // Focus mode: the top bar appears when the pointer's dwell on the top row is over.
         if let Some(d) = self.focus_dwell_due() {
             want(d);
         }

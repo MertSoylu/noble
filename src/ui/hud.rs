@@ -88,24 +88,27 @@ pub fn set_bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, color: Color) {
 
 /// A frame's rectangle and which of its sides are left open (no vertical line: the content
 /// reaches the edge, the top and bottom lines run through). Terminal panes leave the window's
-/// outer sides open.
+/// outer sides open. `open_bottom` drops the bottom line instead, for a frame on the screen's last
+/// row in focus mode: its content reaches that row, and its side lines run on down to it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Outline {
     pub rect: Rect,
     pub open_left: bool,
     pub open_right: bool,
+    pub open_bottom: bool,
 }
 
 impl Outline {
     pub fn closed(rect: Rect) -> Self {
-        Outline { rect, open_left: false, open_right: false }
+        Outline { rect, open_left: false, open_right: false, open_bottom: false }
     }
 
     /// The area inside the lines.
     pub fn inner(&self) -> Rect {
         let (l, r) = (u16::from(!self.open_left), u16::from(!self.open_right));
+        let bottom = u16::from(!self.open_bottom);
         let a = self.rect;
-        Rect::new(a.x + l, a.y + 1, a.width.saturating_sub(l + r), a.height.saturating_sub(2))
+        Rect::new(a.x + l, a.y + 1, a.width.saturating_sub(l + r), a.height.saturating_sub(1 + bottom))
     }
 
     /// The cells the lines are drawn on.
@@ -115,7 +118,10 @@ impl Outline {
             return Vec::new();
         }
         let (l, r, t, b) = (a.left(), a.right() - 1, a.top(), a.bottom() - 1);
-        let mut out: Vec<(u16, u16)> = (l..=r).flat_map(|x| [(x, t), (x, b)]).collect();
+        let mut out: Vec<(u16, u16)> = (l..=r).map(|x| (x, t)).collect();
+        if !self.open_bottom {
+            out.extend((l..=r).map(|x| (x, b)));
+        }
         for (x, open) in [(l, self.open_left), (r, self.open_right)] {
             if !open {
                 out.extend((t..=b).map(|y| (x, y)));
@@ -139,16 +145,22 @@ pub fn frame_outline(buf: &mut Buffer, o: Outline, title: &str, tag: &str, focus
     let line = if focused { Style::default().fg(th.accent_dim) } else { th.line() };
     let (l, r, t, b) = (area.left(), area.right() - 1, area.top(), area.bottom() - 1);
     hline(buf, l, t, area.width, "─", line);
-    hline(buf, l, b, area.width, "─", line);
+    if !o.open_bottom {
+        hline(buf, l, b, area.width, "─", line);
+    }
     for (x, open, top, bottom) in [(l, o.open_left, "╭", "╰"), (r, o.open_right, "╮", "╯")] {
         if open {
             continue;
         }
-        for y in t + 1..b {
+        // With the bottom open the side runs on to the last row; otherwise it ends in the bottom corner.
+        let end = if o.open_bottom { b } else { b - 1 };
+        for y in t + 1..=end {
             put(buf, x, y, "│", line, 1);
         }
         put(buf, x, t, top, line, 1);
-        put(buf, x, b, bottom, line, 1);
+        if !o.open_bottom {
+            put(buf, x, b, bottom, line, 1);
+        }
     }
     let max_title = area.width.saturating_sub(6);
     if !title.is_empty() && max_title > 2 {
@@ -187,14 +199,15 @@ pub fn join_frames(buf: &mut Buffer, frames: &[Outline]) {
             for o in &frames {
                 let a = o.rect;
                 let (ol, or, ot, ob) = (a.left(), a.right() - 1, a.top(), a.bottom() - 1);
-                if (y == ot || y == ob) && (ol..=or).contains(&x) {
+                // An open bottom has no bottom line, and its side lines run on down to the edge.
+                if (y == ot || (y == ob && !o.open_bottom)) && (ol..=or).contains(&x) {
                     // Past an open side the line runs on to the edge.
                     left |= x > ol || o.open_left;
                     right |= x < or || o.open_right;
                 }
                 if ((x == ol && !o.open_left) || (x == or && !o.open_right)) && (ot..=ob).contains(&y) {
                     up |= y > ot;
-                    down |= y < ob;
+                    down |= y < ob || o.open_bottom;
                 }
             }
             let sym = match (up, down, left, right) {
@@ -536,9 +549,9 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 9, 5));
         // Left and right panes with the outer sides open; the right one split in two.
         let frames = [
-            Outline { rect: Rect::new(0, 0, 5, 5), open_left: true, open_right: false },
-            Outline { rect: Rect::new(4, 0, 5, 3), open_left: false, open_right: true },
-            Outline { rect: Rect::new(4, 2, 5, 3), open_left: false, open_right: true },
+            Outline { rect: Rect::new(0, 0, 5, 5), open_left: true, open_right: false, open_bottom: false },
+            Outline { rect: Rect::new(4, 0, 5, 3), open_left: false, open_right: true, open_bottom: false },
+            Outline { rect: Rect::new(4, 2, 5, 3), open_left: false, open_right: true, open_bottom: false },
         ];
         for f in frames {
             frame_outline(&mut buf, f, "", "", false, &th);
@@ -548,6 +561,27 @@ mod tests {
         assert_eq!(rows, ["────┬────", "    │    ", "    ├────", "    │    ", "────┴────"]);
         assert_eq!(frames[0].inner(), Rect::new(0, 1, 4, 3));
         assert_eq!(frames[1].inner(), Rect::new(5, 1, 4, 1));
+    }
+
+    /// Focus mode: the bottom row is the frames' last row, with no bottom lines. The title row stays, the shared side
+    /// line runs down to the edge, and the outer sides (open) add no lines.
+    #[test]
+    fn open_bottom_frames_run_their_sides_to_the_edge() {
+        let th = crate::theme::Theme::by_name("amber", false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 9, 4));
+        let frames = [
+            Outline { rect: Rect::new(0, 0, 5, 4), open_left: true, open_right: false, open_bottom: true },
+            Outline { rect: Rect::new(4, 0, 5, 4), open_left: false, open_right: true, open_bottom: true },
+        ];
+        for f in frames {
+            frame_outline(&mut buf, f, "", "", false, &th);
+        }
+        join_frames(&mut buf, &frames);
+        let rows: Vec<String> = (0..4).map(|y| (0..9).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        assert_eq!(rows, ["────┬────", "    │    ", "    │    ", "    │    "]);
+        // The content reaches the last row, and the top line is the only horizontal one.
+        assert_eq!(frames[0].inner(), Rect::new(0, 1, 4, 3));
+        assert_eq!(frames[1].inner(), Rect::new(5, 1, 4, 3));
     }
 
     /// The agent spinner cycles through ten single-width braille frames, one per `AGENT_SPIN_MS`.

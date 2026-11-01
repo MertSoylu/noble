@@ -326,7 +326,7 @@ impl App {
     /// Size a new pane gets in the terminal body (a tab with one pane).
     fn fresh_size(&self) -> (u16, u16) {
         let b = self.body();
-        let inner = crate::ui::pane_outline(b, b).inner();
+        let inner = crate::ui::pane_outline(b, b, self.focus_mode_active()).inner();
         (inner.height.max(4), inner.width.max(10))
     }
 
@@ -371,19 +371,20 @@ impl App {
         Ok(id)
     }
 
-    /// Opens a new terminal tab; if `command` is given the shell runs it first.
-    pub fn new_tab(&mut self, cwd: PathBuf, command: Option<&str>, origin: Option<String>) {
+    /// Opens a new terminal tab; if `command` is given the shell runs it first. `false` when the tab did not open
+    /// (the shell could not start, and the error is already in a toast).
+    pub fn new_tab(&mut self, cwd: PathBuf, command: Option<&str>, origin: Option<String>) -> bool {
         let (rows, cols) = self.fresh_size();
-        if let Some(id) = self.spawn_pane(&cwd, command, rows, cols) {
-            // A command with its own title is a launcher tab: the title ends in " · <launcher>".
-            let launched = command.is_some() && origin.is_some();
-            let origin = origin.unwrap_or_else(|| dir_name(&cwd));
-            let mut tab = Tab::new(id, origin);
-            tab.launched = launched;
-            self.tabs.push(tab);
-            self.view = View::Term(self.tabs.len() - 1);
-            self.recent.record(&cwd);
-        }
+        let Some(id) = self.spawn_pane(&cwd, command, rows, cols) else { return false };
+        // A command with its own title is a launcher tab: the title ends in " · <launcher>".
+        let launched = command.is_some() && origin.is_some();
+        let origin = origin.unwrap_or_else(|| dir_name(&cwd));
+        let mut tab = Tab::new(id, origin);
+        tab.launched = launched;
+        self.tabs.push(tab);
+        self.view = View::Term(self.tabs.len() - 1);
+        self.recent.record(&cwd);
+        true
     }
 
     /// Closes tab `i` the user asked for: it is kept for `reopen_tab`, and a toast names the key.
@@ -492,7 +493,7 @@ impl App {
         let mut after = tab.root.clone();
         after.split(focus, PaneId::MAX, dir);
         let tile = after.layout(body).0.into_iter().find(|(id, _)| *id == PaneId::MAX).map(|(_, r)| r);
-        let inner = crate::ui::pane_outline(tile.unwrap_or(rect), body).inner();
+        let inner = crate::ui::pane_outline(tile.unwrap_or(rect), body, self.focus_mode_active()).inner();
         let (rows, cols) = (inner.height, inner.width);
         let cwd = self.panes.get(&focus).map(|p| p.cwd()).unwrap_or_else(home);
         let new = self.spawn_pane(&cwd, command, rows, cols)?;
@@ -719,7 +720,7 @@ impl App {
             if tab.zoomed { vec![(tab.focus, body)] } else { tab.root.layout(body).0 };
         let mut search_resized = false;
         for (id, tile) in rects {
-            let inner = crate::ui::pane_outline(tile, body).inner();
+            let inner = crate::ui::pane_outline(tile, body, self.focus_mode_active()).inner();
             if let Some(p) = self.panes.get_mut(&id)
                 && p.resize(inner.height, inner.width)
             {

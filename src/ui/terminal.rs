@@ -40,7 +40,9 @@ pub fn draw(
     let pal = TermPalette::resolve(&app.term_schemes, &t.colors, &t.background, &t.foreground, th);
     let mut cursor = None;
     // Neighbouring panes share one border line; the frames are joined after they are all drawn.
-    let frames: Vec<(PaneId, Outline)> = rects.iter().map(|(id, tile)| (*id, pane_outline(*tile, area))).collect();
+    let bars_hidden = app.focus_mode_active();
+    let frames: Vec<(PaneId, Outline)> =
+        rects.iter().map(|(id, tile)| (*id, pane_outline(*tile, area, bars_hidden))).collect();
     let ctx = FrameCtx { hover: hover.and_then(|at| hovered_pane(&rects, &frames, at)), ..ctx };
     // Title text and buttons go on top of the dividers: a horizontal divider runs along the lower pane's title row.
     let mut on_top = Vec::new();
@@ -90,7 +92,7 @@ pub fn draw(
         let rect = lerp_rect(z.from, z.to, t);
         if let Some(pane) = app.panes.get(&z.pane) {
             hud::clear(buf, rect, th);
-            let o = Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right() };
+            let o = outline_at(rect, area, zoom_open_bottom(rect, z.to, area, app.focus_mode_active()));
             let working = working_glyph(app, &[z.pane]);
             let agent = app.agent_badge(z.pane).map(|b| (b, working));
             let progress = app.pane_progress(z.pane).map(|g| (g, working));
@@ -122,9 +124,25 @@ fn hovered_pane(tiles: &[(PaneId, Rect)], frames: &[(PaneId, Outline)], (x, y): 
 
 /// A pane's frame: it reaches one cell into a neighbour on its left or top (one shared line),
 /// and the window's outer left and right sides stay open (the lines only go between panes).
-pub fn pane_outline(tile: Rect, area: Rect) -> Outline {
+/// `bars_hidden` is focus mode: `area` then is the whole screen, and the frames on its bottom row drop
+/// their bottom line, so the terminal reaches the screen's last row (see `outline_at`).
+pub fn pane_outline(tile: Rect, area: Rect, bars_hidden: bool) -> Outline {
     let rect = frame_rect(tile, area);
-    Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right() }
+    outline_at(rect, area, bars_hidden && rect.bottom() >= area.bottom())
+}
+
+/// The outline of a frame drawn at `rect` inside `area` (see `pane_outline`). `open_bottom` drops its bottom line.
+fn outline_at(rect: Rect, area: Rect, open_bottom: bool) -> Outline {
+    Outline { rect, open_left: rect.x <= area.x, open_right: rect.right() >= area.right(), open_bottom }
+}
+
+/// Whether the animated frame of a zoom (`rect`, between `from` and `to`, both frame rects) drops its bottom line in
+/// focus mode. A pane that reaches the screen's last row when the zoom ends has no bottom line for the whole
+/// animation: a line drawn at the screen's bottom edge would pop away when the pane arrives. A zoom out starts at the
+/// full screen, so its first frames keep that row open too, and the line comes back only as the frame leaves it.
+fn zoom_open_bottom(rect: Rect, to: Rect, area: Rect, bars_hidden: bool) -> bool {
+    let reaches = |r: Rect| r.bottom() >= area.bottom();
+    bars_hidden && (reaches(to) || reaches(rect))
 }
 
 /// What the pane's title row shows about the command at its prompt: the live timer while one runs
@@ -938,6 +956,25 @@ mod tests {
 
     fn text(spans: &[(String, Style)]) -> String {
         spans.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    /// A zoom's frame in focus mode drops its bottom line while it reaches the last row at either end of the
+    /// animation, and keeps its line otherwise. Outside focus mode it always keeps it.
+    #[test]
+    fn zoom_frames_leave_the_last_row_open_when_a_pane_reaches_it() {
+        let area = Rect::new(0, 0, 110, 30);
+        let top_tile = Rect::new(0, 0, 110, 15);
+        for step in 0..=10 {
+            let rect = lerp_rect(top_tile, area, f64::from(step) / 10.0);
+            assert!(
+                zoom_open_bottom(rect, area, area, true),
+                "step {step}: a bottom line drawn on the way to the screen"
+            );
+        }
+        // A zoom out starts at the full screen: its first frame keeps the last row, and the line comes as it leaves.
+        assert!(zoom_open_bottom(area, top_tile, area, true), "the zoom out starts with the last row open");
+        assert!(!zoom_open_bottom(top_tile, top_tile, area, true), "a settled pane above the last row has its line");
+        assert!(!zoom_open_bottom(area, area, area, false), "outside focus mode the frame keeps its line");
     }
 
     /// The thumb's size follows the visible share, its place the offset; scrolled back it never sits

@@ -103,10 +103,17 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `App::anim_on` (the `animations` setting, and `animations_on_battery` on battery); off, every query
   returns the final state, so render tests turn animations off.
 - **Focus mode:** `app/focus.rs`. On a terminal tab with the flag on (`terminal.focus_mode`, prefix f, Settings),
-  `App::body()` is the whole screen and `ui::draw` skips both bars. `App::focus_reveal` draws them over the panes
-  without a resize: while the prefix is armed, or once the pointer has rested on row 0 or the last row for
-  `EDGE_DWELL` (`track_focus_edge` runs on every mouse event, `redraw_after` wakes for it). Other tabs' markers show
-  as the `Hit::FocusAlert` chip on the bottom row. A config reload changes the flag only when the file's value changed.
+  `App::body()` is the whole screen and `ui::draw` skips both bars. The panes on the last row then drop their bottom
+  line (`Outline::open_bottom`, `ui::pane_outline`'s `bars_hidden`), so the terminal reaches that row. A zoom animation
+  decides it with `ui::terminal::zoom_open_bottom`: a pane that reaches the last row at either end of the zoom draws no
+  bottom line during it, so none pops away on arrival. `App::focus_reveal` draws the bars over the panes without a
+  resize: the bottom bar only while the prefix is armed (the update notice is drawn with it, so it shows only then), the
+  top bar once the pointer has rested on row 0 for `EDGE_DWELL` (`track_focus_edge` runs on every mouse event and only
+  row 0 starts a dwell; `redraw_after` wakes for it). Nothing else covers the last row, so a program's mouse clicks
+  there reach it. Other tabs' markers show as the `Hit::FocusAlert` chip on the top row (the pane title row), at the
+  rightmost place on that row with no click target under it (`ui::alert_slot`: a pane's buttons with their brackets, a
+  failed command's badge, a divider); no chip when there is no such place. A config reload changes the flag only when
+  the file's value changed.
 - **Mouse/hit-test:** `ui/*` drawing functions fill `hits: Vec<(Rect, Hit)>` while drawing; `app/input.rs`
   resolves clicks from that list (most recently added first). New clickable element = `app::Hit` variant +
   `hits.push` in drawing + handling in `input.rs`. Hover highlighting is based on the same list.
@@ -122,6 +129,15 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   gives a line its stable number, which search matches (`SearchState`, `ScrollText`), OSC 8 spans and
   `scroll_mark` use. On an epoch change search is redone and OSC 8 links are dropped. Reflow is eager (about 100 ms
   at 100k rows, a few ms at the default history).
+- **Vendored portable-pty:** `src/pty/` is `portable-pty` 0.9.0 with the changes of wezterm's commit
+  e68a8ec27727fbbda15e07f0a0737cd5e16481f6 (`pty` and `filedescriptor` folders; MIT, `LICENSE.md` in each folder). The
+  `pty/mod.rs` header lists every difference from upstream. It is vendored because crates.io's 0.9.0 pins nix 0.28
+  (a future-incompatibility warning) and has an inverted `TerminateProcess` check, and upstream has released nothing
+  since. The ConPTY flags, the `CommandBuilder` environment (on Windows the registry reads) and the Unix pty setup are
+  upstream's: a change there needs a run on Windows (`cargo test --test e2e`). On Windows `conpty.dll` is searched for
+  only in the folder of `noble.exe` and System32 (never the current folder or PATH); without one, kernel32's ConPTY is
+  used. Unix uses nix 0.31's `access` and `tcgetattr` only. To update: take the files of a newer upstream commit and
+  reapply the listed differences.
 - **Terminal:** `term/layout.rs` pure split tree (knows nothing about PTYs), `term/pane.rs` PTY + `vt100` +
   shell integration (cwd tracking via OSC 7 / OSC 9;9; the pane's writer thread is the only writer to the PTY
   (`PtyInput`), so `Pane::write` never blocks on a program that does not read; `Pane::cwd` checks a reported folder
@@ -288,7 +304,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`ai::isolated`), which turns off every agent's settings path (`settings_path` returns None) and AI credential
   detection.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
-  argument (`cmd /K %NOBLE_LAUNCH%`); portable-pty's `\"` escaping breaks quoted paths in cmd.
+  argument (`cmd /K %NOBLE_LAUNCH%`); the vendored pty's (`src/pty/cmdbuilder.rs`) `\"` escaping breaks quoted
+  paths in cmd.
 - **Private files:** on Unix NOBLE's folders are 0700 and new files 0600 (`util::create_private_dir`,
   `util::private_file_options`, `store::write_text`); existing files keep their mode. Windows: the profile's ACL applies.
   `Paths::resolve` returns `None` without a home folder (never a relative `.noble`); `main` reports it.
@@ -327,7 +344,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
   before `tar` unpacks it. `tar` is run by its full path (`tar_program`: System32 on Windows, else `util::which`). It then swaps the binary: on Linux/macOS one rename over the running binary (no old
   copy is kept); on Windows the running one is renamed to `*.old`, falling back to `.old2` … `.old9` when one
-  cannot be deleted, and `update::cleanup_old` removes it on the next launch.
+  cannot be deleted, and `update::cleanup_old` removes it on the next launch. A winget install is never replaced:
+  `update::install_source` (Windows only; Linux and macOS are always `Direct`) canonicalizes the running binary's path
+  and `is_winget_package_path` tests the text for `WinGet\Packages\MertSoylu.Noble_*` (either separator, any case).
+  `noble update` then refuses with the winget command and exit 1 (`--check` names it too), and the update notice's tab
+  runs `winget upgrade` through the winget on PATH (`app/notify.rs` `update_command`; without winget a toast names the
+  command and the notice stays). The tab's toast asks to quit NOBLE if winget reports the file in use.
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, a fixed-size array whose length must be bumped,
