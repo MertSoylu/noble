@@ -244,6 +244,10 @@ impl FileDescriptor {
     /// resources that may not be available, this is a potentially fallible operation.
     /// The returned handle has a separate lifetime from the source, but
     /// references the same object at the kernel level.
+    ///
+    /// # Safety
+    /// `dest_fd` is closed and replaced by the duplicate, so nothing else may still rely on what it referred to,
+    /// and the returned `FileDescriptor` owns `dest_fd` and closes it when dropped.
     pub unsafe fn dup2<F: AsRawFileDescriptor>(f: &F, dest_fd: RawFd) -> Result<Self> {
         unsafe { OwnedHandle::dup2_impl(f, dest_fd) }.map(|handle| Self { handle })
     }
