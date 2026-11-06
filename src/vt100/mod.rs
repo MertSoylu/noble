@@ -56,6 +56,8 @@ mod term;
 
 #[cfg(test)]
 mod reflow_tests;
+#[cfg(test)]
+mod sgr_tests;
 
 pub use attrs::Color;
 pub use callbacks::Callbacks;

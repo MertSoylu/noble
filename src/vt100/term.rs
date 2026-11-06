@@ -122,6 +122,9 @@ pub struct Attrs {
     italic: Option<bool>,
     underline: Option<bool>,
     inverse: Option<bool>,
+    strikethrough: Option<bool>,
+    conceal: Option<bool>,
+    blink: Option<bool>,
 }
 
 impl Attrs {
@@ -154,6 +157,21 @@ impl Attrs {
         self.inverse = Some(inverse);
         self
     }
+
+    pub fn strikethrough(mut self, strikethrough: bool) -> Self {
+        self.strikethrough = Some(strikethrough);
+        self
+    }
+
+    pub fn conceal(mut self, conceal: bool) -> Self {
+        self.conceal = Some(conceal);
+        self
+    }
+
+    pub fn blink(mut self, blink: bool) -> Self {
+        self.blink = Some(blink);
+        self
+    }
 }
 
 impl BufWrite for Attrs {
@@ -166,6 +184,9 @@ impl BufWrite for Attrs {
             && self.italic.is_none()
             && self.underline.is_none()
             && self.inverse.is_none()
+            && self.strikethrough.is_none()
+            && self.conceal.is_none()
+            && self.blink.is_none()
         {
             return Ok(());
         }
@@ -265,6 +286,30 @@ impl BufWrite for Attrs {
                 write_param!(7);
             } else {
                 write_param!(27);
+            }
+        }
+
+        if let Some(conceal) = self.conceal {
+            if conceal {
+                write_param!(8);
+            } else {
+                write_param!(28);
+            }
+        }
+
+        if let Some(blink) = self.blink {
+            if blink {
+                write_param!(5);
+            } else {
+                write_param!(25);
+            }
+        }
+
+        if let Some(strikethrough) = self.strikethrough {
+            if strikethrough {
+                write_param!(9);
+            } else {
+                write_param!(29);
             }
         }
 

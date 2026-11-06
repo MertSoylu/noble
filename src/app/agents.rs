@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use super::*;
 
 /// An agent session's state from its last hook event. While subagents still run the
@@ -31,6 +33,31 @@ fn same_prompt(old: &crate::hooks::HookRecord, new: &crate::hooks::HookRecord) -
     ) && hook_state(old) == hook_state(new)
 }
 
+/// The state a record shows. A question the user answered (`App::answer_prompt`, the time of the answer) reads as
+/// working: Claude sends no event for an answer, so the record still says "needs you" until its next event. The
+/// question's own records were written before the answer (its permission request and its notification, in either
+/// order) and the next question comes after it, so only a "needs you" record at or before the answer is masked.
+fn shown_state(rec: &crate::hooks::HookRecord, answered: Option<i64>) -> Option<AgentState> {
+    match hook_state(rec)? {
+        AgentState::NeedsYou if answered.is_some_and(|at| rec.ts <= at) => Some(AgentState::Working),
+        state => Some(state),
+    }
+}
+
+/// Whether a key answers a question or permission prompt: Enter submits, and a digit or y / n picks an option. Esc is
+/// no answer: it interrupts the turn, and Claude sends no event for that. Arrow keys and other letters are no answer
+/// either (a typed answer ends with Enter), and Shift+Enter is a newline.
+pub(super) fn answers_prompt(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => key.modifiers.is_empty(),
+        KeyCode::Char(c) => {
+            !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && matches!(c.to_ascii_lowercase(), '1'..='9' | 'y' | 'n')
+        }
+        _ => false,
+    }
+}
+
 /// How a notice names the agent: Claude's own name is short.
 fn agent_who(agent: crate::hooks::Agent) -> &'static str {
     match agent {
@@ -43,7 +70,11 @@ impl App {
     /// The state and running subagents of every pane with a hook record (in pane order), to see
     /// whether they changed.
     fn hook_states(&self) -> Vec<(PaneId, Option<AgentState>, usize)> {
-        let mut states: Vec<_> = self.agent_hooks.iter().map(|(p, rec)| (*p, hook_state(rec), rec.subagents)).collect();
+        let mut states: Vec<_> = self
+            .agent_hooks
+            .iter()
+            .map(|(p, rec)| (*p, shown_state(rec, self.agent_answered.get(p).copied()), rec.subagents))
+            .collect();
         states.sort_by_key(|(p, ..)| *p);
         states
     }
@@ -99,6 +130,9 @@ impl App {
         self.agent_working_since = since;
         let before = self.hook_states();
         self.agent_hooks = live;
+        // An answer stands only while the pane's record is still the question it answered: a newer record ends it.
+        let hooks = &self.agent_hooks;
+        self.agent_answered.retain(|pane, at| hooks.get(pane).is_some_and(|rec| rec.ts <= *at));
         // The states show on Home, in the pane titles and as the tab strip's dots (the top bar is on
         // every screen), and those only redraw by the clock (once a minute on battery): a changed state
         // asks for its own frame. A changed subagent count ("+2") only shows in a visible pane's title.
@@ -155,6 +189,7 @@ impl App {
     pub(super) fn clear_agent(&mut self, pane: PaneId) {
         self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
         self.agent_working_since.remove(&pane);
+        self.agent_answered.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
             crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
         }
@@ -165,6 +200,7 @@ impl App {
         self.agent_resume.remove(&pane);
         self.agent_cleared.remove(&pane);
         self.agent_working_since.remove(&pane);
+        self.agent_answered.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
             crate::hooks::remove_record(&self.paths.data, std::process::id(), pane);
         }
@@ -183,7 +219,7 @@ impl App {
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         // A record whose event this build does not map falls through to the guess below.
         if let Some(rec) = self.agent_hooks.get(&pane)
-            && let Some(state) = hook_state(rec)
+            && let Some(state) = shown_state(rec, self.agent_answered.get(&pane).copied())
         {
             return Some((rec.agent().id(), state));
         }
@@ -202,6 +238,20 @@ impl App {
             AgentState::Running
         };
         Some((kind, state))
+    }
+
+    /// The user answered a question or permission prompt in a pane (`answers_prompt`, from `term_key`). Only a Claude
+    /// pane that shows "needs you" changes: its record is masked as working from now on (`shown_state`), with the
+    /// answer's time as the start of the stretch. Other agents keep their own states.
+    pub(super) fn answer_prompt(&mut self, pane: PaneId) {
+        let Some(rec) = self.agent_hooks.get(&pane) else { return };
+        if rec.agent() != crate::hooks::Agent::Claude
+            || shown_state(rec, self.agent_answered.get(&pane).copied()) != Some(AgentState::NeedsYou)
+        {
+            return;
+        }
+        self.agent_answered.insert(pane, chrono::Utc::now().timestamp());
+        self.dirty = true;
     }
 
     /// The pane's program reports work in progress (OSC 9;4 states 1 and 3, `Progress::busy`).
@@ -223,8 +273,15 @@ impl App {
     pub fn agent_badge(&self, pane: PaneId) -> Option<AgentBadge> {
         let (kind, state) = self.agent_state(pane)?;
         let rec = self.agent_hooks.get(&pane);
+        // An answered question's stretch of work starts at the answer (`answer_prompt`), not at the question's record.
         let working_since = (state == AgentState::Working)
-            .then(|| self.agent_working_since.get(&pane).copied().or(rec.map(|r| r.ts)))
+            .then(|| {
+                self.agent_working_since
+                    .get(&pane)
+                    .copied()
+                    .or(self.agent_answered.get(&pane).copied())
+                    .or(rec.map(|r| r.ts))
+            })
             .flatten();
         let quota = self.agent_quota_warning(kind);
         Some(AgentBadge { kind, state, working_since, subagents: rec.map_or(0, |r| r.subagents), quota })
@@ -401,6 +458,7 @@ mod tests {
         assert_eq!(named("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(named("cursor"), None);
         assert_eq!(named("agy"), Some(Agent::Antigravity));
+        assert_eq!(named("cursor-agent --model x"), Some(Agent::Cursor), "the arguments do not hide the agent");
     }
 
     #[test]
@@ -599,5 +657,88 @@ mod tests {
         // A terminal without the progress report (Windows console host) gets the title only.
         both(&mut app, "notification", "stop");
         assert_eq!(app.outer_sequences(false).as_deref(), Some("\x1b]0;NOBLE · ◆ 1\x07"));
+    }
+
+    /// Keys that answer a prompt: Enter, a digit, y or n, without Ctrl or Alt. Shift+Enter is a newline in Claude's
+    /// prompt, Esc interrupts the turn (no answer), and arrows and other letters are no answer.
+    #[test]
+    fn answer_keys_are_enter_digits_and_yes_no() {
+        let key = |code, mods| KeyEvent::new(code, mods);
+        assert!(answers_prompt(&key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!answers_prompt(&key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(answers_prompt(&key(KeyCode::Char('2'), KeyModifiers::NONE)));
+        assert!(answers_prompt(&key(KeyCode::Char('Y'), KeyModifiers::SHIFT)));
+        assert!(!answers_prompt(&key(KeyCode::Enter, KeyModifiers::SHIFT)));
+        assert!(!answers_prompt(&key(KeyCode::Char('0'), KeyModifiers::NONE)));
+        assert!(!answers_prompt(&key(KeyCode::Char('1'), KeyModifiers::CONTROL)));
+        assert!(!answers_prompt(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(!answers_prompt(&key(KeyCode::Up, KeyModifiers::NONE)));
+    }
+
+    /// An answer reads as working at once and keeps doing so while the records still show that question: its
+    /// notification may arrive after the answer, and every second's re-read brings the same record back. The next
+    /// question is written after the answer and needs you again. The working stretch starts at the answer.
+    #[test]
+    fn an_answered_claude_prompt_reads_as_working_until_the_next_record() {
+        use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST, STOP};
+        let (mut app, pane) = app_with_pane();
+        let now = chrono::Utc::now().timestamp();
+        apply(&mut app, pane, rec(PERMISSION_REQUEST, now - 2, 0));
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
+        assert_eq!(app.agents_waiting(), 1);
+        app.answer_prompt(pane);
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+        assert_eq!(app.agents_waiting(), 0);
+        let at = app.agent_answered[&pane];
+        assert_eq!(app.agent_badge(pane).and_then(|b| b.working_since), Some(at), "the stretch starts at the answer");
+        // The once-a-second re-read of the same record, and the notification of the same prompt arriving late.
+        let same = app.agent_hooks.clone();
+        app.apply_hook_records(same);
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)), "a re-read does not revert it");
+        apply(&mut app, pane, rec(NOTIFICATION, now - 2, 0));
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)), "the other record of the prompt");
+        // A second answer keeps the first answer's time: the pane already reads as working.
+        app.answer_prompt(pane);
+        assert_eq!(app.agent_answered.get(&pane), Some(&at));
+        // The turn ends: its own state (written after the answer).
+        apply(&mut app, pane, rec(STOP, at + 1, 0));
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Idle)));
+        assert!(!app.agent_answered.contains_key(&pane), "a newer record ends the answer");
+        // The next question comes after the answer: it needs you again.
+        apply(&mut app, pane, rec(PERMISSION_REQUEST, at + 5, 0));
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
+        assert_eq!(app.agents_waiting(), 1);
+    }
+
+    /// An answer to a pane that does not show "needs you" changes nothing, and the answer of another agent's
+    /// permission request is no answer for Claude: its own rules stay.
+    #[test]
+    fn answers_change_only_a_claude_pane_that_needs_you() {
+        use crate::hooks::{Agent, PERMISSION_REQUEST, PROMPT};
+        let (mut app, pane) = app_with_pane();
+        let now = chrono::Utc::now().timestamp();
+        apply(&mut app, pane, rec(PROMPT, now - 2, 0));
+        app.answer_prompt(pane);
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+        assert!(app.agent_answered.is_empty(), "a working pane is not answered");
+        let mut codex = rec(PERMISSION_REQUEST, now - 2, 0);
+        codex.agent = Some(Agent::Codex);
+        apply(&mut app, pane, codex);
+        app.answer_prompt(pane);
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::NeedsYou)));
+        assert!(app.agent_answered.is_empty(), "another agent's question is not masked");
+    }
+
+    /// Answering a Claude question clears the outer terminal's waiting marks (the pause and the title count) at once.
+    #[test]
+    fn answering_clears_the_outer_waiting_marks() {
+        use crate::hooks::PERMISSION_REQUEST;
+        let (mut app, pane) = app_with_pane();
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]0;NOBLE\x07"));
+        apply(&mut app, pane, rec(PERMISSION_REQUEST, now - 2, 0));
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]9;4;4;0\x1b\\\x1b]0;NOBLE · ◆ 1\x07"));
+        app.answer_prompt(pane);
+        assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]9;4;0;0\x1b\\\x1b]0;NOBLE\x07"));
     }
 }

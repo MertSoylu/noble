@@ -166,8 +166,8 @@ impl Agent {
         }
     }
 
-    /// Gives the hooks of an older NOBLE the events added since (with the same command); does nothing when no
-    /// NOBLE hook is installed or all of them already are.
+    /// Gives the hooks of an older NOBLE the events added since (with the same command) and drops the events it
+    /// no longer uses; does nothing when no NOBLE hook is installed.
     pub fn upgrade(self, path: &Path) -> Result<(), String> {
         match self {
             Agent::Claude => claude::upgrade(path),
@@ -262,29 +262,71 @@ pub fn agents_dir(data: &Path) -> PathBuf {
     data.join("agents")
 }
 
-/// Base of the hook command: `noble` from PATH if present, else the running file's full path, quoted for the
-/// shell that runs hooks (see [`quote_for_shell`]).
+/// Base of the hook command: `noble` from PATH if present, else the running file's path as one word for the shell
+/// that runs hooks (see [`quote_for_shell`]; the path is `program_path`).
 pub fn command_base() -> String {
     if crate::util::which("noble").is_some() {
         return "noble".into();
     }
     match std::env::current_exe() {
-        Ok(p) => quote_for_shell(&p.display().to_string()),
+        Ok(p) => quote_for_shell(&program_path(&p)),
         Err(_) => "noble".into(),
     }
 }
 
-/// `text` as one word for the shell an agent runs hook commands with. Unix (`sh`): single quotes, so
-/// nothing in the path expands (`$`, backticks, `\`); a `'` is closed, escaped and reopened. Windows: double
-/// quotes, the form cmd.exe and Git Bash read (a path cannot hold a `"` there).
+/// The executable's path as the hook command names it. On Windows the folder gets its 8.3 short name when the volume
+/// has one (it has no spaces, so the path needs no quotes). The file keeps its own name, which `noble_base` reads:
+/// a short name would turn `noble-dev.exe` into `NOBLE-~1.EXE`. Unix: the path itself.
+fn program_path(exe: &Path) -> String {
+    match (exe.parent(), exe.file_name()) {
+        (Some(dir), Some(name)) => {
+            short_path(dir).unwrap_or_else(|| dir.to_path_buf()).join(name).display().to_string()
+        }
+        _ => exe.display().to_string(),
+    }
+}
+
+/// The 8.3 short name of an existing path (`GetShortPathNameW`). `None` when the lookup fails. A volume with no short
+/// names (they can be turned off) gets the long name back from the call, which is then used as it is.
+#[cfg(windows)]
+fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut buf = vec![0u16; 32_768];
+    // SAFETY: `wide` is NUL-terminated, and `buf` holds the `buf.len()` UTF-16 units the call is told it has.
+    let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    // 0 is a failure; a length at or past the buffer size means the buffer was too small.
+    (len > 0 && len < buf.len()).then(|| PathBuf::from(OsString::from_wide(&buf[..len])))
+}
+
+/// Unix has no 8.3 names: the path is used as it is (Windows: see the function above).
+#[cfg(not(windows))]
+fn short_path(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// `text` as one word for the shell an agent runs hook commands with. Unix (`sh`): single quotes, so nothing in the
+/// path expands (`$`, backticks, `\`); a `'` is closed, escaped and reopened. Windows: see `windows_word`.
 pub fn quote_for_shell(text: &str) -> String {
     if cfg!(windows) {
-        // Windows: cmd.exe and Git Bash read double quotes (a path cannot hold a `"` there).
-        format!("\"{text}\"")
+        // Windows: a plain path runs unquoted in Git Bash, cmd.exe and PowerShell alike; any other is double-quoted.
+        windows_word(text)
     } else {
-        // Unix: single quotes, where nothing expands. Windows uses double quotes (see above).
+        // Unix: single quotes, where nothing expands (Windows: see `windows_word`).
         format!("'{}'", text.replace('\'', r"'\''"))
     }
+}
+
+/// The Windows form of [`quote_for_shell`], a plain function so every platform's tests can check it. Forward slashes,
+/// since a backslash is an escape in bash and PowerShell reads a quoted string as a value. A path of letters, digits
+/// and `_ - . : / ~` (no space, no shell syntax) is written as it is, which bash, cmd.exe and PowerShell all run. Any
+/// other is double-quoted: bash and cmd.exe run that, PowerShell needs the `&` call operator in front (Copilot's
+/// `powershell` entries add it).
+fn windows_word(text: &str) -> String {
+    let slashed = text.replace('\\', "/");
+    let plain = !slashed.is_empty() && slashed.chars().all(|c| c.is_ascii_alphanumeric() || "_-.:/~".contains(c));
+    if plain { slashed } else { format!("\"{slashed}\"") }
 }
 
 /// Is `command` NOBLE's own hook command (see [`noble_base`])?
@@ -463,6 +505,28 @@ fn field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(Value::as_str).map(str::trim)
 }
 
+/// Whether the environment shows that a hook runs under another terminal application than a NOBLE pane, so that it
+/// belongs to no pane. A pane has `TERM_PROGRAM=NOBLE` and none of the outer terminal's variables
+/// (`pane::is_outer_terminal_var`). Any other `TERM_PROGRAM` or such a variable means a terminal around the process:
+/// `code .` run in a pane starts VS Code with NOBLE's `NOBLE_INSTANCE` and `NOBLE_PANE`, and an agent in VS Code's
+/// terminal (`TERM_PROGRAM=vscode`) would otherwise report to that pane. VS Code is told by `TERM_PROGRAM` alone: a
+/// pane started from VS Code's terminal keeps the `VSCODE_*` variables (`pane::is_outer_terminal_var` does not match
+/// them), so they say nothing about where the hook runs.
+pub fn started_in_other_terminal(vars: impl IntoIterator<Item = (OsString, OsString)>) -> bool {
+    // Not a terminal: a path a user may set in a pane, tmux's own variables (tmux runs inside a pane too), and
+    // `TERM_PROGRAM_VERSION`, which comes with `TERM_PROGRAM`. `tmux` is accepted as a `TERM_PROGRAM` value too, since
+    // a multiplexer inside a pane may set it.
+    const NOT_A_TERMINAL: [&str; 4] = ["TERMINFO", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE"];
+    vars.into_iter().any(|(name, value)| {
+        let Some(name) = name.to_str() else { return false };
+        if name.eq_ignore_ascii_case("TERM_PROGRAM") {
+            let value = value.to_string_lossy();
+            return !value.is_empty() && value != "NOBLE" && value != "tmux";
+        }
+        crate::term::pane::is_outer_terminal_var(name) && !NOT_A_TERMINAL.iter().any(|n| name.eq_ignore_ascii_case(n))
+    })
+}
+
 /// `noble hook <event>`: takes the message from the JSON the agent passes on stdin and writes the pane's state
 /// file. Does nothing when run outside NOBLE. Errors never surface to the agent (always silent).
 pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Option<&str>, pane: Option<&str>) {
@@ -492,10 +556,9 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
         return;
     }
     if event == SUBAGENT_START || event == SUBAGENT_STOP {
-        // Only file-name-safe characters of the id (Copilot's payloads are camelCase); without an id the
-        // subagent is not tracked.
+        // Only file-name-safe characters of the id; without an id the subagent is not tracked (Copilot's payloads
+        // have none that pair, so it has no subagent events).
         let id: String = field(&input, "agent_id")
-            .or_else(|| field(&input, "agentId"))
             .unwrap_or("")
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
@@ -689,6 +752,51 @@ mod tests {
         d
     }
 
+    fn env_of(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+    }
+
+    /// A hook started in a NOBLE pane is told from one started by another terminal that inherited the pane's ids.
+    #[test]
+    fn a_hook_from_another_terminal_belongs_to_no_pane() {
+        let pane =
+            [("TERM_PROGRAM", "NOBLE"), ("TERM", "xterm-256color"), ("NOBLE_INSTANCE", "42"), ("NOBLE_PANE", "3")];
+        let in_pane = |extra: &[(&str, &str)]| {
+            let mut all = pane.to_vec();
+            all.extend_from_slice(extra);
+            env_of(&all)
+        };
+        assert!(!started_in_other_terminal(in_pane(&[("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22")])));
+        assert!(!started_in_other_terminal(in_pane(&[("LC_ALL", "en_US.UTF-8"), ("TERMINFO", "/home/u/.terminfo")])));
+        // tmux runs inside a pane: its variables, and a TERM_PROGRAM of its own, do not make it another terminal.
+        assert!(!started_in_other_terminal(in_pane(&[("TMUX", "/tmp/tmux-1000/default,1,0"), ("TMUX_PANE", "%1")])));
+        assert!(!started_in_other_terminal(env_of(&[
+            ("TERM_PROGRAM", "tmux"),
+            ("TERM_PROGRAM_VERSION", "3.4"),
+            ("TMUX", "/tmp/tmux-1000/default,1,0"),
+            ("NOBLE_INSTANCE", "42"),
+            ("NOBLE_PANE", "3"),
+        ])));
+        assert!(!started_in_other_terminal(env_of(&[])), "outside NOBLE, nothing to tell");
+        // VS Code (its terminal sets TERM_PROGRAM=vscode), Windows Terminal, kitty: the ids came along from a pane.
+        assert!(started_in_other_terminal(env_of(&[
+            ("TERM_PROGRAM", "vscode"),
+            ("TERM_PROGRAM_VERSION", "1.96.0"),
+            ("NOBLE_INSTANCE", "42"),
+            ("NOBLE_PANE", "3"),
+        ])));
+        // A pane started from VS Code's terminal keeps VS Code's variables, but its TERM_PROGRAM is NOBLE: a pane.
+        assert!(!started_in_other_terminal(in_pane(&[
+            ("VSCODE_INJECTION", "1"),
+            ("VSCODE_IPC_HOOK_CLI", "/run/user/1000/vscode-ipc.sock"),
+            ("VSCODE_GIT_ASKPASS_MAIN", "/usr/share/code/askpass-main.js"),
+        ])));
+        assert!(started_in_other_terminal(env_of(&[("WT_SESSION", "9b3c2f0e"), ("NOBLE_PANE", "3")])));
+        assert!(started_in_other_terminal(env_of(&[("KITTY_WINDOW_ID", "1"), ("NOBLE_PANE", "3")])));
+        // Windows environment names are case-insensitive.
+        assert!(started_in_other_terminal(env_of(&[("term_program", "vscode")])));
+    }
+
     /// Only NOBLE's own command shape counts: another tool that merely mentions "noble" and " hook " does not.
     #[test]
     fn noble_command_shape_is_strict() {
@@ -698,11 +806,12 @@ mod tests {
             "noble hook permission-request",
             "noble hook stop-failure",
             "noble hook stop --agent codex",
-            "noble hook subagent-stop --agent copilot",
+            "noble hook subagent-stop --agent copilot", // an older build's entry: upgrade removes it
             "noble hook prompt --agent antigravity",
             "noble hook tool-use --agent cursor",
             "noble hook stop --agent cursor",
             "\"C:/Users/me/.cargo/bin/noble.exe\" hook session-end",
+            "C:/Users/MERTSO~1/.cargo/bin/noble.exe hook session-end",
             "\"/opt/my hook tools/noble\" hook notification",
             "& \"C:/Users/me/.cargo/bin/noble.exe\" hook session-end --agent copilot",
         ] {
@@ -722,6 +831,61 @@ mod tests {
         ] {
             assert!(!is_noble_command(bad), "{bad}");
         }
+    }
+
+    /// The Windows form: a plain path is written with forward slashes and no quotes, which Git Bash, cmd.exe and
+    /// PowerShell all run; a path with a space or shell syntax is double-quoted. Plain string work, so every
+    /// platform checks it. Both forms are NOBLE's hook commands (`noble_base` reads them).
+    #[test]
+    fn windows_words_are_plain_when_they_can_be() {
+        assert_eq!(windows_word(r"C:\Users\Mert\.cargo\bin\noble.exe"), "C:/Users/Mert/.cargo/bin/noble.exe");
+        assert_eq!(windows_word(r"C:\Users\MERTSO~1\noble.exe"), "C:/Users/MERTSO~1/noble.exe");
+        assert_eq!(windows_word(r"C:\my tools\noble.exe"), r#""C:/my tools/noble.exe""#);
+        assert_eq!(windows_word(r"C:\Program Files (x86)\noble.exe"), r#""C:/Program Files (x86)/noble.exe""#);
+        assert_eq!(windows_word(r"C:\a&b\noble.exe"), r#""C:/a&b/noble.exe""#);
+        assert_eq!(windows_word(r"C:\it's\noble.exe"), r#""C:/it's/noble.exe""#);
+        assert_eq!(windows_word(r"C:\$x\noble.exe"), r#""C:/$x/noble.exe""#);
+        // A plain word holds nothing a shell would read as quoting, escaping or expansion.
+        for plain in [r"C:\Users\x\noble.exe", "C:/Users/x/noble.exe"] {
+            let word = windows_word(plain);
+            assert!(!word.contains(['"', '\'', '\\', '$', '&', ' ', '%', '!', '`']), "{word}");
+        }
+        for base in [r"C:\Users\Mert\.cargo\bin\noble.exe", r"C:\my tools\noble.exe"] {
+            assert!(is_noble_command(&format!("{} hook stop", windows_word(base))), "{base}");
+        }
+    }
+
+    /// The folder of the hook command gets its 8.3 short name when the volume has one, so a folder with a space in its
+    /// name loses the space. Where there are no short names the long name comes back, and Unix has none at all; the
+    /// test then checks nothing more.
+    #[test]
+    fn short_path_has_no_spaces() {
+        if !cfg!(windows) {
+            assert!(short_path(Path::new("/tmp")).is_none(), "Unix has no short names");
+            return;
+        }
+        let dir = temp("short name");
+        if let Some(short) = short_path(&dir)
+            && short != dir
+        {
+            let text = short.display().to_string();
+            assert!(!text.contains(' '), "{text}");
+            assert!(short.is_dir(), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file keeps its name in the hook command. Shortened, `noble-dev.exe` would become `NOBLE-~1.EXE`, which
+    /// `noble_base` does not know as NOBLE's; the hook command must still read as NOBLE's on every platform.
+    #[test]
+    fn program_path_keeps_the_file_name() {
+        let dir = temp("program name");
+        let exe = dir.join("noble-dev.exe");
+        let program = program_path(&exe);
+        assert!(program.ends_with("noble-dev.exe"), "{program}");
+        let command = format!("{} hook stop", quote_for_shell(&program));
+        assert!(is_noble_command(&command), "{command}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A failed write leaves no temporary file next to the settings (a directory in the way
@@ -820,6 +984,23 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(names.iter().all(|n| n.ends_with(".json")), "no temp files left: {names:?}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A compaction (`source` "compact") can come in the middle of a turn: the pane keeps its record, state and
+    /// time alike, and a pane without one gets none. The other sources still record `session-start`.
+    #[test]
+    fn compaction_keeps_the_record() {
+        let data = temp("compact");
+        let hook = |event: &str, stdin: &str| run_cli(Agent::Claude, event, stdin, &data, Some("42"), Some("3"));
+        hook("prompt", r#"{"session_id":"s-1"}"#);
+        let before = read_records(&data, 42)[&3].clone();
+        hook(SESSION_START, r#"{"source":"compact","session_id":"s-1"}"#);
+        assert_eq!(read_records(&data, 42)[&3], before, "still working after a mid-turn compaction");
+        run_cli(Agent::Claude, SESSION_START, r#"{"source":"compact"}"#, &data, Some("42"), Some("9"));
+        assert!(!read_records(&data, 42).contains_key(&9));
+        hook(SESSION_START, r#"{"source":"startup","session_id":"s-1"}"#);
+        assert_eq!(read_records(&data, 42)[&3].event, SESSION_START);
         let _ = std::fs::remove_dir_all(&data);
     }
 

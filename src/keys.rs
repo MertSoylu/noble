@@ -57,7 +57,7 @@ impl Chord {
         if let KeyCode::Char(c) = self.code {
             let shift = self.mods.contains(KeyModifiers::SHIFT);
             self.mods.remove(KeyModifiers::SHIFT);
-            // A symbol produced with AltGr (Ctrl+Alt) counts as a plain character.
+            // A symbol produced with AltGr (Ctrl+Alt, Windows only: see `is_altgr_char`) counts as a plain character.
             if crate::term::input::is_altgr_char(self.mods, c) {
                 self.mods = KeyModifiers::NONE;
             }
@@ -133,9 +133,11 @@ impl Chord {
         };
         // ctrl+alt with a non-letter is how Windows reports AltGr, so such a chord is matched as the plain
         // character (`normalized`): `ctrl+alt+1` would quietly become `1` and take that key from every
-        // shell. It is refused instead, on every platform alike (configs are shared).
+        // shell. It is refused instead, on every platform alike (configs are shared). A letter is refused only
+        // where the layout types it with AltGr (`is_altgr_char`, Windows).
         if let KeyCode::Char(c) = code
-            && crate::term::input::is_altgr_char(mods, c)
+            && mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && (!c.is_ascii_alphabetic() || crate::term::input::is_altgr_char(mods, c))
         {
             return None;
         }
@@ -962,8 +964,15 @@ mod tests {
         assert_eq!(Some(from_terminal), Chord::parse("X"));
         let pipe = Chord::new(KeyCode::Char('|'), KeyModifiers::SHIFT);
         assert_eq!(Some(pipe), Chord::parse("|"));
+        // Windows: a symbol with Ctrl+Alt is AltGr, the plain character. Elsewhere Ctrl+Alt+| is a chord of its own.
         let altgr_pipe = Chord::new(KeyCode::Char('|'), KeyModifiers::CONTROL | KeyModifiers::ALT);
-        assert_eq!(Some(altgr_pipe), Chord::parse("|"));
+        if cfg!(windows) {
+            assert_eq!(Some(altgr_pipe), Chord::parse("|"));
+        } else {
+            assert_eq!(altgr_pipe.mods, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        }
+        // Configs are shared, so the spelling is refused on every platform.
+        assert_eq!(Chord::parse("ctrl+alt+|"), None);
     }
 
     #[test]

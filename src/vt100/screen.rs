@@ -716,6 +716,26 @@ impl Screen {
         self.attrs.inverse()
     }
 
+    /// Returns whether newly drawn text should be rendered with the
+    /// strikethrough text attribute.
+    #[must_use]
+    pub fn strikethrough(&self) -> bool {
+        self.attrs.strikethrough()
+    }
+
+    /// Returns whether newly drawn text should be rendered concealed.
+    #[must_use]
+    pub fn conceal(&self) -> bool {
+        self.attrs.conceal()
+    }
+
+    /// Returns whether newly drawn text should be rendered with the blink
+    /// text attribute.
+    #[must_use]
+    pub fn blink(&self) -> bool {
+        self.attrs.blink()
+    }
+
     pub(crate) fn grid(&self) -> &crate::vt100::grid::Grid {
         if self.mode(MODE_ALTERNATE_SCREEN) { &self.alternate_grid } else { &self.grid }
     }
@@ -1364,13 +1384,26 @@ impl<CB: crate::vt100::Callbacks> WrappedScreen<CB> {
                 [2] => screen.attrs.set_dim(),
                 [3] => screen.attrs.set_italic(true),
                 [4] => screen.attrs.set_underline(true),
+                // `4:n` is an underline style: `4:0` is none, `4:3` curly and so on are underlined
+                [4, style] => screen.attrs.set_underline(*style != 0),
+                // 5 is slow blink and 6 rapid blink; both are drawn as blink
+                [5] | [6] => screen.attrs.set_blink(true),
                 [7] => screen.attrs.set_inverse(true),
+                [8] => screen.attrs.set_conceal(true),
+                [9] => screen.attrs.set_strikethrough(true),
                 [22] => screen.attrs.set_normal_intensity(),
                 [23] => screen.attrs.set_italic(false),
                 [24] => screen.attrs.set_underline(false),
+                [25] => screen.attrs.set_blink(false),
                 [27] => screen.attrs.set_inverse(false),
+                [28] => screen.attrs.set_conceal(false),
+                [29] => screen.attrs.set_strikethrough(false),
                 [n] if (30..=37).contains(n) => {
                     screen.attrs.fgcolor = crate::vt100::Color::Idx(to_u8!(*n) - 30);
+                }
+                // The colon form may carry a colorspace id (`38:2::r:g:b`, empty here); the id is skipped
+                [38, 2, _, r, g, b] => {
+                    screen.attrs.fgcolor = crate::vt100::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
                 [38, 2, r, g, b] => {
                     screen.attrs.fgcolor = crate::vt100::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
@@ -1399,6 +1432,9 @@ impl<CB: crate::vt100::Callbacks> WrappedScreen<CB> {
                 [n] if (40..=47).contains(n) => {
                     screen.attrs.bgcolor = crate::vt100::Color::Idx(to_u8!(*n) - 40);
                 }
+                [48, 2, _, r, g, b] => {
+                    screen.attrs.bgcolor = crate::vt100::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
+                }
                 [48, 2, r, g, b] => {
                     screen.attrs.bgcolor = crate::vt100::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
@@ -1423,6 +1459,25 @@ impl<CB: crate::vt100::Callbacks> WrappedScreen<CB> {
                 [49] => {
                     screen.attrs.bgcolor = crate::vt100::Color::Default;
                 }
+                // SGR 58 sets the underline color and 59 resets it. Cells store no underline color, so the
+                // parameters of 58 are consumed and dropped: the semicolon form (`58;2;r;g;b`, `58;5;n`) would
+                // otherwise read them as attributes (dim, bold or a background color).
+                [58, 2, _, _, _] | [58, 2, _, _, _, _] | [58, 5, _] => {}
+                [58] => match next_param!() {
+                    [2] => {
+                        next_param!();
+                        next_param!();
+                        next_param!();
+                    }
+                    [5] => {
+                        next_param!();
+                    }
+                    _ => {
+                        unhandled(self);
+                        return;
+                    }
+                },
+                [59] => {}
                 [n] if (90..=97).contains(n) => {
                     screen.attrs.fgcolor = crate::vt100::Color::Idx(to_u8!(*n) - 82);
                 }

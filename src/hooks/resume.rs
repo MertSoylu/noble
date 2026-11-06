@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::Agent;
+use super::{Agent, opencode};
 
 /// The longest session id NOBLE keeps (real ids are UUIDs or short `ses_…` names).
 pub const MAX_ID_LEN: usize = 128;
@@ -34,11 +34,18 @@ pub fn session_id(agent: Agent, input: &Value) -> Option<String> {
         Agent::Claude | Agent::Codex => input.get("session_id").and_then(Value::as_str),
         // Copilot names it `sessionId` on camelCase events and `session_id` on PascalCase ones.
         Agent::Copilot => input.get("sessionId").or_else(|| input.get("session_id")).and_then(Value::as_str),
-        // OpenCode's plugin forwards its own events, which carry the session in `properties`.
-        Agent::OpenCode => input
-            .pointer("/properties/sessionID")
-            .or_else(|| input.pointer("/properties/info/id"))
-            .and_then(Value::as_str),
+        // OpenCode's plugin forwards its own events, which carry the session in `properties`. A subagent's event
+        // names the top session in `rootSessionID` instead: the child's own id is not the conversation to resume.
+        Agent::OpenCode => {
+            if opencode::is_subagent(input) {
+                input.get("rootSessionID").and_then(Value::as_str)
+            } else {
+                input
+                    .pointer("/properties/sessionID")
+                    .or_else(|| input.pointer("/properties/info/id"))
+                    .and_then(Value::as_str)
+            }
+        }
         // Antigravity names the conversation `conversationId` on every event. `agy --conversation` starts a new
         // conversation when it does not find the id, so a wrong id is harmless. A live run has not confirmed it.
         Agent::Antigravity => input.get("conversationId").and_then(Value::as_str),
@@ -183,6 +190,22 @@ mod tests {
         assert_eq!(session_id(Agent::Antigravity, &json!({ "conversationId": "a b" })), None);
     }
 
+    /// A subagent's event resumes the top session (`rootSessionID`), never the subagent's own id.
+    #[test]
+    fn opencode_subagent_resumes_the_top_session() {
+        let subagent = json!({
+            "type": "permission.asked",
+            "subagent": true,
+            "rootSessionID": "ses_root",
+            "properties": { "sessionID": "ses_child" }
+        });
+        assert_eq!(session_id(Agent::OpenCode, &subagent).as_deref(), Some("ses_root"));
+        let own = json!({ "type": "session.status", "properties": { "sessionID": "ses_root" } });
+        assert_eq!(session_id(Agent::OpenCode, &own).as_deref(), Some("ses_root"));
+        let unnamed = json!({ "subagent": true, "properties": { "sessionID": "ses_child" } });
+        assert_eq!(session_id(Agent::OpenCode, &unnamed), None, "a subagent without a top session names no id");
+    }
+
     #[test]
     fn resume_arguments_per_agent() {
         assert_eq!(res(Agent::Claude, "abc").args().as_deref(), Some("--resume abc"));
@@ -223,6 +246,11 @@ mod tests {
             resume_command("C:\\Tools\\claude.exe --verbose", &res(Agent::Claude, "abc")).as_deref(),
             Some("C:\\Tools\\claude.exe --verbose --resume abc")
         );
+        // Arguments after the program do not hide it from the agent check.
+        assert_eq!(
+            resume_command("agy --model x", &res(Agent::Antigravity, "abc")).as_deref(),
+            Some("agy --model x --conversation abc")
+        );
     }
 
     #[test]
@@ -236,6 +264,11 @@ mod tests {
         assert_eq!(resume_command("copilot --continue", &res(Agent::Copilot, "abc")), None);
         assert_eq!(resume_command("opencode --session x", &res(Agent::OpenCode, "abc")), None);
         assert_eq!(resume_command("agy -c", &res(Agent::Antigravity, "abc")), None, "agy -c picks the last one");
+        assert_eq!(
+            resume_command("agy --conversation abc", &res(Agent::Antigravity, "abc")),
+            None,
+            "a restored agy pane already picks its conversation"
+        );
         assert_eq!(resume_command("agy --conversation=x", &res(Agent::Antigravity, "abc")), None);
         assert_eq!(resume_command("agy", &res(Agent::Claude, "abc")), None, "agy is not Claude");
         assert_eq!(resume_command("cursor-agent", &res(Agent::Cursor, "abc")), None, "Cursor has no resume");

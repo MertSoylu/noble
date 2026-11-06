@@ -852,6 +852,9 @@ pub struct App {
     /// record's time when it turned Working, kept while it stays Working (a `stop` with
     /// subagents still running does not restart it). Shown as "working 2m" in the pane title.
     agent_working_since: HashMap<PaneId, i64>,
+    /// When the user last answered a question or permission prompt in a Claude pane (Unix seconds,
+    /// `App::answer_prompt`). The record written at or before it reads as working; a newer record drops the entry.
+    agent_answered: HashMap<PaneId, i64>,
     last_hook_scan: Instant,
     /// Agents whose NOBLE hooks are installed in their settings (`scan_agent_hooks`, Settings, the popup).
     pub hooks_on: Vec<crate::hooks::Agent>,
@@ -1036,7 +1039,8 @@ impl App {
             });
         }
         crate::hooks::prune(&app.paths.data, std::process::id());
-        // Hooks from an older NOBLE get the events added since (e.g. the subagent ones), for every agent.
+        // Hooks from an older NOBLE get the events added since (e.g. the subagent ones) and lose the ones dropped
+        // since, for every agent.
         crate::hooks::upgrade_installed();
         app.scan_agent_hooks();
         crate::update::cleanup_old();
@@ -1156,6 +1160,7 @@ impl App {
             agent_resume: HashMap::new(),
             last_agent: None,
             agent_working_since: HashMap::new(),
+            agent_answered: HashMap::new(),
             last_hook_scan: Instant::now(),
             hooks_on: Vec::new(),
             agents_found: Vec::new(),

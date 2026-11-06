@@ -150,12 +150,38 @@ pub fn warned_window(state: &ProviderState, warn_at: u8, now: i64) -> Option<&Wi
         .max_by_key(|w| w.used)
 }
 
+/// The program of a launcher command line: its first word, or the text inside the quotes when the word is quoted
+/// (`& 'C:\Program Files\agy.exe' --x` from PowerShell, `"C:\Tools\claude.exe" --resume id` from cmd, `'/opt/my
+/// tools/kilo' run` from a POSIX shell). Inside PowerShell single quotes `''` is one quote, as `pane::pwsh_quote`
+/// writes it.
+fn program_word(command: &str) -> &str {
+    let s = command.trim().trim_start_matches('&').trim_start();
+    let Some(quote) = s.chars().next().filter(|&c| matches!(c, '\'' | '"')) else {
+        return s.split_whitespace().next().unwrap_or("");
+    };
+    // The quote is one byte, so the body starts right after it.
+    let body = &s[1..];
+    let mut chars = body.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != quote {
+            continue;
+        }
+        if quote == '\'' && chars.next_if(|&(_, next)| next == '\'').is_some() {
+            continue;
+        }
+        return &body[..i];
+    }
+    body
+}
+
 /// AI agent running in a pane: from the launcher command or the window title.
 pub fn agent_kind(command: Option<&str>, label: &str) -> Option<&'static str> {
-    // When opened from a launcher the command's file name is authoritative.
+    // When opened from a launcher the program's file name is authoritative: the program is the command's first word
+    // (`program_word`), so the arguments after it do not count (`pi --model claude-x` is pi).
     // The path is split on both separators: on Linux `Path` does not treat `\` as a separator.
     let stem = command
-        .and_then(|c| c.trim().trim_matches(['&', ' ', '\'', '"']).rsplit(['/', '\\']).next())
+        .map(program_word)
+        .and_then(|program| program.rsplit(['/', '\\']).next())
         .and_then(|name| std::path::Path::new(name).file_stem())
         .map(|s| s.to_string_lossy().to_lowercase());
     const BY_COMMAND: [(&str, &str); 13] = [
@@ -774,6 +800,35 @@ mod tests {
         assert_eq!(agent_kind(None, "GitHub Copilot"), Some("copilot"));
         assert_eq!(agent_kind(None, "pwsh"), None);
         assert_eq!(agent_kind(None, "legacy agy notes"), None);
+    }
+
+    /// The program is the command's first word (or its quoted path): the arguments after it do not name an agent.
+    /// The quoted forms are the ones `ShellSpec::invocation` writes on Windows (`& '...'` and `"..."`).
+    #[test]
+    fn agent_kind_reads_the_program_not_the_arguments() {
+        assert_eq!(agent_kind(Some("cursor-agent --model x"), "pwsh"), Some("cursor"));
+        assert_eq!(agent_kind(Some("agy --conversation 0f3a-b9"), "pwsh"), Some("antigravity"));
+        assert_eq!(agent_kind(Some("pi --model claude-sonnet"), "pwsh"), Some("pi"));
+        assert_eq!(agent_kind(Some("omp --model codex"), "pwsh"), Some("oh-my-pi"));
+        assert_eq!(agent_kind(Some("grok --resume x"), "pwsh"), Some("grok"));
+        assert_eq!(agent_kind(Some("command-code -y"), "pwsh"), Some("command code"));
+        assert_eq!(agent_kind(Some("kilo run"), "pwsh"), Some("kilo"));
+        assert_eq!(agent_kind(Some("cline --yolo"), "pwsh"), Some("cline"));
+        assert_eq!(agent_kind(Some("freebuff --x"), "pwsh"), Some("freebuff"));
+        assert_eq!(agent_kind(Some("/usr/local/bin/cline --yolo"), "bash"), Some("cline"));
+        assert_eq!(agent_kind(Some(r"C:\Tools\COMMAND-CODE.CMD --x"), "pwsh"), Some("command code"));
+        // A quoted path with spaces; the apostrophe in the folder is doubled, as PowerShell writes it.
+        assert_eq!(
+            agent_kind(Some(r"& 'C:\Program Files\Agy\agy.exe' --conversation abc"), "pwsh"),
+            Some("antigravity")
+        );
+        assert_eq!(agent_kind(Some(r"& 'C:\Users\O''Brien\bin\grok.exe' --x"), "pwsh"), Some("grok"));
+        assert_eq!(agent_kind(Some(r#""C:\Program Files\Claude\claude.exe" --resume abc"#), "cmd"), Some("claude"));
+        assert_eq!(agent_kind(Some("'/opt/my tools/kilo' run"), "zsh"), Some("kilo"));
+        // Other programs stay none, whatever their arguments say.
+        assert_eq!(agent_kind(Some("cursor --model x"), "pwsh"), None);
+        assert_eq!(agent_kind(Some("agy-notes --x"), "pwsh"), None);
+        assert_eq!(agent_kind(Some("pwsh -c claude"), "pwsh"), Some("claude"), "the wrapper's text still falls back");
     }
 
     #[test]

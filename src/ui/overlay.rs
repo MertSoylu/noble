@@ -320,14 +320,9 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
             }
             y += 1;
             if y < bottom {
-                hud::put(
-                    buf,
-                    vx,
-                    y,
-                    PREFIX_NOTES.get(ws.prefix).copied().unwrap_or(""),
-                    th.dim(),
-                    vend.saturating_sub(vx),
-                );
+                let note = PREFIX_NOTES.get(ws.prefix).copied().unwrap_or("");
+                let note = fit_words(note, vend.saturating_sub(vx) as usize);
+                hud::put(buf, vx, y, &note, th.dim(), vend.saturating_sub(vx));
             }
         } else {
             let value = match row {
@@ -339,12 +334,15 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
             let arrow = if on { th.accent_bold() } else { th.dim() };
             // ‹ value ›, the value padded so the right arrow stays put while cycling.
             let value_w = 24.min(vend.saturating_sub(vx + 4) as usize);
+            // The value is cut at a word boundary; a single word too long for the room is cut in place.
+            let fitted = fit_words(&value, value_w);
+            let shown = if fitted.is_empty() { util::truncate(&value, value_w) } else { fitted };
             let left_end = hud::put(buf, vx, y, "‹ ", arrow, vend.saturating_sub(vx));
             let text_end = hud::put(
                 buf,
                 left_end,
                 y,
-                &util::pad_right(&util::truncate(&value, value_w), value_w),
+                &util::pad_right(&shown, value_w),
                 if on { th.accent_bold() } else { th.text() },
                 vend.saturating_sub(left_end),
             );
@@ -372,21 +370,31 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
     keys.push(("?".into(), "every shortcut · ctrl+click opens links".into()));
     // The key column fits the longest key (a rebound palette key can be "ctrl+space :") and the launcher keys,
     // but takes at most half the card so the text beside it keeps room; a longer key is cut.
-    let launcher_keys = launchers.iter().map(|l| l.key.as_str()).collect::<Vec<_>>().join("  ");
+    let launcher_keys: Vec<&str> = launchers.iter().map(|l| l.key.as_str()).collect();
     let key_w = keys
         .iter()
         .map(|(k, _)| util::width(k) + 2)
-        .chain((!launchers.is_empty()).then(|| util::width(&launcher_keys) + 2))
+        .chain((!launchers.is_empty()).then(|| util::width(&launcher_keys.join("  ")) + 2))
         .max()
         .unwrap_or(8)
         .clamp(8, ((iw / 2) as usize).max(8));
     if !launchers.is_empty() {
         let names: Vec<String> = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect();
         let what = launcher_what(&names, (iw as usize).saturating_sub(key_w));
-        keys.insert(1, (launcher_keys, what));
+        let shown_keys = fit_keys(&launcher_keys, key_w - 2);
+        if !what.is_empty() && !shown_keys.is_empty() {
+            keys.insert(1, (shown_keys, what));
+        }
     }
+    // A description is cut at a word boundary with "…". A row with no room for its first word is left out
+    // whole: a key on its own beside a fragment reads as a broken hint.
+    let avail = (iw as usize).saturating_sub(key_w);
     for (key, what) in &keys {
-        line(buf, y, &[(&util::pad_right(key, key_w), th.accent_bold()), (what, th.text())]);
+        let shown = fit_words(what, avail);
+        if shown.is_empty() {
+            continue;
+        }
+        line(buf, y, &[(&util::pad_right(key, key_w), th.accent_bold()), (shown.as_str(), th.text())]);
         y += 1;
     }
     // Always drawn (the rows above stop short of it): the way out must stay visible.
@@ -403,10 +411,10 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
 
 /// The welcome card's launcher line, `start Claude / Codex +2 right there`: names are dropped from the end
 /// as whole names until the line fits `avail` columns, and the count of those left out follows as `+N`
-/// (the same mark the project card uses for ports). A name is never cut; only when not even `+N` fits is
-/// the line cut, with "…".
+/// (the same mark the project card uses for ports). " right there" is the first part to go. A name is
+/// never cut, and nothing is cut with "…" either: `""` when not even `start +N` fits, and the line is left out.
 fn launcher_what(names: &[String], avail: usize) -> String {
-    let line = |shown: usize| {
+    let list = |shown: usize| {
         let mut list = names[..shown].join(" / ");
         if shown < names.len() {
             if shown > 0 {
@@ -414,13 +422,26 @@ fn launcher_what(names: &[String], avail: usize) -> String {
             }
             list.push_str(&format!("+{}", names.len() - shown));
         }
-        format!("start {list} right there")
+        list
     };
-    (0..=names.len())
+    // The whole phrase with as many names as fit; only then the phrase without " right there".
+    let phrase = (0..=names.len()).rev().map(|shown| format!("start {} right there", list(shown)));
+    let short = (0..=names.len()).rev().map(|shown| format!("start {}", list(shown)));
+    phrase.chain(short).find(|text| util::width(text) <= avail).unwrap_or_default()
+}
+
+/// The launcher keys that fit `avail` columns, whole keys only: the keys left out follow as "…" (a key is never
+/// cut). `""` when not even one key fits.
+fn fit_keys(keys: &[&str], avail: usize) -> String {
+    let all = keys.join("  ");
+    if util::width(&all) <= avail {
+        return all;
+    }
+    (1..keys.len())
         .rev()
-        .map(&line)
+        .map(|n| format!("{}  …", keys[..n].join("  ")))
         .find(|text| util::width(text) <= avail)
-        .unwrap_or_else(|| util::truncate(&line(0), avail))
+        .unwrap_or_default()
 }
 
 /// Theme selector: each row is drawn in its theme's own colors (name, accents, status
@@ -718,6 +739,25 @@ pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// `text` cut to `avail` columns at a word boundary: whole words are dropped from the end and "…" follows the
+/// last word that stays ("command palette — everything" reads "command palette…"). Text that fits comes back
+/// unchanged; `""` when not even the first word fits with its "…" (the caller leaves the row out).
+fn fit_words(text: &str, avail: usize) -> String {
+    if util::width(text) <= avail {
+        return text.to_string();
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for n in (1..words.len()).rev() {
+        // A phrase ends on a word: a dash or a dot left at its end goes with the words after it.
+        let kept = words[..n].iter().rposition(|w| w.chars().any(char::is_alphanumeric)).map_or(0, |i| i + 1);
+        let cut = words[..kept].join(" ");
+        if kept > 0 && util::width(&cut) < avail {
+            return format!("{cut}…");
+        }
+    }
+    String::new()
 }
 
 /// `line` cut to at most `width` columns and ending with "…" (the text was cut after it).
@@ -1093,8 +1133,28 @@ fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hit
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_text;
+    use super::{fit_keys, fit_words, wrap_text};
     use crate::util;
+
+    #[test]
+    fn fit_words_cuts_at_a_word_and_never_inside_one() {
+        assert_eq!(fit_words("short", 5), "short");
+        assert_eq!(fit_words("open a terminal in the selected project", 33), "open a terminal in the selected…");
+        assert_eq!(fit_words("command palette — everything is in there", 19), "command palette…");
+        // A dash or a dot left at the end of the phrase goes with the words after it.
+        assert_eq!(fit_words("every shortcut · ctrl+click opens links", 16), "every shortcut…");
+        // The first word does not fit with its "…": nothing is left (the caller drops the row).
+        assert_eq!(fit_words("launcher x", 8), "");
+        assert_eq!(fit_words("launcher", 0), "");
+    }
+
+    #[test]
+    fn fit_keys_drops_whole_keys() {
+        let keys = ["c", "x", "e", "g", "b", "f", "u", "d", "l"];
+        assert_eq!(fit_keys(&keys, 25), "c  x  e  g  b  f  u  d  l");
+        assert_eq!(fit_keys(&keys, 16), "c  x  e  g  b  …");
+        assert_eq!(fit_keys(&keys, 2), "");
+    }
 
     #[test]
     fn wrap_text_breaks_at_spaces_and_cuts_long_words() {

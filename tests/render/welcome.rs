@@ -202,3 +202,87 @@ fn welcome_card_launcher_line_drops_whole_names() {
     }
     assert!(checked >= 3, "the launcher line is drawn at 110, 120 and 160 columns");
 }
+
+/// The text a card row draws after its key, up to the card's right border (`None` when no row shows the key).
+fn card_text(text: &str, key: &str) -> Option<String> {
+    let marker = format!("│  {key}");
+    text.lines().find_map(|line| {
+        let (_, after) = line.split_once(&marker)?;
+        Some(after.split('│').next().unwrap_or_default().trim().to_string())
+    })
+}
+
+/// The launcher line's text after "start " up to the card's right border (`None` when the card has no such line).
+fn launcher_text(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (_, after) = line.split_once("start ")?;
+        Some(after.split('│').next().unwrap_or_default().trim().to_string())
+    })
+}
+
+/// `shown` is `full` as the card drew it: either whole, or cut after a whole word and ended with "…".
+fn assert_word_cut(shown: &str, full: &str, ctx: &str) {
+    if shown == full {
+        return;
+    }
+    let head = shown.strip_suffix('…').unwrap_or_else(|| panic!("{ctx}: {shown:?} is cut without \"…\""));
+    assert!(
+        !head.is_empty() && full.starts_with(head) && full[head.len()..].starts_with(' '),
+        "{ctx}: {shown:?} cuts a word of {full:?}"
+    );
+}
+
+/// The card's texts are cut at a word boundary with "…", never inside a word, and a row with no room for its
+/// first word is left out whole. Nine launchers at 120 columns used to cut the palette text after "is i"; at 45
+/// columns the key column ended in a cut key and the descriptions in fragments.
+#[test]
+fn welcome_card_cuts_text_at_word_boundaries() {
+    use noble::config::Launcher;
+    const TERMINAL: &str = "open a terminal in the selected project";
+    const PALETTE: &str = "command palette — everything is in there";
+    const SHORTCUTS: &str = "every shortcut · ctrl+click opens links";
+    const NAMES: [&str; 9] =
+        ["Claude", "Codex", "Opencode", "Antigravity", "Oh-my-pi", "Freebuff", "Cursor", "Command code", "Cline"];
+    let keys = ["c", "x", "e", "g", "b", "f", "u", "d", "l"];
+    let commands =
+        ["claude", "codex", "opencode", "antigravity", "oh-my-pi", "freebuff", "cursor", "command code", "cline"];
+    let mut app = demo_app(120, 34);
+    app.launchers = keys
+        .iter()
+        .zip(commands)
+        .map(|(key, name)| {
+            (Launcher { key: key.to_string(), name: name.into(), command: name.into(), show: true }, true)
+        })
+        .collect();
+    app.show_welcome();
+    // Nine keys take 27 columns of the key column, so the texts get 33: each is cut after the last whole word.
+    let text = render(&mut app, 120, 34);
+    save("welcome-cut-120x34", &text);
+    assert_eq!(card_text(&text, "⏎").as_deref(), Some("open a terminal in the selected…"), "{text}");
+    assert_eq!(card_text(&text, "alt+p").as_deref(), Some("command palette — everything is…"), "{text}");
+    assert_eq!(card_text(&text, "?").as_deref(), Some("every shortcut · ctrl+click…"), "{text}");
+    for (w, h) in [(120, 34), (90, 28), (76, 24), (56, 18), (45, 30), (45, 18), (45, 12), (30, 8)] {
+        let text = render(&mut app, w, h);
+        save(&format!("welcome-cut-{w}x{h}"), &text);
+        for (key, full) in [("⏎", TERMINAL), ("alt+p", PALETTE), ("?", SHORTCUTS)] {
+            // A drawn row always has its description (a bare key reads as a broken hint).
+            let Some(shown) = card_text(&text, key) else { continue };
+            assert!(!shown.is_empty(), "{w}x{h}: the {key} row has no description\n{text}");
+            assert_word_cut(&shown, full, &format!("{w}x{h} {key}"));
+        }
+        // The launcher line names whole CLIs or counts the ones left out as "+N": no name is cut.
+        let Some(line) = launcher_text(&text) else { continue };
+        let body = line.strip_suffix(" right there").unwrap_or(&line);
+        let (list, hidden) = match body.rsplit_once('+') {
+            Some((list, n)) => (list.trim_end(), n.parse::<usize>().expect("+N count")),
+            None => (body, 0),
+        };
+        let names: Vec<&str> = if list.is_empty() { Vec::new() } else { list.split(" / ").collect() };
+        assert!(names.iter().all(|n| NAMES.contains(n)), "{w}x{h}: a cut or unknown name in {line:?}\n{text}");
+        assert_eq!(names.len() + hidden, NAMES.len(), "{w}x{h}: names left out not counted in {line:?}");
+    }
+    // The narrowest card cuts its setup values at a word too: "Follow…", not "Follow th…".
+    let text = render(&mut app, 30, 8);
+    assert!(text.contains("Follow…") && text.contains("auto…"), "{text}");
+    assert!(!text.contains("Follow th") && !text.contains("auto (p"), "{text}");
+}

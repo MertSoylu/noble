@@ -38,11 +38,11 @@ pub(super) fn settings_file(isolated: bool, home: Option<PathBuf>) -> Option<Pat
 }
 
 /// One handler of an event: agy's handler is `type`, `command` and `timeout` (seconds). `base` comes from
-/// `command_base`: `noble` when it is on PATH (every shell runs that), else a path quoted by `quote_for_shell`, which
-/// is double quotes on Windows. Which shell agy runs a handler's command with on Windows is not verified. If it is
-/// PowerShell, the quoted form does not run there (PowerShell needs the `&` call operator before a quoted path), and
-/// one `command` cannot carry both forms (Copilot writes a separate `powershell` key for that). The usual install,
-/// with `noble` on PATH, does not depend on it. Unix shells read the single quotes as they are.
+/// `command_base`: `noble` when it is on PATH (every shell runs that), else the executable's path as `quote_for_shell`
+/// writes it. On Windows a plain path (no spaces) is unquoted, which bash, cmd.exe and PowerShell all run; a path with
+/// spaces is double-quoted, which PowerShell does not run (it needs the `&` call operator, and one `command` cannot
+/// carry both forms; Copilot writes a separate `powershell` key for that). Which shell agy runs a handler's command
+/// with on Windows is not verified. Unix shells read the single quotes as they are.
 fn handler(base: &str, arg: &str) -> Value {
     let command = format!("{base} hook {arg} --agent {}", Agent::Antigravity.id());
     json!({ "type": "command", "command": command, "timeout": TIMEOUT_SECS })

@@ -208,6 +208,27 @@ impl Cell {
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
     }
+
+    /// Returns whether the cell should be rendered with the strikethrough
+    /// text attribute.
+    #[must_use]
+    pub fn strikethrough(&self) -> bool {
+        self.attrs.strikethrough()
+    }
+
+    /// Returns whether the cell should be rendered concealed (hidden text,
+    /// still selectable and copied).
+    #[must_use]
+    pub fn conceal(&self) -> bool {
+        self.attrs.conceal()
+    }
+
+    /// Returns whether the cell should be rendered with the blink text
+    /// attribute (SGR 5 and 6).
+    #[must_use]
+    pub fn blink(&self) -> bool {
+        self.attrs.blink()
+    }
 }
 
 #[cfg(test)]

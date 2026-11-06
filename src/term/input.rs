@@ -19,9 +19,13 @@ fn modifier_param(mods: KeyModifiers) -> u8 {
 }
 
 /// A non-letter character arriving with Ctrl+Alt was produced by AltGr, and so is a letter the keyboard layout
-/// types with AltGr (Turkish Q: AltGr+I is "i").
+/// types with AltGr (Turkish Q: AltGr+I is "i"). Windows only: Linux and macOS never send AltGr or Option as Ctrl+Alt,
+/// so there Ctrl+Alt+symbol is a chord (Emacs C-M-/ is ESC 0x1f).
 pub fn is_altgr_char(mods: KeyModifiers, c: char) -> bool {
-    mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) && (!c.is_ascii_alphabetic() || layout_altgr_letter(c))
+    // Windows: the rule above. Linux and macOS: Ctrl+Alt is never AltGr, so this is always false there.
+    cfg!(windows)
+        && mods.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && (!c.is_ascii_alphabetic() || layout_altgr_letter(c))
 }
 
 /// Windows: whether the keyboard layout types `c` with AltGr. ConPTY turns text it is given (SSH, a paste without
@@ -155,7 +159,7 @@ pub fn encode_key(ev: &KeyEvent, mode: KeyMode) -> Vec<u8> {
     let app_cursor = mode.app_cursor;
     let mut mods = ev.modifiers;
     // Windows AltGr = Ctrl+Alt: produced characters like '@', '{', '|', '€'
-    // are sent as they are and never turned into control codes.
+    // are sent as they are and never turned into control codes. Elsewhere Ctrl+Alt+symbol is a chord (ESC + the code).
     if let KeyCode::Char(c) = ev.code
         && is_altgr_char(mods, c)
     {
@@ -376,12 +380,26 @@ mod tests {
         assert_eq!(encode_key(&key(KeyCode::Backspace, KeyModifiers::NONE), KeyMode::default()), vec![0x7f]);
     }
 
+    /// Ctrl+Alt with a symbol. On Windows it is AltGr, so the character is text. Linux and macOS never send AltGr or
+    /// Option as Ctrl+Alt, so it is a chord there: ESC and the control code where one exists (Emacs C-M-SPC is ESC NUL,
+    /// C-M-\ is ESC 0x1c, C-M-/ is ESC 0x1f), or ESC and the character.
     #[test]
-    fn altgr_symbols_pass_through() {
+    fn ctrl_alt_symbols_are_altgr_only_on_windows() {
         let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        assert_eq!(encode_key(&key(KeyCode::Char('@'), altgr), KeyMode::default()), b"@");
-        assert_eq!(encode_key(&key(KeyCode::Char('{'), altgr), KeyMode::default()), b"{");
-        assert_eq!(encode_key(&key(KeyCode::Char('€'), altgr), KeyMode::default()), "€".as_bytes());
+        // (symbol, bytes on Windows, bytes on Linux and macOS)
+        let cases: [(char, &[u8], &[u8]); 5] = [
+            ('@', b"@", b"\x1b\0"),
+            ('{', b"{", b"\x1b{"),
+            (' ', b" ", b"\x1b\0"),
+            ('\\', b"\\", b"\x1b\x1c"),
+            ('/', b"/", b"\x1b\x1f"),
+        ];
+        for (c, windows, unix) in cases {
+            let want = if cfg!(windows) { windows } else { unix };
+            assert_eq!(encode_key(&key(KeyCode::Char(c), altgr), KeyMode::default()), want, "{c:?}");
+        }
+        let euro: &[u8] = if cfg!(windows) { "€".as_bytes() } else { "\x1b€".as_bytes() };
+        assert_eq!(encode_key(&key(KeyCode::Char('€'), altgr), KeyMode::default()), euro);
         // A real Ctrl+Alt+letter is still ESC + control code.
         assert_eq!(encode_key(&key(KeyCode::Char('b'), altgr), KeyMode::default()), vec![0x1b, 2]);
     }
@@ -486,12 +504,15 @@ mod tests {
         assert_eq!(encode_key(&key(KeyCode::Char('a'), KeyModifiers::SUPER), k), b"\x1b[97;9u");
     }
 
-    /// AltGr characters stay text under the flag too (the Windows layouts send them as Ctrl+Alt).
+    /// Ctrl+Alt with a symbol under the flag. On Windows it is AltGr and stays text. Elsewhere it is a chord: CSI u
+    /// with the character as the code and the modifiers 1 + Alt 2 + Ctrl 4 = 7.
     #[test]
-    fn kitty_altgr_characters_stay_text() {
+    fn kitty_ctrl_alt_symbols_are_altgr_only_on_windows() {
         let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        assert_eq!(encode_key(&key(KeyCode::Char('@'), altgr), kitty()), b"@");
-        assert_eq!(encode_key(&key(KeyCode::Char('€'), altgr), kitty()), "€".as_bytes());
+        let (at, euro): (&[u8], &[u8]) =
+            if cfg!(windows) { (b"@", "€".as_bytes()) } else { (b"\x1b[64;7u", "\x1b[8364;7u".as_bytes()) };
+        assert_eq!(encode_key(&key(KeyCode::Char('@'), altgr), kitty()), at);
+        assert_eq!(encode_key(&key(KeyCode::Char('€'), altgr), kitty()), euro);
     }
 
     /// Ctrl+Shift+letter is one key in both shapes: legacy input sends `Char('C')`, the kitty protocol `Char('c')`

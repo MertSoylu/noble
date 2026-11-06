@@ -6,6 +6,46 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-06
+
+### Removed
+- Winget support is removed. `noble update` and the update notice no longer single out a copy installed by winget: it
+  is replaced like any other copy, and `winget upgrade MertSoylu.Noble` is no longer named. The release workflow no
+  longer submits the Windows archives to microsoft/winget-pkgs, and the README no longer describes a winget install or
+  update.
+
+### Fixed
+- Windows: a multi-line paste that contains characters typed with AltGr (such as @, \ or { on Turkish Q) is one paste
+  again, so the multi-line confirmation applies and an Enter inside it is not sent on its own.
+- A Claude Code compaction (SessionStart with source "compact") no longer shows the pane as "your turn" while Claude is
+  still working, and no longer resets its working timer.
+- Claude notifications that do not ask for input (auth, quota auto-resume, elicitation results, plugin notices) no
+  longer set an agent to "needs you"; only permission prompts, questions and agents waiting for input do.
+- A Claude question or permission prompt answered in its pane (Enter, a digit, y or n) reads as working at once,
+  so the tab dot, the outer window title and the progress pause no longer wait for the end of the turn.
+- OpenCode subagents (child sessions started by the task tool) no longer show the pane as idle or finished while the
+  main session still works, and never become the pane's resume id; their permission requests still need you.
+- Notifications to the outer terminal are sent as one sequence (OSC 9 or OSC 777, chosen from the terminal NOBLE runs
+  in), so terminals that understand both (WezTerm, Ghostty, foot) no longer show each one twice.
+- The terminal emulator no longer reads the parameters of the underline color codes (SGR 58/59) as text attributes;
+  `4:n` underline styles are underlined, and strikethrough (9), conceal (8) and blink (5, 6) are drawn.
+- Windows: agent hooks also run when the agent uses PowerShell. When `noble` is not on PATH the hook command names the
+  executable unquoted with forward slashes (the folder's 8.3 short name when needed) instead of in double quotes.
+  Turn the agent hooks off and on in Settings to rewrite existing entries.
+- Linux and macOS: Ctrl+Alt with a symbol (Emacs C-M-SPC, C-M-\, C-M-/) reaches the pane with its modifiers instead of
+  as the bare character. Windows AltGr handling is unchanged.
+- Launchers with arguments, such as `cursor-agent --model x` or a restored `agy --conversation <id>`, are recognised
+  as their agent, so their quota, hooks offer and resume work.
+- Panes no longer pass the outer terminal's identity variables (kitty, WezTerm, Ghostty, Konsole, Windows Terminal,
+  iTerm2, VTE, tmux) to their programs. VS Code's `VSCODE_*` variables still reach them (`VSCODE_IPC_HOOK_CLI` lets
+  `code file` reuse the window, `VSCODE_GIT_ASKPASS_*` is git's credential helper). An agent hook in another terminal
+  that inherited a pane's ids (VS Code opened with `code .` from a pane) no longer writes state for that pane, and
+  programs NOBLE opens drop `NOBLE_INSTANCE` and `NOBLE_PANE`.
+- GitHub Copilot CLI: NOBLE no longer installs subagent hooks that could never be paired (a subagent start carries no
+  id); the ones an older version wrote are removed at the next start.
+- The welcome card cuts its hints, prefix notes and setup values at a word boundary with "…" instead of in the middle of
+  a word.
+
 ## [1.14.0] - 2026-11-01
 
 ### Changed
@@ -896,7 +936,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.0...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.1...HEAD
+[1.14.1]: https://github.com/MertSoylu/noble/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/MertSoylu/noble/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/MertSoylu/noble/compare/v1.12.3...v1.13.0
 [1.12.3]: https://github.com/MertSoylu/noble/compare/v1.12.2...v1.12.3

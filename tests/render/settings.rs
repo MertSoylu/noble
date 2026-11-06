@@ -299,7 +299,7 @@ fn settings_filter_narrows_rows() {
 }
 
 /// A symbol typed with AltGr (Ctrl+Alt on Windows) is text in the Settings and key bindings filters, like
-/// in the other text fields; a real alt+letter is not.
+/// in the other text fields; a real alt+letter is not. Elsewhere Ctrl+Alt+symbol is a chord, so nothing is typed.
 #[test]
 fn altgr_symbols_type_into_the_filters() {
     let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
@@ -309,7 +309,7 @@ fn altgr_symbols_type_into_the_filters() {
     app.on_key(KeyEvent::new(KeyCode::Char('@'), altgr));
     app.on_key(KeyEvent::new(KeyCode::Char('{'), altgr));
     app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
-    assert_eq!(app.settings_filter, "@{");
+    assert_eq!(app.settings_filter, if cfg!(windows) { "@{" } else { "" });
 }
 
 /// Settings on a wide terminal (140+ columns): the page is 130 columns, its list keeps the first 80
