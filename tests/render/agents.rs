@@ -54,6 +54,45 @@ fn claude_hook_states_drive_sessions() {
     assert!(app.agent_hooks.is_empty());
 }
 
+/// Keys typed in a Claude pane that needs you: Enter answers the question, so the session reads as working at once
+/// (Claude sends no hook event for an answer). Typed text is no answer, the re-read keeps the answer, Esc is no answer
+/// (in a working pane it changes nothing, at a question it leaves the question open), and the question Claude asks
+/// next needs you again.
+#[test]
+fn an_answer_typed_in_a_claude_pane_reads_as_working() {
+    use noble::app::{AgentState, View};
+    use noble::hooks::PERMISSION_REQUEST;
+    let mut app = demo_app(160, 45);
+    app.new_tab(std::env::temp_dir(), None, Some("agent".into()));
+    let pane = app.tabs[0].focus;
+    // The shell drops keys typed before its prompt is ready (see `wait_idle`). Its first prompt clears the pane's
+    // agent state (`clear_agent`) when it is pumped, and a record written before that is stale: the records below
+    // come a second later, and the test pumps no more events, so no prompt clears them.
+    wait_idle(&mut app, pane);
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(app.view, View::Term(0));
+    let now = chrono::Utc::now().timestamp();
+    app.apply_hook_records([(pane, hook_rec(PERMISSION_REQUEST, now, 0))].into());
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
+    app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)), "typed text is no answer");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+    assert_eq!(app.agents_waiting(), 0);
+    let same = app.agent_hooks.clone();
+    app.apply_hook_records(same);
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)), "the re-read keeps the answer");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+    app.apply_hook_records([(pane, hook_rec(PERMISSION_REQUEST, now + 5, 0))].into());
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
+    assert_eq!(app.agents_waiting(), 1);
+    // Esc interrupts the turn and sends no Stop, so at a question it is no answer: the pane still needs you.
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)), "Esc is no answer");
+    assert_eq!(app.agents_waiting(), 1);
+}
+
 /// Claude's `Stop` fires when the main answer ends even while background subagents still
 /// run: the session stays "working" without a notice until the last one is done, then it
 /// says Claude finished. A permission request still needs you.
@@ -262,6 +301,7 @@ fn hook_cli_writes_state_file() {
         cmd.env_remove("NOBLE_INSTANCE").env_remove("NOBLE_PANE");
         if with_env {
             cmd.env("NOBLE_INSTANCE", "4242").env("NOBLE_PANE", "7");
+            pane_env(&mut cmd);
         }
         let mut child = cmd.spawn().unwrap();
         child.stdin.take().unwrap().write_all(br#"{"message":"Claude needs your permission to use Bash"}"#).unwrap();
@@ -272,6 +312,39 @@ fn hook_cli_writes_state_file() {
     assert!(run(true).success());
     let recs = noble::hooks::read_records(&home, 4242);
     assert_eq!(recs[&7].message.as_deref(), Some("Claude needs your permission to use Bash"));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A `code .` run in a pane starts VS Code with the pane's ids: its terminal's hook (`TERM_PROGRAM=vscode`) records
+/// nothing for the pane, while the same hook in the pane does. A pane started from VS Code's terminal keeps VS Code's
+/// `VSCODE_*` variables, and its hook still records.
+#[test]
+fn hook_cli_ignores_a_hook_from_another_terminal() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let home = std::env::temp_dir().join(format!("noble-hookother-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let run = |term_program: &str, message: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_noble"));
+        cmd.args(["hook", "notification"])
+            .env("NOBLE_HOME", &home)
+            .env("NOBLE_INSTANCE", "4243")
+            .env("NOBLE_PANE", "5")
+            .env("VSCODE_INJECTION", "1")
+            .env("VSCODE_IPC_HOOK_CLI", "/run/user/1000/vscode-ipc.sock")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        pane_env(&mut cmd).env("TERM_PROGRAM", term_program);
+        let mut child = cmd.spawn().unwrap();
+        let payload = format!(r#"{{"message":"{message}"}}"#);
+        child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    run("NOBLE", "from the pane");
+    run("vscode", "from VS Code");
+    let recs = noble::hooks::read_records(&home, 4243);
+    assert_eq!(recs[&5].message.as_deref(), Some("from the pane"));
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -585,11 +658,9 @@ fn hook_cli_names_the_agent_it_runs_for() {
         (&["hook", "stop"], Some(Agent::Claude)),
     ];
     for (args, want) in cases {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
-            .args(args)
-            .env("NOBLE_HOME", &home)
-            .env("NOBLE_INSTANCE", "42")
-            .env("NOBLE_PANE", "3")
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_noble"));
+        cmd.args(args).env("NOBLE_HOME", &home).env("NOBLE_INSTANCE", "42").env("NOBLE_PANE", "3");
+        let mut child = pane_env(&mut cmd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -622,11 +693,9 @@ fn antigravity_hooks_answer_on_stdout() {
         (&["hook", "stop"], "", Some(Agent::Claude)),
     ];
     for (args, want_out, want_agent) in cases {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
-            .args(args)
-            .env("NOBLE_HOME", &home)
-            .env("NOBLE_INSTANCE", "42")
-            .env("NOBLE_PANE", "3")
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_noble"));
+        cmd.args(args).env("NOBLE_HOME", &home).env("NOBLE_INSTANCE", "42").env("NOBLE_PANE", "3");
+        let mut child = pane_env(&mut cmd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -662,11 +731,9 @@ fn cursor_hooks_answer_on_stdout() {
         (&["hook", "stop"], "", Some("stop")),
     ];
     for (args, want_out, want_event) in cases {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
-            .args(args)
-            .env("NOBLE_HOME", &home)
-            .env("NOBLE_INSTANCE", "42")
-            .env("NOBLE_PANE", "3")
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_noble"));
+        cmd.args(args).env("NOBLE_HOME", &home).env("NOBLE_INSTANCE", "42").env("NOBLE_PANE", "3");
+        let mut child = pane_env(&mut cmd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

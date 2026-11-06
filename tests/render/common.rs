@@ -312,15 +312,27 @@ pub(crate) fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u1
     app.handle(AppEvent::Input(Event::Mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE })));
 }
 
+/// Gives a hook's command the environment of a NOBLE pane, whatever terminal runs the tests: `TERM_PROGRAM=NOBLE`
+/// and no outer terminal variables (`hooks::started_in_other_terminal` would tell it apart from a pane otherwise).
+pub(crate) fn pane_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(noble::term::pane::is_outer_terminal_var) {
+            cmd.env_remove(name);
+        }
+    }
+    cmd.env("TERM_PROGRAM", "NOBLE")
+}
+
 /// Runs the real `noble hook <event>` the way Claude Code's hooks do: inside the pane's
 /// environment (`NOBLE_INSTANCE`, `NOBLE_PANE`), with the event JSON on stdin.
 pub(crate) fn noble_hook(app: &App, pane: noble::term::layout::PaneId, instance: u32, event: &str, stdin: &str) {
     use std::io::Write as _;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_noble"))
-        .args(["hook", event])
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_noble"));
+    cmd.args(["hook", event])
         .env("NOBLE_HOME", &app.paths.data)
         .env("NOBLE_INSTANCE", instance.to_string())
-        .env("NOBLE_PANE", pane.to_string())
+        .env("NOBLE_PANE", pane.to_string());
+    let mut child = pane_env(&mut cmd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

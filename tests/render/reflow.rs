@@ -96,7 +96,10 @@ fn zoom_and_restore_keep_a_long_line_whole() {
 }
 
 /// Focus mode takes the bars away and the pane's bottom line with them: the pane gets three rows more, and three fewer
-/// when it ends. The lines that were in the pane stay in order, and the newest one stays on the screen.
+/// when it ends. The lines that were in the pane stay in order, and the newest one stays on the screen. Every toggle is
+/// settled before the next: the frame loop resizes a pane at most once per frame (`FRAME`, 16 ms), while a ConPTY
+/// repaint still in flight when the pane changes size again can be read at the wrong size and repeat a row. Toggles
+/// drawn back to back, with no frame between them, are not a sequence the app produces.
 #[test]
 fn focus_mode_toggle_keeps_the_lines() {
     let mut app = demo_app(110, 30);
@@ -130,13 +133,14 @@ fn focus_mode_toggle_keeps_the_lines() {
     save("reflow-focus-off-110x30", &render(&mut app, 110, 30));
     assert_eq!(app.panes[&id].size.0, rows);
     check(&mut app, "focus mode off");
-    for _ in 0..3 {
+    for round in 1..=3 {
         app.run(Action::FocusMode);
         render(&mut app, 110, 30);
+        check(&mut app, &format!("round {round}: focus mode on"));
         app.run(Action::FocusMode);
         render(&mut app, 110, 30);
+        check(&mut app, &format!("round {round}: focus mode off"));
     }
-    check(&mut app, "after three more toggles");
     app.run(Action::CloseTab);
 }
 

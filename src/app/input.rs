@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use super::agents::answers_prompt;
 use super::{App, Confirm, ConfirmAction, Drag, Hit, Overlay, ProjectAct, SortKey, ToastLevel, ToastTarget, View};
 use crate::keys::{Action, Chord, legacy_key};
 use crate::sensors::ProcInfo;
@@ -209,6 +210,8 @@ impl App {
         }
         if !p.write(&encode_key(&k, mode)) {
             self.input_refused();
+        } else if answers_prompt(&k) {
+            self.answer_prompt(id);
         }
     }
 

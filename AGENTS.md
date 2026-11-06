@@ -143,7 +143,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`PtyInput`), so `Pane::write` never blocks on a program that does not read; `Pane::cwd` checks a reported folder
   on a background thread (`AppEvent::PaneCwd`), and a network path is shown (`shown_cwd`) but never checked or used),
   `term/osc.rs` the vt100 `Callbacks` (OSC parsing, hyperlinks), `term/input.rs` xterm key/mouse encoding and AltGr
-  handling.
+  handling. A pane's environment has `TERM_PROGRAM=NOBLE` and no outer terminal's identity variables
+  (`pane::is_outer_terminal_var`: kitty, WezTerm, Ghostty, Konsole, Windows Terminal, iTerm2, VTE, tmux, TERMINFO);
+  SSH, locale and VS Code's `VSCODE_*` variables stay (`VSCODE_IPC_HOOK_CLI` lets `code file` reuse the window).
 - **Shell integration:** PowerShell gets a prompt wrapper (`PWSH_CWD_HOOK`), cmd a `PROMPT` (only when
   `PROMPT` is not already set in NOBLE's environment); bash (`--rcfile`; login arguments use the separate
   `bash_login` script), zsh (`ZDOTDIR`) and fish (`--init-command`) get scripts from `term/integration.rs`,
@@ -210,7 +212,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `Pane::step_command` / `show_last_output` / `block_lines` read them; `app/blocks.rs` holds the actions (jump, copy,
   send to the agent of the tab or the last one used, pasted never run). The ✗ badge is `Hit::CommandBadge`.
 - **Agent resume:** `hooks/resume.rs` reads each agent's session id from its hook payload (`session_id`; Copilot
-  `sessionId`; OpenCode `properties.sessionID`; Antigravity `conversationId`; Cursor keeps none, since its `--resume`
+  `sessionId`; OpenCode `properties.sessionID`, or the plugin's `rootSessionID` for a subagent's event; Antigravity
+  `conversationId`; Cursor keeps none, since its `--resume`
   takes the CLI session id, not the `conversation_id` its hooks carry) into
   `HookRecord.session`; `valid_id` keeps only `[A-Za-z0-9_-]` up to 128 characters, also when a session file is read
   back. `App::agent_resume` keeps the last id per pane (dropped in `forget_agent`). `save_node` writes
@@ -221,7 +224,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `Hit::ClaudeContinue` runs `continue_command`.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); `app/agent_hooks.rs` holds the per-agent install state
-  and the popup toggles; the state types stay in `app/mod.rs`.
+  and the popup toggles; the state types stay in `app/mod.rs`. A key that answers a Claude prompt in the focused pane
+  (`answers_prompt`, from `term_key`) calls `App::answer_prompt`: Claude sends no event for an answer, so the pane's
+  "needs you" record reads as working (`shown_state`, `agent_answered`) until a newer record arrives.
 - **Session auto-save / termination:** `App::tick` compares the tabs with the last saved session and writes a
   change that lasted 2 s, only while it gets the session lock (`session_save_waiting`, 1 s wait); otherwise the
   save is retried and `session_saved` does not move. Shutdown and the startup restore keep the bounded
@@ -233,7 +238,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   startup, which moves a `noble.log` over `LOG_ROTATE_SIZE` (256 KiB) to `noble.log.1`, replacing an older one.
   `termination.rs` turns SIGHUP/SIGTERM (Unix) and the console
   close/logoff/shutdown handler (Windows) into `AppEvent::Quit` so the normal shutdown path saves.
-- **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as OSC 9 / OSC 777 (sanitized;
+- **Outer notifications:** `outer.rs` forwards `notify()` to the outer terminal as exactly one of OSC 9 or OSC 777
+  (`notify_form`, from `TERM_PROGRAM`, `TERM`, `KITTY_WINDOW_ID` and `KONSOLE_VERSION`: OSC 9 for iTerm2, WezTerm,
+  Ghostty and kitty, OSC 777 for foot, rxvt-unicode and Konsole, OSC 9 otherwise; sanitized;
   skipped while the window is known to be focused; on Windows only when `TERM_PROGRAM` is set).
   The same terminal shows the agents waiting for you (`App::agents_waiting`, `NeedsYou`): `App::outer_sequences`
   (`app/notify.rs`) returns the OSC 9;4 pause (state 4, cleared with state 0) and the window title (`NOBLE · ◆ N`,
@@ -242,7 +249,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   title the terminal had is pushed at start (`SAVE_TITLE`, XTWINOPS 22) and `exit_sequences` clears the report and
   pops it on exit (XTWINOPS 23), from `restore_terminal` on every exit path.
 - **Child processes:** GUI programs (browser, editor, file manager) start through `util::spawn_detached`
-  (null stdio, reaper thread on Unix); background git goes through `projects::git_run` (no optional locks,
+  (null stdio, reaper thread on Unix, without `NOBLE_INSTANCE` / `NOBLE_PANE`); background git goes through `projects::git_run` (no optional locks,
   no prompts, timeout via `ai::run_command`, which kills the whole tree on every exit; `App::shutdown` ends the
   commands still running with `ai::kill_background_children`, which also closes the registry so none starts after
   it). The codex RPC child (`ai::stdio_rpc`) starts the same way (`ai::spawn_tracked`: group, registry, `Tracked`
@@ -268,7 +275,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   records folder, `run_cli`, `read_records`, `prune`, `remove_record`, `command_base`/`quote_for_shell`, the `Agent`
   registry and `HOOK_ARGS`); one module per agent: `claude.rs` (`~/.claude/settings.json`), `codex.rs`
   (`hooks.json` under `$CODEX_HOME`), `copilot.rs` (its own `noble.json` under `$COPILOT_HOME/hooks`), `opencode.rs`
-  (its own plugin file `plugins/noble.js`), `antigravity.rs` (`~/.gemini/config/hooks.json`: NOBLE's own `noble` key of
+  (its own plugin file `plugins/noble.js`; a subagent's events come tagged `subagent: true` with `rootSessionID`, and
+  `hook_arg` lets only their permission requests and answers through), `antigravity.rs` (`~/.gemini/config/hooks.json`: NOBLE's own `noble` key of
   flat handler lists under SessionStart, PreInvocation and Stop; `enabled: false` counts as not installed; no
   `PreToolUse`, whose reply would decide the tool's permission) and `cursor.rs` (`~/.cursor/hooks.json`: `version` 1
   and flat entries under sessionStart, beforeSubmitPrompt, postToolUse, afterShellExecution, afterFileEdit and stop; no
@@ -287,14 +295,22 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`app/agent_hooks.rs`, the "Agent status hooks" popup), an agent's hooks run `noble hook <event> [--agent <id>]`
   (no flag = Claude). `main.rs` handles this subcommand without opening the terminal; state is written to
   `data/agents/<NOBLE_INSTANCE>-<NOBLE_PANE>.json` files, which `App::tick` reads at most once a second
+  (`hooks::started_in_other_terminal`: a hook that finds another terminal's `TERM_PROGRAM` or identity variable writes
+  nothing, since a `code .` run in a pane leaves VS Code's terminals with the pane's ids; tmux inside a pane is not one;
+  VS Code's `VSCODE_*` variables are no signal, since a pane keeps them)
   (`apply_hook_records` → `AgentState`, the record's agent names the pane; `tick` runs on every event and at least
   every `IDLE_TICK` = 2 s, and this scan only while hooks are installed or records exist).
   `session-end` deletes the record, and the prompt signal clears the pane's agent (`App::clear_agent`; older
   records are ignored) and its window title; the launcher command only names the agent until the first prompt
   (`Pane::launch_running`). Running subagents are `<instance>-<pane>.<agent_id>.sub` marker files
-  (`SubagentStart`/`SubagentStop`); while any exist the session stays Working after `Stop`. Idle-reminder and
-  `agent_completed` notifications are not recorded (`QUIET_NOTIFICATIONS`). `upgrade_installed` (every agent) adds
-  newly added events to an older install at startup. `hooks::prune` runs at startup: a file named after this instance
+  (`SubagentStart`/`SubagentStop`, Claude and Codex only: Copilot's `subagentStart` has no id to pair with its
+  `subagentStop`'s `agentId`, so `copilot.rs` has no subagent events and `RETIRED_EVENTS` removes an older install's);
+  while any exist the session stays Working after `Stop`. Only Claude notifications
+  whose `notification_type` asks the user are recorded (`NEEDS_USER`: permission prompts, elicitations, `agent_needs_input`);
+  every other type, and the idle reminder's text when a payload has no type, is not (`claude::record_message` returns
+  `None`). `upgrade_installed` (every agent) adds
+  newly added events to an older install at startup and drops the events it no longer uses.
+  `hooks::prune` runs at startup: a file named after this instance
   goes at once; a file whose `<pid>-` owner is still running is kept (`prune_with`, `owner_running`: the process must
   have started before the file was written, within `START_SLACK_SECS`,
   so a reused pid keeps nothing); any other file goes
@@ -344,12 +360,7 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   (`copy_capped`), and `check_listing` refuses an archive with absolute names, `..` parts or links (`tar -tf`/`-tvf`)
   before `tar` unpacks it. `tar` is run by its full path (`tar_program`: System32 on Windows, else `util::which`). It then swaps the binary: on Linux/macOS one rename over the running binary (no old
   copy is kept); on Windows the running one is renamed to `*.old`, falling back to `.old2` … `.old9` when one
-  cannot be deleted, and `update::cleanup_old` removes it on the next launch. A winget install is never replaced:
-  `update::install_source` (Windows only; Linux and macOS are always `Direct`) canonicalizes the running binary's path
-  and `is_winget_package_path` tests the text for `WinGet\Packages\MertSoylu.Noble_*` (either separator, any case).
-  `noble update` then refuses with the winget command and exit 1 (`--check` names it too), and the update notice's tab
-  runs `winget upgrade` through the winget on PATH (`app/notify.rs` `update_command`; without winget a toast names the
-  command and the notice stays). The tab's toast asks to quit NOBLE if winget reports the file in use.
+  cannot be deleted, and `update::cleanup_old` removes it on the next launch.
 
 ## Extension points
 - New action: add it to `Action` in `src/keys.rs` (+ `ALL`, a fixed-size array whose length must be bumped,

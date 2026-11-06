@@ -6,6 +6,7 @@ use crate::ai::ProviderState;
 use crate::pr::PrInfo;
 use crate::projects::{GitInfo, Project};
 use crate::sensors::{SensorSample, StaticInfo};
+use crate::term::input::is_altgr_char;
 use crate::term::layout::PaneId;
 
 pub enum AppEvent {
@@ -67,7 +68,10 @@ pub fn coalesce_paste(batch: Vec<crossterm::event::Event>) -> Vec<crossterm::eve
         if k.kind == KeyEventKind::Release {
             return Some(None);
         }
-        if !(k.modifiers - KeyModifiers::SHIFT).is_empty() {
+        // Windows (the only platform whose bursts reach here, see `main.rs`): a character the layout types with
+        // AltGr arrives as Ctrl+Alt (`is_altgr_char`), and it is text like any other key.
+        let altgr_char = matches!(k.code, KeyCode::Char(c) if is_altgr_char(k.modifiers, c));
+        if !altgr_char && !(k.modifiers - KeyModifiers::SHIFT).is_empty() {
             return None;
         }
         match k.code {
@@ -113,6 +117,59 @@ mod tests {
 
     fn release(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release))
+    }
+
+    /// A character the Windows console reports for AltGr: Ctrl+Alt with the character it types.
+    fn altgr(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL | KeyModifiers::ALT))
+    }
+
+    #[test]
+    fn altgr_symbols_are_text_in_a_paste() {
+        // Windows only: the console reports AltGr as Ctrl+Alt, and `coalesce_paste` runs there alone (`main.rs`).
+        // Elsewhere Ctrl+Alt symbols are not text, so there is nothing to check.
+        if !cfg!(windows) {
+            return;
+        }
+        // '\\' and '@' are typed with AltGr on common layouts (Turkish Q and German, for example): they stay text,
+        // so a multi-line paste of them is still one paste.
+        let burst =
+            vec![altgr('\\'), altgr('@'), press(KeyCode::Enter), press(KeyCode::Char('x')), press(KeyCode::Enter)];
+        assert_eq!(coalesce_paste(burst), vec![Event::Paste("\\@\nx\n".into())]);
+    }
+
+    #[test]
+    fn ctrl_alt_key_without_a_character_ends_a_paste_run() {
+        // Ctrl+Alt+Enter types no character, so it is a shortcut and ends the run, as Ctrl+C does.
+        let alt_enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT));
+        let keys = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Enter),
+            press(KeyCode::Char('b')),
+            alt_enter.clone(),
+            press(KeyCode::Char('c')),
+        ];
+        assert_eq!(coalesce_paste(keys), vec![Event::Paste("a\nb".into()), alt_enter, press(KeyCode::Char('c'))]);
+    }
+
+    #[test]
+    fn altgr_letters_follow_the_layout() {
+        // Which letters a layout types with AltGr is up to the layout (Windows: Turkish Q has AltGr+I = "i"), so
+        // the expectation is `is_altgr_char`'s own verdict for 'i'. The rest of the burst is plain keys.
+        let i = altgr('i');
+        let burst = vec![
+            i.clone(),
+            press(KeyCode::Char('x')),
+            press(KeyCode::Enter),
+            press(KeyCode::Char('y')),
+            press(KeyCode::Enter),
+        ];
+        if is_altgr_char(KeyModifiers::CONTROL | KeyModifiers::ALT, 'i') {
+            assert_eq!(coalesce_paste(burst), vec![Event::Paste("ix\ny\n".into())]);
+        } else {
+            // The letter stays a key, and the rest of the burst is a paste of its own.
+            assert_eq!(coalesce_paste(burst), vec![i, Event::Paste("x\ny\n".into())]);
+        }
     }
 
     #[test]

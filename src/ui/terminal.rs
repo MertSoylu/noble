@@ -730,6 +730,15 @@ fn pane_content(
             if cell.underline() {
                 m |= Modifier::UNDERLINED;
             }
+            if cell.strikethrough() {
+                m |= Modifier::CROSSED_OUT;
+            }
+            if cell.conceal() {
+                m |= Modifier::HIDDEN;
+            }
+            if cell.blink() {
+                m |= Modifier::SLOW_BLINK;
+            }
             if selection.is_some_and(|s| !s.is_empty() && s.contains(r, c)) {
                 bg = pal.sel_bg;
                 fg = pal.fg;

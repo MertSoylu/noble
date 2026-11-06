@@ -76,6 +76,16 @@ fn outer_progress() -> bool {
     )
 }
 
+/// The sequence the outer terminal shows as a notification (`outer::notify_form`), read from the environment.
+fn outer_notify_form() -> noble::outer::NotifyForm {
+    noble::outer::notify_form(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        std::env::var_os("KONSOLE_VERSION").is_some(),
+    )
+}
+
 /// Reported before the terminal is touched: without a home folder NOBLE has nowhere for its files.
 fn no_folder_error() -> anyhow::Error {
     anyhow::anyhow!("no home folder for NOBLE's files: set NOBLE_HOME to the folder to use")
@@ -100,6 +110,11 @@ fn main() -> anyhow::Result<()> {
         // No folder for the files: nothing to record, and a hook never reports an error.
         let Some(paths) = Paths::resolve(None) else { return Ok(()) };
         let (instance, pane) = (std::env::var("NOBLE_INSTANCE").ok(), std::env::var("NOBLE_PANE").ok());
+        // A hook of another terminal (VS Code opened with `code .` from a pane) inherits the pane's ids: it is not
+        // that pane's agent, so it records nothing (`hooks::started_in_other_terminal`).
+        if noble::hooks::started_in_other_terminal(std::env::vars_os()) {
+            return Ok(());
+        }
         noble::hooks::run_cli(agent, event, &input, &paths.data, instance.as_deref(), pane.as_deref());
         return Ok(());
     }
@@ -353,7 +368,7 @@ fn event_loop(
                 && noble::outer::supported(cfg!(windows), std::env::var_os("TERM_PROGRAM").is_some())
             {
                 let mut out = stdout();
-                let _ = out.write_all(noble::outer::sequences(&text).as_bytes());
+                let _ = out.write_all(noble::outer::sequences(&text, outer_notify_form()).as_bytes());
                 let _ = out.flush();
             }
             if std::mem::take(&mut app.outer_bell) {

@@ -488,6 +488,7 @@ pub fn spawn_reporting(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    drop_pane_identity(cmd);
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
     if cfg!(unix) {
         // Unix (Linux/macOS): an unwaited child stays a zombie until NOBLE exits, so wait for it on a thread.
@@ -503,6 +504,13 @@ pub fn spawn_reporting(
         drop((child, report));
     }
     Ok(())
+}
+
+/// Removes `NOBLE_INSTANCE` and `NOBLE_PANE` from a program NOBLE starts itself. They name the pane whose agent hooks
+/// write its state: a GUI program that inherits them (a browser, an editor, a file manager) would have the hooks of
+/// the agents it runs report to that pane. The same on every platform: the variables are the command's environment.
+fn drop_pane_identity(cmd: &mut std::process::Command) {
+    cmd.env_remove("NOBLE_INSTANCE").env_remove("NOBLE_PANE");
 }
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -556,6 +564,16 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_programs_do_not_inherit_the_pane_identity() {
+        let mut cmd = std::process::Command::new("browser");
+        drop_pane_identity(&mut cmd);
+        // A removed variable shows up in `get_envs` with no value.
+        let removed: Vec<&str> =
+            cmd.get_envs().filter(|(_, value)| value.is_none()).filter_map(|(name, _)| name.to_str()).collect();
+        assert!(removed.contains(&"NOBLE_INSTANCE") && removed.contains(&"NOBLE_PANE"), "{removed:?}");
+    }
 
     #[test]
     fn forwarded_x11_display_is_told_from_a_local_one() {
