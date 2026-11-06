@@ -426,10 +426,12 @@ fn key_bindings_editor_renders_and_asks_before_taking_keys() {
     let text = render(&mut app, 110, 30);
     assert!(text.contains("press a key for Split Pane Right after ctrl+a · esc cancel"), "{text}");
 
-    // ctrl+alt with a symbol is AltGr on Windows: refused, and the editor keeps waiting.
+    // ctrl+alt with a symbol is refused, and the editor keeps waiting: on Windows it is AltGr (a character); on
+    // Linux and macOS it is a chord, but configs are shared, so it cannot be bound there either.
     app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL | KeyModifiers::ALT));
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("AltGr"), "{text}");
+    let refusal = if cfg!(windows) { "AltGr" } else { "cannot bind" };
+    assert!(text.contains(refusal), "{text}");
     assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.capture.is_some()), "still waiting");
 
     // "n" is Next Tab's prefix key: the question comes first, and "n" keeps its owner until yes.
