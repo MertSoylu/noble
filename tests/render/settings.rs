@@ -8,6 +8,33 @@ use ratatui::backend::TestBackend;
 
 use super::common::*;
 
+/// The selectable rows drawn on the page now (indices into `settings_items`), in page order.
+fn shown_items(app: &App) -> Vec<usize> {
+    let mut shown: Vec<usize> = app
+        .hits
+        .iter()
+        .filter_map(|(_, h)| match h {
+            noble::app::Hit::Setting(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    shown.sort_unstable();
+    shown.dedup();
+    shown
+}
+
+/// The N of the "<arrow> N more" marker on the screen, if there is one. The marker's row ends with the frame's
+/// border, so only the two words after the arrow are read.
+fn more_count(text: &str, arrow: char) -> Option<usize> {
+    text.lines().find_map(|line| {
+        line.match_indices(arrow).find_map(|(at, _)| {
+            let mut words = line[at + arrow.len_utf8()..].split_whitespace();
+            let n = words.next()?.parse::<usize>().ok()?;
+            (words.next()? == "more").then_some(n)
+        })
+    })
+}
+
 #[test]
 fn settings_screen_mouse_and_keys() {
     use noble::app::Hit;
@@ -168,14 +195,19 @@ fn settings_back_arrows_scroll_and_dim() {
     key(&mut app, KeyCode::Home);
     // A toast from an earlier key (e.g. "no tab here") would cover the marker.
     app.toasts.clear();
+    let total = app.settings_items().len();
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("Theme") && text.contains("↓ more") && !text.contains("↑ more"), "{text}");
+    let shown = shown_items(&app);
+    assert!(text.contains("Theme") && more_count(&text, '↑').is_none(), "{text}");
+    assert_eq!(more_count(&text, '↓'), Some(total - shown.len()), "{text}");
     for _ in 0..20 {
         mouse(&mut app, MouseEventKind::ScrollDown, 50, 15);
     }
     let text = render(&mut app, 110, 30);
     save("settings-scrolled-110x30", &text);
-    assert!(text.contains("↑ more") && !text.contains("↓ more"), "{text}");
+    let shown = shown_items(&app);
+    assert_eq!(more_count(&text, '↑'), Some(total - shown.len()), "{text}");
+    assert!(more_count(&text, '↓').is_none(), "{text}");
     assert!(text.contains("Edit config file") && !text.contains("Transparent background"), "{text}");
     assert_eq!(app.settings_sel, 0);
     key(&mut app, KeyCode::Right);
@@ -488,4 +520,97 @@ fn resume_agents_row_sits_under_restore_and_toggles() {
     assert!(!app.cfg.terminal.resume_agents && !app.setting_on(SettingKey::ResumeAgents));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.cfg.terminal.resume_agents && app.setting_on(SettingKey::ResumeAgents));
+}
+
+/// The "⏎ choose" hint is drawn on the selected row only. A selector row that is not selected shows its value
+/// alone: the theme chip keeps its colors, the popup row (quick launch, key bindings) its value.
+#[test]
+fn choose_hint_only_on_the_selected_row() {
+    use noble::app::{Hit, SettingItem, SettingKey};
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let items = app.settings_items();
+    let pos = |k: SettingKey| items.iter().position(|i| *i == SettingItem::Setting(k)).unwrap();
+    let (theme, quick, bindings) = (pos(SettingKey::Theme), pos(SettingKey::QuickLaunch), pos(SettingKey::KeyBindings));
+    // The row as it is drawn now.
+    let row_text = |app: &mut App, i: usize| {
+        let buf = render_cells(app, 110, 30);
+        let row = find_hit(app, |h| *h == Hit::Setting(i)).expect("the row is on screen");
+        cells_text(&buf, row)
+    };
+
+    app.settings_sel = theme;
+    let text = row_text(&mut app, theme);
+    assert!(text.contains("choose") && text.contains(app.theme.label), "selected theme row: {text}");
+    let text = row_text(&mut app, quick);
+    assert!(!text.contains("choose") && text.contains(&app.setting_value(SettingKey::QuickLaunch)), "{text}");
+
+    app.settings_sel = quick;
+    let text = row_text(&mut app, quick);
+    assert!(text.contains("choose"), "selected popup row: {text}");
+    let text = row_text(&mut app, theme);
+    assert!(!text.contains("choose") && text.contains(app.theme.label), "theme row no longer selected: {text}");
+
+    // Key bindings is further down the page: select it, then select the row above it.
+    app.settings_sel = bindings;
+    app.settings_follow = true;
+    let text = row_text(&mut app, bindings);
+    assert!(text.contains("choose"), "selected key bindings row: {text}");
+    app.settings_sel = pos(SettingKey::Prefix);
+    let text = row_text(&mut app, bindings);
+    assert!(!text.contains("choose") && text.contains(&app.setting_value(SettingKey::KeyBindings)), "{text}");
+}
+
+/// The "↑ N more" and "↓ N more" markers count the selectable rows hidden on their side of the page. Section
+/// headers, blank lines and descriptions are not counted, so the rows on screen and the two counts add up to
+/// every setting. A small page keeps the markers too.
+#[test]
+fn settings_more_markers_count_hidden_rows() {
+    use crossterm::event::MouseEventKind;
+    let mut app = demo_app(110, 30);
+    app.open_settings();
+    let total = app.settings_items().len();
+    app.settings_sel = 0;
+    app.settings_follow = true;
+    // The top of the page: nothing above, the rest below.
+    let text = render(&mut app, 110, 30);
+    let shown = shown_items(&app);
+    assert_eq!(shown.first(), Some(&0), "{text}");
+    assert!(shown.windows(2).all(|w| w[1] == w[0] + 1), "the rows on screen are consecutive: {shown:?}");
+    assert_eq!(more_count(&text, '↑'), None, "{text}");
+    assert_eq!(more_count(&text, '↓'), Some(total - shown.len()), "{text}");
+
+    // Scrolled into the middle, both markers: each counts the rows hidden on its side.
+    let mut text = String::new();
+    for _ in 0..10 {
+        mouse(&mut app, MouseEventKind::ScrollDown, 50, 15);
+        text = render(&mut app, 110, 30);
+        if shown_items(&app).first().is_some_and(|&i| i > 0) {
+            break;
+        }
+    }
+    let shown = shown_items(&app);
+    let (first, last) = (shown[0], shown[shown.len() - 1]);
+    assert!(first > 0 && last + 1 < total, "scrolled into the middle: {shown:?} of {total}");
+    assert_eq!(more_count(&text, '↑'), Some(first), "{text}");
+    assert_eq!(more_count(&text, '↓'), Some(total - last - 1), "{text}");
+
+    // The bottom of the page: the rest above, nothing below.
+    for _ in 0..30 {
+        mouse(&mut app, MouseEventKind::ScrollDown, 50, 15);
+    }
+    let text = render(&mut app, 110, 30);
+    let shown = shown_items(&app);
+    assert_eq!(shown.last(), Some(&(total - 1)), "{text}");
+    assert_eq!(more_count(&text, '↑'), Some(total - shown.len()), "{text}");
+    assert_eq!(more_count(&text, '↓'), None, "{text}");
+
+    // The smallest page that draws (30x10, under the two bars) counts both sides too; the view keeps its line
+    // offset, so it is in the middle of the page here.
+    let text = render(&mut app, 30, 10);
+    let shown = shown_items(&app);
+    let (first, last) = (shown[0], shown[shown.len() - 1]);
+    assert!(first > 0 && last + 1 < total, "{shown:?} of {total}");
+    assert_eq!(more_count(&text, '↑'), Some(first), "{text}");
+    assert_eq!(more_count(&text, '↓'), Some(total - last - 1), "{text}");
 }
