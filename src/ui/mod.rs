@@ -792,7 +792,7 @@ fn tips(app: &App) -> Vec<String> {
             });
         }
         View::System => {
-            v.push("/ filters the process list · K terminates the selected process after asking".to_string());
+            v.push("click a column title to sort by it · click it again to reverse".to_string());
         }
     }
     // The tab strip is on every screen with tabs to switch.

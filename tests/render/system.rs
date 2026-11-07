@@ -16,7 +16,7 @@ fn system_and_overlays_render() {
         let text = render(&mut app, w, h);
         save(&format!("system-{w}x{h}"), &text);
         if w >= 90 {
-            assert!(text.contains("PROCESSES"));
+            assert!(text.contains("Processes"));
             assert!(text.contains("code.exe"));
         }
     }
@@ -167,4 +167,44 @@ fn system_filter_hint_says_esc_clears() {
     assert!(text.lines().last().unwrap().contains("esc home"), "{text}");
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.view, View::Bridge);
+}
+
+/// The panel titles are in sentence case, as on Home ("Projects", "AI usage"); "CPU" stays upper case.
+#[test]
+fn system_panel_titles_are_sentence_case() {
+    let mut app = demo_app(120, 34);
+    app.run(Action::System);
+    let text = render(&mut app, 120, 34);
+    for title in ["CPU", "Memory · Net · Disk", "Processes"] {
+        assert!(text.contains(title), "{title}\n{text}");
+    }
+    for old in ["MEMORY", "PROCESSES"] {
+        assert!(!text.contains(old), "{old}\n{text}");
+    }
+}
+
+/// At 150 columns the CPU bar takes its 40-cell cap and NAME the rest, and MEM ends one column in from the
+/// panel's right border. Bars fill relative to the busiest listed process: code.exe (12.4%) is full, and
+/// msedge.exe (8.1%) is 65% of the busiest, so 26 of its 40 cells.
+#[test]
+fn process_bars_fill_relative_to_the_busiest() {
+    use noble::app::{Hit, SortKey};
+    let mut app = demo_app(150, 42);
+    app.run(Action::System);
+    let (text, buf) = render_buf(&mut app, 150, 42);
+    save("system-150x42", &text);
+    let cpu = find_hit(&app, |h| *h == Hit::SortCol(SortKey::Cpu)).expect("CPU header");
+    let mem = find_hit(&app, |h| *h == Hit::SortCol(SortKey::Mem)).expect("MEM header");
+    let bar_x = cpu.right() + 1;
+    let bar_w = mem.x - bar_x;
+    assert_eq!(bar_w, 40, "the CPU bar is capped at 40 cells\n{text}");
+    let border = (0..150).rev().find(|&x| buf[(x, mem.y)].symbol() == "│").expect("the panel's right border");
+    assert_eq!(mem.right() + 1, border, "MEM ends one column in from the border\n{text}");
+    // Empty cells of a bar are drawn in the line color; every other bar cell is filled.
+    let line = app.theme.line;
+    let filled = |y: u16| (bar_x..bar_x + bar_w).filter(|&x| buf[(x, y)].fg != line).count();
+    let (_, y) = find_text(&buf, "code.exe", 0).expect("code.exe row");
+    assert_eq!(filled(y), 40, "the busiest process fills its bar\n{text}");
+    let (_, y) = find_text(&buf, "msedge.exe", 0).expect("msedge.exe row");
+    assert_eq!(filled(y), 26, "8.1 of the busiest 12.4 is 65% of the bar\n{text}");
 }
