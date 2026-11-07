@@ -188,7 +188,9 @@ fn listening(roots: &Roots, skip_pid: Option<u32>) -> Vec<(usize, u16)> {
 fn folders_by_pid(roots: &Roots, skip_pid: Option<u32>, only: Option<&[u32]>) -> HashMap<u32, usize> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let refresh = ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always);
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else {
+        return HashMap::new();
+    };
     match only {
         Some(pids) => {
             let pids: Vec<Pid> = pids.iter().map(|pid| Pid::from_u32(*pid)).collect();

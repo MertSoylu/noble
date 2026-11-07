@@ -213,12 +213,15 @@ pub fn spawn(tx: Tx, requests: Receiver<SensorRequest>) {
 }
 
 fn run(tx: Tx, requests: Receiver<SensorRequest>) {
-    let mut sys = System::new_with_specifics(RefreshKind::nothing());
+    // sysinfo could not start: there is no sensor data, so the thread ends and the screens show none.
+    let Ok(mut sys) = System::new_with_specifics(RefreshKind::nothing()) else {
+        return;
+    };
     sys.refresh_cpu_all();
     sys.refresh_memory();
     let info = StaticInfo {
-        host: System::host_name().unwrap_or_else(|| "localhost".into()),
-        os: System::long_os_version().or_else(System::name).unwrap_or_else(|| std::env::consts::OS.into()),
+        host: System::host_name().unwrap_or_else(|_| "localhost".into()),
+        os: System::long_os_version().or_else(|_| System::name()).unwrap_or_else(|_| std::env::consts::OS.into()),
         cpu_brand: sys.cpus().first().map(|c| c.brand().trim().to_string()).unwrap_or_default(),
         cores: sys.cpus().len().max(1),
         total_mem: sys.total_memory(),
@@ -228,7 +231,8 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
         return;
     }
 
-    let mut networks = Networks::new_with_refreshed_list();
+    // No network counters when sysinfo cannot list the interfaces: the traffic rows stay at zero.
+    let mut networks = Networks::new_with_refreshed_list().ok();
     // Disks are read on a thread of their own: a dead network mount (sshfs, smb) can block `statvfs`
     // for minutes, and that must not freeze CPU, memory and network. While a read hangs no new one starts.
     let disks: Arc<Mutex<Option<Disks>>> = Arc::new(Mutex::new(None));
@@ -273,12 +277,13 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
 
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        networks.refresh(true);
-        let (rx, txb) = networks
-            .list()
-            .iter()
-            .filter(|(name, _)| counts_traffic(name))
-            .fold((0u64, 0u64), |(r, t), (_, n)| (r + n.received(), t + n.transmitted()));
+        let (rx, txb) = networks.as_mut().map_or((0, 0), |networks| {
+            networks.refresh(true);
+            networks
+                .iter()
+                .filter(|(name, _)| counts_traffic(&name.to_string_lossy()))
+                .fold((0u64, 0u64), |(r, t), (_, n)| (r + n.received(), t + n.transmitted()))
+        });
 
         let due = |last: Option<Instant>, every: Duration| last.is_none_or(|t| t.elapsed() >= every);
         // The process list is the most expensive read: only while the System screen is open.
@@ -312,11 +317,15 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             let (disks, busy, shared) = (disks.clone(), disks_busy.clone(), disk_shared.clone());
             let spawned = std::thread::Builder::new().name("disks".into()).spawn(move || {
                 if let Ok(mut d) = disks.lock() {
-                    let d = d.get_or_insert_with(Disks::new);
-                    d.refresh(true);
-                    let list = disk_rows(d.list());
-                    if let Ok(mut s) = shared.lock() {
-                        *s = list;
+                    if d.is_none() {
+                        *d = Disks::new().ok();
+                    }
+                    if let Some(d) = d.as_mut() {
+                        d.refresh(true);
+                        let list = disk_rows(&*d);
+                        if let Ok(mut s) = shared.lock() {
+                            *s = list;
+                        }
                     }
                 }
                 busy.store(false, Ordering::Release);
@@ -329,7 +338,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
 
         let sample = SensorSample {
             cpu: sys.global_cpu_usage().clamp(0.0, 100.0),
-            cores: sys.cpus().iter().map(|c| c.cpu_usage().clamp(0.0, 100.0)).collect(),
+            cores: sys.cpus().iter().map(|c| c.usage().clamp(0.0, 100.0)).collect(),
             freq_mhz: sys.cpus().first().map(|c| c.frequency()).unwrap_or(0),
             mem_used: sys.used_memory(),
             mem_total: sys.total_memory(),
@@ -342,7 +351,7 @@ fn run(tx: Tx, requests: Receiver<SensorRequest>) {
             // it is not copied and sent every second.
             procs: if mode == SensorMode::Detail { procs.clone() } else { Vec::new() },
             proc_count,
-            uptime: System::uptime(),
+            uptime: System::uptime().unwrap_or(0),
             battery: battery.clone(),
         };
         if tx.send(AppEvent::Sensors(Box::new(sample))).is_err() {
@@ -400,7 +409,7 @@ fn counts_traffic(name: &str) -> bool {
 /// snap images, and the second mount of one device (btrfs subvolumes `/` and `/home`, bind mounts).
 /// macOS also lists the APFS system volumes (`/System/Volumes/Data`, `VM`, `Preboot`, which share `/`'s
 /// container) and Xcode's simulator runtimes; Windows lists drive letters only, none of this applies.
-fn disk_rows(list: &[sysinfo::Disk]) -> Vec<DiskInfo> {
+fn disk_rows<'a>(list: impl IntoIterator<Item = &'a sysinfo::Disk>) -> Vec<DiskInfo> {
     let mut rows: Vec<(String, DiskInfo)> = Vec::new();
     for d in list {
         if d.total_space() == 0 {
@@ -466,7 +475,7 @@ mod tests {
         let mut child = Sleeper(command.spawn().expect("a sleeping process"));
         let pid = child.0.id();
         let kind = ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::Never);
-        let mut sys = System::new_with_specifics(RefreshKind::nothing());
+        let mut sys = System::new_with_specifics(RefreshKind::nothing()).expect("sysinfo starts");
         sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true, kind);
         let started = sys.process(Pid::from_u32(pid)).expect("the child is listed").start_time();
 
