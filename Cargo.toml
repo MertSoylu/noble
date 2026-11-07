@@ -30,7 +30,7 @@ chrono = "0.4.45"
 crossterm = "0.29.0"
 dirs = "7.0.0"
 # Trait downcasts of the vendored PTY layer (`src/pty`); already in the tree through wayland-backend, so no new crate.
-downcast-rs = "1.2.1"
+downcast-rs = "2.0.2"
 # itoa and vte are the dependencies of the vendored vt100 emulator (`src/vt100`); vte/std as upstream enabled it.
 itoa = "1.0.18"
 # Warnings and errors of the vendored PTY layer (`src/pty`); already in the tree, and NOBLE installs no logger.
