@@ -548,7 +548,8 @@ fn hooks_offer_notice() {
     // The status bar's row (H-1) under the panels' bottom border; the action buttons above it (H-3) stay whole.
     assert!(text.lines().nth(31).unwrap().contains("Show agent status in NOBLE?"), "{text}");
     let buttons = text.lines().nth(29).unwrap();
-    assert!(buttons.contains("e Opencode") && !buttons.contains("Show agent"), "{text}");
+    // "Open" is on the button row on every machine (the launcher chips depend on the CLIs installed).
+    assert!(buttons.contains("⏎ Open") && !buttons.contains("Show agent"), "{text}");
     for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }

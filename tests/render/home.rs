@@ -1039,12 +1039,15 @@ fn update_notice_bottom_right() {
     let border = text.lines().nth(30).unwrap();
     assert!(!border.contains("99.0.0") && !border.contains("update") && border.contains('╯'), "{text}");
     let buttons = text.lines().nth(29).unwrap();
-    assert!(buttons.contains("e Opencode") && !buttons.contains("99.0.0"), "{text}");
+    // "Open" is on the button row on every machine (the launcher chips depend on the CLIs installed).
+    assert!(buttons.contains("⏎ Open") && !buttons.contains("99.0.0"), "{text}");
     app.cfg.general.check_updates = false;
     let plain = render(&mut app, 120, 32);
     app.cfg.general.check_updates = true;
+    // Only the rows next to the notice are compared: the demo's quota countdowns follow the wall clock, so two renders
+    // a second boundary apart can differ higher up.
     let (with, without): (Vec<&str>, Vec<&str>) = (text.lines().collect(), plain.lines().collect());
-    assert!(with[..31] == without[..31], "the notice changes only the status bar row:\n{text}");
+    assert!(with[27..31] == without[27..31], "the notice changes only the status bar row:\n{text}");
     render(&mut app, 120, 32);
     let hit = find_hit(&app, |h| *h == noble::app::Hit::Update).expect("update hit");
     assert_eq!((hit.y, hit.x + hit.width + 4), (31, 120));
