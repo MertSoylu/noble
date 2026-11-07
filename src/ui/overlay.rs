@@ -37,14 +37,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // The question wraps over as many rows as it needs: the box grows with it (within the
             // area) and the Yes/No row stays at the bottom.
             let text_w = (w as usize).saturating_sub(4);
-            let lines = wrap_text(&c.body, text_w);
+            let lines = wrap_text(&capitalized(&c.body), text_w);
             let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-            let rect = centered(area, w, rows.saturating_add(6).min(area.height));
+            let rect = centered(area, w, rows.saturating_add(5).min(area.height));
             hits.push((rect, Hit::Inert));
             let inner = boxed(buf, rect, &c.title, th, th.crit);
             let x = inner.x + 1;
-            // Rows: a top padding row, the text, two blank rows, then the buttons. A short box drops
-            // the blank rows first: the text takes every row from the padding down to the buttons.
+            // Rows: a top padding row, the text, one blank row, then the buttons. A short box drops
+            // the blank row first: the text takes every row from the padding down to the buttons.
             let room = inner.height.saturating_sub(2) as usize;
             let cut = lines.len() > room;
             for (i, line) in lines.iter().take(room).enumerate() {
@@ -56,8 +56,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // Chips stay inside the frame: they stop at the content's right edge (one column in).
             let edge = inner.right().saturating_sub(1);
             // The button words drop out when the box is too narrow for them (the keys stay).
+            let yes_text = format!(" {}", c.yes);
             let (yes_word, no_word) =
-                if inner.width.saturating_sub(2) >= 28 { (" confirm", " cancel") } else { ("", "") };
+                if inner.width.saturating_sub(2) >= 28 { (yes_text.as_str(), " cancel") } else { ("", "") };
             let yes_x = x;
             let yes_spans = [
                 (" y ", Style::default().fg(th.on_accent).bg(th.crit).add_modifier(Modifier::BOLD)),
@@ -701,6 +702,15 @@ fn agent_hooks(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &
     hud::key_hints(buf, x, by, iw, &[("space", "on/off"), ("esc", "close")], th);
 }
 
+/// `text` with its first character in upper case; the rest is kept as written (`close it?` → `Close it?`).
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Word-wraps `text` to lines of at most `width` columns (by display width); a word wider than
 /// a line is cut into pieces. Newlines count as spaces.
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -896,12 +906,22 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
         }
         let cx = x + 2;
         let group_w = 6u16;
+        // A notification's group is its level, colored as its toast is (see `toasts`); other groups use accent2.
+        let group_color = match &item.cmd {
+            crate::app::PaletteCmd::Notice { level, .. } => match level {
+                crate::app::ToastLevel::Info => th.accent2,
+                crate::app::ToastLevel::Ok => th.ok,
+                crate::app::ToastLevel::Warn => th.warn,
+                crate::app::ToastLevel::Error => th.crit,
+            },
+            _ => th.accent2,
+        };
         let cx = hud::put(
             buf,
             cx,
             y,
             &util::pad_right(item.group, group_w as usize),
-            Style::default().fg(th.accent2).bg(bgc),
+            Style::default().fg(group_color).bg(bgc),
             group_w,
         );
         let hint_w = util::width(&item.hint) as u16;
@@ -1119,7 +1139,7 @@ fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hit
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_words, launcher_keys_text, launcher_what, wrap_text};
+    use super::{capitalized, fit_words, launcher_keys_text, launcher_what, wrap_text};
     use crate::util;
 
     #[test]
@@ -1179,5 +1199,16 @@ mod tests {
         assert!(wide.iter().all(|l| util::width(l) <= 5), "{wide:?}");
         assert!(wrap_text("", 10).is_empty());
         assert!(wrap_text("abc", 0).is_empty());
+    }
+
+    #[test]
+    fn capitalized_uppercases_only_the_first_character() {
+        assert_eq!(capitalized("a command is still running"), "A command is still running");
+        assert_eq!(capitalized("cargo test — close it?"), "Cargo test — close it?");
+        // Already capitalized, a symbol, a non-ASCII letter, and empty text.
+        assert_eq!(capitalized("Already"), "Already");
+        assert_eq!(capitalized("“quoted”"), "“quoted”");
+        assert_eq!(capitalized("élan"), "Élan");
+        assert_eq!(capitalized(""), "");
     }
 }

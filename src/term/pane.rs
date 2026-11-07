@@ -101,6 +101,16 @@ pub fn process_label(title: &str, fallback: &str) -> String {
     util::truncate(label, 28)
 }
 
+/// The command on a command block's typed line, past the prompt before it (`~/app $ cargo test` → `cargo test`).
+/// The prompt ends at the first `$ `, `# `, `% `, `> ` or `❯ `; a line with none of them has no known prompt, so
+/// nothing is guessed (`None`), and neither is a prompt with nothing typed after it.
+fn typed_command(line: &str) -> Option<String> {
+    const MARKS: [&str; 5] = ["$ ", "# ", "% ", "> ", "❯ "];
+    let past = MARKS.iter().filter_map(|mark| line.find(mark).map(|i| i + mark.len())).min()?;
+    let typed = line[past..].trim();
+    (!typed.is_empty()).then(|| typed.to_string())
+}
+
 #[derive(Clone, Debug)]
 pub struct ShellSpec {
     pub program: String,
@@ -1509,14 +1519,27 @@ impl Pane {
         hyperlink_in(&mut lock(&self.parser), row, col)
     }
 
-    /// What is still running in the pane (its label), if closing it would stop something:
+    /// What is still running in the pane (its name), if closing it would stop something:
     /// a full-screen app, a command started at the prompt, or a launcher command before its first prompt.
+    /// The name is the command as typed (the running block's line, past its prompt), else the program's title,
+    /// else the launcher command; "a command" when none of them names it (a shell rarely sets a title).
     pub fn busy(&self) -> Option<String> {
-        let alt = lock(&self.parser).screen().alternate_screen();
+        let (alt, typed) = {
+            let p = lock(&self.parser);
+            let running = p.callbacks().blocks.back().filter(|b| b.end.is_none());
+            let typed = running.and_then(|b| b.line.as_deref()).and_then(typed_command);
+            (p.screen().alternate_screen(), typed)
+        };
         let command = if self.prompted { self.command_started.is_some() } else { self.command.is_some() };
-        // The shell rarely names the command it runs (no title): say "a command" rather than the shell.
+        if !(alt || command) {
+            return None;
+        }
         let label = self.label();
-        (alt || command).then(|| if label == self.shell_label { "a command".into() } else { label })
+        // The shell's own name is no command: the launcher's command (only before the first prompt) is named then.
+        let name = typed
+            .or_else(|| (label != self.shell_label).then_some(label))
+            .or_else(|| self.command.as_deref().filter(|_| !self.prompted).map(str::to_string));
+        Some(name.map_or_else(|| "a command".into(), |n| util::truncate(&n, 60)))
     }
 
     /// Visible line text (for link detection).
@@ -1795,6 +1818,18 @@ mod tests {
         // Titles whose lowercase form has a different byte length must not panic.
         assert_eq!(process_label("\u{212A}x.exe", "x"), "\u{212A}x");
         assert_eq!(process_label("İİİİİ.exe", "x"), "İİİİİ");
+    }
+
+    #[test]
+    fn typed_command_drops_the_prompt() {
+        assert_eq!(typed_command("~/app $ cargo test").as_deref(), Some("cargo test"));
+        assert_eq!(typed_command("PS C:\\x> cargo test  ").as_deref(), Some("cargo test"));
+        assert_eq!(typed_command("❯ npm run dev").as_deref(), Some("npm run dev"));
+        // The first mark ends the prompt; later ones belong to the command.
+        assert_eq!(typed_command("~/app $ echo # hi").as_deref(), Some("echo # hi"));
+        // No known prompt, or nothing typed after it: no name.
+        assert_eq!(typed_command("app main ~ cargo test"), None);
+        assert_eq!(typed_command("~/app $ "), None);
     }
 
     #[test]

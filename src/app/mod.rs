@@ -113,9 +113,13 @@ pub enum ConfirmAction {
     RemoveProject(std::path::PathBuf),
 }
 
+/// A yes/no question over the screen (`Overlay::Confirm`).
 pub struct Confirm {
     pub title: String,
+    /// The question. Drawn with its first letter capitalized, whatever case it is written in.
     pub body: String,
+    /// The verb on the yes chip (" y  close"): what the action does ("close", "quit", "paste").
+    pub yes: &'static str,
     pub action: ConfirmAction,
 }
 
