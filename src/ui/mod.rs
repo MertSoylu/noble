@@ -94,8 +94,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if focus && !reveal_top {
         focus_alert(buf, area, app, &mut hits);
     }
-    update_notice(buf, area, app, &mut hits, reveal_bottom);
-    toasts(buf, area, app, &mut hits);
+    let notice_row = update_notice(buf, area, app, &mut hits, reveal_bottom);
+    toasts(buf, area, app, &mut hits, notice_row);
     app.fx.observe_overlay(app.overlay.is_some());
     overlay::draw(buf, area, app, &mut hits);
     hover(buf, app, &hits);
@@ -572,9 +572,15 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             x = hud::put(buf, x, y, glyph, style.bg(bg), room(x).min(1));
         }
         x = hud::put(buf, x, y, " ", base, room(x).min(1));
+        // The pointer on the tab's cells (on the top row) shows its close button, as on the active tab.
+        let over = app.hover.is_some_and(|(hx, hy)| hy == y && (start..x).contains(&hx));
         hits.push((Rect::new(start, y, x - start, 1), Hit::Tab(i)));
         let cx = x;
-        x = hud::put(buf, x, y, "×", Style::default().fg(th.dim).bg(bg), room(x).min(1));
+        // Other tabs leave the close cell blank, so their widths do not change with the pointer. The click
+        // target stays on every tab: a click there is over the tab, so its "×" shows.
+        let (close, close_style) =
+            if c.active || over { ("×", Style::default().fg(th.dim).bg(bg)) } else { (" ", base) };
+        x = hud::put(buf, x, y, close, close_style, room(x).min(1));
         if x > cx {
             hits.push((Rect::new(cx, y, 1, 1), Hit::TabClose(i)));
         }
@@ -829,7 +835,8 @@ fn current_tip(app: &App) -> Option<String> {
 }
 
 /// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's
-/// row (bottom right) so it never covers the shell's last line; elsewhere it sits just above the bar.
+/// row (bottom right) so it never covers the shell's last line; elsewhere it sits on the row above the
+/// panels' bottom border (three rows above the bottom edge), so it never covers the frame.
 struct NoticePlan {
     /// A new release (button: update) or the one-time hooks offer (button: enable).
     hooks: bool,
@@ -862,7 +869,9 @@ fn notice_plan(app: &App, area: Rect) -> Option<NoticePlan> {
     let room = area.width.saturating_sub(fixed + 2) / 2;
     let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
     let width = fixed + util::width(&text) as u16;
-    Some(NoticePlan { hooks, button, text, width, y: area.bottom() - if in_term { 1 } else { 2 } })
+    // Non-terminal views: the last row is the bar, the panels' bottom border is the row above it, and the
+    // notice goes one row higher still.
+    Some(NoticePlan { hooks, button, text, width, y: area.bottom().saturating_sub(if in_term { 1 } else { 3 }) })
 }
 
 /// Key chip and description: the key in the accent color, what it does dim.
@@ -1014,13 +1023,13 @@ fn alert_slot(hits: &[(Rect, Hit)], area: Rect, y: u16, w: u16) -> Option<u16> {
     None
 }
 
-/// New version notice: bottom right, just above the status bar. On terminal tabs
+/// New version notice: bottom right, on the row above the panels' bottom border. On terminal tabs
 /// it drops to the right of the status bar (which leaves room for it). `show` is false while
-/// focus mode hides the status bar (the notice is drawn with it).
-fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>, show: bool) {
+/// focus mode hides the status bar (the notice is drawn with it). Returns the row it was drawn on.
+fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>, show: bool) -> Option<u16> {
     let plan = notice_plan(app, area);
     app.fx.observe_notice(plan.is_some());
-    let Some(plan) = plan.filter(|_| show) else { return };
+    let plan = plan.filter(|_| show)?;
     let th = &app.theme;
     // When it appears the button pulses a few times to catch the eye.
     let button_bg = crate::theme::Theme::mix(th.accent2, th.fg, 0.45 * app.fx.notice_pulse());
@@ -1042,6 +1051,7 @@ fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, 
     x = hud::put(buf, x, y, NOTICE_CLOSE, bg.fg(th.dim), w);
     hud::put(buf, x, y, " ", bg, 1);
     hits.push((Rect::new(cx, y, x - cx, 1), if plan.hooks { Hit::HooksOfferDismiss } else { Hit::UpdateDismiss }));
+    Some(y)
 }
 
 /// A notification's text as drawn on a screen `screen_w` wide (cut to fit, padded).
@@ -1055,9 +1065,12 @@ pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
     util::width(&toast_text(text, screen_w)) as u16
 }
 
-fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
+/// The notifications, stacked upward from three rows above the bottom edge. `notice_row` is the row the update
+/// notice was drawn on: when that is this row (a non-terminal view), the stack starts one row higher.
+fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>, notice_row: Option<u16>) {
     let th = &app.theme;
-    let mut y = area.bottom().saturating_sub(3);
+    let bar_row = area.bottom().saturating_sub(3);
+    let mut y = if notice_row == Some(bar_row) { bar_row.saturating_sub(1) } else { bar_row };
     for t in app.toasts.iter().rev() {
         if y <= area.y + 1 {
             break;

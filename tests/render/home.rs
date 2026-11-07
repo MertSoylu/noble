@@ -874,10 +874,13 @@ fn update_notice_bottom_right() {
     assert_eq!(app.update_notice(), Some("99.0.0"));
     let text = render(&mut app, 120, 32);
     save("update-notice-120x32", &text);
-    let row = text.lines().nth(30).unwrap();
+    // On Home the notice is on the row above the panels' bottom border (row H-3); the border (H-2) stays whole.
+    let row = text.lines().nth(29).unwrap();
     assert!(row.contains("NOBLE 99.0.0 is available") && row.trim_end().ends_with("update  ×"), "{text}");
+    let border = text.lines().nth(30).unwrap();
+    assert!(!border.contains("99.0.0") && !border.contains("update") && border.contains('╯'), "{text}");
     let hit = find_hit(&app, |h| *h == noble::app::Hit::Update).expect("update hit");
-    assert_eq!((hit.y, hit.x + hit.width + 4), (30, 120));
+    assert_eq!((hit.y, hit.x + hit.width + 4), (29, 120));
     for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
         save(&format!("update-notice-{w}x{h}"), &render(&mut app, w, h));
     }
@@ -903,6 +906,35 @@ fn update_notice_bottom_right() {
     assert!(app.update_notice().is_none(), "dismissed version stays hidden");
     app.handle(AppEvent::Update(Ok("99.0.1".into())));
     assert_eq!(app.update_notice(), Some("99.0.1"));
+}
+
+/// The row of the first line of `text` that contains `needle`.
+fn row_with(text: &str, needle: &str) -> usize {
+    text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle:?} on screen:\n{text}"))
+}
+
+/// A notification never shares a row with the update notice: on Home it stacks one row higher (H-4, the notice is
+/// on H-3); on a terminal tab the notice is in the status bar and the notification keeps its row above the bar.
+#[test]
+fn toast_stacks_above_the_update_notice() {
+    use noble::app::ToastLevel;
+    let mut app = demo_app(120, 32);
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "a note beside the notice");
+    let text = render(&mut app, 120, 32);
+    save("update-notice-toast-120x32", &text);
+    assert_eq!(row_with(&text, "NOBLE 99.0.0 is available"), 29, "{text}");
+    assert_eq!(row_with(&text, "a note beside the notice"), 28, "{text}");
+
+    app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "a note in a terminal");
+    let text = render(&mut app, 120, 32);
+    save("update-notice-toast-terminal-120x32", &text);
+    assert_eq!(row_with(&text, "↑ 99.0.0"), 31, "{text}");
+    assert_eq!(row_with(&text, "a note in a terminal"), 29, "{text}");
+    app.run(Action::CloseTab);
 }
 
 /// Test provider state that reports a session (login) that has expired, with cached numbers.

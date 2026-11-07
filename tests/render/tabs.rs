@@ -381,9 +381,11 @@ fn tab_markers_are_typed() {
     let (text, buf) = render_buf(&mut app, 120, 30);
     save("tabs-markers-120x30", &text);
     let top = text.lines().next().unwrap().to_string();
-    for row in ["notice ◆ ×", "failed ✗ ×", "done ✓ ×", "quiet • ×"] {
+    for row in ["notice ◆", "failed ✗", "done ✓", "quiet •"] {
         assert!(top.contains(row), "{row}: {top}");
     }
+    // Only the active tab shows its close button; the others leave that cell blank.
+    assert_eq!(top.matches('×').count(), 1, "{top}");
     let th = &app.theme;
     let color = |glyph: &str| {
         let x = (0..120u16).find(|x| buf[(*x, 0)].symbol() == glyph).unwrap();
@@ -407,7 +409,7 @@ fn tab_markers_are_typed() {
     assert_eq!(t.alert, Some(TabAlert::Notice));
     app.tabs[3].alert = Some(TabAlert::Done);
     let top = render(&mut app, 120, 30).lines().next().unwrap().to_string();
-    assert!(top.contains("quiet ✓ ×") && !top.contains("quiet • ×"), "{top}");
+    assert!(top.contains("quiet ✓") && !top.contains("quiet •"), "{top}");
     // The whole row stays inside the screen at small sizes.
     for (w, h) in [(80, 24), (60, 20), (40, 12), (30, 8)] {
         let text = render(&mut app, w, h);
@@ -550,14 +552,14 @@ fn background_command_result_marks_tab() {
     assert_eq!(app.tabs[0].alert, Some(TabAlert::Failed));
     assert!(app.toasts.is_empty(), "{:?}", app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     let top = render(&mut app, 110, 30).lines().next().unwrap().to_string();
-    assert!(top.contains("worker ✗ ×"), "{top}");
+    assert!(top.contains("worker ✗") && top.matches('×').count() == 1, "{top}");
     // A long success: ✓ and a toast.
     reset(&mut app);
     finish(&mut app, Duration::from_secs(3600), 0, true);
     assert_eq!(app.tabs[0].alert, Some(TabAlert::Done));
     assert!(app.toasts.iter().any(|t| t.text.contains("done in")), "toast missing");
     let top = render(&mut app, 110, 30).lines().next().unwrap().to_string();
-    assert!(top.contains("worker ✓ ×"), "{top}");
+    assert!(top.contains("worker ✓") && top.matches('×').count() == 1, "{top}");
     // A long failure: ✗ with its code in the toast.
     reset(&mut app);
     finish(&mut app, Duration::from_secs(3600), 2, true);
@@ -591,8 +593,9 @@ fn tab_strip_split_count_and_active_edges() {
     let (text, buf) = render_buf(&mut app, 120, 30);
     save("tabs-split-120x30", &text);
     let top = text.lines().next().unwrap().to_string();
-    assert!(top.contains("one ⊞3 ×") && top.contains("two ⊞2 ×"), "{top}");
+    assert!(top.contains("one ⊞3") && top.contains("two ⊞2"), "{top}");
     assert!(top.contains("▌solo ×▐") && !top.contains("solo ⊞"), "{top}");
+    assert_eq!(top.matches('×').count(), 1, "only the active tab shows its close button: {top}");
     // The active tab is drawn with accent edges on the base background.
     let bar = (0..120u16).find(|x| buf[(*x, 0)].symbol() == "▌").unwrap();
     assert_eq!((buf[(bar, 0)].fg, buf[(bar, 0)].bg), (app.theme.accent, app.theme.bg));
@@ -673,4 +676,47 @@ fn hidden_tabs_chip_opens_the_tab_list() {
     let text = render(&mut app, 80, 24);
     save("palette-hidden-tabs-80x24", &text);
     assert!(text.contains("Tab 12: tab11"), "{text}");
+}
+
+/// Only the active tab and the tab under the pointer show their close button "×". The other tabs leave the cell
+/// blank, so the strip keeps its widths when the pointer moves. The blank cell stays a click target: a click on it
+/// closes its tab.
+#[test]
+fn tab_close_button_shows_on_active_and_hovered_tab() {
+    use crossterm::event::{Event, MouseEvent, MouseEventKind};
+    use noble::app::Hit;
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "first");
+    named_tab(&mut app, "second");
+    assert_eq!(app.view, View::Term(1));
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-close-hover-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    assert!(top.contains("▌second ×▐") && top.matches('×').count() == 1, "{top}");
+    let first = find_hit(&app, |h| *h == Hit::Tab(0)).expect("first tab hit");
+    let second = find_hit(&app, |h| *h == Hit::Tab(1)).expect("second tab hit");
+    let close = find_hit(&app, |h| *h == Hit::TabClose(0)).expect("the blank close cell is a click target");
+    assert_eq!(cells_text(&buf, close), " ", "{top}");
+
+    // The pointer moves onto the first tab: the move redraws, its × shows and nothing else changes.
+    let moved = app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: first.x + 1,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })));
+    assert!(moved, "a pointer move redraws the strip");
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-close-hover-hovered-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    assert_eq!(top.matches('×').count(), 2, "{top}");
+    assert_eq!(cells_text(&buf, close), "×", "{top}");
+    assert_eq!(find_hit(&app, |h| *h == Hit::Tab(0)), Some(first), "the hovered tab keeps its width");
+    assert_eq!(find_hit(&app, |h| *h == Hit::Tab(1)), Some(second), "the active tab keeps its width");
+
+    // A click on the close button closes the hovered tab.
+    click(&mut app, close.x, close.y);
+    assert_eq!(app.tabs.len(), 1, "the click closed the tab under the pointer");
+    assert_eq!(app.tabs[0].name.as_deref(), Some("second"));
+    app.run(Action::CloseTab);
 }

@@ -545,7 +545,8 @@ fn hooks_offer_notice() {
     app.agents_found = vec![noble::hooks::Agent::Claude];
     let text = render(&mut app, 120, 32);
     save("hooks-offer-120x32", &text);
-    assert!(text.lines().nth(30).unwrap().contains("Show agent status in NOBLE?"), "{text}");
+    // The row above the panels' bottom border (H-3 on Home).
+    assert!(text.lines().nth(29).unwrap().contains("Show agent status in NOBLE?"), "{text}");
     for (w, h) in [(80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }
