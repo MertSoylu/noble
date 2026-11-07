@@ -95,6 +95,28 @@ fn context_menus_on_tabs_and_panes() {
     app.run(Action::CloseTab);
 }
 
+/// Closing a pane or a tab is set apart in its menu: a rule above the item and the label in the critical color.
+#[test]
+fn close_items_are_set_apart_in_the_menus() {
+    use noble::app::{Hit, Overlay};
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("close".into()));
+    let pane = app.tabs[0].focus;
+    let check = |app: &mut App, label: &str| {
+        let Some(Overlay::Menu(m)) = &app.overlay else { panic!("{label}: menu not open") };
+        let i = m.items.iter().position(|it| it.label == label).unwrap_or_else(|| panic!("no {label}"));
+        assert!(m.items[i].sep && m.items[i].danger, "{label} is a rule and a danger item");
+        let buf = render_cells(app, 110, 30);
+        let row = find_hit(app, |h| *h == Hit::MenuItem(i)).expect("item row");
+        assert_eq!(buf[(row.x, row.y - 1)].symbol(), "─", "{label}: a rule above it");
+        assert_eq!(buf[(row.x + 2, row.y)].fg, app.theme.crit, "{label}: critical color");
+    };
+    app.open_pane_menu(pane, 10, 5);
+    check(&mut app, "Close pane");
+    app.open_tab_menu(0, 10, 5);
+    check(&mut app, "Close tab");
+}
+
 /// Reordering tabs by dragging and renaming them with a double click.
 #[test]
 fn tabs_drag_and_rename() {

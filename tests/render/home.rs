@@ -734,6 +734,164 @@ fn project_actions_from_keyboard() {
     assert_eq!(app.bridge.proj_act, None);
 }
 
+/// The project menu's rows: a right click on the first project, with `launchers` in the app.
+fn open_first_project_menu(app: &mut App) -> Vec<noble::app::MenuItem> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::{Hit, Overlay};
+    app.overlay = None;
+    render(app, 110, 30);
+    let first = find_hit(app, |h| *h == Hit::Project(0)).unwrap();
+    mouse(app, MouseEventKind::Down(MouseButton::Right), first.x + 4, first.y);
+    match &app.overlay {
+        Some(Overlay::Menu(m)) => m.items.clone(),
+        _ => panic!("project menu not open"),
+    }
+}
+
+/// A quick launcher for the project menu tests: shown on Home, found on PATH (as the headless app is told).
+fn quick_launcher(key: &str, name: &str, show: bool) -> (noble::config::Launcher, bool) {
+    (noble::config::Launcher { key: key.into(), name: name.into(), command: name.into(), show }, true)
+}
+
+/// More than three quick launchers: the project menu gives one "Start agent ›" row, whose list opens where the menu
+/// was (the same as the pane menu's launch list). The rules set apart the folder actions, Git pull and the pin, and
+/// the removal is drawn in the critical color. Keys step over the items only.
+#[test]
+fn project_menu_groups_launchers_and_rules() {
+    use noble::app::{Hit, MenuCmd, Overlay};
+    let mut app = demo_app(110, 30);
+    app.launchers = vec![
+        quick_launcher("a", "alpha", true),
+        quick_launcher("b", "beta", true),
+        quick_launcher("g", "gamma", true),
+        quick_launcher("d", "delta", true),
+    ];
+    let path = app.projects[0].path.clone();
+    let items = open_first_project_menu(&mut app);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Open terminal",
+            "Start agent ›",
+            "Open in VS Code",
+            "Open folder",
+            "Copy path",
+            "Git pull",
+            "Pin to top",
+            "Remove from list"
+        ]
+    );
+    let seps: Vec<bool> = items.iter().map(|i| i.sep).collect();
+    assert_eq!(seps, [false, false, true, false, false, true, true, false]);
+    assert_eq!(items[1].cmd, MenuCmd::StartMenu(path.clone()));
+    let dangers: Vec<&str> = items.iter().filter(|i| i.danger).map(|i| i.label.as_str()).collect();
+    assert_eq!(dangers, ["Remove from list"]);
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("project menu not open") };
+    let (menu_x, menu_y) = (m.x, m.y);
+
+    // Every row is drawn where its hit is, and a rule sits above each item marked `sep` (never above the first).
+    save("menu-project-groups-110x30", &render(&mut app, 110, 30));
+    let buf = render_cells(&mut app, 110, 30);
+    for (i, it) in items.iter().enumerate() {
+        let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).expect("item row");
+        assert!(cells_text(&buf, row).contains(&it.label), "row {i} draws {}", it.label);
+        if i > 0 {
+            let above = &buf[(row.x, row.y - 1)];
+            assert_eq!(above.symbol() == "─", it.sep, "rule above {}", it.label);
+            if it.sep {
+                assert_eq!(above.fg, app.theme.line, "the rule is in the line color");
+            }
+        }
+    }
+    let remove = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    assert_eq!(buf[(remove.x + 2, remove.y)].fg, app.theme.crit, "the removal is in the critical color");
+    let copy = find_hit(&app, |h| *h == Hit::MenuItem(4)).unwrap();
+    assert_ne!(buf[(copy.x + 2, copy.y)].fg, app.theme.crit, "a plain item keeps the text color");
+
+    // Seven steps from the first item reach the last one (the rules are no steps), and one more wraps round.
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    for _ in 0..7 {
+        key(&mut app, KeyCode::Down);
+    }
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
+    assert_eq!(m.selected, 7);
+    key(&mut app, KeyCode::Down);
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
+    assert_eq!(m.selected, 0);
+
+    // Clicking "Start agent ›" opens the four launchers, in the folder of the project, where the menu was.
+    let start = find_hit(&app, |h| *h == Hit::MenuItem(1)).unwrap();
+    click(&mut app, start.x + 1, start.y);
+    let Some(Overlay::Menu(sub)) = &app.overlay else { panic!("start agent list not open") };
+    assert_eq!(sub.title, "Start agent");
+    assert_eq!((sub.x, sub.y), (menu_x, menu_y), "the list opens where the menu was");
+    let rows: Vec<(&str, &str, MenuCmd)> =
+        sub.items.iter().map(|i| (i.label.as_str(), i.hint.as_str(), i.cmd.clone())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("alpha", "a", MenuCmd::Launch(0, path.clone())),
+            ("beta", "b", MenuCmd::Launch(1, path.clone())),
+            ("gamma", "g", MenuCmd::Launch(2, path.clone())),
+            ("delta", "d", MenuCmd::Launch(3, path.clone())),
+        ]
+    );
+    let text = render(&mut app, 110, 30);
+    save("menu-start-agent-110x30", &text);
+    assert!(text.contains("Start agent") && text.contains("alpha"), "{text}");
+}
+
+/// Up to three quick launchers stay inline in the project menu as "Start <name>" rows, the key as the hint; the
+/// launchers that are hidden on Home do not count.
+#[test]
+fn project_menu_keeps_few_launchers_inline() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.launchers = vec![quick_launcher("c", "claude", true), quick_launcher("x", "codex", true)];
+    app.launchers.push(quick_launcher("e", "opencode", false));
+    app.launchers.push(quick_launcher("i", "copilot", false));
+    let items = open_first_project_menu(&mut app);
+    let starts: Vec<(&str, &str)> =
+        items.iter().filter(|i| i.label.starts_with("Start")).map(|i| (i.label.as_str(), i.hint.as_str())).collect();
+    assert_eq!(starts, [("Start claude", "c"), ("Start codex", "x")]);
+    assert!(!items.iter().any(|i| i.label.contains("agent ›")), "no list row for two launchers");
+    // Three shown is still inline (the list starts above three).
+    app.launchers.push(quick_launcher("o", "pi", true));
+    let items = open_first_project_menu(&mut app);
+    assert_eq!(items.iter().filter(|i| i.label.starts_with("Start ")).count(), 3);
+    assert!(!items.iter().any(|i| i.label.contains("agent ›")));
+    // The menu's rows still hit their items.
+    render(&mut app, 110, 30);
+    assert!(find_hit(&app, |h| *h == Hit::MenuItem(items.len() - 1)).is_some());
+}
+
+/// Near the bottom edge the menu slides up and stays on the screen with its rules: every row is drawn, the
+/// removal is the last inner row, and the frame closes below it.
+#[test]
+fn project_menu_near_the_bottom_fits_with_its_rules() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.launchers = (0..4).map(|i| quick_launcher(&format!("{i}"), &format!("agent{i}"), true)).collect();
+    render(&mut app, 110, 30);
+    let path = app.projects[0].path.clone();
+    app.open_project_menu(path, 20, 28);
+    let buf = render_cells(&mut app, 110, 30);
+    let frame = find_hit(&app, |h| *h == Hit::Inert).expect("menu frame");
+    assert!(frame.bottom() <= 30, "the frame stays on the screen: {frame:?}");
+    let rules = (frame.y + 1..frame.bottom() - 1).filter(|&y| buf[(frame.x + 1, y)].symbol() == "─").count();
+    assert_eq!(rules, 3, "one rule above each of the three groups' first items");
+    for i in 0..8 {
+        let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).unwrap_or_else(|| panic!("row {i} is drawn"));
+        assert!(row.y > frame.y && row.bottom() < frame.bottom(), "row {i} sits inside the frame");
+    }
+    let last = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    assert_eq!(last.y + 1, frame.bottom() - 1, "the removal is the last row, above the bottom border");
+    for (w, h) in SIZES {
+        save(&format!("menu-project-rules-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
 /// Removing a project from the ⋯ menu hides it for good (a rescan does not bring it back, a
 /// pin goes with it); `A` adds any folder as a project — a plain folder too — and brings a
 /// removed one back. The state stays in memory (`UiState::memory` in headless mode).

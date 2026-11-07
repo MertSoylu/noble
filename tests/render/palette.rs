@@ -144,7 +144,7 @@ fn palette_hints_follow_the_view() {
     assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
     assert_eq!(hint_of(&app, "Add Project or Folder…"), "a");
     // `A` still works (project mode) but is not shown anywhere.
-    assert_eq!(hint_of(&app, "Add Project…"), "");
+    assert_eq!(hint_of(&app, "Add One Project…"), "");
 
     app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
     let term = titles(&app);
@@ -267,4 +267,20 @@ fn palette_setting_item_toggles_a_switch() {
     // A choice opens its popup, as ⏎ does on its row.
     app.run_palette(PaletteCmd::Setting(SettingItem::Setting(SettingKey::Theme)));
     assert!(matches!(app.overlay, Some(Overlay::Themes(_))), "the theme row opens the theme picker");
+}
+
+/// Command names: "Add One Project…" is the one-project add (the add dialog's "one project" mode), and Quit is
+/// a system command, listed with the other SYS ones rather than under navigation.
+#[test]
+fn command_titles_and_groups() {
+    use noble::app::PaletteCmd;
+    let app = demo_app(120, 30);
+    let items = app.palette_items();
+    assert!(!items.iter().any(|i| i.title == "Add Project…"), "the old title is gone");
+    let add = items.iter().find(|i| i.title == "Add One Project…").expect("the renamed add");
+    assert_eq!(add.cmd, PaletteCmd::Action(Action::AddProject));
+    let quit = items.iter().find(|i| i.title == "Quit NOBLE").expect("quit");
+    assert_eq!((quit.group, &quit.cmd), ("SYS", &PaletteCmd::Action(Action::Quit)));
+    let help = items.iter().find(|i| i.title == "Keyboard Reference").expect("help");
+    assert_eq!(help.group, "NAV", "the other navigation commands keep their group");
 }

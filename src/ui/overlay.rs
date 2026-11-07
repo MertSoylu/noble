@@ -185,23 +185,37 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, th: &Theme, fade: f64) {
     }
 }
 
-/// Right-click menu: next to the clicked point, kept inside the screen.
+/// Right-click menu: next to the clicked point, kept inside the screen. An item with `sep` gets a rule row above
+/// it (none above the first item), so the menu is as tall as its items and rules; a rule row is not a hit.
 fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let label_w = m.items.iter().map(|i| util::width(&i.label)).max().unwrap_or(4) as u16;
     let hint_w = m.items.iter().map(|i| util::width(&i.hint)).max().unwrap_or(0) as u16;
     let title_w = util::width(&m.title) as u16 + 6;
     let w = (label_w + hint_w + 8).max(title_w).clamp(16, 44).min(area.width);
-    let h = (m.items.len() as u16 + 2).min(area.height);
-    // Slides left/up when it would overflow right/bottom.
+    let rules = m.items.iter().enumerate().filter(|(i, it)| *i > 0 && it.sep).count();
+    let rows = m.items.len().saturating_add(rules).saturating_add(2);
+    let h = u16::try_from(rows).unwrap_or(u16::MAX).min(area.height);
+    // Slides left/up when it would overflow right/bottom, and never leaves the screen either way.
     let x = m.x.min(area.right().saturating_sub(w));
-    let y = if m.y + h > area.bottom() { m.y.saturating_sub(h + 1).max(area.y) } else { m.y };
+    let y =
+        if m.y.saturating_add(h) > area.bottom() { m.y.saturating_sub(h.saturating_add(1)).max(area.y) } else { m.y };
+    let y = y.min(area.bottom().saturating_sub(h)).max(area.y);
     let rect = Rect::new(x, y, w, h);
     hits.push((rect, Hit::Inert));
     let inner = boxed(buf, rect, &util::truncate(&m.title, (w as usize).saturating_sub(6)), th, th.accent_dim);
     let glide = app.fx.glide("menu", m.selected);
-    for (i, it) in m.items.iter().enumerate().take(inner.height as usize) {
-        let ry = inner.y + i as u16;
+    let mut ry = inner.y;
+    for (i, it) in m.items.iter().enumerate() {
+        // A rule and its item go together: when only one row is left, neither is drawn.
+        let rule = i > 0 && it.sep;
+        if ry.saturating_add(if rule { 2 } else { 1 }) > inner.bottom() {
+            break;
+        }
+        if rule {
+            hud::hline(buf, inner.x, ry, inner.width, "─", th.line().bg(th.raised));
+            ry += 1;
+        }
         let row = Rect::new(inner.x, ry, inner.width, 1);
         let selected = i == m.selected;
         let bg = glide.bg(i, th.raised, th.sel_bg);
@@ -210,6 +224,10 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
         hud::put(buf, row.x, ry, marker, Style::default().fg(th.accent).bg(bg), 1);
         let style = if !it.enabled {
             th.dim().bg(bg)
+        } else if it.danger {
+            // Closing or removing reads as such: the critical color, bold while selected like the others.
+            let base = Style::default().fg(th.crit).bg(bg);
+            if selected { base.add_modifier(Modifier::BOLD) } else { base }
         } else if selected {
             th.accent_bold().bg(bg)
         } else {
@@ -220,6 +238,7 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
             hud::put_right(buf, row.right() - 1, ry, &it.hint, th.dim().bg(bg));
         }
         hits.push((row, Hit::MenuItem(i)));
+        ry += 1;
     }
 }
 
