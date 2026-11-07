@@ -106,11 +106,10 @@ fn bridge_renders_at_all_sizes() {
                 "{w}x{h}
 {text}"
             );
-            assert!(
-                text.contains("3 uncommitted changes (1 new) · 1 commit to push"),
-                "{w}x{h}
-{text}"
-            );
+            // With the card open the git summary is not repeated on the footer row: the card's title has the folder
+            // and its STATUS column has the counts.
+            assert!(!text.contains("uncommitted"), "{w}x{h}\n{text}");
+            assert!(text.contains("● 3"), "{w}x{h}\n{text}");
             // The old process list was removed.
             assert!(!text.contains("code.exe"));
         }
@@ -554,21 +553,36 @@ fn add_project_folder_flow() {
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
 }
 
-/// With no project yet, Home says how to add one (`a`) and the welcome-free overlay line says the same.
+/// With no project yet, Home says how to add one (`a`) and its only button adds one: a click runs what the `a` key
+/// runs (the add dialog). Nothing else is drawn on the action bar: the launchers and "Open" have no project to act on.
 #[test]
 fn empty_home_says_how_to_add_a_project() {
+    use noble::app::{Hit, Overlay};
     let mut app = demo_app(110, 30);
     app.projects.clear();
     app.projects_loaded = true;
     let text = render(&mut app, 110, 30);
     save("bridge-empty-110x30", &text);
     assert!(
-        text.contains("No git repositories found.") && text.contains("press a to add a project or folder"),
+        text.contains("No git repositories found.") && text.contains("Press a to add a project or folder"),
         "{text}"
     );
     assert!(!text.contains(" A "), "no `A` hint left: {text}");
+    assert!(!text.contains("press a"), "the second line is capitalized: {text}");
+    assert!(text.contains("Add project"), "{text}");
+    assert!(!text.contains("Open") && !text.contains("Folder"), "no action buttons without a project: {text}");
+    assert!(find_hit(&app, |h| *h == Hit::OpenSelected).is_none());
+    assert!(find_hit(&app, |h| matches!(h, Hit::Launcher(_))).is_none());
+    let button = find_hit(&app, |h| *h == Hit::AddProject).expect("the add project button");
+    assert_eq!(cells_text(&render_cells(&mut app, 110, 30), button), " a Add project ", "{text}");
+    // The button runs what the `a` key runs: the add dialog opens.
+    click(&mut app, button.x + 1, button.y);
+    assert!(matches!(app.overlay, Some(Overlay::Prompt(_))), "the add dialog opens");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     for (w, h) in [(60, 12), (30, 8)] {
-        save(&format!("bridge-empty-{w}x{h}"), &render(&mut app, w, h));
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-empty-{w}x{h}"), &text);
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "overflow at {w}x{h}:\n{text}");
     }
 }
 
@@ -996,27 +1010,44 @@ fn home_search_label_starts_the_filter() {
     assert!(!app.bridge.filtering);
 }
 
-/// `o` and the "Folder" button with no project selected say why, instead of doing nothing.
+/// `o` with no project selected says why, instead of doing nothing. Without a project the action bar has no
+/// "Folder" button (the one button adds a project), and a filter that matches no project draws no buttons at all.
 #[test]
 fn open_folder_without_a_project_says_so() {
     use noble::app::Hit;
     let mut app = demo_app(110, 30);
-    // Without the launchers detected on this machine: their buttons come first and, with enough of them
-    // installed, leave no room on the row for "Folder".
     app.launchers.clear();
     app.handle(AppEvent::Projects(Vec::new()));
     assert!(app.selected_project().is_none());
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
     let text = render(&mut app, 110, 30);
+    assert!(find_hit(&app, |h| *h == Hit::OpenFiles).is_none(), "no folder button without a project");
+    assert!(!text.contains("Folder"), "{text}");
+
+    // With projects, the folder button is there (the launchers are cleared, so it fits on the row) and says the folder.
+    let mut app = demo_app(110, 30);
+    app.launchers.clear();
+    let text = render(&mut app, 110, 30);
     let folder = find_hit(&app, |h| *h == Hit::OpenFiles).expect("folder button");
     assert!(text.contains("Folder"), "{text}");
     click(&mut app, folder.x + 1, folder.y);
-    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+    assert!(!toast_texts(&app).iter().any(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+
+    // A filter that matches no project: nothing to act on, so no buttons.
+    let mut app = demo_app(110, 30);
+    app.bridge.filter = "zzqx".into();
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Nothing matches"), "{text}");
+    assert!(!text.contains("Folder") && !text.contains("Open") && !text.contains("Add project"), "{text}");
+    for hit in [Hit::OpenSelected, Hit::OpenFiles, Hit::AddProject] {
+        assert!(find_hit(&app, |h| *h == hit).is_none(), "{hit:?} has nothing to act on");
+    }
 }
 
-/// The selected project's card shows `↻ claude · 2h ago` when the project has a Claude conversation folder and a
-/// `claude` launcher is installed; a click on it is a `ClaudeContinue` hit. Without either, the line is left out.
+/// The selected project's card shows the chip `↻ Continue claude · 2h ago` when the project has a Claude conversation
+/// folder and a `claude` launcher is installed; the chip is a `ClaudeContinue` hit over its whole width. Without
+/// either, the chip is left out.
 #[test]
 fn project_card_shows_the_claude_line() {
     use noble::app::Hit;
@@ -1032,8 +1063,10 @@ fn project_card_shows_the_claude_line() {
 
     let text = render(&mut app, 160, 45);
     save("home-claude-line-160x45", &text);
-    assert!(text.contains("↻ claude · 2h ago"), "{text}");
-    assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_some(), "the line is clickable");
+    assert!(text.contains("↻ Continue claude · 2h ago"), "{text}");
+    // The chip is one button: its hit is the chip's cells, from the glyph to the closing space.
+    let chip = find_hit(&app, |h| *h == Hit::ClaudeContinue).expect("the line is clickable");
+    assert_eq!(cells_text(&render_cells(&mut app, 160, 45), chip), " ↻ Continue claude · 2h ago ", "{text}");
     // Every size: the line is drawn whole or left out, never past the card.
     for (w, h) in SIZES {
         let text = render(&mut app, w, h);
@@ -1043,21 +1076,26 @@ fn project_card_shows_the_claude_line() {
 
     // No `claude` launcher installed: no line and no hit.
     app.launchers = vec![(claude.clone(), false)];
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_none());
     app.launchers = Vec::new();
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     // The launcher is there, but the project has no conversation folder.
-    app.launchers = vec![(claude, true)];
+    app.launchers = vec![(claude.clone(), true)];
     for p in &mut app.projects {
         p.claude = None;
     }
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     // Other projects keep their own times: only the selected one is on the card.
     for p in &mut app.projects {
         p.claude = (p.path == path).then_some(two_hours);
     }
-    assert!(render(&mut app, 160, 45).contains("↻ claude · 2h ago"));
+    assert!(render(&mut app, 160, 45).contains("↻ Continue claude · 2h ago"));
+    // Just started: the label says so.
+    for p in &mut app.projects {
+        p.claude = (p.path == path).then_some(SystemTime::now());
+    }
+    assert!(render(&mut app, 160, 45).contains("↻ Continue claude · just now"));
 }
 
 /// Without a `claude` launcher the continue action says so instead of opening a tab.
@@ -1135,8 +1173,15 @@ fn bridge_lists_background_claude_sessions() {
     ];
     let text = render(&mut app, 160, 45);
     save("bridge-bg-160x45", &text);
-    assert!(text.contains("claude bg · Fix the build") && text.contains("running"), "{text}");
-    assert!(text.contains("claude bg · Broken migration") && text.contains("failed"), "{text}");
+    // One "BACKGROUND" header above the rows; each row is glyph, title and state (no repeated "claude bg").
+    assert!(text.contains("BACKGROUND"), "{text}");
+    assert!(!text.contains("claude bg"), "the rows do not repeat the label: {text}");
+    let row = |name: &str| text.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+    assert!(row("Fix the build").contains("● Fix the build") && row("Fix the build").contains("running"), "{text}");
+    assert!(row("Broken migration").contains("✗ Broken migration") && row("Broken migration").contains("failed"));
+    let header = text.lines().position(|l| l.contains("BACKGROUND")).expect("header row");
+    let first = text.lines().position(|l| l.contains("Fix the build")).expect("first row");
+    assert_eq!(first, header + 1, "the header sits right above the rows: {text}");
     assert!(!text.contains("Stale task"), "a finished session from two days ago is not listed: {text}");
     assert!(find_hit(&app, |h| *h == Hit::BgSession(0)).is_some(), "running row hit");
     assert!(find_hit(&app, |h| *h == Hit::BgSession(2)).is_some(), "failed row hit");
@@ -1159,4 +1204,113 @@ fn bridge_lists_background_claude_sessions() {
         let text = render(&mut app, w, h);
         save(&format!("bridge-bg-{w}x{h}"), &text);
     }
+}
+
+/// The card's separator names the selected project's folder, dim after the name, and the folder is said once: the
+/// footer row does not repeat the git summary while the card is open. A long folder is cut from the left; too
+/// little room for it leaves the name alone.
+#[test]
+fn project_card_title_names_the_folder() {
+    let mut app = demo_app(160, 45);
+    let idx = app.visible_projects()[app.bridge.proj_sel];
+    let folder = noble::util::tilde(&app.projects[idx].path);
+    let text = render(&mut app, 160, 45);
+    save("home-card-title-160x45", &text);
+    assert!(text.lines().any(|l| l.contains(&format!("noble-rs · {folder} ")) && l.contains("──")), "{text}");
+    assert_eq!(text.matches(folder.as_str()).count(), 1, "the folder is on the card title only: {text}");
+    assert!(!text.contains("uncommitted"), "the card shows the git status: {text}");
+
+    // A deep folder at 110x30 does not fit: its end stays, the start is cut to "…".
+    let deep = "C:\\Users\\Mert\\Desktop\\archive\\2026\\old-builds\\client-work\\noble-rs-fork\\noble-rs";
+    app.projects[idx].path = std::path::PathBuf::from(deep);
+    let text = render(&mut app, 110, 30);
+    save("home-card-title-cut-110x30", &text);
+    let row = text.lines().find(|l| l.contains("noble-rs · …")).unwrap_or_default();
+    assert!(row.contains("noble-rs ─"), "the end of the folder stays: {text}");
+    assert!(text.lines().all(|l| l.chars().count() <= 110), "overflow:\n{text}");
+
+    // Too little room for the folder: the name alone.
+    let name = "n".repeat(60);
+    app.projects[idx].name = name.clone();
+    let text = render(&mut app, 110, 30);
+    save("home-card-title-name-only-110x30", &text);
+    assert!(!text.lines().any(|l| l.contains(&name[..10]) && l.contains(" · ")), "{text}");
+    assert!(text.lines().all(|l| l.chars().count() <= 110), "overflow:\n{text}");
+}
+
+/// Without the card (a small window) the footer row keeps the git status sentence, which the card would otherwise show.
+#[test]
+fn footer_keeps_the_git_summary_without_the_card() {
+    for (w, h) in [(76, 24), (56, 18)] {
+        let mut app = demo_app(w, h);
+        let text = render(&mut app, w, h);
+        save(&format!("home-footer-{w}x{h}"), &text);
+        assert!(!text.contains("RECENT COMMITS"), "no card at {w}x{h}: {text}");
+        assert!(text.contains("3 uncommitted changes"), "the summary is the footer's at {w}x{h}: {text}");
+    }
+}
+
+/// Home's CPU graph scales to its highest sample, 25, 50 or 100 percent, and names a scale below 100 at its top right.
+/// RAM has no graph of its own: its line is the only RAM row.
+#[test]
+fn home_cpu_graph_scales_to_its_peak() {
+    let mut app = demo_app(160, 45);
+    let row_under_cpu = |text: &str| -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let cpu = lines.iter().position(|l| l.contains("CPU")).expect("the CPU line");
+        lines[cpu + 1].to_string()
+    };
+    // A quiet history (highest sample 40%): the scale is 50% and labelled on the graph's top row.
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 40.0;
+    }
+    let text = render(&mut app, 160, 45);
+    save("home-cpu-scale-160x45", &text);
+    assert!(row_under_cpu(&text).contains("50%"), "{text}");
+    // The peak alone sets the scale: 20% is 25%, 90% has no label.
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 20.0;
+    }
+    assert!(row_under_cpu(&render(&mut app, 160, 45)).contains("25%"));
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 90.0;
+    }
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("25%") && !text.contains("50%"), "a full scale is not labelled: {text}");
+    // The RAM line is one row: the label reads the memory percentage and no graph follows it.
+    let lines: Vec<&str> = text.lines().collect();
+    let ram = lines.iter().position(|l| l.contains("RAM")).expect("the RAM line");
+    assert!(lines[ram + 1].contains("11.8G of 32.0G"), "{text}");
+}
+
+/// With one row left under the agent sessions the "BACKGROUND" header is left out, and the background session
+/// still shows on that row.
+#[test]
+fn background_header_gives_way_to_a_single_row() {
+    use noble::bg::BgSession;
+    // 160x18: the AI panel is 6 rows high, so three agent rows leave the last one for the background session.
+    let mut app = demo_app(160, 18);
+    let now = chrono::Utc::now().timestamp();
+    let dir = std::env::temp_dir();
+    let mut records = Vec::new();
+    for _ in 0..3 {
+        app.new_tab(dir.clone(), None, Some("agent".into()));
+        records.push((app.tabs.last().expect("a tab").focus, hook_rec("prompt", now, 0)));
+    }
+    // One list of every pane's record: the records apply as the whole set.
+    app.apply_hook_records(records.into_iter().collect());
+    app.run(Action::Bridge);
+    app.bg_sessions = vec![BgSession {
+        id: "run1a2b".into(),
+        cwd: Some(dir.clone()),
+        name: "Fix the build".into(),
+        state: "running".into(),
+        started: now - 600,
+    }];
+    let text = render(&mut app, 160, 18);
+    save("bridge-bg-one-row-160x18", &text);
+    assert!(text.contains("Fix the build"), "the session is not hidden: {text}");
+    assert!(!text.contains("BACKGROUND"), "no header for one row: {text}");
+    app.tabs.clear();
+    app.panes.clear();
 }

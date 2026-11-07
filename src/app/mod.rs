@@ -440,10 +440,14 @@ pub enum Hit {
     },
     Project(usize),
     OpenSelected,
+    /// Home's "Add project" button, shown when there are no projects: runs what the `a` key runs
+    /// (`Action::AddProjectFolder`).
+    AddProject,
     Launcher(usize),
     /// A quick task chip on the selected project's card (`Project::tasks` index).
     ProjectTask(usize),
-    /// Home's card line "↻ claude · 2h ago" of the selected project: a tab that continues its last Claude conversation.
+    /// Home's card chip "↻ Continue claude · 2h ago" of the selected project: a tab that continues its last Claude
+    /// conversation.
     ClaudeContinue,
     /// A background Claude session row on Home (`App::bg_sessions` index): attaches to it in a new tab.
     BgSession(usize),

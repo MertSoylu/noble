@@ -1167,6 +1167,8 @@ impl App {
                 }
             }
             Hit::OpenSelected => self.open_selected(),
+            // The same action as Home's `a` key.
+            Hit::AddProject => self.run(Action::AddProjectFolder),
             Hit::AiRefresh => self.refresh_ai(),
             Hit::Setting(i)
                 if self.settings_items().get(i)
