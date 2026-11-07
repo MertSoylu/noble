@@ -210,6 +210,20 @@ fn palette_marks_matched_title_letters() {
     assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
 }
 
+/// The palette's key hints are left-aligned at the content's edge (two columns in from the frame) and read
+/// "↑↓ select  ⏎ run  esc close" on a command row.
+#[test]
+fn palette_footer_starts_at_the_content_edge() {
+    let mut app = demo_app(110, 30);
+    app.open_palette();
+    let buf = render_cells(&mut app, 110, 30);
+    let (bx, _) = find_text(&buf, "╭ COMMAND", 0).expect("the palette box");
+    let (fx, _) = find_text(&buf, "↑↓ select", 0).expect("the key hints");
+    assert_eq!(fx, bx + 2, "the hints start at column {fx}, the box at {bx}");
+    let text = render(&mut app, 110, 30);
+    assert!(text.lines().any(|l| l.contains("↑↓ select  ⏎ run  esc close")), "{text}");
+}
+
 /// Recently run commands come first, most recent first, once each, and the list is kept to ten.
 #[test]
 fn palette_empty_query_lists_recent_commands_first() {

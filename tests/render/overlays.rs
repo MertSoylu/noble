@@ -163,7 +163,7 @@ fn help_has_columns_a_filter_and_runs_rows() {
     for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
         assert!(wide_text.contains(name), "{name} is drawn:\n{wide_text}");
     }
-    assert!(wide_text.contains("type to filter · ⏎ run · esc close"), "{wide_text}");
+    assert!(wide_text.contains("type filter  ⏎ run  esc close"), "{wide_text}");
 
     // A narrow screen keeps one column, and it scrolls with the selection.
     let mut narrow = demo_app(110, 30);
@@ -651,4 +651,61 @@ fn notification_list_goes_to_the_pane_and_copies() {
         save(&format!("notifications-list-{w}x{h}"), &text);
         app.overlay = None;
     }
+}
+
+/// A box overlay starts below the top bar: at 110×30, 120×34 and 76×24 (where the palette reaches row 0 without
+/// the rule) the first row is the same with the overlay open, and it still shows the NOBLE name.
+#[test]
+fn overlay_boxes_leave_the_top_bar_visible() {
+    let openers: [fn(&mut App); 3] = [|app| app.run(Action::Help), |app| app.open_bindings(), |app| app.open_palette()];
+    for (w, h) in [(110, 30), (120, 34), (76, 24)] {
+        let mut app = demo_app(w, h);
+        let plain = render(&mut app, w, h);
+        let top_bar = plain.lines().next().unwrap_or_default().to_string();
+        assert!(top_bar.contains("NOBLE"), "{w}x{h}: {top_bar:?}");
+        for open in openers {
+            app.overlay = None;
+            open(&mut app);
+            let text = render(&mut app, w, h);
+            let row = text.lines().next().unwrap_or_default();
+            assert_eq!(row, top_bar, "{w}x{h}: an overlay covers the top bar:\n{text}");
+        }
+    }
+}
+
+/// The footer's first key starts two columns right of the box's left frame: the content edge, as the palette's
+/// footer always did. The footers are left-aligned, not pushed to the right edge.
+#[test]
+fn overlay_footers_start_at_the_content_edge() {
+    use noble::app::Overlay;
+    fn footer_at_content_edge(buf: &ratatui::buffer::Buffer, title: &str, footer: &str) {
+        let (bx, _) = find_text(buf, title, 0).unwrap_or_else(|| panic!("box {title:?} is drawn"));
+        let (fx, _) = find_text(buf, footer, 0).unwrap_or_else(|| panic!("footer {footer:?} is drawn"));
+        assert_eq!(fx, bx + 2, "{footer:?} starts at column {fx}, the box at {bx}");
+    }
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(Overlay::AgentHooks { selected: 0 });
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ AGENT STATUS HOOKS", "space on/off");
+    app.overlay = None;
+    app.run(Action::Help);
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ KEYBOARD REFERENCE", "type filter");
+    app.overlay = None;
+    app.open_bindings();
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ KEY BINDINGS", "⏎ prefix key");
+}
+
+/// The keyboard reference's rows that name an action read in Title Case, as the action titles do: the tab-number
+/// row is "Go to Tab" and the prefix row that sends the prefix on is "Send Prefix to the Shell".
+#[test]
+fn keyboard_reference_action_rows_read_in_title_case() {
+    let app = demo_app(160, 45);
+    let sections = app.help_sections("");
+    for section in sections.iter().filter(|s| s.title.starts_with("PREFIX") || s.title == "GLOBAL") {
+        for row in &section.rows {
+            assert!(row.desc.starts_with(char::is_uppercase), "{}: {:?} is not in Title Case", section.title, row.desc);
+        }
+    }
+    let prefix = sections.iter().find(|s| s.title.starts_with("PREFIX")).expect("the prefix section");
+    assert!(prefix.rows.iter().any(|r| r.desc == "Go to Tab"), "{:?}", prefix.rows);
+    assert!(prefix.rows.iter().any(|r| r.desc == "Send Prefix to the Shell"), "{:?}", prefix.rows);
 }
