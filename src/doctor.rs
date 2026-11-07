@@ -175,7 +175,7 @@ fn read_config(path: &Path) -> (ConfigState, Option<Config>) {
 }
 
 fn os_line() -> String {
-    let version = sysinfo::System::long_os_version().unwrap_or_else(|| "version unknown".into());
+    let version = sysinfo::System::long_os_version().unwrap_or_else(|_| "version unknown".into());
     format!("{} ({version})", std::env::consts::OS)
 }
 

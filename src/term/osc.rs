@@ -642,7 +642,7 @@ fn is_local_host(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    NAME.get_or_init(sysinfo::System::host_name).as_deref().is_some_and(|name| same_host(name, host))
+    NAME.get_or_init(|| sysinfo::System::host_name().ok()).as_deref().is_some_and(|name| same_host(name, host))
 }
 
 /// Does `path` start with two separators: `\\server\share`, `//server/share`, `\\?\UNC\…`, a `\\.\` device?

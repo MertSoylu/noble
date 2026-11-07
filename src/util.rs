@@ -239,7 +239,9 @@ pub fn fuzzy_match(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
 pub fn process_start(pid: u32) -> Option<u64> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let pid = Pid::from_u32(pid);
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else {
+        return None;
+    };
     sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
     sys.process(pid).map(|p| p.start_time())
 }
@@ -335,6 +337,7 @@ pub fn lacks_truecolor() -> bool {
         return false;
     }
     let major = sysinfo::System::os_version()
+        .ok()
         .and_then(|v| v.split('.').next().and_then(|m| m.parse::<u32>().ok()))
         .unwrap_or(0);
     major < 26

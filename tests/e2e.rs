@@ -352,7 +352,7 @@ fn measure(h: &Harness, secs: u64) -> (f64, u64) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let secs = std::env::var("NOBLE_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(secs);
     let pid = Pid::from_u32(h.child.process_id().unwrap());
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo starts");
     let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
     let read = |sys: &mut System| {
         sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
