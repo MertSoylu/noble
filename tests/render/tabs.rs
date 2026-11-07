@@ -736,6 +736,34 @@ fn tab_close_button_shows_on_active_and_hovered_tab() {
     assert_eq!(find_hit(&app, |h| *h == Hit::Tab(0)), Some(first), "the hovered tab keeps its width");
     assert_eq!(find_hit(&app, |h| *h == Hit::Tab(1)), Some(second), "the active tab keeps its width");
 
+    // The pointer on the close cell itself keeps the hovered tab's "×" shown (it is part of the tab's hover).
+    let moved = app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: close.x,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })));
+    assert!(moved, "a pointer move redraws the strip");
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    save("tabs-close-hover-on-cell-120x30", &text);
+    let top = text.lines().next().unwrap().to_string();
+    assert_eq!(cells_text(&buf, close), "×", "the close cell keeps its × under the pointer: {top}");
+    assert_eq!(top.matches('×').count(), 2, "{top}");
+    assert_eq!(find_hit(&app, |h| *h == Hit::Tab(0)), Some(first), "the hovered tab keeps its width");
+
+    // The pointer leaves the top bar: the inactive tab's close cell is blank again.
+    let moved = app.handle(AppEvent::Input(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: close.x,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    })));
+    assert!(moved, "a pointer move redraws the strip");
+    let (text, buf) = render_buf(&mut app, 120, 30);
+    let top = text.lines().next().unwrap().to_string();
+    assert_eq!(cells_text(&buf, close), " ", "{top}");
+    assert_eq!(top.matches('×').count(), 1, "{top}");
+
     // A click on the close button closes the hovered tab.
     click(&mut app, close.x, close.y);
     assert_eq!(app.tabs.len(), 1, "the click closed the tab under the pointer");

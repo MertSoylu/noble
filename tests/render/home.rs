@@ -1021,8 +1021,8 @@ fn quota_pace_warning_line() {
     assert!(!text.contains("at this pace"), "{text}");
 }
 
-/// New release: a notice appears bottom right, drops to the status bar in a
-/// terminal and, once dismissed, is never shown again for the same version.
+/// New release: a notice appears bottom right on the status bar's row, on every page and not only in a terminal,
+/// and, once dismissed, is never shown again for the same version.
 #[test]
 fn update_notice_bottom_right() {
     let mut app = demo_app(120, 32);
@@ -1032,13 +1032,22 @@ fn update_notice_bottom_right() {
     assert_eq!(app.update_notice(), Some("99.0.0"));
     let text = render(&mut app, 120, 32);
     save("update-notice-120x32", &text);
-    // On Home the notice is on the row above the panels' bottom border (row H-3); the border (H-2) stays whole.
-    let row = text.lines().nth(29).unwrap();
+    // On Home the notice takes the status bar's row (H-1). The panels' bottom border (H-2) and the action buttons
+    // (H-3) keep their cells: apart from that status row the screen is the same as without the notice.
+    let row = text.lines().nth(31).unwrap();
     assert!(row.contains("NOBLE 99.0.0 is available") && row.trim_end().ends_with("update  ×"), "{text}");
     let border = text.lines().nth(30).unwrap();
     assert!(!border.contains("99.0.0") && !border.contains("update") && border.contains('╯'), "{text}");
+    let buttons = text.lines().nth(29).unwrap();
+    assert!(buttons.contains("e Opencode") && !buttons.contains("99.0.0"), "{text}");
+    app.cfg.general.check_updates = false;
+    let plain = render(&mut app, 120, 32);
+    app.cfg.general.check_updates = true;
+    let (with, without): (Vec<&str>, Vec<&str>) = (text.lines().collect(), plain.lines().collect());
+    assert!(with[..31] == without[..31], "the notice changes only the status bar row:\n{text}");
+    render(&mut app, 120, 32);
     let hit = find_hit(&app, |h| *h == noble::app::Hit::Update).expect("update hit");
-    assert_eq!((hit.y, hit.x + hit.width + 4), (29, 120));
+    assert_eq!((hit.y, hit.x + hit.width + 4), (31, 120));
     for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
         save(&format!("update-notice-{w}x{h}"), &render(&mut app, w, h));
     }
@@ -1066,13 +1075,31 @@ fn update_notice_bottom_right() {
     assert_eq!(app.update_notice(), Some("99.0.1"));
 }
 
+/// Home, System and Settings all keep the notice on the status bar's row: the last content row above it (H-2) never
+/// carries the notice's text, at a wide and a narrow size.
+#[test]
+fn update_notice_on_every_page() {
+    let mut app = demo_app(120, 32);
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    for (w, h) in [(120, 32), (80, 24)] {
+        for (page, action) in [("home", Action::Bridge), ("system", Action::System), ("settings", Action::Settings)] {
+            app.run(action);
+            let text = render(&mut app, w, h);
+            save(&format!("update-notice-{page}-{w}x{h}"), &text);
+            let (status, above) = (text.lines().last().unwrap(), text.lines().nth(h as usize - 2).unwrap());
+            assert!(status.contains("NOBLE 99.0.0 is available"), "{page} {w}x{h}\n{text}");
+            assert!(!above.contains("99.0.0"), "{page} {w}x{h}\n{text}");
+        }
+    }
+}
+
 /// The row of the first line of `text` that contains `needle`.
 fn row_with(text: &str, needle: &str) -> usize {
     text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle:?} on screen:\n{text}"))
 }
 
-/// A notification never shares a row with the update notice: on Home it stacks one row higher (H-4, the notice is
-/// on H-3); on a terminal tab the notice is in the status bar and the notification keeps its row above the bar.
+/// A notification never shares a row with the update notice: the notice is on the status bar (H-1) and the
+/// notifications stack from H-3 on Home as on a terminal tab.
 #[test]
 fn toast_stacks_above_the_update_notice() {
     use noble::app::ToastLevel;
@@ -1082,8 +1109,8 @@ fn toast_stacks_above_the_update_notice() {
     app.toast(ToastLevel::Info, "a note beside the notice");
     let text = render(&mut app, 120, 32);
     save("update-notice-toast-120x32", &text);
-    assert_eq!(row_with(&text, "NOBLE 99.0.0 is available"), 29, "{text}");
-    assert_eq!(row_with(&text, "a note beside the notice"), 28, "{text}");
+    assert_eq!(row_with(&text, "NOBLE 99.0.0 is available"), 31, "{text}");
+    assert_eq!(row_with(&text, "a note beside the notice"), 29, "{text}");
 
     app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
     app.toasts.clear();
