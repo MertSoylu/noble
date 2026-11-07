@@ -164,13 +164,14 @@ fn bridge_keyboard_flow() {
     assert_eq!(app.visible_projects().len(), 1);
     assert_eq!(app.selected_project().unwrap().name, "dotfiles");
     save("bridge-filter-120x34", &render(&mut app, 120, 34));
-    // AltGr (Ctrl+Alt on Windows) symbols are typed as text, not dropped as shortcuts.
+    // AltGr (Ctrl+Alt on Windows) symbols are typed as text, not dropped as shortcuts. Elsewhere Ctrl+Alt is a
+    // chord, which the filter does not take as text.
     let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
     for c in ['\\', '@'] {
         app.on_key(KeyEvent::new(KeyCode::Char(c), altgr));
     }
     assert!(app.bridge.filtering);
-    assert_eq!(app.bridge.filter, "dot\\@");
+    assert_eq!(app.bridge.filter, if cfg!(windows) { "dot\\@" } else { "dot" });
     key(&mut app, KeyCode::Esc);
     assert!(app.bridge.filter.is_empty());
     // Prefix + unknown key: a warning, no crash.

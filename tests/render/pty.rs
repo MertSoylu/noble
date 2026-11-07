@@ -196,6 +196,33 @@ fn terminal_compatibility_basics() {
     app.run(Action::CloseTab);
 }
 
+/// Strikethrough (9), conceal (8) and blink (5, 6) reach the cells as the crossed-out, hidden and slow blink
+/// modifiers, and their reset codes (29, 28, 25) clear them again.
+#[test]
+fn strikethrough_conceal_and_blink_reach_the_cells() {
+    use ratatui::style::Modifier;
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("sgr".into()));
+    let id = app.tabs[0].focus;
+    wait_idle(&mut app, id);
+    let styled = b"\x1b[2J\x1b[H\x1b[9mS\x1b[29mP\x1b[8mH\x1b[28mV\x1b[5mB\x1b[6mR\x1b[25mN\x1b[0m";
+    app.panes[&id].parser().process(styled);
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| noble::ui::draw(f, &mut app)).unwrap();
+    let inner = find_hit_inner(&app).unwrap();
+    let buf = term.backend().buffer().clone();
+    let cell = |x: u16| buf[(inner.x + x, inner.y)].clone();
+    assert_eq!(cell(0).symbol(), "S");
+    assert!(cell(0).modifier.contains(Modifier::CROSSED_OUT), "strikethrough");
+    assert!(!cell(1).modifier.contains(Modifier::CROSSED_OUT), "29 ends it");
+    assert!(cell(2).modifier.contains(Modifier::HIDDEN), "conceal keeps the text in the buffer");
+    assert_eq!(cell(2).symbol(), "H");
+    assert!(!cell(3).modifier.contains(Modifier::HIDDEN), "28 ends it");
+    assert!(cell(4).modifier.contains(Modifier::SLOW_BLINK), "blink");
+    assert!(cell(5).modifier.contains(Modifier::SLOW_BLINK), "rapid blink is drawn as blink");
+    assert!(!cell(6).modifier.contains(Modifier::SLOW_BLINK), "25 ends it");
+}
+
 /// Throughput under heavy output: while a 50 thousand line file is printed the
 /// output keeps drawing. Prints duration and frame count (run with `--ignored --nocapture`).
 const PERF_LINES: usize = 50_000;

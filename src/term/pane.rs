@@ -872,6 +872,47 @@ pub fn key_mode(parser: &crate::vt100::Parser<Callbacks>) -> KeyMode {
     }
 }
 
+/// Whether an environment variable describes the terminal around NOBLE (or its shell integration) rather than the
+/// pane: a pane does not inherit it. Apps would look up the wrong terminfo, send that terminal's own sequences, or
+/// pick a graphics or control protocol NOBLE does not speak (kitty, WezTerm, Ghostty, Konsole, Windows Terminal).
+/// `TMUX` and `TMUX_PANE` are included: a tmux started in a pane would refuse to run as nested. VS Code's `VSCODE_*`
+/// variables are not outer ones: `VSCODE_IPC_HOOK_CLI` lets `code file` reuse the window, and `VSCODE_GIT_ASKPASS_*`
+/// is git's credential helper. Names compare ignoring ASCII case, as Windows environment names do. SSH and locale
+/// variables are not outer ones either.
+pub fn is_outer_terminal_var(name: &str) -> bool {
+    const NAMES: [&str; 11] = [
+        "TERMINFO",
+        "TERM_PROGRAM_VERSION",
+        "TERM_SESSION_ID", // Apple Terminal
+        "LC_TERMINAL",     // iTerm2
+        "LC_TERMINAL_VERSION",
+        "WT_SESSION", // Windows Terminal
+        "WT_PROFILE_ID",
+        "VTE_VERSION",       // GNOME Terminal and the other VTE terminals
+        "TERMINAL_EMULATOR", // JetBrains IDE terminals
+        "TMUX",
+        "TMUX_PANE",
+    ];
+    const PREFIXES: [&str; 6] = ["ITERM_", "KITTY_", "WEZTERM_", "GHOSTTY_", "ALACRITTY_", "KONSOLE_"];
+    let name = name.to_ascii_uppercase();
+    NAMES.contains(&name.as_str()) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// Removes the outer terminal's variables (`is_outer_terminal_var`) from a pane's command. The names are read from the
+/// command's own environment, which is the base one (the process's, and on Windows the registry's) plus the entries
+/// set so far.
+fn remove_outer_terminal_vars(cmd: &mut CommandBuilder) {
+    let outer: Vec<String> = cmd
+        .iter_full_env_as_str()
+        .map(|(name, _)| name)
+        .filter(|name| is_outer_terminal_var(name))
+        .map(str::to_owned)
+        .collect();
+    for name in outer {
+        cmd.env_remove(name);
+    }
+}
+
 impl Pane {
     pub fn spawn(id: PaneId, spec: SpawnSpec<'_>, tx: Sender<AppEvent>) -> Result<Pane> {
         let rows = spec.rows.max(2);
@@ -913,20 +954,7 @@ impl Pane {
         cmd.env("TERM_PROGRAM", "NOBLE");
         // rxvt's hint for programs that cannot ask (OSC 11): `15;0` on a dark background, `0;15` on a light one.
         cmd.env("COLORFGBG", spec.colors.read().unwrap_or_else(|e| e.into_inner()).colorfgbg());
-        // The outer terminal's identity (kitty/Ghostty terminfo, iTerm2) does not describe the
-        // pane: apps would look up the wrong terminfo or send that terminal's own sequences.
-        // Windows Terminal's `WT_SESSION` / `WT_PROFILE_ID` would make apps think they draw in it directly.
-        for var in [
-            "TERMINFO",
-            "TERM_PROGRAM_VERSION",
-            "LC_TERMINAL",
-            "LC_TERMINAL_VERSION",
-            "ITERM_SESSION_ID",
-            "WT_SESSION",
-            "WT_PROFILE_ID",
-        ] {
-            cmd.env_remove(var);
-        }
+        remove_outer_terminal_vars(&mut cmd);
         cmd.env("NOBLE_PANE", id.to_string());
         // So the Claude Code hooks write the state to the right NOBLE instance.
         cmd.env("NOBLE_INSTANCE", std::process::id().to_string());
@@ -1652,6 +1680,85 @@ impl Drop for Pane {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outer_terminal_variable_names_are_recognized() {
+        for name in [
+            "TERMINFO",
+            "TERM_PROGRAM_VERSION",
+            "TERM_SESSION_ID",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "WT_SESSION",
+            "WT_PROFILE_ID",
+            "VTE_VERSION",
+            "TERMINAL_EMULATOR",
+            "TMUX",
+            "TMUX_PANE",
+            "ITERM_SESSION_ID",
+            "KITTY_WINDOW_ID",
+            "KITTY_PID",
+            "KITTY_LISTEN_ON",
+            "KITTY_PUBLIC_KEY",
+            "WEZTERM_PANE",
+            "WEZTERM_UNIX_SOCKET",
+            "GHOSTTY_RESOURCES_DIR",
+            "GHOSTTY_BIN_DIR",
+            "KONSOLE_VERSION",
+            "KONSOLE_DBUS_SESSION",
+            "ALACRITTY_WINDOW_ID",
+        ] {
+            assert!(is_outer_terminal_var(name), "{name} describes the outer terminal");
+        }
+        for name in [
+            "TERM",
+            "TERM_PROGRAM",
+            "COLORTERM",
+            "TERMINFO_DIRS",
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "LC_ALL",
+            "LANG",
+            "KITTY",
+            "WT",
+            "NOBLE_PANE",
+            "PATH",
+            "VSCODE_INJECTION",
+            "VSCODE_IPC_HOOK_CLI",
+            "vscode_git_askpass_main",
+        ] {
+            assert!(!is_outer_terminal_var(name), "{name} is the pane's or the user's");
+        }
+    }
+
+    #[test]
+    fn a_pane_command_loses_the_outer_terminal_and_keeps_ssh_locale_and_vscode() {
+        let mut cmd = crate::pty::CommandBuilder::new("shell");
+        let outer = ["KITTY_WINDOW_ID", "TMUX", "WT_SESSION", "VTE_VERSION", "ITERM_PROFILE", "TERMINFO"];
+        for name in outer {
+            cmd.env(name, "1");
+        }
+        cmd.env("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22");
+        cmd.env("LC_ALL", "en_US.UTF-8");
+        // TERMINFO names the outer terminal's terminfo directory; TERMINFO_DIRS is the user's search path and stays.
+        cmd.env("TERMINFO_DIRS", "/home/u/.terminfo");
+        cmd.env("VSCODE_IPC_HOOK_CLI", "/run/user/1000/vscode-ipc.sock");
+        cmd.env("VSCODE_GIT_ASKPASS_MAIN", "/usr/share/code/askpass-main.js");
+        remove_outer_terminal_vars(&mut cmd);
+        for name in outer {
+            assert!(cmd.get_env(name).is_none(), "{name} reached the pane");
+        }
+        assert_eq!(cmd.get_env("SSH_CONNECTION"), Some(std::ffi::OsStr::new("10.0.0.2 50000 10.0.0.1 22")));
+        assert_eq!(cmd.get_env("LC_ALL"), Some(std::ffi::OsStr::new("en_US.UTF-8")));
+        assert_eq!(cmd.get_env("TERMINFO_DIRS"), Some(std::ffi::OsStr::new("/home/u/.terminfo")));
+        assert_eq!(cmd.get_env("VSCODE_IPC_HOOK_CLI"), Some(std::ffi::OsStr::new("/run/user/1000/vscode-ipc.sock")));
+        assert_eq!(
+            cmd.get_env("VSCODE_GIT_ASKPASS_MAIN"),
+            Some(std::ffi::OsStr::new("/usr/share/code/askpass-main.js"))
+        );
+        // The base environment is the test process's own: whatever terminal runs the tests is removed too.
+        assert!(cmd.iter_full_env_as_str().all(|(name, _)| !is_outer_terminal_var(name)));
+    }
+
     #[test]
     fn word_range_picks_paths_and_stops_at_delimiters() {
         let row: Vec<char> = "cd ~/code/app; echo \"hi there\"  ".chars().collect();

@@ -2,7 +2,6 @@
 //! terminal's status (the progress pause and the window title while agents wait for you).
 
 use super::*;
-use crate::update::{InstallSource, WINGET_UPGRADE, WINGET_UPGRADE_ARGS};
 
 impl App {
     pub fn toast(&mut self, level: ToastLevel, text: impl Into<String>) {
@@ -232,18 +231,10 @@ impl App {
         self.update_available.as_deref().filter(|_| self.cfg.general.check_updates)
     }
 
-    /// Runs `noble update` in a new tab; the progress shows there. A winget install runs `winget upgrade` instead:
-    /// winget keeps the package's files, so NOBLE replaces nothing (`update::install_source`).
+    /// Runs `noble update` in a new tab; the progress shows there.
     pub fn start_update(&mut self) {
-        let source = crate::update::install_source();
-        let winget = (source == InstallSource::Winget).then(|| crate::util::which("winget")).flatten();
-        self.run_update(source, winget.as_deref());
-    }
-
-    /// `start_update` for a known install source and the winget found for it (`None`: no winget on PATH).
-    fn run_update(&mut self, source: InstallSource, winget: Option<&Path>) {
         let Ok(exe) = std::env::current_exe() else { return };
-        let command = match update_command(&self.shell, &exe, source, winget) {
+        let command = match update_command(&self.shell, &exe) {
             Ok(command) => command,
             Err(text) => {
                 // The notice stays: nothing ran, and the update can still be started from a terminal.
@@ -257,15 +248,6 @@ impl App {
             return;
         }
         self.update_available = None;
-        if source == InstallSource::Winget {
-            // winget refuses to replace a file that is in use, and this window may be running the binary.
-            self.toast(
-                ToastLevel::Warn,
-                format!(
-                    "winget runs in a new tab. If it says the file is in use, quit NOBLE and run `{WINGET_UPGRADE}`."
-                ),
-            );
-        }
     }
 
     /// Dismisses the notice: never shown again for the same version.
@@ -276,27 +258,12 @@ impl App {
     }
 }
 
-/// The command line the update notice's tab runs, or the toast text when there is none to run. A direct install runs
-/// `noble update` through the running binary; a winget install runs `winget upgrade` through the winget that was found
-/// (`None`: winget is not on PATH, so nothing runs). The shell quotes the program's path (`invocation_of`), and cmd.exe
-/// refuses a path it cannot take.
-fn update_command(
-    shell: &ShellSpec,
-    exe: &Path,
-    source: InstallSource,
-    winget: Option<&Path>,
-) -> Result<String, String> {
-    let (program, args) = match source {
-        InstallSource::Direct => (exe, "update"),
-        InstallSource::Winget => match winget {
-            Some(winget) => (winget, WINGET_UPGRADE_ARGS),
-            None => return Err(format!("winget was not found on PATH: run `{WINGET_UPGRADE}` in a terminal")),
-        },
-    };
-    shell.invocation_of(program, args).ok_or_else(|| match source {
-        InstallSource::Direct => "cmd.exe cannot take this program's path: run `noble update` in a terminal".into(),
-        InstallSource::Winget => format!("cmd.exe cannot take winget's path: run `{WINGET_UPGRADE}` in a terminal"),
-    })
+/// The command line the update notice's tab runs (`noble update` through the running binary), or the toast text when
+/// cmd.exe cannot take the path. The shell quotes the program's path (`invocation_of`).
+fn update_command(shell: &ShellSpec, exe: &Path) -> Result<String, String> {
+    shell
+        .invocation_of(exe, "update")
+        .ok_or_else(|| "cmd.exe cannot take this program's path: run `noble update` in a terminal".into())
 }
 
 #[cfg(test)]
@@ -360,57 +327,16 @@ mod tests {
         assert!(app.toasts.is_empty());
     }
 
-    /// The update notice's tab: a direct install runs `noble update` as it always has, a winget install runs
-    /// `winget upgrade` through the winget that was found. Without winget, or for a path the shell cannot take, the
-    /// result is the toast text and nothing runs. Pure: no tab is opened.
+    /// The update notice's tab runs `noble update` through the running binary, quoted per shell. For a path the shell
+    /// cannot take (`%` in cmd.exe) the result is the toast text and nothing runs. Pure: no tab is opened.
     #[test]
-    fn update_tab_runs_the_command_of_the_install_source() {
+    fn update_tab_runs_noble_update() {
         let exe = Path::new(r"C:\Tools\noble.exe");
-        let winget = Path::new(r"C:\Users\Mert\AppData\Local\Microsoft\WindowsApps\winget.exe");
         let cmd = ShellSpec::new("cmd.exe", vec![]);
         let pwsh = ShellSpec::new("pwsh", vec![]);
-        // Direct: the command the notice has always run, quoted per shell.
-        assert_eq!(update_command(&cmd, exe, InstallSource::Direct, None), Ok(r#""C:\Tools\noble.exe" update"#.into()));
-        assert_eq!(
-            update_command(&pwsh, exe, InstallSource::Direct, None),
-            Ok(r"& 'C:\Tools\noble.exe' update".into())
-        );
-        // Winget: the winget found on PATH upgrades the package.
-        assert_eq!(
-            update_command(&cmd, exe, InstallSource::Winget, Some(winget)),
-            Ok(r#""C:\Users\Mert\AppData\Local\Microsoft\WindowsApps\winget.exe" upgrade MertSoylu.Noble"#.into())
-        );
-        assert_eq!(
-            update_command(&pwsh, exe, InstallSource::Winget, Some(winget)),
-            Ok(r"& 'C:\Users\Mert\AppData\Local\Microsoft\WindowsApps\winget.exe' upgrade MertSoylu.Noble".into())
-        );
-        // Winget missing: nothing runs, and the text names the command to run by hand.
-        let missing = update_command(&cmd, exe, InstallSource::Winget, None).unwrap_err();
-        assert!(
-            missing.contains("winget was not found") && missing.contains("winget upgrade MertSoylu.Noble"),
-            "{missing}"
-        );
-        // cmd.exe cannot take a `%` in a path (it would expand it): refused for both sources.
-        let refused = update_command(&cmd, Path::new(r"C:\50%\noble.exe"), InstallSource::Direct, None).unwrap_err();
+        assert_eq!(update_command(&cmd, exe), Ok(r#""C:\Tools\noble.exe" update"#.into()));
+        assert_eq!(update_command(&pwsh, exe), Ok(r"& 'C:\Tools\noble.exe' update".into()));
+        let refused = update_command(&cmd, Path::new(r"C:\50%\noble.exe")).unwrap_err();
         assert!(refused.contains("cmd.exe cannot take this program's path"), "{refused}");
-        let refused = update_command(&cmd, exe, InstallSource::Winget, Some(Path::new(r"C:\50%\winget.exe")));
-        assert!(refused.unwrap_err().contains("cmd.exe cannot take winget's path"));
-    }
-
-    /// A winget update whose tab cannot start: the spawn's error is the only toast, nothing says winget runs in a new
-    /// tab, and the notice stays. The shell program does not exist, so the spawn fails on every platform.
-    #[test]
-    fn an_update_tab_that_cannot_start_keeps_the_notice_and_announces_nothing() {
-        let mut app = App::headless(Config::default(), (120, 30));
-        app.shell = ShellSpec::new("noble-no-such-shell", vec![]);
-        app.update_available = Some("9.9.9".into());
-        app.toasts.clear();
-        let winget = Path::new(r"C:\Users\Mert\AppData\Local\Microsoft\WindowsApps\winget.exe");
-        app.run_update(InstallSource::Winget, Some(winget));
-        let texts: Vec<&str> = app.toasts.iter().map(|t| t.text.as_str()).collect();
-        assert!(app.tabs.is_empty(), "no tab opened");
-        assert_eq!(app.update_available.as_deref(), Some("9.9.9"), "the notice stays: nothing ran");
-        assert!(texts.iter().all(|t| !t.contains("runs in a new tab")), "{texts:?}");
-        assert!(app.toasts.iter().any(|t| t.level == ToastLevel::Error), "the spawn error is the toast: {texts:?}");
     }
 }

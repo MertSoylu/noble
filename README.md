@@ -167,10 +167,6 @@ with `curl` or `noble update`). Each archive has a `.sha256` file next to it: ch
 `sha256sum -c noble-linux-x86_64.tar.gz.sha256` on Linux, `shasum -a 256 -c noble-macos-aarch64.tar.gz.sha256`
 on macOS, or compare it with `Get-FileHash noble-windows-x86_64.zip` in PowerShell on Windows.
 
-**winget (Windows):** `winget install MertSoylu.Noble` is planned but not available yet: NOBLE is not in the winget
-community repository (microsoft/winget-pkgs) yet. Until then use the prebuilt archive above, Cargo or the source install
-below.
-
 **With Cargo** (Rust 1.95+):
 
 ```sh
@@ -200,10 +196,6 @@ stops the update and leaves the installed binary alone), refuses any address tha
 archive that holds links or paths outside its folder, and replaces the installed one; restart NOBLE afterwards. Turn the check off with
 `check_updates = false` or in Settings.
 
-A copy installed by winget is updated by winget, not by NOBLE, which replaces nothing there: the **update** button opens
-a tab running `winget upgrade MertSoylu.Noble`, and `noble update` only names that command (`--check` included). If
-winget says the file is in use, quit NOBLE and run the command again.
-
 <details>
 <summary><b>Terminal requirements and a Windows Terminal profile</b></summary>
 
@@ -227,7 +219,7 @@ To open NOBLE in its own tab from the Windows Terminal dropdown:
 
 ```
 noble [--config <path>] [--no-boot] [<dir>]   open NOBLE; <dir> opens a shell tab in that folder
-noble update [--check]                        download and install the latest release (--check only reports; winget installs use winget upgrade)
+noble update [--check]                        download and install the latest release (--check only reports)
 noble doctor [--config <path>]                print a setup report for bug reports (never opens the terminal)
       --paths      print config and data locations
       --version    print version
@@ -321,8 +313,10 @@ so these actions do nothing there.
   `alt+!` is sent with that symbol's own code. On Linux and macOS, a terminal that answers neither the keyboard query
   nor the device attributes query can delay startup by up to 2 s (`TERM=dumb` is not asked).
 - **Notifications:** clicking one that came from a pane (a toast, or `⏎` in the notification list) goes to that tab
-  and pane; `ctrl+y` in the list copies its text. Background alerts also go to the outer terminal as OSC 9 / OSC 777 desktop notifications
-  while NOBLE is not in front (on Windows only when `TERM_PROGRAM` is set; Windows Terminal gets the bell).
+  and pane; `ctrl+y` in the list copies its text. Background alerts also go to the outer terminal as desktop notifications while NOBLE is
+  not in front: one sequence per notification, OSC 9 (iTerm2, WezTerm, Ghostty, kitty) or OSC 777 (foot,
+  rxvt-unicode, Konsole), chosen from the terminal NOBLE runs in (on Windows only when `TERM_PROGRAM` is set; Windows
+  Terminal gets the bell).
   While an agent waits for you, the window title reads `NOBLE · ◆ 1` with the number of agents waiting, and the
   terminal's progress report pauses (OSC 9;4: Windows Terminal, Ghostty and the like; Linux and macOS always, on Windows only in Windows
   Terminal or when `TERM_PROGRAM` is set). Both return to normal when nothing waits.
@@ -466,8 +460,9 @@ Enter, which submits.
   one in a new tab (`claude attach <id>`). NOBLE lists and attaches only; it does not start them.
 - **Outside NOBLE:** while an agent waits for you, the window title reads `NOBLE · ◆ 1` and the terminal NOBLE runs in
   gets a paused progress report (on Windows only in Windows Terminal or when `TERM_PROGRAM` is set). Background
-  alerts also reach your desktop as OSC 9 / OSC 777 notifications while NOBLE is not in front (on Windows only when
-  `TERM_PROGRAM` is set); **Notify from background tabs** (`notify`) switches them off.
+  alerts also reach your desktop as a notification while NOBLE is not in front (OSC 9 or OSC 777, whichever the
+  terminal shows; on Windows only when `TERM_PROGRAM` is set); **Notify from background tabs** (`notify`) switches
+  them off.
 
 <details>
 <summary><b>Agent status hooks (optional)</b></summary>
@@ -495,19 +490,25 @@ On Windows these are in your user profile (`%USERPROFILE%\.claude`, `%USERPROFIL
 agent runs `noble hook <event>` (with `--agent <id>` for the agents other than Claude Code) on the
 events it reports: prompt, stop, permission request, notification, error, subagent start and stop, session start
 and end. Codex has no notification or error event, OpenCode has no notification, subagent or session start and end
-event, Antigravity CLI has session start, each model call and stop, and Cursor CLI has session start, each prompt (not
+event, GitHub Copilot has no subagent start and stop event (see its bullet), Antigravity CLI has session start, each model call and stop, and Cursor CLI has session start, each prompt (not
 confirmed for the CLI), each tool call and stop. The command writes one small file per pane into NOBLE's data folder and exits; outside NOBLE
-it writes nothing (Antigravity CLI and Cursor CLI still get their JSON reply on stdout).
+it writes nothing, and neither does a hook in another terminal application that inherited a pane's ids (VS Code
+started with `code .` from a pane) (Antigravity CLI and Cursor CLI still get their JSON reply on stdout).
 The hooks apply to sessions started after the install: restart an agent that is already running.
 
 - **Claude Code:** also reports a failed turn (`StopFailure`: an API error or a rate limit) as an error, and a permission request
   as "needs you" at once. The notifications name the request: "Claude asks to run Bash", "Claude asks a question".
+  An Esc interrupt sends no event (Claude's stop does not run on an interrupt), so an interrupted session stays
+  **working** until its next prompt. NOBLE cannot tell that from a turn still running, and does not use Claude Code's
+  OSC 9;4 progress report for it: Claude Code sends that report only in some terminals (not under Windows Terminal, for one).
 - **Codex:** Codex runs user-level hooks only after you trust them once. After an install NOBLE says
   "Codex: open /hooks once to trust NOBLE's hooks"; open `/hooks` in Codex and trust them. NOBLE cannot do this for you.
-- **GitHub Copilot:** NOBLE's hooks are in its own file, `noble.json`. Turning them off deletes that file when nothing else is in it; otherwise NOBLE removes only its own entries.
+- **GitHub Copilot:** NOBLE's hooks are in its own file, `noble.json`. Turning them off deletes that file when nothing else is in it; otherwise NOBLE removes only its own entries. Copilot's subagent start has no id that pairs with its subagent stop, so NOBLE does not count Copilot's subagents: a running subagent does not keep the session working. An older NOBLE's subagent entries are removed on the next start.
 - **OpenCode:** a plugin forwards session status, idle, errors and permission requests to NOBLE, and it runs NOBLE
-  only in a NOBLE pane. A child session is not told apart from its parent, so a parent tab can show idle while a
-  child still works.
+  only in a NOBLE pane. A subagent (a child session the task tool starts) does not change the pane's state: its busy,
+  idle and error events are left out, so the tab does not show idle while the main session still works. A permission
+  request from a subagent still shows as waiting for you. The plugin recognizes a subagent from the sessions OpenCode
+  creates while it runs, so one that started before the plugin was loaded counts as the main session.
 - **Antigravity CLI:** NOBLE shows working from each model call, idle when the turn stops, and an error when the turn
   stopped with one. agy has no permission, notification, subagent or session-end event, so an agent waiting for a
   permission answer still shows as working. NOBLE clears the pane's state when the shell prompt comes back. The resume id
@@ -521,9 +522,11 @@ The hooks apply to sessions started after the install: restart an agent that is 
 
 The Home screen then lists every session as **working**, **needs you**, **your turn** or **error**, and a
 background tab lights up the moment an agent asks for permission. A Claude session stays **working** while its
-subagents (background ones too) still run, and Claude's idle reminder does not count as needing you. After you
-answer a Claude permission prompt, the state stays "needs you" until the next prompt or stop. Hooks set by an
-older NOBLE get the new events on the next start.
+subagents (background ones too) still run. Only permission prompts, questions and agents waiting for input count as
+needing you; Claude's idle reminder and its other notices (auth, quota, finished agents) do not. After you
+answer a Claude permission prompt or question in its pane (Enter, a digit, y or n), the session reads
+**working** at once: Claude sends no event for an answer, so it reads working until Claude's next event (a new question,
+which needs you again, or the stop of the turn). Hooks set by an older NOBLE get the new events on the next start.
 
 The pane title leads with the same state: `⠋ claude · working 2m +2` (a spinner, how long it has been working
 and its running subagents), `◆ claude · needs you`, `● claude · your turn`, `✗ claude · error`, or `○ codex` for an
@@ -624,9 +627,10 @@ Windows, Linux and macOS, never opens the terminal, and is what a bug report ask
 - **Splits and restored tabs open in the wrong folder:** the shell is not reporting its directory (see Shell
   integration above). cmd keeps a `PROMPT` you set yourself, so add `$E]9;9;$P$E\` to it; bash, zsh and fish
   started with `--norc`, `-f` or `--no-config` skip the hook; any other shell needs a prompt that emits OSC 7.
-- **An AltGr symbol runs a NOBLE shortcut instead of typing:** a character that arrives with Ctrl+Alt (how
-  Windows reports AltGr) is treated as text, and on Linux the terminal sends the character itself. If a key
-  still triggers a shortcut, the terminal sends it as an `alt+` chord: unbind it (`"alt+…" = "none"` under
+- **An AltGr symbol runs a NOBLE shortcut instead of typing:** on Windows a character that arrives with Ctrl+Alt
+  (how Windows reports AltGr) is treated as text. On Linux and macOS the terminal sends AltGr or Option as the
+  character itself, so a Ctrl+Alt+symbol there is a real chord and goes to the pane as one. If a key still
+  triggers a shortcut, the terminal sends it as an `alt+` chord: unbind it (`"alt+…" = "none"` under
   `[keys.direct_bindings]`) or lock the pane's keys with prefix `i`.
 - **`alt+` shortcuts type `π`, `¡` or `º` on macOS:** the terminal sends Option as a character. Turn on
   Option as Meta: Terminal.app Settings → Profiles → Keyboard → "Use Option as Meta key"; iTerm2 Profiles →

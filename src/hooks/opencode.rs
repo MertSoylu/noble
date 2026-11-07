@@ -2,7 +2,9 @@
 //! else `~/.config/opencode`). OpenCode loads every plugin in that folder at startup. The plugin forwards the session
 //! and permission events to `noble hook <event> --agent opencode` with the event as JSON on stdin. The event names are
 //! OpenCode's own, so [`hook_arg`] maps them to the shared hook arguments (`session.status` carries busy or idle in its
-//! payload). Install writes the file only when it is missing or already NOBLE's; uninstall deletes only NOBLE's file.
+//! payload). A subagent's events are tagged by the plugin (see [`is_subagent`]). Install writes the file only when it
+//! is missing or already NOBLE's; uninstall deletes only NOBLE's file. Startup rewrites an older NOBLE file whose text
+//! differs (`upgrade`), so a plugin change reaches existing installs without a version marker.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -32,21 +34,26 @@ const MARKER: &str = "// NOBLE OpenCode plugin";
 const TEMPLATE: &str = r##"__MARKER__: written by NOBLE when the hooks are installed and at every start. Edits are
 // overwritten; NOBLE's Settings turns the hooks off and removes this file.
 // It forwards session and permission events to `noble hook <event> --agent opencode`, with the event as JSON on stdin.
+// A child session (a subagent the task tool starts, its `info.parentID` names the parent) is forwarded with
+// `subagent: true` and the top session's id as `rootSessionID`, so NOBLE does not take its status for the pane's own.
 // Outside NOBLE (no NOBLE_PANE or NOBLE_INSTANCE in the environment) it does nothing. It never throws or waits.
 import { spawn } from "node:child_process";
 
 const NOBLE_BIN = __NOBLE_BIN__;
 const FORWARD = new Set(__FORWARD__);
+// Child session id → the top session it was started from (a child of a child maps to the same top session).
+// `session.created` and `session.updated` carry the parent in `info.parentID`.
+const childRoots = new Map();
 
-function forward(event) {
+function forward(payload) {
   try {
-    const child = spawn(NOBLE_BIN, ["hook", event.type, "--agent", "opencode"], {
+    const child = spawn(NOBLE_BIN, ["hook", payload.type, "--agent", "opencode"], {
       stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
     });
     child.on("error", () => {}); // a missing noble arrives here; OpenCode is not affected
     child.stdin.on("error", () => {}); // noble may exit before it reads the event
-    child.stdin.end(JSON.stringify(event));
+    child.stdin.end(JSON.stringify(payload));
     child.unref(); // OpenCode does not wait for the hook
   } catch {
     // never throw into OpenCode
@@ -58,7 +65,14 @@ export const NoblePlugin = async () => ({
     try {
       const env = globalThis.process?.env ?? {};
       if (!env.NOBLE_PANE || !env.NOBLE_INSTANCE) return;
-      if (event && FORWARD.has(event.type)) forward(event);
+      if (!event) return;
+      const info = event.properties?.info;
+      if ((event.type === "session.created" || event.type === "session.updated") && info?.id && info.parentID) {
+        childRoots.set(info.id, childRoots.get(info.parentID) ?? info.parentID);
+      }
+      if (!FORWARD.has(event.type)) return;
+      const root = childRoots.get(event.properties?.sessionID ?? info?.id);
+      forward(root === undefined ? event : { ...event, subagent: true, rootSessionID: root });
     } catch {
       // never throw into OpenCode
     }
@@ -86,9 +100,24 @@ fn config_home(xdg: Option<&OsStr>, home: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
+/// Whether the plugin tagged the event as a subagent's: a child session the task tool started, which the plugin
+/// recognizes by `info.parentID` (see the template). The top session's id comes with it as `rootSessionID`.
+pub fn is_subagent(input: &Value) -> bool {
+    input.get("subagent").and_then(Value::as_bool) == Some(true)
+}
+
 /// The hook argument for an OpenCode event (the name the plugin forwards, and the event JSON). `None` for an event
 /// that changes nothing (a retry, a token) or that NOBLE does not forward.
 pub fn hook_arg(native: &str, input: &Value) -> Option<&'static str> {
+    // A subagent's busy, idle and error events are its own session's: they leave the pane's state alone. Its permission
+    // requests still need the user, and the answer lets the subagent carry on.
+    if is_subagent(input) {
+        return match native {
+            "permission.asked" | "permission.updated" => Some(PERMISSION_REQUEST),
+            "permission.replied" => Some(PROMPT),
+            _ => None,
+        };
+    }
     if native == "session.status" {
         return match input.pointer("/properties/status/type").and_then(Value::as_str)? {
             "busy" => Some(PROMPT),
@@ -272,15 +301,17 @@ mod tests {
         let file = dir.join("plugins").join("noble.js");
         let program = r"C:\Users\Mert\.cargo\bin\noble.exe";
         assert!(!installed_state(&file).unwrap());
-        install(&file, &quote_for_shell(program)).unwrap();
-        install(&file, &quote_for_shell(program)).unwrap();
+        // Unquoted, so the program reaches the plugin as it is: this checks the escaping alone (`quote_for_shell`
+        // writes forward slashes on Windows, see `awkward_paths_reach_the_plugin_unchanged`).
+        install(&file, program).unwrap();
+        install(&file, program).unwrap();
         assert!(installed_state(&file).unwrap());
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.starts_with(MARKER), "the NOBLE marker comes first");
         assert!(!text.contains("__"), "every placeholder is replaced");
         assert!(text.contains(r#"const NOBLE_BIN = "C:\\Users\\Mert\\.cargo\\bin\\noble.exe";"#), "{text}");
         assert_eq!(program_in(&text).as_deref(), Some(program));
-        assert!(text.contains(r#"spawn(NOBLE_BIN, ["hook", event.type, "--agent", "opencode"]"#));
+        assert!(text.contains(r#"spawn(NOBLE_BIN, ["hook", payload.type, "--agent", "opencode"]"#));
         assert!(text.contains(r#""session.status""#) && text.contains(r#""permission.replied""#));
         assert!(!text.contains(r#""message.part.updated""#), "per-token events are not forwarded");
         assert!(text.contains("NOBLE_PANE") && text.contains("unref()"), "silent outside NOBLE, never waits");
@@ -294,11 +325,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Paths with quotes, apostrophes and spaces survive the shell quoting and the JS string unchanged.
+    /// Paths with quotes, apostrophes and spaces survive the shell quoting and the JS string unchanged. On Windows
+    /// `quote_for_shell` writes forward slashes (see `windows_word`), so the plugin gets those.
     #[test]
     fn awkward_paths_reach_the_plugin_unchanged() {
         for program in ["/opt/it's here/noble", "/opt/q\"uote/noble", r"C:\my tools\noble.exe", "/opt/a\\b/noble"] {
-            assert_eq!(program_of(&quote_for_shell(program)), program);
+            let expected = if cfg!(windows) { program.replace('\\', "/") } else { program.to_string() };
+            assert_eq!(program_of(&quote_for_shell(program)), expected);
             assert_eq!(program_in(&render(program)).as_deref(), Some(program), "{program}");
         }
         assert_eq!(program_of("noble"), "noble", "a bare name from PATH has no quotes");
@@ -429,5 +462,174 @@ mod tests {
         let r = rec().unwrap();
         assert_eq!(r.event, "stop-failure", "unforwarded names change nothing");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A subagent's busy, idle and error events leave the pane's state alone; its permission requests and their
+    /// answers still count, because the user has to answer them.
+    #[test]
+    fn subagent_events_leave_the_pane_state_alone() {
+        let tagged = |mut event: Value| {
+            event["subagent"] = json!(true);
+            event["rootSessionID"] = json!("ses_root");
+            event
+        };
+        let status = |t: &str| {
+            tagged(
+                json!({ "type": "session.status", "properties": { "sessionID": "ses_child", "status": { "type": t } } }),
+            )
+        };
+        assert_eq!(hook_arg("session.status", &status("busy")), None, "a subagent's busy is its own");
+        assert_eq!(hook_arg("session.status", &status("idle")), None, "a finished subagent does not finish the pane");
+        assert_eq!(hook_arg("session.status", &status("retry")), None);
+        assert_eq!(hook_arg("session.idle", &tagged(json!({ "properties": { "sessionID": "ses_child" } }))), None);
+        assert_eq!(hook_arg("session.error", &tagged(json!({ "properties": { "sessionID": "ses_child" } }))), None);
+        let asked =
+            tagged(json!({ "type": "permission.asked", "properties": { "sessionID": "ses_child", "type": "bash" } }));
+        assert_eq!(hook_arg("permission.asked", &asked), Some(PERMISSION_REQUEST), "the user answers it");
+        assert_eq!(hook_arg("permission.replied", &tagged(json!({ "properties": {} }))), Some(PROMPT));
+        // An untagged event of the same name is the pane's own.
+        assert_eq!(
+            hook_arg("session.status", &json!({ "properties": { "status": { "type": "busy" } } })),
+            Some(PROMPT)
+        );
+        assert!(is_subagent(&asked));
+        assert!(!is_subagent(&json!({ "subagent": "yes" })), "only the plugin's true counts");
+    }
+
+    /// The pane's record keeps the top session's id and its state through a subagent's events.
+    #[test]
+    fn cli_subagent_events_keep_the_pane_record() {
+        let data = temp("subagent-cli");
+        let hook = |native: &str, stdin: &str| run_cli(Agent::OpenCode, native, stdin, &data, Some("42"), Some("3"));
+        let rec = || read_records(&data, 42).remove(&3);
+        hook(
+            "session.status",
+            r#"{"type":"session.status","properties":{"sessionID":"ses_root","status":{"type":"busy"}}}"#,
+        );
+        hook(
+            "session.status",
+            r#"{"type":"session.status","properties":{"sessionID":"ses_child","status":{"type":"idle"}},"subagent":true,"rootSessionID":"ses_root"}"#,
+        );
+        let r = rec().unwrap();
+        assert_eq!(
+            (r.event.as_str(), r.session.as_deref()),
+            ("prompt", Some("ses_root")),
+            "the subagent's idle is ignored"
+        );
+        hook(
+            "permission.asked",
+            r#"{"type":"permission.asked","properties":{"sessionID":"ses_child","type":"bash"},"subagent":true,"rootSessionID":"ses_root"}"#,
+        );
+        let r = rec().unwrap();
+        assert_eq!(
+            (r.event.as_str(), r.session.as_deref(), r.message.as_deref()),
+            ("permission-request", Some("ses_root"), Some("OpenCode asks to use bash"))
+        );
+        hook(
+            "permission.replied",
+            r#"{"type":"permission.replied","properties":{"sessionID":"ses_child"},"subagent":true,"rootSessionID":"ses_root"}"#,
+        );
+        assert_eq!(rec().unwrap().event, "prompt", "the answer lets the subagent carry on");
+        hook(
+            "session.status",
+            r#"{"type":"session.status","properties":{"sessionID":"ses_root","status":{"type":"idle"}}}"#,
+        );
+        let r = rec().unwrap();
+        assert_eq!((r.event.as_str(), r.session.as_deref()), ("stop", Some("ses_root")));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The plugin text tags a subagent's events with their top session, and learns subagents from `info.parentID`.
+    #[test]
+    fn plugin_text_tags_subagent_events() {
+        let text = render("/opt/noble");
+        assert!(text.contains("info.parentID"), "subagents are recognized by their parent");
+        assert!(text.contains("childRoots.set(info.id"), "the top session is kept per child");
+        assert!(text.contains("subagent: true, rootSessionID: root"), "the forwarded event is tagged");
+        assert!(text.contains(r#"event.type === "session.created""#), "creation events are read, not forwarded");
+    }
+
+    /// Runs the rendered plugin under node (when it is installed) with `spawn` replaced by a recorder, feeds it
+    /// `events` and returns each `noble hook` call it made: its arguments and the payload on stdin. `None` without
+    /// node: the plugin is JavaScript, and NOBLE itself needs no node.
+    fn plugin_calls(name: &str, events: &[Value], inside: bool) -> Option<Vec<Value>> {
+        crate::util::which("node")?;
+        let dir = temp(name);
+        let plugin = render("/opt/noble").replacen(
+            r#"import { spawn } from "node:child_process";"#,
+            "const { spawn } = globalThis.__nobleTestSpawn;",
+            1,
+        );
+        assert!(plugin.contains("globalThis.__nobleTestSpawn"), "the spawn import is replaced");
+        let harness = format!(
+            r#"const calls = [];
+globalThis.__nobleTestSpawn = {{
+  spawn(bin, args) {{
+    const call = {{ args, stdin: null }};
+    calls.push(call);
+    return {{ on() {{}}, unref() {{}}, stdin: {{ on() {{}}, end(text) {{ call.stdin = JSON.parse(text); }} }} }};
+  }},
+}};
+delete process.env.NOBLE_PANE;
+delete process.env.NOBLE_INSTANCE;
+if ({inside}) {{ process.env.NOBLE_PANE = "3"; process.env.NOBLE_INSTANCE = "42"; }}
+const {{ NoblePlugin }} = await import("./plugin.mjs");
+const hooks = await NoblePlugin({{}});
+for (const event of {events}) await hooks.event({{ event }});
+console.log(JSON.stringify(calls));
+"#,
+            inside = inside,
+            events = serde_json::to_string(events).unwrap(),
+        );
+        std::fs::write(dir.join("plugin.mjs"), plugin).unwrap();
+        std::fs::write(dir.join("harness.mjs"), harness).unwrap();
+        let out = std::process::Command::new("node").arg(dir.join("harness.mjs")).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "node failed: {}", String::from_utf8_lossy(&out.stderr));
+        Some(serde_json::from_slice(&out.stdout).unwrap())
+    }
+
+    /// Subagent events reach NOBLE tagged with their top session (also a subagent of a subagent, and one whose
+    /// creation the plugin saw only as an update); the parent's own events and the subagent's permission requests
+    /// are forwarded, and nothing is forwarded outside NOBLE.
+    #[test]
+    fn plugin_forwards_subagent_events_tagged_with_their_top_session() {
+        let events = vec![
+            json!({ "type": "session.created", "properties": { "info": { "id": "ses_root" } } }),
+            json!({ "type": "session.created", "properties": { "info": { "id": "ses_child", "parentID": "ses_root" } } }),
+            json!({ "type": "session.created", "properties": { "info": { "id": "ses_grand", "parentID": "ses_child" } } }),
+            json!({ "type": "session.status", "properties": { "sessionID": "ses_root", "status": { "type": "busy" } } }),
+            json!({ "type": "session.status", "properties": { "sessionID": "ses_child", "status": { "type": "busy" } } }),
+            json!({ "type": "permission.asked", "properties": { "sessionID": "ses_grand", "type": "bash" } }),
+            json!({ "type": "session.idle", "properties": { "sessionID": "ses_child" } }),
+            json!({ "type": "message.part.updated", "properties": { "sessionID": "ses_child" } }),
+            json!({ "type": "session.updated", "properties": { "info": { "id": "ses_late", "parentID": "ses_root" } } }),
+            json!({ "type": "session.status", "properties": { "sessionID": "ses_late", "status": { "type": "busy" } } }),
+            json!({ "type": "session.status", "properties": { "sessionID": "ses_root", "status": { "type": "idle" } } }),
+        ];
+        let Some(calls) = plugin_calls("plugin-tagged", &events, true) else { return };
+        let got: Vec<(String, Option<String>)> = calls
+            .iter()
+            .map(|c| {
+                let payload = &c["stdin"];
+                let name = payload["type"].as_str().unwrap().to_string();
+                let root = payload["rootSessionID"].as_str().map(str::to_string);
+                assert_eq!(payload["subagent"].as_bool().is_some(), root.is_some(), "{payload}");
+                assert_eq!(c["args"], json!(["hook", &name, "--agent", "opencode"]));
+                (name, root)
+            })
+            .collect();
+        let want = [
+            ("session.status", None),
+            ("session.status", Some("ses_root")),
+            ("permission.asked", Some("ses_root")),
+            ("session.idle", Some("ses_root")),
+            ("session.status", Some("ses_root")),
+            ("session.status", None),
+        ];
+        let want: Vec<(String, Option<String>)> =
+            want.iter().map(|(name, root)| (name.to_string(), root.map(str::to_string))).collect();
+        assert_eq!(got, want);
+        assert_eq!(plugin_calls("plugin-outside", &events, false), Some(Vec::new()), "outside NOBLE nothing is sent");
     }
 }

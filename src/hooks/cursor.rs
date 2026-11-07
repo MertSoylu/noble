@@ -59,10 +59,11 @@ pub(super) fn settings_file(isolated: bool, home: Option<PathBuf>) -> Option<Pat
     home.map(|h| h.join(".cursor").join("hooks.json"))
 }
 
-/// One hook of an event. `base` comes from `command_base`: `noble` when it is on PATH, else a quoted path. Which shell
-/// cursor-agent runs a hook command with on Windows is not verified. If it is PowerShell, a quoted absolute path does
-/// not run there (PowerShell needs the `&` call operator), the same open question as Antigravity's handlers (see
-/// `antigravity::handler`). The usual install with `noble` on PATH does not depend on it.
+/// One hook of an event. `base` comes from `command_base`: `noble` when it is on PATH, else the executable's path as
+/// `quote_for_shell` writes it (unquoted when it is plain, see `hooks::quote_for_shell`). Which shell cursor-agent runs
+/// a hook command with on Windows is not verified. A path with spaces is double-quoted, which PowerShell does not run
+/// (it needs the `&` call operator), the same open question as Antigravity's handlers (see `antigravity::handler`).
+/// The usual install with `noble` on PATH does not depend on it.
 fn handler(base: &str, arg: &str) -> Value {
     let command = format!("{base} hook {arg} --agent {}", Agent::Cursor.id());
     json!({ "command": command, "timeout": TIMEOUT_SECS })

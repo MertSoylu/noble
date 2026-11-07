@@ -6,31 +6,35 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{
-    Agent, NOTIFICATION, PERMISSION_REQUEST, PROMPT, SESSION_END, SESSION_START, STOP, STOP_FAILURE, SUBAGENT_START,
-    SUBAGENT_STOP, field, noble_base, plain_message, read_settings, write_settings,
+    Agent, NOTIFICATION, PERMISSION_REQUEST, PROMPT, SESSION_END, SESSION_START, STOP, STOP_FAILURE, field, noble_base,
+    plain_message, read_settings, write_settings,
 };
 
-/// Copilot event → `noble hook` argument (the camelCase names are Copilot's own).
-pub const EVENTS: [(&str, &str); 9] = [
+/// Copilot event → `noble hook` argument (the camelCase names are Copilot's own). Copilot has no subagent events
+/// here: its `subagentStart` carries no id, so a `subagentStop` (whose `agentId` pairs with nothing) cannot end it
+/// (see `RETIRED_EVENTS`).
+pub const EVENTS: [(&str, &str); 7] = [
     ("sessionStart", SESSION_START),
     ("sessionEnd", SESSION_END),
     ("userPromptSubmitted", PROMPT),
     ("agentStop", STOP),
-    ("subagentStart", SUBAGENT_START),
-    ("subagentStop", SUBAGENT_STOP),
     ("notification", NOTIFICATION),
     ("permissionRequest", PERMISSION_REQUEST),
     ("errorOccurred", STOP_FAILURE),
 ];
 
+/// Events an older NOBLE installed and this one does not: the subagent hooks, which could never be paired. An install
+/// or upgrade removes NOBLE's entries of them, and uninstall removes them too.
+const RETIRED_EVENTS: [&str; 2] = ["subagentStart", "subagentStop"];
+
 /// Seconds a hook may run; NOBLE's hook only writes a small file.
 const TIMEOUT_SECS: u64 = 10;
 
 /// The notification kinds that ask nothing of the user: a background shell or subagent finished, or the agent is
-/// idle. The subagent hooks and the state already show those.
+/// idle. They leave the pane's state as it is.
 const QUIET_KINDS: [&str; 4] = ["agent_idle", "agent_completed", "shell_completed", "shell_detached_completed"];
 
 /// `COPILOT_HOME` when it is set, else `~/.copilot`; `None` without a home folder.
@@ -66,15 +70,38 @@ fn is_noble_entry(entry: &Value) -> bool {
     entry_base(entry).is_some()
 }
 
-/// One command entry of an event. PowerShell runs a quoted path only after the call operator `&`; the bare
-/// `noble` from PATH needs none.
+/// One command entry of an event. PowerShell runs a quoted path only after the call operator `&`; the bare `noble`
+/// from PATH and a plain path (unquoted) need none.
 fn entry(base: &str, arg: &str) -> Value {
     let command = format!("{base} hook {arg} --agent {}", Agent::Copilot.id());
     let powershell = if base.starts_with(['"', '\'']) { format!("& {command}") } else { command.clone() };
     json!({ "type": "command", "bash": command, "powershell": powershell, "timeoutSec": TIMEOUT_SECS })
 }
 
-/// Is every event installed with one of NOBLE's entries? An unreadable file is an error.
+/// Every event NOBLE's entries can be on: the current ones, then the retired ones.
+fn all_events() -> impl Iterator<Item = &'static str> {
+    EVENTS.iter().map(|(event, _)| *event).chain(RETIRED_EVENTS)
+}
+
+/// Removes NOBLE's entries from the lists of `events` in a `hooks` object; a list left empty goes, and the user's
+/// own entries stay. Returns whether an entry was removed.
+fn remove_nobles(hooks: &mut Map<String, Value>, events: impl IntoIterator<Item = &'static str>) -> bool {
+    let mut changed = false;
+    for event in events {
+        if let Some(list) = hooks.get_mut(event).and_then(Value::as_array_mut) {
+            let before = list.len();
+            list.retain(|e| !is_noble_entry(e));
+            changed |= list.len() != before;
+            if list.is_empty() {
+                hooks.remove(event);
+            }
+        }
+    }
+    changed
+}
+
+/// Is every current event installed with one of NOBLE's entries? Retired events do not count. An unreadable file is
+/// an error.
 pub fn installed_state(path: &Path) -> Result<bool, String> {
     let v = read_settings(path)?;
     Ok(EVENTS.iter().all(|(event, _)| {
@@ -82,13 +109,15 @@ pub fn installed_state(path: &Path) -> Result<bool, String> {
     }))
 }
 
-/// Adds the missing entries and the `version` Copilot expects; other keys and entries are kept.
+/// Adds the missing entries and the `version` Copilot expects, and removes NOBLE's entries of the retired events;
+/// other keys and entries are kept.
 pub fn install(path: &Path, base: &str) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let root = v.as_object_mut().ok_or("the hooks file is not a JSON object")?;
     root.entry("version").or_insert(json!(1));
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("\"hooks\" is not an object")?;
+    remove_nobles(hooks, RETIRED_EVENTS);
     for (event, arg) in EVENTS {
         let list = hooks.entry(event).or_insert_with(|| json!([]));
         let list = list.as_array_mut().ok_or(format!("hooks.{event} is not a list"))?;
@@ -104,19 +133,8 @@ pub fn install(path: &Path, base: &str) -> Result<(), String> {
 pub fn uninstall(path: &Path) -> Result<(), String> {
     let mut v = read_settings(path)?;
     let Some(root) = v.as_object_mut() else { return Ok(()) };
-    let mut changed = false;
-    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
-        for (event, _) in EVENTS {
-            if let Some(list) = hooks.get_mut(event).and_then(Value::as_array_mut) {
-                let before = list.len();
-                list.retain(|e| !is_noble_entry(e));
-                changed |= list.len() != before;
-                if list.is_empty() {
-                    hooks.remove(event);
-                }
-            }
-        }
-    }
+    let changed =
+        root.get_mut("hooks").and_then(Value::as_object_mut).is_some_and(|hooks| remove_nobles(hooks, all_events()));
     if !changed {
         return Ok(());
     }
@@ -133,13 +151,18 @@ pub fn uninstall(path: &Path) -> Result<(), String> {
     write_settings(path, &v)
 }
 
-/// Startup: a file with NOBLE's entries from an older build gets the events added since, with the same base.
+/// Startup: a file with NOBLE's entries from an older build gets the events added since, with the same base, and
+/// loses the entries of the retired events.
 pub fn upgrade(path: &Path) -> Result<(), String> {
-    let v = read_settings(path)?;
-    let base = EVENTS
-        .iter()
-        .find_map(|(event, _)| v.pointer(&format!("/hooks/{event}"))?.as_array()?.iter().find_map(entry_base));
+    let mut v = read_settings(path)?;
+    let base =
+        all_events().find_map(|event| v.pointer(&format!("/hooks/{event}"))?.as_array()?.iter().find_map(entry_base));
     let Some(base) = base else { return Ok(()) };
+    let retired =
+        v.get_mut("hooks").and_then(Value::as_object_mut).is_some_and(|hooks| remove_nobles(hooks, RETIRED_EVENTS));
+    if retired {
+        write_settings(path, &v)?;
+    }
     if installed_state(path)? {
         return Ok(());
     }
@@ -182,7 +205,7 @@ pub fn record_message(event: &str, input: &Value) -> Option<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::{HOOK_ARGS, quote_for_shell, read_records, run_cli};
+    use crate::hooks::{HOOK_ARGS, SUBAGENT_START, SUBAGENT_STOP, agents_dir, quote_for_shell, read_records, run_cli};
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("noble-copilot-hooks-{name}-{}", std::process::id()));
@@ -245,6 +268,7 @@ mod tests {
         assert_eq!(start[0]["powershell"], "noble hook session-start --agent copilot");
         assert_eq!(start[0]["timeoutSec"], 10);
         assert_eq!(v["hooks"]["errorOccurred"][0]["bash"], "noble hook stop-failure --agent copilot");
+        assert!(v["hooks"].get("subagentStart").is_none() && v["hooks"].get("subagentStop").is_none());
         let backup = dir.join("hooks").join("noble.json.noble-bak");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), "", "an empty backup: the file did not exist");
         let _ = std::fs::remove_dir_all(&dir);
@@ -300,7 +324,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An install from an older build gets the events it lacks, with the base it was installed with.
+    /// An install from an older build gets the events it lacks, with the base it was installed with. The subagent
+    /// entries that build wrote are removed: they never ended anything.
     #[test]
     fn upgrade_adds_the_events_an_older_install_lacks() {
         let dir = temp("upgrade");
@@ -308,17 +333,17 @@ mod tests {
         let base = quote_for_shell("/opt/my hook tools/noble");
         install(&file, &base).unwrap();
         let mut v = read(&file);
-        for event in ["subagentStop", "errorOccurred"] {
-            v["hooks"].as_object_mut().unwrap().remove(event);
-        }
+        v["hooks"].as_object_mut().unwrap().remove("errorOccurred");
+        v["hooks"]["subagentStart"] = json!([entry(&base, SUBAGENT_START)]);
+        v["hooks"]["subagentStop"] = json!([entry(&base, SUBAGENT_STOP)]);
         std::fs::write(&file, v.to_string()).unwrap();
         assert!(!installed_state(&file).unwrap());
         upgrade(&file).unwrap();
         assert!(installed_state(&file).unwrap());
         let v = read(&file);
-        assert_eq!(v["hooks"]["subagentStop"][0]["bash"], format!("{base} hook subagent-stop --agent copilot"));
         assert_eq!(v["hooks"]["errorOccurred"][0]["powershell"], format!("& {base} hook stop-failure --agent copilot"));
         assert_eq!(v["hooks"]["agentStop"].as_array().unwrap().len(), 1, "existing entries are not duplicated");
+        assert!(v["hooks"].get("subagentStart").is_none() && v["hooks"].get("subagentStop").is_none());
         // Without NOBLE's entries nothing is written.
         let other = dir.join("other.json");
         std::fs::write(&other, r#"{ "hooks": {} }"#).unwrap();
@@ -347,12 +372,8 @@ mod tests {
         assert_eq!(rec().unwrap().message.as_deref(), Some("Copilot asks a question"), "a reminder keeps the state");
         hook(PERMISSION_REQUEST, r#"{"toolName":"bash"}"#);
         assert_eq!(rec().unwrap().message.as_deref(), Some("Copilot asks to run bash"));
-        hook(SUBAGENT_START, r#"{"agentId":"sub-7","agentName":"explore"}"#);
         hook(STOP, r#"{"stopReason":"end_turn"}"#);
-        let r = rec().unwrap();
-        assert_eq!((r.event.as_str(), r.subagents), ("stop", 1), "the subagent still runs");
-        hook(SUBAGENT_STOP, r#"{"agentId":"sub-7","agentType":"explore"}"#);
-        assert_eq!(rec().unwrap().subagents, 0);
+        assert_eq!(rec().unwrap().event, "stop");
         hook(STOP_FAILURE, r#"{"recoverable":true,"error":{"message":"retrying"}}"#);
         assert_eq!(rec().unwrap().event, "stop", "a recovered error changes nothing");
         hook(STOP_FAILURE, r#"{"recoverable":false,"error":{"message":"model unavailable"}}"#);
@@ -362,5 +383,61 @@ mod tests {
         hook(SESSION_END, r#"{"reason":"complete"}"#);
         assert!(rec().is_none(), "the session ended: no record");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Copilot's subagent payloads are not tracked: a start has no id, and a stop's `agentId` pairs with no start, so
+    /// neither writes a marker or changes the pane's record.
+    #[test]
+    fn subagent_payloads_track_nothing() {
+        let data = temp("subagent");
+        let hook = |arg: &str, stdin: &str| run_cli(Agent::Copilot, arg, stdin, &data, Some("42"), Some("3"));
+        hook(PROMPT, r#"{"prompt":"explore the repo"}"#);
+        hook(SUBAGENT_START, r#"{"sessionId":"s-1","timestamp":1,"cwd":"/repo","agentName":"explore"}"#);
+        hook(SUBAGENT_STOP, r#"{"sessionId":"s-1","agentId":"sub-7","agentType":"explore"}"#);
+        let rec = read_records(&data, 42).remove(&3).unwrap();
+        assert_eq!((rec.event.as_str(), rec.subagents), ("prompt", 0));
+        let files: Vec<_> = std::fs::read_dir(agents_dir(&data)).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "the pane's record only: {files:?}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The subagent entries an older build wrote leave with the next upgrade or install, and the user's own entries in
+    /// those events stay. A file that still holds every current event reports installed while it holds them.
+    #[test]
+    fn retired_subagent_entries_are_removed_on_upgrade_and_install() {
+        let dir = temp("retired");
+        let file = dir.join("noble.json");
+        install(&file, "noble").unwrap();
+        let mut v = read(&file);
+        v["hooks"]["subagentStop"] =
+            json!([{ "type": "command", "bash": "say subagent done" }, entry("noble", SUBAGENT_STOP)]);
+        v["hooks"]["subagentStart"] = json!([entry("noble", SUBAGENT_START)]);
+        std::fs::write(&file, v.to_string()).unwrap();
+        assert!(installed_state(&file).unwrap(), "every current event is installed");
+        upgrade(&file).unwrap();
+        let v = read(&file);
+        assert_eq!(v["hooks"]["subagentStop"], json!([{ "type": "command", "bash": "say subagent done" }]));
+        assert!(v["hooks"].get("subagentStart").is_none(), "no NOBLE entry left");
+        // An install writes the current set too.
+        let mut v = read(&file);
+        v["hooks"]["subagentStart"] = json!([entry("noble", SUBAGENT_START)]);
+        std::fs::write(&file, v.to_string()).unwrap();
+        install(&file, "noble").unwrap();
+        assert!(read(&file)["hooks"].get("subagentStart").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Uninstall removes the retired entries as well, and the file goes when nothing else is in it.
+    #[test]
+    fn uninstall_removes_the_retired_entries_too() {
+        let dir = temp("retired-uninstall");
+        let file = dir.join("noble.json");
+        install(&file, "noble").unwrap();
+        let mut v = read(&file);
+        v["hooks"]["subagentStop"] = json!([entry("noble", SUBAGENT_STOP)]);
+        std::fs::write(&file, v.to_string()).unwrap();
+        uninstall(&file).unwrap();
+        assert!(!file.exists(), "nothing else was in the file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

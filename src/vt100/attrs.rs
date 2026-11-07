@@ -21,6 +21,9 @@ const TEXT_MODE_DIM: u8 = 0b0000_0010;
 const TEXT_MODE_ITALIC: u8 = 0b0000_0100;
 const TEXT_MODE_UNDERLINE: u8 = 0b0000_1000;
 const TEXT_MODE_INVERSE: u8 = 0b0001_0000;
+const TEXT_MODE_STRIKETHROUGH: u8 = 0b0010_0000;
+const TEXT_MODE_CONCEAL: u8 = 0b0100_0000;
+const TEXT_MODE_BLINK: u8 = 0b1000_0000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Attrs {
@@ -102,6 +105,42 @@ impl Attrs {
         }
     }
 
+    pub fn strikethrough(&self) -> bool {
+        self.mode & TEXT_MODE_STRIKETHROUGH != 0
+    }
+
+    pub fn set_strikethrough(&mut self, strikethrough: bool) {
+        if strikethrough {
+            self.mode |= TEXT_MODE_STRIKETHROUGH;
+        } else {
+            self.mode &= !TEXT_MODE_STRIKETHROUGH;
+        }
+    }
+
+    pub fn conceal(&self) -> bool {
+        self.mode & TEXT_MODE_CONCEAL != 0
+    }
+
+    pub fn set_conceal(&mut self, conceal: bool) {
+        if conceal {
+            self.mode |= TEXT_MODE_CONCEAL;
+        } else {
+            self.mode &= !TEXT_MODE_CONCEAL;
+        }
+    }
+
+    pub fn blink(&self) -> bool {
+        self.mode & TEXT_MODE_BLINK != 0
+    }
+
+    pub fn set_blink(&mut self, blink: bool) {
+        if blink {
+            self.mode |= TEXT_MODE_BLINK;
+        } else {
+            self.mode &= !TEXT_MODE_BLINK;
+        }
+    }
+
     pub fn write_escape_code_diff(&self, contents: &mut String, other: &Self) {
         self.write_escape_code_diff_fmt(contents, other).expect("writing to a String cannot fail");
     }
@@ -128,6 +167,13 @@ impl Attrs {
         let attrs = if self.italic() == other.italic() { attrs } else { attrs.italic(self.italic()) };
         let attrs = if self.underline() == other.underline() { attrs } else { attrs.underline(self.underline()) };
         let attrs = if self.inverse() == other.inverse() { attrs } else { attrs.inverse(self.inverse()) };
+        let attrs = if self.conceal() == other.conceal() { attrs } else { attrs.conceal(self.conceal()) };
+        let attrs = if self.blink() == other.blink() { attrs } else { attrs.blink(self.blink()) };
+        let attrs = if self.strikethrough() == other.strikethrough() {
+            attrs
+        } else {
+            attrs.strikethrough(self.strikethrough())
+        };
 
         attrs.write_fmt(writer)
     }

@@ -24,10 +24,12 @@ pub const EVENTS: [(&str, &str); 9] = [
     ("StopFailure", STOP_FAILURE),
 ];
 
-/// Notifications that ask nothing of the user: the idle reminder Claude sends a while after its answer (it is
-/// already "your turn", and it also comes while background subagents still run) and a background subagent
-/// finishing (the subagent hooks track that).
-const QUIET_NOTIFICATIONS: [&str; 2] = ["idle_prompt", "agent_completed"];
+/// The `notification_type` values that ask the user to act: a permission prompt, an MCP server's question or URL to
+/// open, and an agent waiting for input. Every other type is quiet, known or not (`record_message` drops it): the
+/// idle reminder (Claude is already "your turn", and it also comes while background subagents still run), a
+/// background subagent finishing (the subagent hooks track that), auth, quota and elicitation results, plugin notices.
+const NEEDS_USER: [&str; 4] =
+    ["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"];
 /// The idle reminder's text, for Claude versions that do not send `notification_type`.
 const IDLE_MESSAGE: &str = "Claude is waiting for your input";
 
@@ -53,7 +55,12 @@ pub fn record_message(event: &str, input: &Value) -> Option<Option<String>> {
     let message = match event {
         NOTIFICATION => {
             let kind = field(input, "notification_type");
-            if kind.is_some_and(|k| QUIET_NOTIFICATIONS.contains(&k)) || text == Some(IDLE_MESSAGE) {
+            // A payload without a type (older Claude) is quiet only when its text is the idle reminder's.
+            let quiet = match kind {
+                Some(k) => !NEEDS_USER.contains(&k),
+                None => text == Some(IDLE_MESSAGE),
+            };
+            if quiet {
                 return None;
             }
             match kind {
@@ -73,6 +80,9 @@ pub fn record_message(event: &str, input: &Value) -> Option<Option<String>> {
         STOP_FAILURE => {
             field(input, "error").filter(|e| !e.is_empty()).map(|e| format!("Claude stopped with an error: {e}"))
         }
+        // A compaction (`source` "compact", automatic or `/compact`) can come in the middle of a turn: the agent is
+        // still working, so the pane keeps its record. The other sources (startup, resume, clear, fork) start one.
+        SESSION_START if field(input, "source") == Some("compact") => return None,
         _ => text.map(str::to_string),
     };
     Some(message.map(|m| crate::util::truncate(&m, 120)))
@@ -192,7 +202,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The reminders are never recorded; the other notifications keep a text that says what they ask.
+    /// Only the notifications that ask the user are recorded; they keep a text that says what they ask. Every
+    /// other type leaves the record alone, so a notice after an answer does not bring "needs you" back.
     #[test]
     fn only_real_notifications_are_recorded() {
         let data = temp("quiet");
@@ -213,6 +224,26 @@ mod tests {
         assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Claude asks to run Bash"));
         hook("notification", r#"{"notification_type":"elicitation_dialog","message":"Which branch?"}"#);
         assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Claude asks a question"));
+        // Notices after the user answered (and every other type) leave that record alone.
+        let kinds = [
+            "elicitation_complete",
+            "elicitation_response",
+            "auth_success",
+            "auth_storage_failure",
+            "quota_auto_resume_fired",
+            "quota_auto_resume_stale",
+            "quota_auto_resume_disabled",
+            "plugin_notification",
+            "some_future_type",
+        ];
+        for kind in kinds {
+            hook("notification", &format!(r#"{{"notification_type":"{kind}","message":"A notice"}}"#));
+            assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Claude asks a question"), "{kind}");
+        }
+        hook("notification", r#"{"notification_type":"agent_needs_input","message":"Pick a repo"}"#);
+        assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Pick a repo"));
+        hook("notification", r#"{"notification_type":"elicitation_url_dialog","message":"Open the link"}"#);
+        assert_eq!(read_records(&data, 42)[&3].message.as_deref(), Some("Open the link"));
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -264,6 +295,20 @@ mod tests {
         // The reminders are not recorded at all.
         assert_eq!(msg("notification", r#"{"notification_type":"idle_prompt"}"#), None);
         assert_eq!(msg("notification", r#"{"message":"Claude is waiting for your input"}"#), None);
+        // Only the types that ask the user are recorded; every other type is quiet, known or not.
+        assert_eq!(msg("notification", r#"{"notification_type":"auth_success","message":"Logged in"}"#), None);
+        assert_eq!(msg("notification", r#"{"notification_type":"plugin_notification","message":"x"}"#), None);
+        assert_eq!(msg("notification", r#"{"notification_type":"future_type","message":"x"}"#), None);
+        assert_eq!(
+            msg("notification", r#"{"notification_type":"agent_needs_input","message":"Pick one"}"#),
+            Some(Some("Pick one".into()))
+        );
+        assert_eq!(
+            msg("notification", r#"{"notification_type":"elicitation_url_dialog","message":"Open it"}"#),
+            Some(Some("Open it".into()))
+        );
+        // A payload without a type keeps the needs-you record; only the idle reminder's text is quiet.
+        assert_eq!(msg("notification", r#"{"message":"Needs you"}"#), Some(Some("Needs you".into())));
         // A long message is cut.
         let long = format!(r#"{{"message":"{}"}}"#, "x".repeat(300));
         assert_eq!(msg("prompt", &long).flatten().map(|m| m.chars().count()), Some(120));
@@ -334,8 +379,9 @@ mod tests {
     #[test]
     fn hook_base_is_quoted_for_the_shell() {
         if cfg!(windows) {
-            // Windows: double quotes, as before (cmd.exe and Git Bash read them).
-            assert_eq!(quote_for_shell(r"C:\my tools\noble.exe"), r#""C:\my tools\noble.exe""#);
+            // Windows: forward slashes, no quotes for a plain path, double quotes when it has a space (`windows_word`).
+            assert_eq!(quote_for_shell(r"C:\Tools\noble.exe"), "C:/Tools/noble.exe");
+            assert_eq!(quote_for_shell(r"C:\my tools\noble.exe"), r#""C:/my tools/noble.exe""#);
         } else {
             // Unix: single quotes, so `$`, backticks and backslashes stay literal.
             assert_eq!(quote_for_shell("/opt/a b/$X/`y`/noble"), "'/opt/a b/$X/`y`/noble'");
