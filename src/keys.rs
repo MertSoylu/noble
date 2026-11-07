@@ -481,7 +481,7 @@ impl Action {
             Action::ScrollDown => "Scroll Down (page)".into(),
             Action::Search => "Search Scrollback".into(),
             Action::AddProjectFolder => "Add Project or Folder…".into(),
-            Action::AddProject => "Add Project…".into(),
+            Action::AddProject => "Add One Project…".into(),
             Action::RemoveProject => "Remove Selected Project from List".into(),
             Action::SendPrefix => "Send Prefix Key to Shell".into(),
             Action::MoveTabLeft => "Move Tab Left".into(),
@@ -511,7 +511,6 @@ impl Action {
             | Action::Settings
             | Action::Palette
             | Action::Help
-            | Action::Quit
             | Action::JumpToAgent => "NAV",
             Action::NewTab
             | Action::CloseTab

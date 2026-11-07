@@ -31,6 +31,8 @@ pub enum MenuCmd {
     MoveTab(TabId, i32),
     OpenProject(PathBuf),
     Launch(usize, PathBuf),
+    /// Opens the list of launchers that start in the project's folder (`Launch`), where the project menu is.
+    StartMenu(PathBuf),
     GitPull(PathBuf),
     TogglePin(PathBuf),
     RemoveProject(PathBuf),
@@ -45,6 +47,24 @@ pub struct MenuItem {
     pub hint: String,
     pub cmd: MenuCmd,
     pub enabled: bool,
+    /// A thin rule is drawn above the item (a rule above the menu's first item is not drawn).
+    pub sep: bool,
+    /// The label is drawn in the critical color: the command closes or removes something.
+    pub danger: bool,
+}
+
+impl MenuItem {
+    /// Draws a rule above this item.
+    pub fn sep(mut self) -> Self {
+        self.sep = true;
+        self
+    }
+
+    /// Draws the label in the critical color.
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
 }
 
 /// An open right-click menu, drawn next to the clicked point.
@@ -64,8 +84,11 @@ pub enum ProjectAct {
 }
 
 fn item(label: &str, hint: &str, cmd: MenuCmd) -> MenuItem {
-    MenuItem { label: label.into(), hint: hint.into(), cmd, enabled: true }
+    MenuItem { label: label.into(), hint: hint.into(), cmd, enabled: true, sep: false, danger: false }
 }
+
+/// The project menu lists this many quick launchers inline; more of them go behind one "Start agent ›" row.
+const INLINE_LAUNCHERS: usize = 3;
 
 impl App {
     pub(super) fn open_menu(&mut self, title: String, x: u16, y: u16, items: Vec<MenuItem>) {
@@ -89,7 +112,7 @@ impl App {
             items.push(item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())));
             items.push(item("Open folder", "", MenuCmd::OpenFolder(cwd)));
         }
-        items.push(item("Close tab", &hint(crate::keys::Action::CloseTab), MenuCmd::CloseTab(key)));
+        items.push(item("Close tab", &hint(crate::keys::Action::CloseTab), MenuCmd::CloseTab(key)).sep().danger());
         self.open_menu(self.tab_title(i), x, y, items);
     }
 
@@ -145,7 +168,7 @@ impl App {
             item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())),
             item("Open folder", "", MenuCmd::OpenFolder(cwd.clone())),
             item("Open in VS Code", "", MenuCmd::OpenCode(cwd)),
-            item("Close pane", &hint(A::ClosePane), MenuCmd::ClosePane(pane)),
+            item("Close pane", &hint(A::ClosePane), MenuCmd::ClosePane(pane)).sep().danger(),
         ]);
         self.open_menu(label, x, y, items);
     }
@@ -160,23 +183,37 @@ impl App {
         self.open_menu("Launch in split".into(), x, y, items);
     }
 
+    /// The launchers a project menu offers to start in the project's folder, at the same place: a row each
+    /// (`Launch`), named by the launcher.
+    pub fn open_start_menu(&mut self, path: PathBuf, x: u16, y: u16) {
+        let items: Vec<MenuItem> =
+            self.quick_launchers().map(|(i, l)| item(&l.name, &l.key, MenuCmd::Launch(i, path.clone()))).collect();
+        self.open_menu("Start agent".into(), x, y, items);
+    }
+
+    /// Project rows: open or start in the folder, then the folder's own actions, Git pull for repos, and the
+    /// pin and the removal from the list (see `MenuCmd::RemoveProject`).
     pub fn open_project_menu(&mut self, path: PathBuf, x: u16, y: u16) {
         let Some(p) = self.projects.iter().find(|p| p.path == path) else { return };
         let (name, repo) = (p.name.clone(), p.repo);
         let mut items = vec![item("Open terminal", "⏎", MenuCmd::OpenProject(path.clone()))];
-        for (i, l) in self.quick_launchers() {
-            items.push(item(&format!("Start {}", l.name), &l.key, MenuCmd::Launch(i, path.clone())));
+        if self.quick_launchers().count() > INLINE_LAUNCHERS {
+            items.push(item("Start agent ›", "", MenuCmd::StartMenu(path.clone())));
+        } else {
+            for (i, l) in self.quick_launchers() {
+                items.push(item(&format!("Start {}", l.name), &l.key, MenuCmd::Launch(i, path.clone())));
+            }
         }
-        items.push(item("Open in VS Code", "", MenuCmd::OpenCode(path.clone())));
+        items.push(item("Open in VS Code", "", MenuCmd::OpenCode(path.clone())).sep());
         items.push(item("Open folder", "o", MenuCmd::OpenFolder(path.clone())));
-        if repo {
-            items.push(item("Git pull", "", MenuCmd::GitPull(path.clone())));
-        }
         items.push(item("Copy path", "", MenuCmd::CopyText(path.display().to_string())));
+        if repo {
+            items.push(item("Git pull", "", MenuCmd::GitPull(path.clone())).sep());
+        }
         let pin = if self.ui_state.is_pinned(&path) { "Unpin" } else { "Pin to top" };
-        items.push(item(pin, "", MenuCmd::TogglePin(path.clone())));
+        items.push(item(pin, "", MenuCmd::TogglePin(path.clone())).sep());
         // Hides it from the list for good (the folder is not touched); a adds it back.
-        items.push(item("Remove from list", "", MenuCmd::RemoveProject(path)));
+        items.push(item("Remove from list", "", MenuCmd::RemoveProject(path)).danger());
         self.open_menu(name, x, y, items);
     }
 
@@ -238,6 +275,7 @@ impl App {
             }
             MenuCmd::OpenProject(path) => self.open_project_shell(path),
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
+            MenuCmd::StartMenu(path) => self.open_start_menu(path, at.0, at.1),
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
             MenuCmd::RemoveProject(path) => self.request_remove_project(path),

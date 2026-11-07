@@ -155,20 +155,36 @@ fn welcome_card_lists_only_installed_launchers() {
     ];
     app.show_welcome();
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("start Claude right there") && !text.contains("Codex"), "{text}");
+    assert!(text.contains("start Claude in the project") && !text.contains("Codex"), "{text}");
     for l in &mut app.launchers {
         l.1 = false;
     }
     let text = render(&mut app, 110, 30);
-    assert!(!text.contains("right there") && text.contains("command palette"), "{text}");
+    assert!(!text.contains("start ") && text.contains("command palette: every action"), "{text}");
 }
 
-/// The launcher line drops whole launcher names that do not fit and counts them as "+N": at every size
-/// the card is drawn at, the line never ends in a cut name (it used to stop at "… / Antigravit").
+/// Up to three installed CLIs are named, with their keys: the line reads `start Claude / Codex in the project`.
 #[test]
-fn welcome_card_launcher_line_drops_whole_names() {
+fn welcome_card_names_up_to_three_launchers() {
     use noble::config::Launcher;
-    const NAMES: [&str; 6] = ["Claude", "Codex", "Gemini", "Antigravity", "Opencode", "Cursor"];
+    let mut app = demo_app(110, 30);
+    app.launchers = [("c", "claude"), ("x", "codex")]
+        .into_iter()
+        .map(|(key, name)| (Launcher { key: key.into(), name: name.into(), command: name.into(), show: true }, true))
+        .collect();
+    app.show_welcome();
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("start Claude / Codex in the project"), "{text}");
+    let row = text.lines().find(|l| l.contains("start Claude")).expect("the launcher row");
+    assert!(row.contains("c  x"), "the keys sit beside their line: {row:?}");
+}
+
+/// With more launchers than the card names, the line keeps the first three keys and "…" and says "an AI CLI"
+/// instead of listing them. At every size the card is drawn at, the line is whole or cut at a word.
+#[test]
+fn welcome_card_launcher_line_marks_the_launchers_it_does_not_name() {
+    use noble::config::Launcher;
+    const LINE: &str = "start an AI CLI in the project";
     let keys = ["c", "x", "g", "a", "o", "u"];
     let commands = ["claude", "codex", "gemini", "antigravity", "opencode", "cursor"];
     let mut app = demo_app(110, 30);
@@ -184,21 +200,14 @@ fn welcome_card_launcher_line_drops_whole_names() {
     for (w, h) in SIZES {
         let text = render(&mut app, w, h);
         save(&format!("welcome-launchers-{w}x{h}"), &text);
-        // The line runs to the card's right border; a cut line never reaches "right there".
-        let Some(line) = text.lines().find(|l| l.contains("start ")) else { continue };
+        // The row carries the keys and the line; a narrow card may leave the row out.
+        let Some(row) = text.lines().find(|l| l.contains("start ")) else { continue };
         checked += 1;
-        let from = &line[line.find("start ").expect("start")..];
-        let segment = from.split('│').next().unwrap_or_default().trim_end();
-        assert!(segment.ends_with(" right there"), "{w}x{h}: the launcher line is cut: {segment:?}\n{text}");
-        let list = segment.strip_prefix("start ").and_then(|s| s.strip_suffix(" right there")).expect("launcher line");
-        // `Claude / Codex +4`: the names shown, then the count of the names left out.
-        let (shown, hidden) = match list.rsplit_once('+') {
-            Some((names, n)) => (names.trim_end(), n.parse::<usize>().expect("+N count")),
-            None => (list, 0),
-        };
-        let names: Vec<&str> = if shown.is_empty() { Vec::new() } else { shown.split(" / ").collect() };
-        assert!(names.iter().all(|n| NAMES.contains(n)), "{w}x{h}: a cut or unknown name in {segment:?}\n{text}");
-        assert_eq!(names.len() + hidden, NAMES.len(), "{w}x{h}: the names left out are not counted in {segment:?}");
+        assert!(row.contains("c  x  g  …"), "{w}x{h}: the first three keys and \"…\" are not drawn: {row:?}\n{text}");
+        let line = launcher_text(&text).expect("the launcher line");
+        assert_word_cut(&format!("start {line}"), LINE, &format!("{w}x{h}"));
+        // The CLIs are not listed by name.
+        assert!(!row.contains("Claude") && !row.contains("Codex"), "{w}x{h}: {row:?}");
     }
     assert!(checked >= 3, "the launcher line is drawn at 110, 120 and 160 columns");
 }
@@ -233,16 +242,15 @@ fn assert_word_cut(shown: &str, full: &str, ctx: &str) {
 }
 
 /// The card's texts are cut at a word boundary with "…", never inside a word, and a row with no room for its
-/// first word is left out whole. Nine launchers at 120 columns used to cut the palette text after "is i"; at 45
-/// columns the key column ended in a cut key and the descriptions in fragments.
+/// first word is left out whole. Nine launchers show three keys and "…"; at 45 columns the texts are cut after a
+/// whole word, and the key column never ends in a cut key.
 #[test]
 fn welcome_card_cuts_text_at_word_boundaries() {
     use noble::config::Launcher;
-    const TERMINAL: &str = "open a terminal in the selected project";
-    const PALETTE: &str = "command palette — everything is in there";
-    const SHORTCUTS: &str = "every shortcut · ctrl+click opens links";
-    const NAMES: [&str; 9] =
-        ["Claude", "Codex", "Opencode", "Antigravity", "Oh-my-pi", "Freebuff", "Cursor", "Command code", "Cline"];
+    const TERMINAL: &str = "open a terminal in the project";
+    const PALETTE: &str = "command palette: every action";
+    const SHORTCUTS: &str = "all shortcuts";
+    const LINE: &str = "start an AI CLI in the project";
     let keys = ["c", "x", "e", "g", "b", "f", "u", "d", "l"];
     let commands =
         ["claude", "codex", "opencode", "antigravity", "oh-my-pi", "freebuff", "cursor", "command code", "cline"];
@@ -255,12 +263,14 @@ fn welcome_card_cuts_text_at_word_boundaries() {
         })
         .collect();
     app.show_welcome();
-    // Nine keys take 27 columns of the key column, so the texts get 33: each is cut after the last whole word.
+    // Nine launchers show as "c  x  e  …" (10 columns), so the texts keep 48 columns: each one is whole.
     let text = render(&mut app, 120, 34);
     save("welcome-cut-120x34", &text);
-    assert_eq!(card_text(&text, "⏎").as_deref(), Some("open a terminal in the selected…"), "{text}");
-    assert_eq!(card_text(&text, "alt+p").as_deref(), Some("command palette — everything is…"), "{text}");
-    assert_eq!(card_text(&text, "?").as_deref(), Some("every shortcut · ctrl+click…"), "{text}");
+    assert_eq!(card_text(&text, "⏎").as_deref(), Some(TERMINAL), "{text}");
+    assert_eq!(card_text(&text, "alt+p").as_deref(), Some(PALETTE), "{text}");
+    assert_eq!(card_text(&text, "?").as_deref(), Some(SHORTCUTS), "{text}");
+    assert_eq!(launcher_text(&text).as_deref(), Some("an AI CLI in the project"), "{text}");
+    assert!(text.contains("c  x  e  …"), "{text}");
     for (w, h) in [(120, 34), (90, 28), (76, 24), (56, 18), (45, 30), (45, 18), (45, 12), (30, 8)] {
         let text = render(&mut app, w, h);
         save(&format!("welcome-cut-{w}x{h}"), &text);
@@ -270,19 +280,40 @@ fn welcome_card_cuts_text_at_word_boundaries() {
             assert!(!shown.is_empty(), "{w}x{h}: the {key} row has no description\n{text}");
             assert_word_cut(&shown, full, &format!("{w}x{h} {key}"));
         }
-        // The launcher line names whole CLIs or counts the ones left out as "+N": no name is cut.
-        let Some(line) = launcher_text(&text) else { continue };
-        let body = line.strip_suffix(" right there").unwrap_or(&line);
-        let (list, hidden) = match body.rsplit_once('+') {
-            Some((list, n)) => (list.trim_end(), n.parse::<usize>().expect("+N count")),
-            None => (body, 0),
-        };
-        let names: Vec<&str> = if list.is_empty() { Vec::new() } else { list.split(" / ").collect() };
-        assert!(names.iter().all(|n| NAMES.contains(n)), "{w}x{h}: a cut or unknown name in {line:?}\n{text}");
-        assert_eq!(names.len() + hidden, NAMES.len(), "{w}x{h}: names left out not counted in {line:?}");
+        // The launcher line is the whole phrase, or cut after a whole word; no CLI is named on it.
+        if let Some(line) = launcher_text(&text) {
+            assert_word_cut(&format!("start {line}"), LINE, &format!("{w}x{h} launchers"));
+            assert!(!line.contains("Claude") && !line.contains("Codex"), "{w}x{h}: {line:?}");
+        }
     }
     // The narrowest card cuts its setup values at a word too: "Follow…", not "Follow th…".
     let text = render(&mut app, 30, 8);
     assert!(text.contains("Follow…") && text.contains("auto…"), "{text}");
     assert!(!text.contains("Follow th") && !text.contains("auto (p"), "{text}");
+}
+
+/// The first screen a new user sees: at 120×34 and 110×30 each explanation of the card is whole, so no row cuts
+/// its text with "…" (the launcher keys keep their "…" for the launchers they leave out).
+#[test]
+fn welcome_card_explanations_are_whole_at_120_and_110() {
+    use noble::config::Launcher;
+    let keys = ["c", "x", "e", "g", "b", "f", "u", "d", "l"];
+    let commands =
+        ["claude", "codex", "opencode", "antigravity", "oh-my-pi", "freebuff", "cursor", "command code", "cline"];
+    let mut app = demo_app(110, 30);
+    app.launchers = keys
+        .iter()
+        .zip(commands)
+        .map(|(key, name)| {
+            (Launcher { key: key.to_string(), name: name.into(), command: name.into(), show: true }, true)
+        })
+        .collect();
+    app.show_welcome();
+    for (w, h) in [(120, 34), (110, 30)] {
+        let text = render(&mut app, w, h);
+        assert_eq!(card_text(&text, "⏎").as_deref(), Some("open a terminal in the project"), "{w}x{h}\n{text}");
+        assert_eq!(card_text(&text, "alt+p").as_deref(), Some("command palette: every action"), "{w}x{h}\n{text}");
+        assert_eq!(card_text(&text, "?").as_deref(), Some("all shortcuts"), "{w}x{h}\n{text}");
+        assert_eq!(launcher_text(&text).as_deref(), Some("an AI CLI in the project"), "{w}x{h}\n{text}");
+    }
 }

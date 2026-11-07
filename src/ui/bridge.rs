@@ -315,7 +315,7 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
             buf,
             x,
             y + 1,
-            &[("press ", th.dim()), ("a", th.accent_bold()), (" to add a project or folder", th.dim())],
+            &[("Press ", th.dim()), ("a", th.accent_bold()), (" to add a project or folder", th.dim())],
             w,
         );
     } else if vis.is_empty() {
@@ -452,31 +452,31 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
         return;
     }
     let by = inner.bottom() - 1;
+    // The selected project's open AI sessions: the summary row's only part while the card is open.
+    let sessions = app.selected_project().map_or_else(Vec::new, |p| session_parts(p, agents, th));
     // A faint rule above the summary anchors it to the action bar when the card leaves a gap.
-    if footer_h == 3 && card_h > 0 && by >= 3 && by - 3 > card_used && by - 3 > card_top {
+    if footer_h == 3 && card_h > 0 && !sessions.is_empty() && by >= 3 && by - 3 > card_used && by - 3 > card_top {
         hud::hline(buf, x, by - 3, w, "─", th.line());
     }
     if footer_h == 3 {
-        // Selected project: open AI sessions, the git status sentence and the last
-        // commit (or the folder path when the card is open, since the card shows it).
+        // Selected project: open AI sessions on the summary row. Without the card (a small terminal) the row also
+        // holds the git status sentence, the pull request, the ports and the last commit (or the folder path); the
+        // card shows all of those itself, so with it the row has only the sessions.
         if let Some(p) = app.selected_project() {
-            let detail = match p.git.as_ref().and_then(|g| g.last_subject.clone().map(|s| (s, g.last_commit))) {
-                _ if card_h > 0 => util::tilde(&p.path),
-                Some((s, Some(t))) => format!("last commit: {s} · {} ago", ago_ts(t)),
-                Some((s, None)) => format!("last commit: {s}"),
-                None => util::tilde(&p.path),
-            };
-            let mut parts: Vec<(String, Style, Option<Hit>)> =
-                git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c), None)).collect();
-            for &(kind, state) in agents.get(&p.path).into_iter().flatten() {
-                let (_, color) = state_glyph(state, th);
-                parts.push((format!("{kind} {}", state.label()), Style::default().fg(color), None));
+            let mut parts: Vec<(String, Style, Option<Hit>)> = Vec::new();
+            if card_h == 0 {
+                parts.extend(git_summary(p, th).into_iter().map(|(t, c)| (t, Style::default().fg(c), None)));
             }
-            // Without the card (a small terminal), the pull request and the ports go here.
+            parts.extend(sessions.iter().map(|(t, st)| (t.clone(), *st, None)));
             if card_h == 0 {
                 parts.extend(footer_live_parts(app, p));
+                let detail = match p.git.as_ref().and_then(|g| g.last_subject.clone().map(|s| (s, g.last_commit))) {
+                    Some((s, Some(t))) => format!("last commit: {s} · {} ago", ago_ts(t)),
+                    Some((s, None)) => format!("last commit: {s}"),
+                    None => util::tilde(&p.path),
+                };
+                parts.push((detail, th.dim(), None));
             }
-            parts.push((detail, th.dim(), None));
             let mut cx = x + 1;
             let mut drawn = false;
             for (text, style, hit) in &parts {
@@ -518,13 +518,33 @@ fn projects(buf: &mut Buffer, area: Rect, app: &App, agents: &AgentsByProject, h
         hits.push((Rect::new(start, by, *cx - start, 1), hit));
         *cx += 1;
     };
-    button(&mut cx, "⏎", "Open", Hit::OpenSelected, true);
-    for (i, l) in app.quick_launchers() {
-        // A full quota of the agent's subscription marks its chip (`App::launcher_quota_full`).
-        let full = if app.launcher_quota_full(&l.command) { " ⚠" } else { "" };
-        button(&mut cx, &l.key, &format!("{}{full}", capitalize(&l.name)), Hit::Launcher(i), true);
+    if total == 0 {
+        // No project to act on: the one button adds a project, as the `a` key does.
+        button(&mut cx, "a", "Add project", Hit::AddProject, true);
+    } else if !vis.is_empty() {
+        // The action bar acts on the selected project. A filter that matches none has no project to act on, so it
+        // draws no buttons.
+        button(&mut cx, "⏎", "Open", Hit::OpenSelected, true);
+        for (i, l) in app.quick_launchers() {
+            // A full quota of the agent's subscription marks its chip (`App::launcher_quota_full`).
+            let full = if app.launcher_quota_full(&l.command) { " ⚠" } else { "" };
+            button(&mut cx, &l.key, &format!("{}{full}", capitalize(&l.name)), Hit::Launcher(i), true);
+        }
+        button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
     }
-    button(&mut cx, "o", "Folder", Hit::OpenFiles, true);
+}
+
+/// The open AI sessions of a project as footer parts: "claude working", "codex needs you" in their state colors.
+fn session_parts(p: &Project, agents: &AgentsByProject, th: &Theme) -> Vec<(String, Style)> {
+    agents
+        .get(&p.path)
+        .into_iter()
+        .flatten()
+        .map(|&(kind, state)| {
+            let (_, color) = state_glyph(state, th);
+            (format!("{kind} {}", state.label()), Style::default().fg(color))
+        })
+        .collect()
 }
 
 /// "/ search" on the Projects panel's top border, just left of the count ("/ search · 6"). A click
@@ -561,10 +581,20 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     let x = area.x + 1;
     let w = area.width.saturating_sub(2);
     let mut y = area.y;
-    // Separator: "── noble-rs ─────────".
+    // Separator: "── noble-rs · ~\Desktop\noble-rs ─────────". The name is accent bold and the folder dim, cut from the
+    // left to the room left (two dashes stay at the right end). Under 8 cells for the folder: the name alone.
     hud::hline(buf, area.x, y, area.width, "─", Style::default().fg(th.line));
-    let title = format!(" {} ", util::truncate(&p.name, w.saturating_sub(4) as usize));
-    hud::put(buf, x + 1, y, &title, th.accent_bold(), w);
+    let title_max = w.saturating_sub(2) as usize;
+    let name = util::truncate(&p.name, w.saturating_sub(4) as usize);
+    // " name · " and the space before the dashes take the cells beside the folder.
+    let folder_room = title_max.saturating_sub(1 + util::width(&name) + 3 + 1);
+    if folder_room >= 8 {
+        let folder = util::truncate_left(&util::tilde(&p.path), folder_room);
+        let (head, tail) = (format!(" {name}"), format!(" · {folder} "));
+        hud::put_spans(buf, x + 1, y, &[(&head, th.accent_bold()), (&tail, th.dim())], w);
+    } else {
+        hud::put(buf, x + 1, y, &format!(" {name} "), th.accent_bold(), w);
+    }
     y += 1;
     // The spacer row under the title carries the pull request and the ports.
     live_row(buf, x, y, w, app, p, hits);
@@ -640,9 +670,10 @@ fn project_card(buf: &mut Buffer, area: Rect, app: &App, p: &Project, hits: &mut
     y + change_rows
 }
 
-/// The Claude line of the selected project's card: `↻ claude · 2h ago`, when the project has a Claude conversation
-/// folder and a `claude` launcher is installed. A click continues that conversation (`Hit::ClaudeContinue`). `line` is
-/// the row it would take (drawn only when it has a row). Returns the rows used (0 or 1).
+/// The Claude line of the selected project's card: a chip `↻ Continue claude · 2h ago`, drawn like the TASKS chips,
+/// when the project has a Claude conversation folder and a `claude` launcher is installed. A click continues that
+/// conversation (`Hit::ClaudeContinue`, the chip's whole width). `line` is the row it would take (drawn only when it
+/// has a row). Returns the rows used (0 or 1).
 fn claude_line(buf: &mut Buffer, line: Rect, app: &App, p: &Project, hits: &mut Vec<(Rect, Hit)>) -> u16 {
     let Some(when) = p.claude else { return 0 };
     if line.height == 0 || line.width < 12 || app.claude_launcher().is_none() {
@@ -650,10 +681,15 @@ fn claude_line(buf: &mut Buffer, line: Rect, app: &App, p: &Project, hits: &mut 
     }
     let th = &app.theme;
     let since = ago(when);
-    let text = if since == "now" { "↻ claude · just now".to_string() } else { format!("↻ claude · {since} ago") };
-    hud::put(buf, line.x, line.y, &text, th.accent(), line.width);
-    let width = (util::width(&text) as u16).min(line.width);
-    hits.push((Rect::new(line.x, line.y, width, 1), Hit::ClaudeContinue));
+    let text = if since == "now" {
+        "Continue claude · just now".to_string()
+    } else {
+        format!("Continue claude · {since} ago")
+    };
+    // The chip is " ↻ label ": a label that does not fit is cut, as the line was before.
+    let label = util::truncate(&text, line.width.saturating_sub(4) as usize);
+    let end = hud::button(buf, line.x, line.y, "↻", &label, th, true);
+    hits.push((Rect::new(line.x, line.y, end.saturating_sub(line.x), 1), Hit::ClaudeContinue));
     1
 }
 
@@ -937,13 +973,14 @@ const MAX_BG_ROWS: usize = 3;
 
 fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, bg: usize) -> u16 {
     let mut h: u16 = 2;
-    // Agent and background rows share one spacer row under the session block.
+    // Agent and background rows share one spacer row under the session block; the background rows have their own
+    // "BACKGROUND" header row above them.
     let rows = sessions.min(MAX_SESSION_ROWS)
         + usize::from(sessions > MAX_SESSION_ROWS)
         + bg.min(MAX_BG_ROWS)
         + usize::from(bg > MAX_BG_ROWS);
     if rows > 0 {
-        h += rows as u16 + 1;
+        h += rows as u16 + 1 + u16::from(bg > 0);
     }
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
@@ -990,8 +1027,8 @@ fn expired_hint(p: &ProviderState, w: u16) -> String {
     if util::width(&full) as u16 <= w { full } else { format!("expired · run {}", p.login_hint) }
 }
 
-/// One background Claude session: `● claude bg · Fix the build`, its state at the right edge in the glyph's color.
-/// The name is the session's name, or its folder when it has none.
+/// One background Claude session: `● Fix the build`, its state at the right edge in the glyph's color. The section's
+/// "BACKGROUND" header says what the rows are. The name is the session's name, or its folder when it has none.
 fn bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, s: &crate::bg::BgSession, th: &Theme) {
     use crate::bg::BgKind;
     let (glyph, color) = match s.kind() {
@@ -1001,14 +1038,13 @@ fn bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, s: &crate::bg::BgSession, th
         BgKind::Failed => ("✗", th.crit),
         BgKind::Other => ("·", th.dim),
     };
-    let cx = hud::put(buf, x, y, glyph, Style::default().fg(color), 1);
-    let cx = hud::put(buf, cx + 1, y, "claude bg", th.text().add_modifier(Modifier::BOLD), w);
+    hud::put(buf, x, y, glyph, Style::default().fg(color), 1);
     let folder = s.cwd.as_ref().and_then(|c| c.file_name()).map(|n| n.to_string_lossy().into_owned());
     let place = if s.name.is_empty() { folder.unwrap_or_default() } else { s.name.clone() };
-    let room = (x + w).saturating_sub(cx + util::width(&s.state) as u16 + 4);
-    if !place.is_empty() {
-        hud::put(buf, cx, y, &format!(" · {}", util::truncate(&place, room as usize)), th.dim(), room + 3);
-    }
+    // The title starts two cells in; one cell stays free before the state at the right edge.
+    let text_x = x + 2;
+    let room = (x + w).saturating_sub(text_x + util::width(&s.state) as u16 + 1);
+    hud::put(buf, text_x, y, &util::truncate(&place, room as usize), th.text(), room);
     hud::put_right(buf, x + w, y, &s.state, Style::default().fg(color));
 }
 
@@ -1064,6 +1100,12 @@ fn ai_panel(
         // so each group keeps its newest-first order).
         let mut rows: Vec<(usize, &crate::bg::BgSession)> = bg.to_vec();
         rows.sort_by_key(|(_, s)| matches!(s.kind(), crate::bg::BgKind::Done | crate::bg::BgKind::Failed));
+        // The "BACKGROUND" header takes a row only when a session row still fits under it; with one row left the
+        // session is shown without the header.
+        if !bg.is_empty() && bottom.saturating_sub(y) >= 2 {
+            section_header(buf, x, y, w, "BACKGROUND", "", th);
+            y += 1;
+        }
         for &(index, s) in rows.iter().take(MAX_BG_ROWS) {
             if y >= bottom {
                 break;
@@ -1155,6 +1197,12 @@ fn ai_panel(
     }
 }
 
+/// The CPU graph's scale in percent: the smallest of 25, 50 and 100 that holds `peak`, the highest sample in the
+/// history. Only Home uses it; the System screen keeps the full 0-100 scale.
+fn cpu_ceiling(peak: f32) -> u32 {
+    [25u32, 50].into_iter().find(|&c| peak <= c as f32).unwrap_or(100)
+}
+
 fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     hits.push((area, Hit::TabSystem));
@@ -1192,35 +1240,33 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
         hud::bar(buf, x + 5, y, bar_w, pct, th.level(pct), th);
         hud::put_right(buf, x + w, y, &format!("{pct:.0}%"), Style::default().fg(th.level(pct)));
     };
-    // The graphs share the remaining height: CPU up to 10 rows, RAM (thin, since it
-    // barely changes) up to 3. Fixed rows: CPU, gap, RAM, info, gap, disks, gap, NET,
-    // UP. In tight spaces a 1-2 row CPU graph comes before NET/UP.
+    // The CPU graph takes the rows the fixed lines leave free, up to 10. RAM is a line without a graph (memory barely
+    // changes). Fixed rows: CPU, gap, RAM, info, gap, disks, gap, NET, UP. In tight spaces a 1-2 row CPU graph comes
+    // before NET/UP.
     let disks = last.disks.len().min(2) as u16;
     let avail = bottom.saturating_sub(y);
     let spare = avail.saturating_sub(8 + disks);
-    let mem_g = if spare >= 8 { (spare / 4).clamp(2, 3) } else { 0 };
-    let cpu_g = match spare - mem_g {
-        n if n >= 2 => n.min(10),
-        _ => avail.saturating_sub(5 + disks).min(2),
-    };
+    let cpu_g = if spare >= 2 { spare.min(10) } else { avail.saturating_sub(5 + disks).min(2) };
     if y < bottom {
         metric(buf, y, "CPU", last.cpu as f64);
         y += 1;
     }
     if cpu_g > 0 && y + cpu_g <= bottom {
-        let vals: Vec<f64> = s.cpu_hist.iter().map(|v| *v as f64 / 100.0).collect();
+        // The scale fits the highest sample, so a 20-40% load uses the graph's height.
+        let peak = s.cpu_hist.iter().copied().fold(0.0, f32::max);
+        let ceiling = cpu_ceiling(peak);
+        let vals: Vec<f64> = s.cpu_hist.iter().map(|v| (*v as f64 / ceiling as f64).min(1.0)).collect();
         hud::braille_area(buf, Rect::new(x, y, w, cpu_g), &vals, th.accent_dim, th.accent);
+        // A scale below 100% is named, so the graph's height reads honestly. The label goes on after the graph.
+        if ceiling < 100 && cpu_g >= 2 && w >= 12 {
+            hud::put_right(buf, x + w, y, &format!("{ceiling}%"), th.dim());
+        }
         y += cpu_g;
     }
     y += 1;
     if y < bottom {
         metric(buf, y, "RAM", s.mem_pct() as f64);
         y += 1;
-    }
-    if mem_g > 0 && y + mem_g <= bottom {
-        let vals: Vec<f64> = s.mem_hist.iter().map(|v| *v as f64 / 100.0).collect();
-        hud::braille_area(buf, Rect::new(x, y, w, mem_g), &vals, th.accent_dim, th.accent2);
-        y += mem_g;
     }
     if y < bottom {
         let info = format!("{} of {}", util::fmt_bytes(last.mem_used), util::fmt_bytes(last.mem_total));
@@ -1255,5 +1301,24 @@ fn system_panel(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, H
     if y < bottom {
         let up = util::fmt_duration(Duration::from_secs(last.uptime));
         hud::put_spans(buf, x, y, &[("UP   ", th.dim().add_modifier(Modifier::BOLD)), (&up, th.text())], w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpu_ceiling;
+
+    /// The CPU graph scales to its highest sample: the smallest of 25, 50 and 100 percent that holds it.
+    #[test]
+    fn cpu_graph_scale_is_the_smallest_nice_ceiling() {
+        assert_eq!(cpu_ceiling(0.0), 25);
+        assert_eq!(cpu_ceiling(20.0), 25);
+        assert_eq!(cpu_ceiling(25.0), 25);
+        assert_eq!(cpu_ceiling(25.5), 50);
+        assert_eq!(cpu_ceiling(37.0), 50);
+        assert_eq!(cpu_ceiling(50.0), 50);
+        assert_eq!(cpu_ceiling(50.5), 100);
+        assert_eq!(cpu_ceiling(90.0), 100);
+        assert_eq!(cpu_ceiling(100.0), 100);
     }
 }

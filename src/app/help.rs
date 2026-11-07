@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 
 use super::App;
 use crate::keys::Action;
+use crate::ui::hud;
 use crate::util;
 
 /// Longest key text that sets the width of the key column (longer keys are cut with "…").
@@ -112,14 +113,14 @@ pub fn sections(app: &App) -> Vec<Section> {
             && let Some(range) = &tab_range
         {
             if !tabs_done {
-                prefix_rows.push(row(range.clone(), "go to tab".into(), None));
+                prefix_rows.push(row(range.clone(), "Go to Tab".into(), None));
                 tabs_done = true;
             }
             continue;
         }
         prefix_rows.push(row(keys.join("  "), a.title(), Some(*a)));
     }
-    prefix_rows.push(row(prefix.clone(), "send prefix to the shell".into(), None));
+    prefix_rows.push(row(prefix.clone(), "Send Prefix to the Shell".into(), None));
     out.push(Section { title: format!("PREFIX · press {prefix}, then"), rows: prefix_rows });
 
     let mut direct: Vec<(String, Action)> = app.keymap.direct_map.iter().map(|(k, a)| (k.to_string(), *a)).collect();
@@ -132,7 +133,7 @@ pub fn sections(app: &App) -> Vec<Section> {
             && let Some(range) = &tab_range
         {
             if !tabs_done {
-                global_rows.push(row(range.clone(), "go to tab".into(), None));
+                global_rows.push(row(range.clone(), "Go to Tab".into(), None));
                 tabs_done = true;
             }
             continue;
@@ -310,7 +311,7 @@ pub fn geometry(area: Rect, sections: &[Section]) -> Option<Geometry> {
     let rect = {
         let w = w.min(area.width);
         let h = h.min(area.height);
-        Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 3, w, h)
+        Rect::new(area.x + (area.width - w) / 2, hud::box_top(area, h), w, h)
     };
     // Inside the border: a one-column padding on each side; the footer takes the last row.
     let inner_w = w.saturating_sub(4);
@@ -422,6 +423,17 @@ mod tests {
         // A narrow box gives the key column less, so a description keeps DESC_MIN columns.
         let g = geometry(Rect::new(0, 0, 34, 20), &long).expect("fits");
         assert!(g.col_w - g.key_w > DESC_MIN as u16, "{g:?}");
+    }
+
+    /// The box never covers the top bar (row 0) when a row is free above it, and keeps a row free below too.
+    #[test]
+    fn the_box_leaves_the_top_bar_and_a_row_below_free() {
+        let row = |k: &str, d: &str| Row { key: k.into(), desc: d.into(), action: None };
+        let sections = vec![Section { title: "A".into(), rows: vec![row("x", "one")] }];
+        // 110x30: one column, 28 rows tall, the box starts on row 1 (row 0 is the top bar).
+        let g = geometry(Rect::new(0, 0, 110, 30), &sections).expect("fits");
+        assert_eq!((g.rect.y, g.rect.height), (1, 28));
+        assert_eq!(g.rect.bottom(), 29, "row 29 stays free below");
     }
 
     #[test]

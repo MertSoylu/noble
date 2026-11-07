@@ -572,9 +572,16 @@ fn top_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>)
             x = hud::put(buf, x, y, glyph, style.bg(bg), room(x).min(1));
         }
         x = hud::put(buf, x, y, " ", base, room(x).min(1));
+        // The pointer on the tab's cells, its close cell included (on the top row), shows its close button, as on
+        // the active tab. The next tab starts two or more cells past the close cell, so no neighbour is affected.
+        let over = app.hover.is_some_and(|(hx, hy)| hy == y && (start..=x).contains(&hx));
         hits.push((Rect::new(start, y, x - start, 1), Hit::Tab(i)));
         let cx = x;
-        x = hud::put(buf, x, y, "×", Style::default().fg(th.dim).bg(bg), room(x).min(1));
+        // Other tabs leave the close cell blank, so their widths do not change with the pointer. The click
+        // target stays on every tab: a click there is over the tab, so its "×" shows.
+        let (close, close_style) =
+            if c.active || over { ("×", Style::default().fg(th.dim).bg(bg)) } else { (" ", base) };
+        x = hud::put(buf, x, y, close, close_style, room(x).min(1));
         if x > cx {
             hits.push((Rect::new(cx, y, 1, 1), Hit::TabClose(i)));
         }
@@ -792,7 +799,7 @@ fn tips(app: &App) -> Vec<String> {
             });
         }
         View::System => {
-            v.push("/ filters the process list · K terminates the selected process after asking".to_string());
+            v.push("click a column title to sort by it · click it again to reverse".to_string());
         }
     }
     // The tab strip is on every screen with tabs to switch.
@@ -828,8 +835,9 @@ fn current_tip(app: &App) -> Option<String> {
     Some(tips[app.tip_turn % tips.len()].clone())
 }
 
-/// Where the update notice goes: its text, width and row. On terminal tabs it shares the status bar's
-/// row (bottom right) so it never covers the shell's last line; elsewhere it sits just above the bar.
+/// Where the update notice goes: its text, width and row. It always sits on the status bar's row (bottom
+/// right), which no panel, button or shell line uses, so it never covers a frame or a button. The status
+/// bar leaves room for it and drops its key hints whole rather than cut them.
 struct NoticePlan {
     /// A new release (button: update) or the one-time hooks offer (button: enable).
     hooks: bool,
@@ -859,10 +867,12 @@ fn notice_plan(app: &App, area: Rect) -> Option<NoticePlan> {
         Some(v) => (format!(" ↑ NOBLE {v} is available "), format!(" ↑ {v} ")),
         None => (" Show agent status in NOBLE? ".to_string(), " Agent status? ".to_string()),
     };
+    // The long text only where it fits in half the row; a terminal tab always gets the short one, its shell and
+    // status bar hints come first.
     let room = area.width.saturating_sub(fixed + 2) / 2;
     let text = if !in_term && util::width(&long) as u16 <= room { long } else { short };
     let width = fixed + util::width(&text) as u16;
-    Some(NoticePlan { hooks, button, text, width, y: area.bottom() - if in_term { 1 } else { 2 } })
+    Some(NoticePlan { hooks, button, text, width, y: area.bottom().saturating_sub(1) })
 }
 
 /// Key chip and description: the key in the accent color, what it does dim.
@@ -886,10 +896,8 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit
     let base = Style::default().bg(th.raised);
     hud::fill(buf, area, base);
     let y = area.y;
-    // On a terminal tab the update notice takes the right end of this row.
-    let notice_w = notice_plan(app, Rect::new(area.x, 0, area.width, area.bottom()))
-        .filter(|p| p.y == y)
-        .map_or(0, |p| p.width + 1);
+    // The update notice takes the right end of this row on every view, so the hints stop short of it.
+    let notice_w = notice_plan(app, Rect::new(area.x, 0, area.width, area.bottom())).map_or(0, |p| p.width + 1);
     let edge = area.right().saturating_sub(notice_w);
     // In a terminal a shell key or a locked pane's shortcut goes to the app: show one that works there.
     let palette = if matches!(app.view, View::Term(_)) {
@@ -1014,9 +1022,8 @@ fn alert_slot(hits: &[(Rect, Hit)], area: Rect, y: u16, w: u16) -> Option<u16> {
     None
 }
 
-/// New version notice: bottom right, just above the status bar. On terminal tabs
-/// it drops to the right of the status bar (which leaves room for it). `show` is false while
-/// focus mode hides the status bar (the notice is drawn with it).
+/// New version notice (or the hooks offer): bottom right, on the status bar's row on every view. `show` is
+/// false while focus mode hides the status bar (the notice is drawn with it).
 fn update_notice(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>, show: bool) {
     let plan = notice_plan(app, area);
     app.fx.observe_notice(plan.is_some());
@@ -1055,6 +1062,8 @@ pub(crate) fn toast_cells(text: &str, screen_w: u16) -> u16 {
     util::width(&toast_text(text, screen_w)) as u16
 }
 
+/// The notifications, stacked upward from three rows above the bottom edge (the update notice is on the status
+/// bar's row, below them).
 fn toasts(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let mut y = area.bottom().saturating_sub(3);

@@ -330,6 +330,8 @@ impl App {
                 hint: String::new(),
                 cmd: super::menu::MenuCmd::OpenLink(target),
                 enabled: true,
+                sep: false,
+                danger: false,
             })
             .collect();
         // Below the pane title, like the pane menu.

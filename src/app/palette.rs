@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{App, Overlay, SettingItem, ToastLevel, ToastTarget, View};
+use super::{App, Notice, Overlay, SettingItem, ToastLevel, ToastTarget, View};
 use crate::keys::Action;
 use crate::util;
 
@@ -30,10 +30,11 @@ pub enum PaletteCmd {
     DeleteWorkspace(String),
     OpenDir(PathBuf),
     /// A past notification (`notifications`): Enter follows its target, as a click on the toast does, or copies
-    /// its full text when it has none; Ctrl+Y always copies the text.
+    /// its full text when it has none; Ctrl+Y always copies the text. `level` colors its group cell.
     Notice {
         text: String,
         target: Option<ToastTarget>,
+        level: ToastLevel,
     },
     /// A Settings row: running it does what ⏎ does on that row (`App::enter_setting`).
     Setting(SettingItem),
@@ -45,6 +46,16 @@ pub struct PaletteItem {
     pub group: &'static str,
     pub hint: String,
     pub cmd: PaletteCmd,
+}
+
+/// The group cell of a notification row: its level in capitals (`WARN`). The palette colors it by the level.
+fn level_name(level: ToastLevel) -> &'static str {
+    match level {
+        ToastLevel::Info => "INFO",
+        ToastLevel::Ok => "OK",
+        ToastLevel::Warn => "WARN",
+        ToastLevel::Error => "ERROR",
+    }
 }
 
 pub struct PaletteState {
@@ -294,7 +305,8 @@ impl App {
         items
     }
 
-    /// The notification history, newest first (the `notifications` action); title = time + text.
+    /// The notification history, newest first (the `notifications` action); title = time + text, group = level.
+    /// Notices in a row with the same text and target make one row, its hint "×N" and its time the newest one's.
     pub fn open_notifications(&mut self) {
         if self.notices.is_empty() {
             self.toast(ToastLevel::Info, "no notifications yet");
@@ -304,21 +316,21 @@ impl App {
         // sticky error toast.
         self.toasts.clear();
         self.dirty = true;
-        let items = self
-            .notices
-            .iter()
-            .rev()
-            .map(|n| PaletteItem {
+        // Newest first, so the first notice of a run is the newest one; each later one of the run counts.
+        let mut rows: Vec<(&Notice, usize)> = Vec::new();
+        for n in self.notices.iter().rev() {
+            match rows.last_mut() {
+                Some((newest, count)) if newest.text == n.text && newest.target == n.target => *count += 1,
+                _ => rows.push((n, 1)),
+            }
+        }
+        let items = rows
+            .into_iter()
+            .map(|(n, count)| PaletteItem {
                 title: format!("{}  {}", n.at.format("%H:%M:%S"), n.text),
-                group: "NOTE",
-                hint: match n.level {
-                    ToastLevel::Info => "info",
-                    ToastLevel::Ok => "ok",
-                    ToastLevel::Warn => "warn",
-                    ToastLevel::Error => "error",
-                }
-                .into(),
-                cmd: PaletteCmd::Notice { text: n.text.clone(), target: n.target.clone() },
+                group: level_name(n.level),
+                hint: if count > 1 { format!("×{count}") } else { String::new() },
+                cmd: PaletteCmd::Notice { text: n.text.clone(), target: n.target.clone(), level: n.level },
             })
             .collect();
         self.open_palette_on(items);
@@ -409,7 +421,7 @@ impl App {
             PaletteCmd::Theme(name) => self.set_theme(name),
             PaletteCmd::Workspace(i) => self.restore_workspace(i),
             PaletteCmd::DeleteWorkspace(name) => self.request_delete_workspace(name),
-            PaletteCmd::Notice { text, target } => match target {
+            PaletteCmd::Notice { text, target, .. } => match target {
                 Some(target) if self.toast_target_open(&target) => self.follow_toast(target),
                 // No target, or its pane has closed: Enter copies.
                 _ => self.copy_notice(&text),

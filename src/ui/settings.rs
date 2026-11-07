@@ -78,6 +78,26 @@ fn line_has(line: &Line, idx: usize) -> bool {
     }
 }
 
+/// The selectable rows (settings and buttons) on `lines`. Section headers, blank lines and the
+/// descriptions under a row are not rows.
+fn selectable_rows(lines: &[Line]) -> usize {
+    lines
+        .iter()
+        .map(|line| match line {
+            Line::Item(_) => 1,
+            Line::Buttons(group) => group.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The text of a "more" marker: "↑ 3 more" or "↓ 3 more" (`arrow` is the glyph). The bare arrow stands in when
+/// no selectable row is hidden on that side (only headers or blank lines) or the words do not fit in `room` columns.
+fn more_text(arrow: &str, hidden: usize, room: usize) -> String {
+    let words = format!("{arrow} {hidden} more");
+    if hidden > 0 && util::width(&words) <= room { words } else { arrow.to_string() }
+}
+
 /// The frame of the page inside the body, and how many lines of the page fit in it (the
 /// first and last inner rows hold the "more" markers).
 fn page_frame(area: Rect) -> (Rect, usize) {
@@ -188,13 +208,15 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             }
         }
     }
-    // More of the page above / below (the wheel scrolls it).
+    // More of the page above / below (the wheel scrolls it), with the selectable rows hidden there.
     if offset > 0 {
-        hud::put_right(buf, x + iw, inner.y, "↑ more", th.dim());
+        let above = selectable_rows(&lines[..offset]);
+        hud::put_right(buf, x + iw, inner.y, &more_text("↑", above, iw as usize), th.dim());
     }
-    let more = offset + rows < lines.len();
-    if more {
-        hud::put_right(buf, x + iw, inner.bottom() - 1, "↓ more", th.dim());
+    let below_from = offset + visible.len();
+    if below_from < lines.len() {
+        let below = selectable_rows(&lines[below_from..]);
+        hud::put_right(buf, x + iw, inner.bottom() - 1, &more_text("↓", below, iw as usize), th.dim());
     }
     if wide {
         let key = match items.get(sel) {
@@ -263,15 +285,18 @@ fn setting_row(buf: &mut Buffer, row: Rect, app: &App, key: SettingKey, selected
     };
     if let Some(look) = look {
         let label_end = x + util::width(&label) as u16 + 2;
-        chip(buf, label_end, x + iw, y, app, bg, look);
+        let span = Rect::new(label_end, y, (x + iw).saturating_sub(label_end), 1);
+        chip(buf, span, app, bg, selected, look);
         return;
     }
     let dim = th.dim().bg(bg);
     if key.opens_popup() {
-        // Changed in a popup: no ‹ › (←→ do nothing here).
+        // Changed in a popup: no ‹ › (←→ do nothing here). Only the selected row says how to open it.
         let value = app.setting_value(key);
         let vx = hud::put_right(buf, x + iw, y, &value, Style::default().fg(th.accent2).bg(bg));
-        hud::put_right(buf, vx, y, "⏎ choose  ", dim);
+        if selected {
+            hud::put_right(buf, vx, y, "⏎ choose  ", dim);
+        }
         return;
     }
     let (value, style) = match key.is_toggle().then(|| app.setting_on(key)) {
@@ -286,25 +311,25 @@ fn setting_row(buf: &mut Buffer, row: Rect, app: &App, key: SettingKey, selected
     hud::put_right(buf, x + iw, y, &value, style);
 }
 
-/// The chosen theme or terminal scheme: a chip in its own background/text colors with
-/// three color swatches, and a hint to open the selector on its left.
+/// The chosen theme or terminal scheme: a chip in its own background/text colors with three color swatches,
+/// at the right end of `span`. The selected row also gets a hint to open the selector on the chip's left.
 fn chip(
     buf: &mut Buffer,
-    left: u16,
-    right: u16,
-    y: u16,
+    span: Rect,
     app: &App,
     row_bg: Color,
+    selected: bool,
     (label, bg, fg, dots): (String, Color, Color, Vec<Color>),
 ) {
     let th = &app.theme;
-    let w = (util::width(&label) as u16 + 7).min(right.saturating_sub(left));
+    let y = span.y;
+    let w = (util::width(&label) as u16 + 7).min(span.width);
     if w < 6 {
         return;
     }
-    let x = right - w;
+    let x = span.right() - w;
     let hint = "⏎ choose  ";
-    if x >= left + util::width(hint) as u16 {
+    if selected && x >= span.x + util::width(hint) as u16 {
         hud::put_right(buf, x, y, hint, th.dim().bg(row_bg));
     }
     let rect = Rect::new(x, y, w, 1);
@@ -336,5 +361,21 @@ pub(super) fn scheme_look(app: &App, name: &str) -> (String, Color, Color, Vec<C
     match crate::theme::find_scheme(&app.term_schemes, name) {
         Some(s) => (s.label.clone(), s.bg, s.fg, s.ansi.to_vec()),
         None => ("Follow theme".into(), th.bg, th.fg, vec![th.accent, th.accent2, th.ok]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::more_text;
+
+    #[test]
+    fn more_markers_count_or_fall_back_to_the_arrow() {
+        assert_eq!(more_text("↑", 3, 10), "↑ 3 more");
+        assert_eq!(more_text("↓", 12, 9), "↓ 12 more");
+        // Only headers or blank lines hidden on that side: the bare arrow.
+        assert_eq!(more_text("↑", 0, 10), "↑");
+        // The words do not fit in the room: the bare arrow.
+        assert_eq!(more_text("↓", 12, 8), "↓");
+        assert_eq!(more_text("↓", 12, 0), "↓");
     }
 }

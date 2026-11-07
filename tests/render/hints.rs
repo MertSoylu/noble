@@ -89,6 +89,29 @@ fn show_tips_off_hides_every_tip() {
     assert!(render(&mut app, 200, 40).lines().last().unwrap().contains("tip: "));
 }
 
+/// System's tip says how the column titles sort (the buttons already show filter and terminate), and the
+/// click it describes does reverse the order.
+#[test]
+fn system_tip_says_how_to_sort() {
+    use noble::app::{Hit, SortKey};
+    let mut app = demo_app(200, 40);
+    app.ui_state.data.prefix_used = true;
+    app.run(Action::System);
+    render(&mut app, 200, 40);
+    // Tips move on with each screen change; the System tip is the first one of its screen.
+    app.tip_turn = 0;
+    let text = render(&mut app, 200, 40);
+    let last = text.lines().last().unwrap();
+    assert!(last.contains("tip: click a column title to sort by it · click it again to reverse"), "{text}");
+    // A click on the active column title flips the order.
+    app.system.sort = SortKey::Cpu;
+    render(&mut app, 200, 40);
+    let before = app.system.desc;
+    let cpu = find_hit(&app, |h| *h == Hit::SortCol(SortKey::Cpu)).expect("CPU header");
+    click(&mut app, cpu.x, cpu.y);
+    assert_eq!(app.system.desc, !before);
+}
+
 /// A shell key with a NOBLE shortcut goes to the shell; the first time each one does, a notice
 /// names the prefix chord (or the setting when the action has none), and it is never shown again.
 #[test]

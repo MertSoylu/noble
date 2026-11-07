@@ -43,7 +43,7 @@ pub const THEMES: [Theme; 22] = [
         accent2: rgb(0x5fd7d0),
         ok: rgb(0x9bd67a),
         warn: rgb(0xff6a3d),
-        crit: rgb(0xff4f4f),
+        crit: rgb(0xe8365f),
         sel_bg: rgb(0x2b2113),
         on_accent: rgb(0x0c0a07),
     },
@@ -229,7 +229,8 @@ pub const THEMES: [Theme; 22] = [
         accent_dim: rgb(0x5a6b45),
         accent2: rgb(0x7fbbb3),
         ok: rgb(0xa7c080),
-        warn: rgb(0xe69875),
+        // #dbbc7f is only 23 CIE76 from the accent (the test needs 25); #deb97f is its nearest shade that passes.
+        warn: rgb(0xdeb97f),
         crit: rgb(0xe67e80),
         sel_bg: rgb(0x3d484d),
         on_accent: rgb(0x2d353b),
@@ -264,7 +265,7 @@ pub const THEMES: [Theme; 22] = [
         accent2: rgb(0x2aa198),
         ok: rgb(0x859900),
         warn: rgb(0xcb4b16),
-        crit: rgb(0xdc322f),
+        crit: rgb(0xd33682),
         sel_bg: rgb(0x0a4050),
         on_accent: rgb(0x002b36),
     },
@@ -349,7 +350,7 @@ pub const THEMES: [Theme; 22] = [
         accent2: rgb(0x268bd2),
         ok: rgb(0x859900),
         warn: rgb(0xcb4b16),
-        crit: rgb(0xdc322f),
+        crit: rgb(0xd33682),
         sel_bg: rgb(0xeee8d5),
         on_accent: rgb(0xfdf6e3),
     },
@@ -851,6 +852,31 @@ mod contrast_tests {
         assert!(stale.is_empty(), "allow-list entries that now pass (remove them):\n{}", stale.join("\n"));
     }
 
+    /// `warn` (changed files, bars from 60%) and `crit` (bars from 85%) must read as two colors, and `warn` must stay
+    /// apart from the accent: CIEDE2000 of at least 18 and 12. A 64% bar and a 95% one looked alike before.
+    #[test]
+    fn warn_and_crit_are_distinguishable() {
+        let mut failures = Vec::new();
+        for t in THEMES.iter() {
+            let (warn, crit, accent) = (hex(t.warn), hex(t.crit), hex(t.accent));
+            let wc = delta_e2000(t.warn, t.crit);
+            if wc < 18.0 {
+                failures.push(format!("{}: warn {warn} vs crit {crit} ΔE2000 {wc:.1} < 18.0", t.name));
+            }
+            let wa = delta_e2000(t.warn, t.accent);
+            if wa < 12.0 {
+                failures.push(format!("{}: warn {warn} vs accent {accent} ΔE2000 {wa:.1} < 12.0", t.name));
+            }
+        }
+        assert!(failures.is_empty(), "warn too close to crit or accent:\n{}", failures.join("\n"));
+    }
+
+    /// "#rrggbb" of an RGB color.
+    fn hex(c: Color) -> String {
+        let Color::Rgb(r, g, b) = c else { panic!("theme colors must be RGB: {c:?}") };
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+
     /// CIE L*a*b* (D65) of an sRGB color.
     fn lab(c: Color) -> [f64; 3] {
         let Color::Rgb(r, g, b) = c else { panic!("theme colors must be RGB: {c:?}") };
@@ -871,6 +897,81 @@ mod contrast_tests {
     fn delta_e76(a: Color, b: Color) -> f64 {
         let (la, lb) = (lab(a), lab(b));
         ((la[0] - lb[0]).powi(2) + (la[1] - lb[1]).powi(2) + (la[2] - lb[2]).powi(2)).sqrt()
+    }
+
+    /// CIEDE2000 color difference (Sharma, Wu and Dalal, 2005) of two L*a*b* colors; kL = kC = kH = 1.
+    fn delta_e2000_lab([l1, a1, b1]: [f64; 3], [l2, a2, b2]: [f64; 3]) -> f64 {
+        let cbar = (a1.hypot(b1) + a2.hypot(b2)) / 2.0;
+        // G stretches a* for low chroma, so grays and near-grays compare as the eye sees them.
+        let g = 0.5 * (1.0 - (cbar.powi(7) / (cbar.powi(7) + 25f64.powi(7))).sqrt());
+        let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
+        let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
+        // Hue angles in degrees, 0 to 360 (0 for a neutral color).
+        let hue =
+            |ap: f64, bp: f64| if ap == 0.0 && bp == 0.0 { 0.0 } else { bp.atan2(ap).to_degrees().rem_euclid(360.0) };
+        let (h1p, h2p) = (hue(a1p, b1), hue(a2p, b2));
+        let dhp_angle = if c1p * c2p == 0.0 {
+            0.0
+        } else if (h2p - h1p).abs() <= 180.0 {
+            h2p - h1p
+        } else if h2p - h1p > 180.0 {
+            h2p - h1p - 360.0
+        } else {
+            h2p - h1p + 360.0
+        };
+        let dhp = 2.0 * (c1p * c2p).sqrt() * (dhp_angle / 2.0).to_radians().sin();
+        let hbarp = if c1p * c2p == 0.0 {
+            h1p + h2p
+        } else if (h1p - h2p).abs() <= 180.0 {
+            (h1p + h2p) / 2.0
+        } else if h1p + h2p < 360.0 {
+            (h1p + h2p + 360.0) / 2.0
+        } else {
+            (h1p + h2p - 360.0) / 2.0
+        };
+        let lbar = (l1 + l2) / 2.0;
+        let cbarp = (c1p + c2p) / 2.0;
+        let t = 1.0 - 0.17 * (hbarp - 30.0).to_radians().cos()
+            + 0.24 * (2.0 * hbarp).to_radians().cos()
+            + 0.32 * (3.0 * hbarp + 6.0).to_radians().cos()
+            - 0.20 * (4.0 * hbarp - 63.0).to_radians().cos();
+        let d_theta = 30.0 * (-((hbarp - 275.0) / 25.0).powi(2)).exp();
+        let rc = 2.0 * (cbarp.powi(7) / (cbarp.powi(7) + 25f64.powi(7))).sqrt();
+        let sl = 1.0 + 0.015 * (lbar - 50.0).powi(2) / (20.0 + (lbar - 50.0).powi(2)).sqrt();
+        let sc = 1.0 + 0.045 * cbarp;
+        let sh = 1.0 + 0.015 * cbarp * t;
+        let rt = -(2.0 * d_theta).to_radians().sin() * rc;
+        let (dl, dc) = (l2 - l1, c2p - c1p);
+        ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhp / sh).powi(2) + rt * (dc / sc) * (dhp / sh)).sqrt()
+    }
+
+    /// CIEDE2000 color difference of two RGB colors.
+    fn delta_e2000(a: Color, b: Color) -> f64 {
+        delta_e2000_lab(lab(a), lab(b))
+    }
+
+    /// The CIEDE2000 helper matches the published test pairs of Sharma, Wu and Dalal (2005) and the values the
+    /// warn/crit rule was checked with (tolerance 0.3).
+    #[test]
+    fn delta_e2000_matches_reference_values() {
+        for (p, q, want) in [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 3.1571, -77.2803], [50.0, 0.0, -82.7485], 2.8615),
+            ([50.0, 2.8361, -74.0200], [50.0, 0.0, -82.7485], 3.4412),
+        ] {
+            let got = delta_e2000_lab(p, q);
+            assert!((got - want).abs() < 1e-3, "{p:?} vs {q:?}: {got:.4}, want {want}");
+        }
+        for (a, b, want) in [
+            ("#ff6a3d", "#ff4f4f", 10.4),
+            ("#ff6a3d", "#e8365f", 21.1),
+            ("#fe8019", "#fb4934", 18.2),
+            ("#cb4b16", "#d33682", 31.4),
+            ("#dbbc7f", "#e67e80", 31.5),
+        ] {
+            let got = delta_e2000(parse_hex(a).unwrap(), parse_hex(b).unwrap());
+            assert!((got - want).abs() <= 0.3, "{a} vs {b}: ΔE2000 {got:.2}, want {want}");
+        }
     }
 
     /// `accent` (the active choice, e.g. the current branch) and `warn` (changed files, near-full bars) must

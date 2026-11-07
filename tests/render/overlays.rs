@@ -52,22 +52,33 @@ fn prompt_validates_on_enter_and_edits_at_the_cursor() {
     assert!(app.overlay.is_none(), "valid folder submits");
 }
 
-/// The text inside the box whose title row holds `title`: its rows (up to the "confirm" button row)
-/// joined with single spaces.
-fn box_text(text: &str, title: &str) -> String {
+/// The rows inside the box whose title row holds `title`, each cut to the box's columns: from the row under the title
+/// down to the frame's bottom row (which is not one of them).
+fn box_rows(text: &str, title: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     let top = lines.iter().position(|l| l.contains(&format!("╭ {title} "))).expect("box title row");
     let start = lines[top].find(&format!("╭ {title} ")).unwrap();
     let left = lines[top][..start].chars().count();
     let right = left + lines[top][start..].chars().position(|c| c == '╮').expect("box corner");
-    let mut parts = Vec::new();
+    let mut rows = Vec::new();
     for line in &lines[top + 1..] {
-        if line.contains(" confirm") {
+        if line.chars().nth(left) == Some('╰') {
             break;
         }
-        let inner: String = line.chars().skip(left + 1).take(right - left - 1).collect();
-        if !inner.trim().is_empty() {
-            parts.push(inner.trim().to_string());
+        rows.push(line.chars().skip(left + 1).take(right - left - 1).collect());
+    }
+    rows
+}
+
+/// The text inside the box whose title row holds `title`: its rows (up to the button row) joined with single spaces.
+fn box_text(text: &str, title: &str) -> String {
+    let mut parts = Vec::new();
+    for row in box_rows(text, title) {
+        if row.contains("n/esc") {
+            break;
+        }
+        if !row.trim().is_empty() {
+            parts.push(row.trim().to_string());
         }
     }
     parts.join(" ")
@@ -163,7 +174,7 @@ fn help_has_columns_a_filter_and_runs_rows() {
     for name in ["PREFIX", "GLOBAL", "HOME", "SYSTEM", "MOUSE"] {
         assert!(wide_text.contains(name), "{name} is drawn:\n{wide_text}");
     }
-    assert!(wide_text.contains("type to filter · ⏎ run · esc close"), "{wide_text}");
+    assert!(wide_text.contains("type filter  ⏎ run  esc close"), "{wide_text}");
 
     // A narrow screen keeps one column, and it scrolls with the selection.
     let mut narrow = demo_app(110, 30);
@@ -236,12 +247,18 @@ fn confirm_wraps_a_long_question() {
     use noble::app::{Confirm, ConfirmAction, Overlay};
     let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
     let mut app = demo_app(110, 30);
-    app.overlay =
-        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        title: "CLOSE PANE".into(),
+        body: body.into(),
+        yes: "close",
+        action: ConfirmAction::Quit,
+    }));
     let text = render(&mut app, 110, 30);
     save("confirm-wrap-110x30", &text);
-    assert_eq!(box_text(&text, "CLOSE PANE"), body, "{text}");
-    assert!(text.contains("confirm") && text.contains("cancel"), "{text}");
+    // The question is drawn with a capital first letter.
+    let shown = "Cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    assert_eq!(box_text(&text, "CLOSE PANE"), shown, "{text}");
+    assert!(text.contains(" y  close") && text.contains("cancel"), "{text}");
     let small = render(&mut app, 30, 8);
     save("confirm-wrap-30x8", &small);
     // Too narrow for the button words: the keys and their buttons stay.
@@ -265,6 +282,7 @@ fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
         app.overlay = Some(Overlay::Confirm(Confirm {
             title: "CLOSE PANE".into(),
             body: body.into(),
+            yes: "close",
             action: ConfirmAction::Quit,
         }));
         let (text, buf) = render_buf(&mut app, w, h);
@@ -292,13 +310,19 @@ fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
         let shown: Vec<String> = (top + 1..bottom - 1).map(row).filter(|l| !l.trim().is_empty()).collect();
         let shown = shown.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         assert!(shown.ends_with('…'), "the cut question has no ellipsis at {w}x{h}: {shown:?}\n{text}");
-        let words: String = shown.trim_end_matches('…').chars().filter(|c| *c != ' ').collect();
+        // The question is drawn with a capital first letter: compared in lower case.
+        let words: String =
+            shown.trim_end_matches('…').chars().filter(|c| *c != ' ').collect::<String>().to_lowercase();
         assert!(body.replace(' ', "").starts_with(&words), "{shown:?}");
         assert!(words.len() > 10, "too little of the question is shown at {w}x{h}: {shown:?}");
     }
     // At 16 columns the n/esc chip does not fit inside the frame: it is left out, and so is its click target.
-    app.overlay =
-        Some(Overlay::Confirm(Confirm { title: "CLOSE PANE".into(), body: body.into(), action: ConfirmAction::Quit }));
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        title: "CLOSE PANE".into(),
+        body: body.into(),
+        yes: "close",
+        action: ConfirmAction::Quit,
+    }));
     let text = render(&mut app, 16, 8);
     assert!(!text.contains("n/esc"), "{text}");
     assert!(find_hit(&app, |h| *h == noble::app::Hit::ConfirmNo).is_none(), "no cancel target when it is not drawn");
@@ -313,11 +337,74 @@ fn wrapped_confirm_text_keeps_whole_words() {
     app.overlay = Some(noble::app::Overlay::Confirm(noble::app::Confirm {
         title: "WIDE".into(),
         body: "x".repeat(120),
+        yes: "close",
         action: noble::app::ConfirmAction::Quit,
     }));
     let text = render(&mut app, 110, 30);
-    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there.
-    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
+    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there (the first one
+    // capitalized, as every question is drawn).
+    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), format!("X{}", "x".repeat(119)), "{text}");
+}
+
+/// A question box has one blank row between its text and its buttons, and the yes chip names the action: a close
+/// asks with "close", a paste with "paste". The box is one row shorter than it was with two blank rows.
+#[test]
+fn confirm_box_has_one_blank_row_and_names_its_action() {
+    use noble::app::{Confirm, ConfirmAction, Overlay};
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        title: "CLOSE PANE".into(),
+        body: "cargo test is still running — close it?".into(),
+        yes: "close",
+        action: ConfirmAction::Quit,
+    }));
+    let text = render(&mut app, 110, 30);
+    save("confirm-one-blank-110x30", &text);
+    // Frame rows: the padding, the question, one blank row and the buttons.
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines.iter().position(|l| l.contains("╭ CLOSE PANE ")).expect("box top");
+    let bottom = (top..lines.len()).find(|&i| lines[i].contains('╰')).expect("box bottom");
+    assert_eq!(bottom - top + 1, 6, "padding, question, blank row, buttons and the frame:\n{text}");
+    let rows = box_rows(&text, "CLOSE PANE");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert!(rows[0].trim().is_empty(), "{rows:?}");
+    assert_eq!(rows[1].trim(), "Cargo test is still running — close it?", "{rows:?}");
+    assert!(rows[2].trim().is_empty(), "one blank row above the buttons: {rows:?}");
+    assert!(rows[3].contains(" y  close") && rows[3].contains("n/esc"), "{rows:?}");
+
+    // A paste with line breaks asks with "paste" on its yes chip.
+    app.new_tab(std::env::temp_dir(), None, Some("paste".into()));
+    let pane = app.focused_pane().unwrap();
+    wait_idle(&mut app, pane);
+    app.panes[&pane].parser().process(b"\x1b[?2004l");
+    app.paste_into(pane, "echo one\necho two".into());
+    let text = render(&mut app, 110, 30);
+    save("confirm-paste-verb-110x30", &text);
+    let rows = box_rows(&text, "PASTE");
+    assert!(rows.iter().any(|r| r.contains("2 lines")), "{rows:?}");
+    assert!(rows.last().is_some_and(|r| r.contains(" y  paste") && r.contains("n/esc")), "{rows:?}");
+}
+
+/// A close asked while a command runs names that command, drawn with a capital first letter. The command is the one
+/// typed on the line above the shell's command mark (the prompt is left out).
+#[test]
+fn close_pane_question_names_the_typed_command() {
+    let mut app = demo_app(110, 30);
+    app.new_tab(std::env::temp_dir(), None, Some("typed".into()));
+    let id = app.focused_pane().unwrap();
+    wait_idle(&mut app, id);
+    {
+        // The typed line, then the shell's mark that the command started (the way the shell sends it).
+        let p = &app.panes[&id];
+        p.parser().process(b"\r\nPS C:\\app> cargo test\r\n\x1b]133;C\x07");
+    }
+    let p = app.panes.get_mut(&id).unwrap();
+    p.prompted = true;
+    p.command_started = Some(std::time::Instant::now());
+    app.run(Action::ClosePane);
+    let text = render(&mut app, 110, 30);
+    save("confirm-close-typed-110x30", &text);
+    assert_eq!(box_text(&text, "CLOSE PANE"), "Cargo test is still running — close it?", "{text}");
 }
 
 /// Moves the toasts' start back, as if they had been on screen for `secs` seconds.
@@ -464,7 +551,7 @@ fn notifications_action_lists_past_toasts() {
     assert!(titles[1].ends_with("second, an error"), "{titles:?}");
     assert!(titles[2].ends_with("first note"), "{titles:?}");
     assert_eq!(titles[0].as_bytes()[2], b':', "title starts with the time: {}", titles[0]);
-    assert_eq!(st.all[0].cmd, PaletteCmd::Notice { text: "third note".into(), target: None });
+    assert_eq!(st.all[0].cmd, PaletteCmd::Notice { text: "third note".into(), target: None, level: ToastLevel::Ok });
     let cmd = st.all[0].cmd.clone();
     app.overlay = None;
     app.run_palette(cmd);
@@ -651,4 +738,61 @@ fn notification_list_goes_to_the_pane_and_copies() {
         save(&format!("notifications-list-{w}x{h}"), &text);
         app.overlay = None;
     }
+}
+
+/// A box overlay starts below the top bar: at 110×30, 120×34 and 76×24 (where the palette reaches row 0 without
+/// the rule) the first row is the same with the overlay open, and it still shows the NOBLE name.
+#[test]
+fn overlay_boxes_leave_the_top_bar_visible() {
+    let openers: [fn(&mut App); 3] = [|app| app.run(Action::Help), |app| app.open_bindings(), |app| app.open_palette()];
+    for (w, h) in [(110, 30), (120, 34), (76, 24)] {
+        let mut app = demo_app(w, h);
+        let plain = render(&mut app, w, h);
+        let top_bar = plain.lines().next().unwrap_or_default().to_string();
+        assert!(top_bar.contains("NOBLE"), "{w}x{h}: {top_bar:?}");
+        for open in openers {
+            app.overlay = None;
+            open(&mut app);
+            let text = render(&mut app, w, h);
+            let row = text.lines().next().unwrap_or_default();
+            assert_eq!(row, top_bar, "{w}x{h}: an overlay covers the top bar:\n{text}");
+        }
+    }
+}
+
+/// The footer's first key starts two columns right of the box's left frame: the content edge, as the palette's
+/// footer always did. The footers are left-aligned, not pushed to the right edge.
+#[test]
+fn overlay_footers_start_at_the_content_edge() {
+    use noble::app::Overlay;
+    fn footer_at_content_edge(buf: &ratatui::buffer::Buffer, title: &str, footer: &str) {
+        let (bx, _) = find_text(buf, title, 0).unwrap_or_else(|| panic!("box {title:?} is drawn"));
+        let (fx, _) = find_text(buf, footer, 0).unwrap_or_else(|| panic!("footer {footer:?} is drawn"));
+        assert_eq!(fx, bx + 2, "{footer:?} starts at column {fx}, the box at {bx}");
+    }
+    let mut app = demo_app(110, 30);
+    app.overlay = Some(Overlay::AgentHooks { selected: 0 });
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ AGENT STATUS HOOKS", "space on/off");
+    app.overlay = None;
+    app.run(Action::Help);
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ KEYBOARD REFERENCE", "type filter");
+    app.overlay = None;
+    app.open_bindings();
+    footer_at_content_edge(&render_cells(&mut app, 110, 30), "╭ KEY BINDINGS", "⏎ prefix key");
+}
+
+/// The keyboard reference's rows that name an action read in Title Case, as the action titles do: the tab-number
+/// row is "Go to Tab" and the prefix row that sends the prefix on is "Send Prefix to the Shell".
+#[test]
+fn keyboard_reference_action_rows_read_in_title_case() {
+    let app = demo_app(160, 45);
+    let sections = app.help_sections("");
+    for section in sections.iter().filter(|s| s.title.starts_with("PREFIX") || s.title == "GLOBAL") {
+        for row in &section.rows {
+            assert!(row.desc.starts_with(char::is_uppercase), "{}: {:?} is not in Title Case", section.title, row.desc);
+        }
+    }
+    let prefix = sections.iter().find(|s| s.title.starts_with("PREFIX")).expect("the prefix section");
+    assert!(prefix.rows.iter().any(|r| r.desc == "Go to Tab"), "{:?}", prefix.rows);
+    assert!(prefix.rows.iter().any(|r| r.desc == "Send Prefix to the Shell"), "{:?}", prefix.rows);
 }

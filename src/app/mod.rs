@@ -113,9 +113,13 @@ pub enum ConfirmAction {
     RemoveProject(std::path::PathBuf),
 }
 
+/// A yes/no question over the screen (`Overlay::Confirm`).
 pub struct Confirm {
     pub title: String,
+    /// The question. Drawn with its first letter capitalized, whatever case it is written in.
     pub body: String,
+    /// The verb on the yes chip (" y  close"): what the action does ("close", "quit", "paste").
+    pub yes: &'static str,
     pub action: ConfirmAction,
 }
 
@@ -440,10 +444,14 @@ pub enum Hit {
     },
     Project(usize),
     OpenSelected,
+    /// Home's "Add project" button, shown when there are no projects: runs what the `a` key runs
+    /// (`Action::AddProjectFolder`).
+    AddProject,
     Launcher(usize),
     /// A quick task chip on the selected project's card (`Project::tasks` index).
     ProjectTask(usize),
-    /// Home's card line "↻ claude · 2h ago" of the selected project: a tab that continues its last Claude conversation.
+    /// Home's card chip "↻ Continue claude · 2h ago" of the selected project: a tab that continues its last Claude
+    /// conversation.
     ClaudeContinue,
     /// A background Claude session row on Home (`App::bg_sessions` index): attaches to it in a new tab.
     BgSession(usize),

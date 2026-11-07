@@ -64,6 +64,51 @@ pub fn put_center(buf: &mut Buffer, area: Rect, y: u16, s: &str, style: Style) {
     put(buf, x, y, s, style, area.width);
 }
 
+/// The top row of an overlay box `h` rows tall: a third of the free rows down from the top of `area`. With two
+/// or more free rows, at least one stays above the box, so the top bar (the first row) is never covered.
+pub fn box_top(area: Rect, h: u16) -> u16 {
+    let free = area.height.saturating_sub(h);
+    let down = if free >= 2 { (free / 3).max(1) } else { free / 3 };
+    area.y + down
+}
+
+/// Blank columns between two key hints of a footer (`key_hints`).
+const HINT_GAP: usize = 2;
+
+/// The key hints of a footer row: each pair is its key in the accent color and what it does in dim text
+/// (`⏎ run`), one blank between them and two blanks between pairs. A pair is drawn whole or not at all. When
+/// not all of them fit in `w` columns, the pairs at the end go first, except the last pair (the way out,
+/// "esc close"): it is kept whenever it fits alone. Returns the x after the last drawn cell (`x` when none fits).
+pub fn key_hints(buf: &mut Buffer, x: u16, y: u16, w: u16, pairs: &[(&str, &str)], th: &Theme) -> u16 {
+    let widths: Vec<usize> = pairs.iter().map(|(key, what)| util::width(key) + 1 + util::width(what)).collect();
+    // The columns of the pairs `widths[..k]` with a gap between each two.
+    let span = |k: usize| widths[..k].iter().sum::<usize>() + HINT_GAP * k.saturating_sub(1);
+    let budget = usize::from(w);
+    let n = pairs.len();
+    let shown: Vec<usize> = if n == 0 || span(n) <= budget {
+        (0..n).collect()
+    } else if widths[n - 1] <= budget {
+        // The last pair stays; as many of the pairs before it as fit beside it.
+        let last = n - 1;
+        let head = (0..last).rev().find(|&k| k == 0 || span(k) + HINT_GAP + widths[last] <= budget).unwrap_or(0);
+        (0..head).chain(std::iter::once(last)).collect()
+    } else {
+        // Even the last pair does not fit alone: the pairs before it, as many as fit.
+        let head = (1..n).rev().find(|&k| span(k) <= budget).unwrap_or(0);
+        (0..head).collect()
+    };
+    let end = x.saturating_add(w);
+    let mut cx = x;
+    for (at, &i) in shown.iter().enumerate() {
+        if at > 0 {
+            cx = put(buf, cx, y, &" ".repeat(HINT_GAP), th.dim(), end.saturating_sub(cx));
+        }
+        let (key, what) = pairs[i];
+        cx = put_spans(buf, cx, y, &[(key, th.accent2()), (" ", th.dim()), (what, th.dim())], end.saturating_sub(cx));
+    }
+    cx
+}
+
 /// The "enlarge window" note for an area too small to draw in. Its row is cleared first, so the text
 /// never lands on what was drawn there before (the dimmed screen under an overlay, for one).
 pub fn too_small(buf: &mut Buffer, area: Rect, th: &Theme) {
@@ -600,5 +645,74 @@ mod tests {
     #[test]
     fn big_digits_width() {
         assert_eq!(big_width("12:34"), 3 + 1 + 3 + 1 + 1 + 1 + 3 + 1 + 3);
+    }
+
+    /// The hints drawn at x = 2 in a 40-column row: the text of the row, and the x after it.
+    fn hints_row(w: u16, pairs: &[(&str, &str)]) -> (String, u16) {
+        let th = crate::theme::Theme::by_name("amber", false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let end = key_hints(&mut buf, 2, 0, w, pairs, &th);
+        ((0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect(), end)
+    }
+
+    /// Key hints draw whole pairs: "a one  b two  esc close" is 23 columns, and the pairs at the end go first
+    /// while the last one (the way out) stays.
+    #[test]
+    fn key_hints_drop_whole_pairs_from_the_end() {
+        let pairs = [("a", "one"), ("b", "two"), ("esc", "close")];
+        let (row, end) = hints_row(23, &pairs);
+        assert_eq!(row, format!("  a one  b two  esc close{}", " ".repeat(15)));
+        assert_eq!(end, 25);
+        // One pair fewer: the middle one goes, the way out stays.
+        let (row, end) = hints_row(16, &pairs);
+        assert_eq!(&row[..20], "  a one  esc close  ");
+        assert_eq!(end, 18);
+        // Too narrow for the first pair beside the last one: the last one alone.
+        let (row, end) = hints_row(12, &pairs);
+        assert_eq!(&row[..13], "  esc close  ");
+        assert_eq!(end, 11);
+        // The last pair does not fit alone: the pairs before it, as many as fit.
+        let (row, end) = hints_row(8, &pairs);
+        assert_eq!(&row[..9], "  a one  ");
+        assert_eq!(end, 7);
+    }
+
+    /// At every width a pair is drawn whole or not at all, and the returned x is the end of what is drawn.
+    #[test]
+    fn key_hints_never_cut_a_pair() {
+        let pairs = [("a", "one"), ("b", "two"), ("esc", "close")];
+        let whole = ["", "a one", "esc close", "a one  esc close", "a one  b two  esc close"];
+        for w in 0..30u16 {
+            let (row, end) = hints_row(w, &pairs);
+            let drawn = row[2..].trim_end().to_string();
+            assert!(whole.contains(&drawn.as_str()), "width {w}: {drawn:?} cuts a pair");
+            assert_eq!(usize::from(end), 2 + util::width(&drawn), "width {w}: the end is not after the text");
+        }
+    }
+
+    /// The keys take the accent color and their meanings the dim color, as the palette footer always did.
+    #[test]
+    fn key_hints_use_the_footer_colors() {
+        let th = crate::theme::Theme::by_name("amber", false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        key_hints(&mut buf, 0, 0, 40, &[("⏎", "run"), ("esc", "close")], &th);
+        assert_eq!(buf[(0, 0)].fg, th.accent2, "the key");
+        assert_eq!(buf[(1, 0)].fg, th.dim, "the blank after the key");
+        assert_eq!(buf[(2, 0)].fg, th.dim, "the meaning");
+        assert_eq!(buf[(5, 0)].fg, th.dim, "the blanks between pairs");
+    }
+
+    #[test]
+    fn box_top_keeps_the_top_bar_free() {
+        let area = Rect::new(0, 0, 110, 30);
+        // Two free rows: one above the box and one below.
+        assert_eq!(box_top(area, 28), 1);
+        // Six free rows: a third of them above.
+        assert_eq!(box_top(area, 24), 2);
+        // Full height and one free row keep the plain third (nothing to leave free).
+        assert_eq!(box_top(area, 30), 0);
+        assert_eq!(box_top(area, 29), 0);
+        // The area's own top row is the reference, not row 0.
+        assert_eq!(box_top(Rect::new(0, 5, 80, 30), 28), 6);
     }
 }

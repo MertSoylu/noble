@@ -37,14 +37,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // The question wraps over as many rows as it needs: the box grows with it (within the
             // area) and the Yes/No row stays at the bottom.
             let text_w = (w as usize).saturating_sub(4);
-            let lines = wrap_text(&c.body, text_w);
+            let lines = wrap_text(&capitalized(&c.body), text_w);
             let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-            let rect = centered(area, w, rows.saturating_add(6).min(area.height));
+            let rect = centered(area, w, rows.saturating_add(5).min(area.height));
             hits.push((rect, Hit::Inert));
             let inner = boxed(buf, rect, &c.title, th, th.crit);
             let x = inner.x + 1;
-            // Rows: a top padding row, the text, two blank rows, then the buttons. A short box drops
-            // the blank rows first: the text takes every row from the padding down to the buttons.
+            // Rows: a top padding row, the text, one blank row, then the buttons. A short box drops
+            // the blank row first: the text takes every row from the padding down to the buttons.
             let room = inner.height.saturating_sub(2) as usize;
             let cut = lines.len() > room;
             for (i, line) in lines.iter().take(room).enumerate() {
@@ -56,8 +56,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // Chips stay inside the frame: they stop at the content's right edge (one column in).
             let edge = inner.right().saturating_sub(1);
             // The button words drop out when the box is too narrow for them (the keys stay).
+            let yes_text = format!(" {}", c.yes);
             let (yes_word, no_word) =
-                if inner.width.saturating_sub(2) >= 28 { (" confirm", " cancel") } else { ("", "") };
+                if inner.width.saturating_sub(2) >= 28 { (yes_text.as_str(), " cancel") } else { ("", "") };
             let yes_x = x;
             let yes_spans = [
                 (" y ", Style::default().fg(th.on_accent).bg(th.crit).add_modifier(Modifier::BOLD)),
@@ -155,16 +156,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
                     cx = hud::put(buf, cx, inner.y, "   ", th.dim(), end.saturating_sub(cx));
                 }
             }
-            // The longest hint that fits (a narrow window drops "tab switch" first).
-            let hints: &[&str] = if add.is_some() {
-                &["tab switch · ⏎ add · esc cancel", "⏎ add · esc cancel"]
-            } else {
-                &["⏎ save · esc cancel"]
-            };
-            if p.error.is_none()
-                && let Some(hint) = hints.iter().find(|h| util::width(h) + 2 <= inner.width as usize)
-            {
-                hud::put_right(buf, inner.right().saturating_sub(1), inner.bottom().saturating_sub(1), hint, th.dim());
+            // The key hints of the prompt; a narrow window drops them from the end (`hud::key_hints`).
+            if p.error.is_none() {
+                let pairs: &[(&str, &str)] = if add.is_some() {
+                    &[("tab", "switch"), ("⏎", "add"), ("esc", "cancel")]
+                } else {
+                    &[("⏎", "save"), ("esc", "cancel")]
+                };
+                hud::key_hints(buf, x, inner.bottom().saturating_sub(1), field_w, pairs, th);
             }
         }
     }
@@ -187,23 +186,37 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, th: &Theme, fade: f64) {
     }
 }
 
-/// Right-click menu: next to the clicked point, kept inside the screen.
+/// Right-click menu: next to the clicked point, kept inside the screen. An item with `sep` gets a rule row above
+/// it (none above the first item), so the menu is as tall as its items and rules; a rule row is not a hit.
 fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mut Vec<(Rect, Hit)>) {
     let th = &app.theme;
     let label_w = m.items.iter().map(|i| util::width(&i.label)).max().unwrap_or(4) as u16;
     let hint_w = m.items.iter().map(|i| util::width(&i.hint)).max().unwrap_or(0) as u16;
     let title_w = util::width(&m.title) as u16 + 6;
     let w = (label_w + hint_w + 8).max(title_w).clamp(16, 44).min(area.width);
-    let h = (m.items.len() as u16 + 2).min(area.height);
-    // Slides left/up when it would overflow right/bottom.
+    let rules = m.items.iter().enumerate().filter(|(i, it)| *i > 0 && it.sep).count();
+    let rows = m.items.len().saturating_add(rules).saturating_add(2);
+    let h = u16::try_from(rows).unwrap_or(u16::MAX).min(area.height);
+    // Slides left/up when it would overflow right/bottom, and never leaves the screen either way.
     let x = m.x.min(area.right().saturating_sub(w));
-    let y = if m.y + h > area.bottom() { m.y.saturating_sub(h + 1).max(area.y) } else { m.y };
+    let y =
+        if m.y.saturating_add(h) > area.bottom() { m.y.saturating_sub(h.saturating_add(1)).max(area.y) } else { m.y };
+    let y = y.min(area.bottom().saturating_sub(h)).max(area.y);
     let rect = Rect::new(x, y, w, h);
     hits.push((rect, Hit::Inert));
     let inner = boxed(buf, rect, &util::truncate(&m.title, (w as usize).saturating_sub(6)), th, th.accent_dim);
     let glide = app.fx.glide("menu", m.selected);
-    for (i, it) in m.items.iter().enumerate().take(inner.height as usize) {
-        let ry = inner.y + i as u16;
+    let mut ry = inner.y;
+    for (i, it) in m.items.iter().enumerate() {
+        // A rule and its item go together: when only one row is left, neither is drawn.
+        let rule = i > 0 && it.sep;
+        if ry.saturating_add(if rule { 2 } else { 1 }) > inner.bottom() {
+            break;
+        }
+        if rule {
+            hud::hline(buf, inner.x, ry, inner.width, "─", th.line().bg(th.raised));
+            ry += 1;
+        }
         let row = Rect::new(inner.x, ry, inner.width, 1);
         let selected = i == m.selected;
         let bg = glide.bg(i, th.raised, th.sel_bg);
@@ -212,6 +225,10 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
         hud::put(buf, row.x, ry, marker, Style::default().fg(th.accent).bg(bg), 1);
         let style = if !it.enabled {
             th.dim().bg(bg)
+        } else if it.danger {
+            // Closing or removing reads as such: the critical color, bold while selected like the others.
+            let base = Style::default().fg(th.crit).bg(bg);
+            if selected { base.add_modifier(Modifier::BOLD) } else { base }
         } else if selected {
             th.accent_bold().bg(bg)
         } else {
@@ -222,6 +239,7 @@ fn menu(buf: &mut Buffer, area: Rect, app: &App, m: &crate::app::Menu, hits: &mu
             hud::put_right(buf, row.right() - 1, ry, &it.hint, th.dim().bg(bg));
         }
         hits.push((row, Hit::MenuItem(i)));
+        ry += 1;
     }
 }
 
@@ -363,26 +381,26 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
     y += 1;
     // The launcher line lists only the CLIs that are installed (and shown); none installed, no line.
     let launchers: Vec<_> = app.quick_launchers().map(|(_, l)| l).collect();
-    let mut keys = vec![("⏎".to_string(), "open a terminal in the selected project".to_string())];
+    let mut keys = vec![("⏎".to_string(), "open a terminal in the project".to_string())];
     if let Some(k) = app.keymap.hint(Action::Palette) {
-        keys.push((k, "command palette — everything is in there".into()));
+        keys.push((k, "command palette: every action".into()));
     }
-    keys.push(("?".into(), "every shortcut · ctrl+click opens links".into()));
+    keys.push(("?".into(), "all shortcuts".into()));
     // The key column fits the longest key (a rebound palette key can be "ctrl+space :") and the launcher keys,
     // but takes at most half the card so the text beside it keeps room; a longer key is cut.
     let launcher_keys: Vec<&str> = launchers.iter().map(|l| l.key.as_str()).collect();
     let key_w = keys
         .iter()
         .map(|(k, _)| util::width(k) + 2)
-        .chain((!launchers.is_empty()).then(|| util::width(&launcher_keys.join("  ")) + 2))
+        .chain((!launchers.is_empty()).then(|| util::width(&launcher_keys_text(&launcher_keys, usize::MAX)) + 2))
         .max()
         .unwrap_or(8)
         .clamp(8, ((iw / 2) as usize).max(8));
     if !launchers.is_empty() {
         let names: Vec<String> = launchers.iter().map(|l| super::bridge::capitalize(&l.name)).collect();
         let what = launcher_what(&names, (iw as usize).saturating_sub(key_w));
-        let shown_keys = fit_keys(&launcher_keys, key_w - 2);
-        if !what.is_empty() && !shown_keys.is_empty() {
+        let shown_keys = launcher_keys_text(&launcher_keys, key_w - 2);
+        if !shown_keys.is_empty() {
             keys.insert(1, (shown_keys, what));
         }
     }
@@ -409,37 +427,30 @@ fn welcome(buf: &mut Buffer, area: Rect, app: &App, ws: &crate::app::WelcomeSetu
     }
 }
 
-/// The welcome card's launcher line, `start Claude / Codex +2 right there`: names are dropped from the end
-/// as whole names until the line fits `avail` columns, and the count of those left out follows as `+N`
-/// (the same mark the project card uses for ports). " right there" is the first part to go. A name is
-/// never cut, and nothing is cut with "…" either: `""` when not even `start +N` fits, and the line is left out.
+/// The most launchers the welcome card names and keys. With more installed, the card shows the first three keys
+/// and "…" in their place, and the line names no CLI.
+const CARD_LAUNCHERS: usize = 3;
+
+/// The welcome card's launcher line: `start Claude / Codex in the project` for up to three CLIs when it fits
+/// `avail` columns, else `start an AI CLI in the project`. No name is cut; a phrase wider than `avail` is cut at a
+/// word when it is drawn (`fit_words`).
 fn launcher_what(names: &[String], avail: usize) -> String {
-    let list = |shown: usize| {
-        let mut list = names[..shown].join(" / ");
-        if shown < names.len() {
-            if shown > 0 {
-                list.push(' ');
-            }
-            list.push_str(&format!("+{}", names.len() - shown));
-        }
-        list
-    };
-    // The whole phrase with as many names as fit; only then the phrase without " right there".
-    let phrase = (0..=names.len()).rev().map(|shown| format!("start {} right there", list(shown)));
-    let short = (0..=names.len()).rev().map(|shown| format!("start {}", list(shown)));
-    phrase.chain(short).find(|text| util::width(text) <= avail).unwrap_or_default()
+    let named = (names.len() <= CARD_LAUNCHERS).then(|| format!("start {} in the project", names.join(" / ")));
+    named.filter(|text| util::width(text) <= avail).unwrap_or_else(|| "start an AI CLI in the project".into())
 }
 
-/// The launcher keys that fit `avail` columns, whole keys only: the keys left out follow as "…" (a key is never
-/// cut). `""` when not even one key fits.
-fn fit_keys(keys: &[&str], avail: usize) -> String {
-    let all = keys.join("  ");
-    if util::width(&all) <= avail {
-        return all;
-    }
-    (1..keys.len())
+/// The launcher keys the card shows, whole keys only: the first three, then "…" when more launchers are installed.
+/// At a narrow card fewer keys are shown, and "…" follows them whenever a launcher key was left out. `""` when not
+/// even one key fits.
+fn launcher_keys_text(keys: &[&str], avail: usize) -> String {
+    let head = &keys[..keys.len().min(CARD_LAUNCHERS)];
+    let more = keys.len() > head.len();
+    (1..=head.len())
         .rev()
-        .map(|n| format!("{}  …", keys[..n].join("  ")))
+        .map(|n| {
+            let shown = head[..n].join("  ");
+            if more || n < head.len() { format!("{shown}  …") } else { shown }
+        })
         .find(|text| util::width(text) <= avail)
         .unwrap_or_default()
 }
@@ -495,12 +506,9 @@ fn themes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::ThemePicker, 
     if counter_w > 0 {
         hud::put(buf, x, by, &count, th.dim(), iw);
     }
-    let hint = ["↑↓ preview · ⏎ apply · esc cancel", "⏎ apply · esc cancel", "⏎ apply"]
-        .into_iter()
-        .find(|h| util::width(h) as u16 + counter_w <= iw);
-    if let Some(hint) = hint {
-        hud::put_right(buf, x + iw, by, hint, th.dim());
-    }
+    // The key hints follow the counter (at the content's left edge when there is none).
+    let pairs = [("↑↓", "preview"), ("⏎", "apply"), ("esc", "cancel")];
+    hud::key_hints(buf, x + counter_w, by, iw.saturating_sub(counter_w), &pairs, th);
 }
 
 /// Terminal color scheme selector: each row is drawn on the scheme's own background
@@ -570,19 +578,16 @@ fn schemes(buf: &mut Buffer, area: Rect, app: &App, p: &crate::app::SchemePicker
         }
         hits.push((line, Hit::TermScheme(i)));
     }
-    // Bottom row: counter left, hint right; shortened in narrow boxes, skipped when it does not fit.
+    // Bottom row: the counter, then the key hints (the pairs at the end go first in a narrow box).
     let by = inner.bottom() - 1;
     let count = format!("{}/{}", p.selected + 1, options.len());
     let counter_w = if options.len() > list_h { util::width(&count) as u16 + 2 } else { 0 };
     if counter_w > 0 {
         hud::put(buf, x, by, &count, th.dim(), iw);
     }
-    let hint = ["↑↓ preview · ⏎ apply · esc cancel", "⏎ apply · esc cancel", "⏎ apply"]
-        .into_iter()
-        .find(|h| util::width(h) as u16 + counter_w <= iw);
-    if let Some(hint) = hint {
-        hud::put_right(buf, x + iw, by, hint, th.dim());
-    }
+    // The key hints follow the counter (at the content's left edge when there is none).
+    let pairs = [("↑↓", "preview"), ("⏎", "apply"), ("esc", "cancel")];
+    hud::key_hints(buf, x + counter_w, by, iw.saturating_sub(counter_w), &pairs, th);
 }
 
 /// Quick launch popup: for each installed launcher its Home visibility and shortcut
@@ -638,12 +643,7 @@ fn launchers(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &mu
         hits.push((Rect::new(chip_x, y, chip_w, 1), Hit::LaunchKey(i)));
     }
     let by = inner.bottom() - 1;
-    let hint = ["space show/hide · ←→ shortcut · esc close", "space show · ←→ key · esc", "esc close"]
-        .into_iter()
-        .find(|h| util::width(h) as u16 <= iw);
-    if let Some(hint) = hint {
-        hud::put_right(buf, x + iw, by, hint, th.dim());
-    }
+    hud::key_hints(buf, x, by, iw, &[("space", "show/hide"), ("←→", "shortcut"), ("esc", "close")], th);
 }
 
 /// Agent status hooks popup: one row per agent (`Agent::ALL`) with its hooks on, off, or not found on this
@@ -699,11 +699,15 @@ fn agent_hooks(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &
         hits.push((line, Hit::AgentHook(n)));
     }
     let by = inner.bottom() - 1;
-    let hint = ["space on/off · esc close", "space on/off · esc", "esc close"]
-        .into_iter()
-        .find(|h| util::width(h) as u16 <= iw);
-    if let Some(hint) = hint {
-        hud::put_right(buf, x + iw, by, hint, th.dim());
+    hud::key_hints(buf, x, by, iw, &[("space", "on/off"), ("esc", "close")], th);
+}
+
+/// `text` with its first character in upper case; the rest is kept as written (`close it?` → `Close it?`).
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -772,10 +776,11 @@ fn ellipsize(line: &str, width: usize) -> String {
     format!("{}…", out.trim_end())
 }
 
+/// A box centered across `area` and a third of the free rows down; it keeps the top bar free (`hud::box_top`).
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
-    Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 3, w, h)
+    Rect::new(area.x + (area.width - w) / 2, hud::box_top(area, h), w, h)
 }
 
 /// Clears the frame lines of the one-cell ring around an overlay box. Without it a box placed next
@@ -901,12 +906,22 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
         }
         let cx = x + 2;
         let group_w = 6u16;
+        // A notification's group is its level, colored as its toast is (see `toasts`); other groups use accent2.
+        let group_color = match &item.cmd {
+            crate::app::PaletteCmd::Notice { level, .. } => match level {
+                crate::app::ToastLevel::Info => th.accent2,
+                crate::app::ToastLevel::Ok => th.ok,
+                crate::app::ToastLevel::Warn => th.warn,
+                crate::app::ToastLevel::Error => th.crit,
+            },
+            _ => th.accent2,
+        };
         let cx = hud::put(
             buf,
             cx,
             y,
             &util::pad_right(item.group, group_w as usize),
-            Style::default().fg(th.accent2).bg(bgc),
+            Style::default().fg(group_color).bg(bgc),
             group_w,
         );
         let hint_w = util::width(&item.hint) as u16;
@@ -933,31 +948,30 @@ fn palette(buf: &mut Buffer, area: Rect, app: &App, st: &crate::app::PaletteStat
     if footer_rule {
         hud::hline(buf, inner.x, fy - 1, inner.width, "─", th.line());
     }
-    // Keys in the accent color, their meaning dimmed.
-    let (k, d) = (th.accent2(), th.dim());
-    let mut keys = vec![("↑↓", k), (" select  ", d), ("⏎", k)];
+    // The key hints; Enter's meaning follows the selected row.
+    let mut pairs: Vec<(&str, &str)> = vec![("↑↓", "select")];
     match st.current().map(|i| &i.cmd) {
         // A notification: Enter goes where it leads (or copies it, when nowhere), ctrl+y copies it in any case.
         Some(crate::app::PaletteCmd::Notice { target, .. }) => {
             use crate::app::ToastTarget;
             // A pane's notification whose pane has closed is only copied, like one without a target.
             let target = target.as_ref().filter(|t| app.toast_target_open(t));
-            keys.push((
+            pairs.push((
+                "⏎",
                 match target {
-                    Some(ToastTarget::Pane { .. }) => " go to  ",
-                    Some(ToastTarget::Config { .. }) => " open  ",
-                    None => " copy  ",
+                    Some(ToastTarget::Pane { .. }) => "go to",
+                    Some(ToastTarget::Config { .. }) => "open",
+                    None => "copy",
                 },
-                d,
             ));
             if target.is_some() {
-                keys.extend([("ctrl+y", k), (" copy  ", d)]);
+                pairs.push(("ctrl+y", "copy"));
             }
         }
-        _ => keys.push((" run  ", d)),
+        _ => pairs.push(("⏎", "run")),
     }
-    keys.extend([("esc", k), (" close", d)]);
-    hud::put_spans(buf, x, fy, &keys, iw);
+    pairs.push(("esc", "close"));
+    hud::key_hints(buf, x, fy, iw, &pairs, th);
 }
 
 /// The keyboard reference: one or more columns of sections, a filter in the title and a selection.
@@ -1022,12 +1036,14 @@ fn help(buf: &mut Buffer, area: Rect, app: &App, st: &HelpState, hits: &mut Vec<
             }
         }
     }
-    hud::put_right(
+    // The key hints on the box's last row, from the content's left edge (`hud::key_hints`).
+    hud::key_hints(
         buf,
-        inner.right() - 1,
+        inner.x + 1,
         inner.bottom() - 1,
-        "type to filter · ⏎ run · esc close",
-        th.dim().bg(th.raised),
+        inner.width.saturating_sub(2),
+        &[("type", "filter"), ("⏎", "run"), ("esc", "close")],
+        th,
     );
 }
 
@@ -1108,32 +1124,22 @@ fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hit
         (String::new(), th.dim().bg(th.raised))
     };
     hud::put(buf, x, inner.bottom() - 2, &util::truncate(&status, iw as usize), style, iw);
-    // The key hints: the longest of them that fits.
-    const BROWSE: [&str; 4] = [
-        "⏎ prefix key · d direct key · x unbind · r reset · / filter · esc close",
-        "⏎ prefix key · d direct key · x unbind · r reset · esc",
-        "⏎ prefix · d direct · x unbind · r reset · esc",
-        "⏎ prefix · d direct · esc",
-    ];
-    const WAITING: [&str; 1] = ["esc cancel"];
-    const REPLACE: [&str; 1] = ["y replace · n cancel"];
-    const FILTER: [&str; 2] = ["type to filter · ⏎ done · esc clear", "⏎ done · esc clear"];
-    let hints: &[&str] = if st.replace.is_some() {
-        &REPLACE
+    // The key hints (`hud::key_hints`): the pairs at the end go first when the box is narrow.
+    let pairs: &[(&str, &str)] = if st.replace.is_some() {
+        &[("y", "replace"), ("n", "cancel")]
     } else if st.capture.is_some() {
-        &WAITING
+        &[("esc", "cancel")]
     } else if st.filtering {
-        &FILTER
+        &[("type", "filter"), ("⏎", "done"), ("esc", "clear")]
     } else {
-        &BROWSE
+        &[("⏎", "prefix key"), ("d", "direct key"), ("x", "unbind"), ("r", "reset"), ("/", "filter"), ("esc", "close")]
     };
-    let hint = hints.iter().find(|h| util::width(h) <= iw as usize).copied().unwrap_or("esc");
-    hud::put(buf, x, inner.bottom() - 1, hint, th.dim().bg(th.raised), iw);
+    hud::key_hints(buf, x, inner.bottom() - 1, iw, pairs, th);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_keys, fit_words, wrap_text};
+    use super::{capitalized, fit_words, launcher_keys_text, launcher_what, wrap_text};
     use crate::util;
 
     #[test]
@@ -1148,12 +1154,35 @@ mod tests {
         assert_eq!(fit_words("launcher", 0), "");
     }
 
+    /// The card shows the first three launcher keys, then "…" for the launchers it does not name. A narrow card
+    /// shows fewer keys, whole ones only, and still marks the ones left out.
     #[test]
-    fn fit_keys_drops_whole_keys() {
+    fn launcher_keys_name_three_and_mark_the_rest() {
         let keys = ["c", "x", "e", "g", "b", "f", "u", "d", "l"];
-        assert_eq!(fit_keys(&keys, 25), "c  x  e  g  b  f  u  d  l");
-        assert_eq!(fit_keys(&keys, 16), "c  x  e  g  b  …");
-        assert_eq!(fit_keys(&keys, 2), "");
+        assert_eq!(launcher_keys_text(&keys, usize::MAX), "c  x  e  …");
+        assert_eq!(launcher_keys_text(&keys, 9), "c  x  …");
+        assert_eq!(launcher_keys_text(&keys, 4), "c  …");
+        assert_eq!(launcher_keys_text(&keys, 3), "");
+        // Up to three keys: all of them or nothing, and no "…" while every launcher is named.
+        assert_eq!(launcher_keys_text(&keys[..3], usize::MAX), "c  x  e");
+        assert_eq!(launcher_keys_text(&keys[..3], 7), "c  x  e");
+        assert_eq!(launcher_keys_text(&keys[..3], 6), "c  …");
+        assert_eq!(launcher_keys_text(&keys[..2], usize::MAX), "c  x");
+    }
+
+    /// Up to three CLIs are named when the phrase fits; otherwise, and with more launchers, the line says
+    /// "an AI CLI" and names none. The phrase is never cut here: `fit_words` cuts it when it is drawn.
+    #[test]
+    fn launcher_line_names_up_to_three_clis() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let two = names(&["Claude", "Codex"]);
+        assert_eq!(launcher_what(&two, 35), "start Claude / Codex in the project");
+        assert_eq!(launcher_what(&two, 34), "start an AI CLI in the project");
+        assert_eq!(launcher_what(&names(&["Claude"]), 27), "start Claude in the project");
+        let many = names(&["Claude", "Codex", "Gemini", "Antigravity"]);
+        assert_eq!(launcher_what(&many, 200), "start an AI CLI in the project");
+        // Too narrow for any phrase: the AI phrase is returned for `fit_words` to cut at a word.
+        assert_eq!(fit_words(&launcher_what(&two, 5), 29), "start an AI CLI in the…");
     }
 
     #[test]
@@ -1170,5 +1199,16 @@ mod tests {
         assert!(wide.iter().all(|l| util::width(l) <= 5), "{wide:?}");
         assert!(wrap_text("", 10).is_empty());
         assert!(wrap_text("abc", 0).is_empty());
+    }
+
+    #[test]
+    fn capitalized_uppercases_only_the_first_character() {
+        assert_eq!(capitalized("a command is still running"), "A command is still running");
+        assert_eq!(capitalized("cargo test — close it?"), "Cargo test — close it?");
+        // Already capitalized, a symbol, a non-ASCII letter, and empty text.
+        assert_eq!(capitalized("Already"), "Already");
+        assert_eq!(capitalized("“quoted”"), "“quoted”");
+        assert_eq!(capitalized("élan"), "Élan");
+        assert_eq!(capitalized(""), "");
     }
 }

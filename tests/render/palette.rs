@@ -144,7 +144,7 @@ fn palette_hints_follow_the_view() {
     assert_eq!(hint_of(&app, "Refresh AI Quotas"), "R");
     assert_eq!(hint_of(&app, "Add Project or Folder…"), "a");
     // `A` still works (project mode) but is not shown anywhere.
-    assert_eq!(hint_of(&app, "Add Project…"), "");
+    assert_eq!(hint_of(&app, "Add One Project…"), "");
 
     app.new_tab(std::env::temp_dir(), None, Some("keys".into()));
     let term = titles(&app);
@@ -210,6 +210,20 @@ fn palette_marks_matched_title_letters() {
     assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
 }
 
+/// The palette's key hints are left-aligned at the content's edge (two columns in from the frame) and read
+/// "↑↓ select  ⏎ run  esc close" on a command row.
+#[test]
+fn palette_footer_starts_at_the_content_edge() {
+    let mut app = demo_app(110, 30);
+    app.open_palette();
+    let buf = render_cells(&mut app, 110, 30);
+    let (bx, _) = find_text(&buf, "╭ COMMAND", 0).expect("the palette box");
+    let (fx, _) = find_text(&buf, "↑↓ select", 0).expect("the key hints");
+    assert_eq!(fx, bx + 2, "the hints start at column {fx}, the box at {bx}");
+    let text = render(&mut app, 110, 30);
+    assert!(text.lines().any(|l| l.contains("↑↓ select  ⏎ run  esc close")), "{text}");
+}
+
 /// Recently run commands come first, most recent first, once each, and the list is kept to ten.
 #[test]
 fn palette_empty_query_lists_recent_commands_first() {
@@ -253,4 +267,79 @@ fn palette_setting_item_toggles_a_switch() {
     // A choice opens its popup, as ⏎ does on its row.
     app.run_palette(PaletteCmd::Setting(SettingItem::Setting(SettingKey::Theme)));
     assert!(matches!(app.overlay, Some(Overlay::Themes(_))), "the theme row opens the theme picker");
+}
+
+/// Command names: "Add One Project…" is the one-project add (the add dialog's "one project" mode), and Quit is
+/// a system command, listed with the other SYS ones rather than under navigation.
+#[test]
+fn command_titles_and_groups() {
+    use noble::app::PaletteCmd;
+    let app = demo_app(120, 30);
+    let items = app.palette_items();
+    assert!(!items.iter().any(|i| i.title == "Add Project…"), "the old title is gone");
+    let add = items.iter().find(|i| i.title == "Add One Project…").expect("the renamed add");
+    assert_eq!(add.cmd, PaletteCmd::Action(Action::AddProject));
+    let quit = items.iter().find(|i| i.title == "Quit NOBLE").expect("quit");
+    assert_eq!((quit.group, &quit.cmd), ("SYS", &PaletteCmd::Action(Action::Quit)));
+    let help = items.iter().find(|i| i.title == "Keyboard Reference").expect("help");
+    assert_eq!(help.group, "NAV", "the other navigation commands keep their group");
+}
+
+/// The notification list: a row's group is its level in capitals, colored as the toasts color it. Notices repeated in
+/// a row (the same text and target) make one row whose hint is "×N"; a notice in between keeps them apart. Enter and
+/// ctrl+y on the collapsed row do what they do for one notice.
+#[test]
+fn notification_list_shows_levels_and_collapses_repeats() {
+    use noble::app::{Overlay, PaletteCmd, ToastLevel};
+    let mut app = demo_app(110, 30);
+    app.notices.clear();
+    app.toast(ToastLevel::Info, "first note");
+    app.toast(ToastLevel::Warn, "disk almost full");
+    for _ in 0..3 {
+        app.toast(ToastLevel::Info, "same note");
+    }
+    app.run(Action::Notifications);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no list") };
+    // Newest first: the three repeats are one row, and a single notice has no hint.
+    let shown: Vec<(&str, &str)> = st.all.iter().map(|i| (i.group, i.hint.as_str())).collect();
+    assert_eq!(shown, [("INFO", "×3"), ("WARN", ""), ("INFO", "")], "{shown:?}");
+    assert!(st.all[0].title.ends_with("same note") && st.all[1].title.ends_with("disk almost full"));
+    assert_eq!(st.all[0].cmd, PaletteCmd::Notice { text: "same note".into(), target: None, level: ToastLevel::Info });
+    let text = render(&mut app, 110, 30);
+    save("notifications-levels-110x30", &text);
+    assert!(text.contains("WARN") && text.contains("×3"), "{text}");
+    assert_eq!(text.matches("same note").count(), 1, "the repeats are one row:\n{text}");
+    // The group cell takes the warning color (the one toasts use for a warning).
+    let buf = render_cells(&mut app, 110, 30);
+    let (x, y) = find_text(&buf, "WARN", 0).expect("the WARN group cell");
+    assert_eq!(buf[(x, y)].fg, app.theme.warn, "the level's color");
+
+    // Opens the list on the row of the repeated notice.
+    let select_repeats = |app: &mut App| {
+        app.run(Action::Notifications);
+        let Some(Overlay::Palette(st)) = &mut app.overlay else { panic!("no list") };
+        let is_repeats = |c: &PaletteCmd| matches!(c, PaletteCmd::Notice { text, .. } if text == "same note");
+        st.selected = st.all.iter().position(|i| is_repeats(&i.cmd)).expect("the repeats' row");
+    };
+    // Enter on the collapsed row copies its text, as it does for one notice (it has no pane to go to).
+    select_repeats(&mut app);
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.overlay.is_none(), "Enter closes the list");
+    let texts = toast_texts(&app);
+    assert!(texts.iter().any(|t| t == "copied" || t == "clipboard unavailable"), "{texts:?}");
+    // ctrl+y copies it too.
+    select_repeats(&mut app);
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert!(app.overlay.is_none(), "copying closes the list");
+
+    // A notice in between keeps two equal texts apart: no hint anywhere.
+    let mut app = demo_app(110, 30);
+    app.notices.clear();
+    app.toast(ToastLevel::Error, "again");
+    app.toast(ToastLevel::Info, "between");
+    app.toast(ToastLevel::Error, "again");
+    app.run(Action::Notifications);
+    let Some(Overlay::Palette(st)) = &app.overlay else { panic!("no list") };
+    let shown: Vec<(&str, &str)> = st.all.iter().map(|i| (i.group, i.hint.as_str())).collect();
+    assert_eq!(shown, [("ERROR", ""), ("INFO", ""), ("ERROR", "")], "{shown:?}");
 }

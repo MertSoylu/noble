@@ -6,6 +6,35 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Warning and critical colors are told apart in every theme: Amber's critical red, Solarized's and Solarized
+  Light's critical (now magenta) and Everforest's warning (now yellow) changed, so a bar at 64% no longer looks like
+  one at 95%. A test keeps the two at least a CIEDE2000 distance of 18 apart in every theme.
+- Home: with the project card open, the row above the buttons no longer repeats the git status the list and the card
+  already show; the project's folder moved into the card's title line. "↻ Continue claude" is a button like the task
+  chips. Background Claude sessions are listed under a BACKGROUND header without "claude bg" on every row. The
+  System panel drops the flat RAM history graph, and its CPU graph scales to 25, 50 or 100% with the scale shown.
+- Home without any project shows one "a Add project" button instead of buttons that had nothing to act on, and a
+  search that matches nothing shows no buttons.
+- System: the panel titles are in sentence case like Home's; the process names take only the width they need and the
+  CPU bars, now relative to the busiest process, get the rest; the core grid has no lone core on its last row; the
+  network rates are colored like their graphs; the status bar tip says how to sort.
+- Settings: "⏎ choose" shows on the selected row only, and the scroll markers say how many settings are hidden
+  ("↓ 16 more").
+- The tab strip shows a tab's × only on the active tab and the one under the pointer.
+- The update notice and the agent status offer sit in the status bar on every screen, so they no longer cover a
+  panel's border or buttons.
+- Overlays: the keyboard reference and the key bindings editor no longer cover the top bar; every overlay footer has
+  the command palette's look; the keyboard reference rows are all in Title Case; the welcome card's texts fit at 110
+  and 120 columns.
+- Right-click menus are grouped with separators and show closing or removing items in red; with more than three quick
+  launchers the project menu lists them under "Start agent ›". The palette's "Add Project…" is now "Add One
+  Project…", and Quit is listed under SYS.
+- Confirmation dialogs name their action ("y close", "y paste", …), start with a capital letter, are one row shorter,
+  and closing a pane names the command still running in it.
+- The notification list shows each notice's level (INFO, OK, WARN, ERROR) in its color and folds repeated notices
+  into one row with a count ("×3").
+
 ## [1.14.1] - 2026-11-06
 
 ### Removed

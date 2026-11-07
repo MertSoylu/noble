@@ -106,11 +106,10 @@ fn bridge_renders_at_all_sizes() {
                 "{w}x{h}
 {text}"
             );
-            assert!(
-                text.contains("3 uncommitted changes (1 new) · 1 commit to push"),
-                "{w}x{h}
-{text}"
-            );
+            // With the card open the git summary is not repeated on the footer row: the card's title has the folder
+            // and its STATUS column has the counts.
+            assert!(!text.contains("uncommitted"), "{w}x{h}\n{text}");
+            assert!(text.contains("● 3"), "{w}x{h}\n{text}");
             // The old process list was removed.
             assert!(!text.contains("code.exe"));
         }
@@ -554,21 +553,36 @@ fn add_project_folder_flow() {
     assert_eq!(app.cfg.projects.roots.len(), defaults + 1);
 }
 
-/// With no project yet, Home says how to add one (`a`) and the welcome-free overlay line says the same.
+/// With no project yet, Home says how to add one (`a`) and its only button adds one: a click runs what the `a` key
+/// runs (the add dialog). Nothing else is drawn on the action bar: the launchers and "Open" have no project to act on.
 #[test]
 fn empty_home_says_how_to_add_a_project() {
+    use noble::app::{Hit, Overlay};
     let mut app = demo_app(110, 30);
     app.projects.clear();
     app.projects_loaded = true;
     let text = render(&mut app, 110, 30);
     save("bridge-empty-110x30", &text);
     assert!(
-        text.contains("No git repositories found.") && text.contains("press a to add a project or folder"),
+        text.contains("No git repositories found.") && text.contains("Press a to add a project or folder"),
         "{text}"
     );
     assert!(!text.contains(" A "), "no `A` hint left: {text}");
+    assert!(!text.contains("press a"), "the second line is capitalized: {text}");
+    assert!(text.contains("Add project"), "{text}");
+    assert!(!text.contains("Open") && !text.contains("Folder"), "no action buttons without a project: {text}");
+    assert!(find_hit(&app, |h| *h == Hit::OpenSelected).is_none());
+    assert!(find_hit(&app, |h| matches!(h, Hit::Launcher(_))).is_none());
+    let button = find_hit(&app, |h| *h == Hit::AddProject).expect("the add project button");
+    assert_eq!(cells_text(&render_cells(&mut app, 110, 30), button), " a Add project ", "{text}");
+    // The button runs what the `a` key runs: the add dialog opens.
+    click(&mut app, button.x + 1, button.y);
+    assert!(matches!(app.overlay, Some(Overlay::Prompt(_))), "the add dialog opens");
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     for (w, h) in [(60, 12), (30, 8)] {
-        save(&format!("bridge-empty-{w}x{h}"), &render(&mut app, w, h));
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-empty-{w}x{h}"), &text);
+        assert!(text.lines().all(|l| l.chars().count() <= w as usize), "overflow at {w}x{h}:\n{text}");
     }
 }
 
@@ -720,6 +734,164 @@ fn project_actions_from_keyboard() {
     assert_eq!(app.bridge.proj_act, None);
 }
 
+/// The project menu's rows: a right click on the first project, with `launchers` in the app.
+fn open_first_project_menu(app: &mut App) -> Vec<noble::app::MenuItem> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::{Hit, Overlay};
+    app.overlay = None;
+    render(app, 110, 30);
+    let first = find_hit(app, |h| *h == Hit::Project(0)).unwrap();
+    mouse(app, MouseEventKind::Down(MouseButton::Right), first.x + 4, first.y);
+    match &app.overlay {
+        Some(Overlay::Menu(m)) => m.items.clone(),
+        _ => panic!("project menu not open"),
+    }
+}
+
+/// A quick launcher for the project menu tests: shown on Home, found on PATH (as the headless app is told).
+fn quick_launcher(key: &str, name: &str, show: bool) -> (noble::config::Launcher, bool) {
+    (noble::config::Launcher { key: key.into(), name: name.into(), command: name.into(), show }, true)
+}
+
+/// More than three quick launchers: the project menu gives one "Start agent ›" row, whose list opens where the menu
+/// was (the same as the pane menu's launch list). The rules set apart the folder actions, Git pull and the pin, and
+/// the removal is drawn in the critical color. Keys step over the items only.
+#[test]
+fn project_menu_groups_launchers_and_rules() {
+    use noble::app::{Hit, MenuCmd, Overlay};
+    let mut app = demo_app(110, 30);
+    app.launchers = vec![
+        quick_launcher("a", "alpha", true),
+        quick_launcher("b", "beta", true),
+        quick_launcher("g", "gamma", true),
+        quick_launcher("d", "delta", true),
+    ];
+    let path = app.projects[0].path.clone();
+    let items = open_first_project_menu(&mut app);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Open terminal",
+            "Start agent ›",
+            "Open in VS Code",
+            "Open folder",
+            "Copy path",
+            "Git pull",
+            "Pin to top",
+            "Remove from list"
+        ]
+    );
+    let seps: Vec<bool> = items.iter().map(|i| i.sep).collect();
+    assert_eq!(seps, [false, false, true, false, false, true, true, false]);
+    assert_eq!(items[1].cmd, MenuCmd::StartMenu(path.clone()));
+    let dangers: Vec<&str> = items.iter().filter(|i| i.danger).map(|i| i.label.as_str()).collect();
+    assert_eq!(dangers, ["Remove from list"]);
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("project menu not open") };
+    let (menu_x, menu_y) = (m.x, m.y);
+
+    // Every row is drawn where its hit is, and a rule sits above each item marked `sep` (never above the first).
+    save("menu-project-groups-110x30", &render(&mut app, 110, 30));
+    let buf = render_cells(&mut app, 110, 30);
+    for (i, it) in items.iter().enumerate() {
+        let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).expect("item row");
+        assert!(cells_text(&buf, row).contains(&it.label), "row {i} draws {}", it.label);
+        if i > 0 {
+            let above = &buf[(row.x, row.y - 1)];
+            assert_eq!(above.symbol() == "─", it.sep, "rule above {}", it.label);
+            if it.sep {
+                assert_eq!(above.fg, app.theme.line, "the rule is in the line color");
+            }
+        }
+    }
+    let remove = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    assert_eq!(buf[(remove.x + 2, remove.y)].fg, app.theme.crit, "the removal is in the critical color");
+    let copy = find_hit(&app, |h| *h == Hit::MenuItem(4)).unwrap();
+    assert_ne!(buf[(copy.x + 2, copy.y)].fg, app.theme.crit, "a plain item keeps the text color");
+
+    // Seven steps from the first item reach the last one (the rules are no steps), and one more wraps round.
+    let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    for _ in 0..7 {
+        key(&mut app, KeyCode::Down);
+    }
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
+    assert_eq!(m.selected, 7);
+    key(&mut app, KeyCode::Down);
+    let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
+    assert_eq!(m.selected, 0);
+
+    // Clicking "Start agent ›" opens the four launchers, in the folder of the project, where the menu was.
+    let start = find_hit(&app, |h| *h == Hit::MenuItem(1)).unwrap();
+    click(&mut app, start.x + 1, start.y);
+    let Some(Overlay::Menu(sub)) = &app.overlay else { panic!("start agent list not open") };
+    assert_eq!(sub.title, "Start agent");
+    assert_eq!((sub.x, sub.y), (menu_x, menu_y), "the list opens where the menu was");
+    let rows: Vec<(&str, &str, MenuCmd)> =
+        sub.items.iter().map(|i| (i.label.as_str(), i.hint.as_str(), i.cmd.clone())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("alpha", "a", MenuCmd::Launch(0, path.clone())),
+            ("beta", "b", MenuCmd::Launch(1, path.clone())),
+            ("gamma", "g", MenuCmd::Launch(2, path.clone())),
+            ("delta", "d", MenuCmd::Launch(3, path.clone())),
+        ]
+    );
+    let text = render(&mut app, 110, 30);
+    save("menu-start-agent-110x30", &text);
+    assert!(text.contains("Start agent") && text.contains("alpha"), "{text}");
+}
+
+/// Up to three quick launchers stay inline in the project menu as "Start <name>" rows, the key as the hint; the
+/// launchers that are hidden on Home do not count.
+#[test]
+fn project_menu_keeps_few_launchers_inline() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.launchers = vec![quick_launcher("c", "claude", true), quick_launcher("x", "codex", true)];
+    app.launchers.push(quick_launcher("e", "opencode", false));
+    app.launchers.push(quick_launcher("i", "copilot", false));
+    let items = open_first_project_menu(&mut app);
+    let starts: Vec<(&str, &str)> =
+        items.iter().filter(|i| i.label.starts_with("Start")).map(|i| (i.label.as_str(), i.hint.as_str())).collect();
+    assert_eq!(starts, [("Start claude", "c"), ("Start codex", "x")]);
+    assert!(!items.iter().any(|i| i.label.contains("agent ›")), "no list row for two launchers");
+    // Three shown is still inline (the list starts above three).
+    app.launchers.push(quick_launcher("o", "pi", true));
+    let items = open_first_project_menu(&mut app);
+    assert_eq!(items.iter().filter(|i| i.label.starts_with("Start ")).count(), 3);
+    assert!(!items.iter().any(|i| i.label.contains("agent ›")));
+    // The menu's rows still hit their items.
+    render(&mut app, 110, 30);
+    assert!(find_hit(&app, |h| *h == Hit::MenuItem(items.len() - 1)).is_some());
+}
+
+/// Near the bottom edge the menu slides up and stays on the screen with its rules: every row is drawn, the
+/// removal is the last inner row, and the frame closes below it.
+#[test]
+fn project_menu_near_the_bottom_fits_with_its_rules() {
+    use noble::app::Hit;
+    let mut app = demo_app(110, 30);
+    app.launchers = (0..4).map(|i| quick_launcher(&format!("{i}"), &format!("agent{i}"), true)).collect();
+    render(&mut app, 110, 30);
+    let path = app.projects[0].path.clone();
+    app.open_project_menu(path, 20, 28);
+    let buf = render_cells(&mut app, 110, 30);
+    let frame = find_hit(&app, |h| *h == Hit::Inert).expect("menu frame");
+    assert!(frame.bottom() <= 30, "the frame stays on the screen: {frame:?}");
+    let rules = (frame.y + 1..frame.bottom() - 1).filter(|&y| buf[(frame.x + 1, y)].symbol() == "─").count();
+    assert_eq!(rules, 3, "one rule above each of the three groups' first items");
+    for i in 0..8 {
+        let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).unwrap_or_else(|| panic!("row {i} is drawn"));
+        assert!(row.y > frame.y && row.bottom() < frame.bottom(), "row {i} sits inside the frame");
+    }
+    let last = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    assert_eq!(last.y + 1, frame.bottom() - 1, "the removal is the last row, above the bottom border");
+    for (w, h) in SIZES {
+        save(&format!("menu-project-rules-{w}x{h}"), &render(&mut app, w, h));
+    }
+}
+
 /// Removing a project from the ⋯ menu hides it for good (a rescan does not bring it back, a
 /// pin goes with it); `A` adds any folder as a project — a plain folder too — and brings a
 /// removed one back. The state stays in memory (`UiState::memory` in headless mode).
@@ -849,8 +1021,8 @@ fn quota_pace_warning_line() {
     assert!(!text.contains("at this pace"), "{text}");
 }
 
-/// New release: a notice appears bottom right, drops to the status bar in a
-/// terminal and, once dismissed, is never shown again for the same version.
+/// New release: a notice appears bottom right on the status bar's row, on every page and not only in a terminal,
+/// and, once dismissed, is never shown again for the same version.
 #[test]
 fn update_notice_bottom_right() {
     let mut app = demo_app(120, 32);
@@ -860,10 +1032,25 @@ fn update_notice_bottom_right() {
     assert_eq!(app.update_notice(), Some("99.0.0"));
     let text = render(&mut app, 120, 32);
     save("update-notice-120x32", &text);
-    let row = text.lines().nth(30).unwrap();
+    // On Home the notice takes the status bar's row (H-1). The panels' bottom border (H-2) and the action buttons
+    // (H-3) keep their cells: apart from that status row the screen is the same as without the notice.
+    let row = text.lines().nth(31).unwrap();
     assert!(row.contains("NOBLE 99.0.0 is available") && row.trim_end().ends_with("update  ×"), "{text}");
+    let border = text.lines().nth(30).unwrap();
+    assert!(!border.contains("99.0.0") && !border.contains("update") && border.contains('╯'), "{text}");
+    let buttons = text.lines().nth(29).unwrap();
+    // "Open" is on the button row on every machine (the launcher chips depend on the CLIs installed).
+    assert!(buttons.contains("⏎ Open") && !buttons.contains("99.0.0"), "{text}");
+    app.cfg.general.check_updates = false;
+    let plain = render(&mut app, 120, 32);
+    app.cfg.general.check_updates = true;
+    // Only the rows next to the notice are compared: the demo's quota countdowns follow the wall clock, so two renders
+    // a second boundary apart can differ higher up.
+    let (with, without): (Vec<&str>, Vec<&str>) = (text.lines().collect(), plain.lines().collect());
+    assert!(with[27..31] == without[27..31], "the notice changes only the status bar row:\n{text}");
+    render(&mut app, 120, 32);
     let hit = find_hit(&app, |h| *h == noble::app::Hit::Update).expect("update hit");
-    assert_eq!((hit.y, hit.x + hit.width + 4), (30, 120));
+    assert_eq!((hit.y, hit.x + hit.width + 4), (31, 120));
     for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
         save(&format!("update-notice-{w}x{h}"), &render(&mut app, w, h));
     }
@@ -889,6 +1076,53 @@ fn update_notice_bottom_right() {
     assert!(app.update_notice().is_none(), "dismissed version stays hidden");
     app.handle(AppEvent::Update(Ok("99.0.1".into())));
     assert_eq!(app.update_notice(), Some("99.0.1"));
+}
+
+/// Home, System and Settings all keep the notice on the status bar's row: the last content row above it (H-2) never
+/// carries the notice's text, at a wide and a narrow size.
+#[test]
+fn update_notice_on_every_page() {
+    let mut app = demo_app(120, 32);
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    for (w, h) in [(120, 32), (80, 24)] {
+        for (page, action) in [("home", Action::Bridge), ("system", Action::System), ("settings", Action::Settings)] {
+            app.run(action);
+            let text = render(&mut app, w, h);
+            save(&format!("update-notice-{page}-{w}x{h}"), &text);
+            let (status, above) = (text.lines().last().unwrap(), text.lines().nth(h as usize - 2).unwrap());
+            assert!(status.contains("NOBLE 99.0.0 is available"), "{page} {w}x{h}\n{text}");
+            assert!(!above.contains("99.0.0"), "{page} {w}x{h}\n{text}");
+        }
+    }
+}
+
+/// The row of the first line of `text` that contains `needle`.
+fn row_with(text: &str, needle: &str) -> usize {
+    text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle:?} on screen:\n{text}"))
+}
+
+/// A notification never shares a row with the update notice: the notice is on the status bar (H-1) and the
+/// notifications stack from H-3 on Home as on a terminal tab.
+#[test]
+fn toast_stacks_above_the_update_notice() {
+    use noble::app::ToastLevel;
+    let mut app = demo_app(120, 32);
+    app.handle(AppEvent::Update(Ok("99.0.0".into())));
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "a note beside the notice");
+    let text = render(&mut app, 120, 32);
+    save("update-notice-toast-120x32", &text);
+    assert_eq!(row_with(&text, "NOBLE 99.0.0 is available"), 31, "{text}");
+    assert_eq!(row_with(&text, "a note beside the notice"), 29, "{text}");
+
+    app.new_tab(std::env::temp_dir(), None, Some("shell".into()));
+    app.toasts.clear();
+    app.toast(ToastLevel::Info, "a note in a terminal");
+    let text = render(&mut app, 120, 32);
+    save("update-notice-toast-terminal-120x32", &text);
+    assert_eq!(row_with(&text, "↑ 99.0.0"), 31, "{text}");
+    assert_eq!(row_with(&text, "a note in a terminal"), 29, "{text}");
+    app.run(Action::CloseTab);
 }
 
 /// Test provider state that reports a session (login) that has expired, with cached numbers.
@@ -996,27 +1230,44 @@ fn home_search_label_starts_the_filter() {
     assert!(!app.bridge.filtering);
 }
 
-/// `o` and the "Folder" button with no project selected say why, instead of doing nothing.
+/// `o` with no project selected says why, instead of doing nothing. Without a project the action bar has no
+/// "Folder" button (the one button adds a project), and a filter that matches no project draws no buttons at all.
 #[test]
 fn open_folder_without_a_project_says_so() {
     use noble::app::Hit;
     let mut app = demo_app(110, 30);
-    // Without the launchers detected on this machine: their buttons come first and, with enough of them
-    // installed, leave no room on the row for "Folder".
     app.launchers.clear();
     app.handle(AppEvent::Projects(Vec::new()));
     assert!(app.selected_project().is_none());
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
     let text = render(&mut app, 110, 30);
+    assert!(find_hit(&app, |h| *h == Hit::OpenFiles).is_none(), "no folder button without a project");
+    assert!(!text.contains("Folder"), "{text}");
+
+    // With projects, the folder button is there (the launchers are cleared, so it fits on the row) and says the folder.
+    let mut app = demo_app(110, 30);
+    app.launchers.clear();
+    let text = render(&mut app, 110, 30);
     let folder = find_hit(&app, |h| *h == Hit::OpenFiles).expect("folder button");
     assert!(text.contains("Folder"), "{text}");
     click(&mut app, folder.x + 1, folder.y);
-    assert!(toast_texts(&app).last().is_some_and(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+    assert!(!toast_texts(&app).iter().any(|t| t == "select a project first"), "{:?}", toast_texts(&app));
+
+    // A filter that matches no project: nothing to act on, so no buttons.
+    let mut app = demo_app(110, 30);
+    app.bridge.filter = "zzqx".into();
+    let text = render(&mut app, 110, 30);
+    assert!(text.contains("Nothing matches"), "{text}");
+    assert!(!text.contains("Folder") && !text.contains("Open") && !text.contains("Add project"), "{text}");
+    for hit in [Hit::OpenSelected, Hit::OpenFiles, Hit::AddProject] {
+        assert!(find_hit(&app, |h| *h == hit).is_none(), "{hit:?} has nothing to act on");
+    }
 }
 
-/// The selected project's card shows `↻ claude · 2h ago` when the project has a Claude conversation folder and a
-/// `claude` launcher is installed; a click on it is a `ClaudeContinue` hit. Without either, the line is left out.
+/// The selected project's card shows the chip `↻ Continue claude · 2h ago` when the project has a Claude conversation
+/// folder and a `claude` launcher is installed; the chip is a `ClaudeContinue` hit over its whole width. Without
+/// either, the chip is left out.
 #[test]
 fn project_card_shows_the_claude_line() {
     use noble::app::Hit;
@@ -1032,8 +1283,10 @@ fn project_card_shows_the_claude_line() {
 
     let text = render(&mut app, 160, 45);
     save("home-claude-line-160x45", &text);
-    assert!(text.contains("↻ claude · 2h ago"), "{text}");
-    assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_some(), "the line is clickable");
+    assert!(text.contains("↻ Continue claude · 2h ago"), "{text}");
+    // The chip is one button: its hit is the chip's cells, from the glyph to the closing space.
+    let chip = find_hit(&app, |h| *h == Hit::ClaudeContinue).expect("the line is clickable");
+    assert_eq!(cells_text(&render_cells(&mut app, 160, 45), chip), " ↻ Continue claude · 2h ago ", "{text}");
     // Every size: the line is drawn whole or left out, never past the card.
     for (w, h) in SIZES {
         let text = render(&mut app, w, h);
@@ -1043,21 +1296,26 @@ fn project_card_shows_the_claude_line() {
 
     // No `claude` launcher installed: no line and no hit.
     app.launchers = vec![(claude.clone(), false)];
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     assert!(find_hit(&app, |h| *h == Hit::ClaudeContinue).is_none());
     app.launchers = Vec::new();
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     // The launcher is there, but the project has no conversation folder.
-    app.launchers = vec![(claude, true)];
+    app.launchers = vec![(claude.clone(), true)];
     for p in &mut app.projects {
         p.claude = None;
     }
-    assert!(!render(&mut app, 160, 45).contains("↻ claude"));
+    assert!(!render(&mut app, 160, 45).contains("Continue claude"));
     // Other projects keep their own times: only the selected one is on the card.
     for p in &mut app.projects {
         p.claude = (p.path == path).then_some(two_hours);
     }
-    assert!(render(&mut app, 160, 45).contains("↻ claude · 2h ago"));
+    assert!(render(&mut app, 160, 45).contains("↻ Continue claude · 2h ago"));
+    // Just started: the label says so.
+    for p in &mut app.projects {
+        p.claude = (p.path == path).then_some(SystemTime::now());
+    }
+    assert!(render(&mut app, 160, 45).contains("↻ Continue claude · just now"));
 }
 
 /// Without a `claude` launcher the continue action says so instead of opening a tab.
@@ -1135,8 +1393,15 @@ fn bridge_lists_background_claude_sessions() {
     ];
     let text = render(&mut app, 160, 45);
     save("bridge-bg-160x45", &text);
-    assert!(text.contains("claude bg · Fix the build") && text.contains("running"), "{text}");
-    assert!(text.contains("claude bg · Broken migration") && text.contains("failed"), "{text}");
+    // One "BACKGROUND" header above the rows; each row is glyph, title and state (no repeated "claude bg").
+    assert!(text.contains("BACKGROUND"), "{text}");
+    assert!(!text.contains("claude bg"), "the rows do not repeat the label: {text}");
+    let row = |name: &str| text.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+    assert!(row("Fix the build").contains("● Fix the build") && row("Fix the build").contains("running"), "{text}");
+    assert!(row("Broken migration").contains("✗ Broken migration") && row("Broken migration").contains("failed"));
+    let header = text.lines().position(|l| l.contains("BACKGROUND")).expect("header row");
+    let first = text.lines().position(|l| l.contains("Fix the build")).expect("first row");
+    assert_eq!(first, header + 1, "the header sits right above the rows: {text}");
     assert!(!text.contains("Stale task"), "a finished session from two days ago is not listed: {text}");
     assert!(find_hit(&app, |h| *h == Hit::BgSession(0)).is_some(), "running row hit");
     assert!(find_hit(&app, |h| *h == Hit::BgSession(2)).is_some(), "failed row hit");
@@ -1159,4 +1424,113 @@ fn bridge_lists_background_claude_sessions() {
         let text = render(&mut app, w, h);
         save(&format!("bridge-bg-{w}x{h}"), &text);
     }
+}
+
+/// The card's separator names the selected project's folder, dim after the name, and the folder is said once: the
+/// footer row does not repeat the git summary while the card is open. A long folder is cut from the left; too
+/// little room for it leaves the name alone.
+#[test]
+fn project_card_title_names_the_folder() {
+    let mut app = demo_app(160, 45);
+    let idx = app.visible_projects()[app.bridge.proj_sel];
+    let folder = noble::util::tilde(&app.projects[idx].path);
+    let text = render(&mut app, 160, 45);
+    save("home-card-title-160x45", &text);
+    assert!(text.lines().any(|l| l.contains(&format!("noble-rs · {folder} ")) && l.contains("──")), "{text}");
+    assert_eq!(text.matches(folder.as_str()).count(), 1, "the folder is on the card title only: {text}");
+    assert!(!text.contains("uncommitted"), "the card shows the git status: {text}");
+
+    // A deep folder at 110x30 does not fit: its end stays, the start is cut to "…".
+    let deep = "C:\\Users\\Mert\\Desktop\\archive\\2026\\old-builds\\client-work\\noble-rs-fork\\noble-rs";
+    app.projects[idx].path = std::path::PathBuf::from(deep);
+    let text = render(&mut app, 110, 30);
+    save("home-card-title-cut-110x30", &text);
+    let row = text.lines().find(|l| l.contains("noble-rs · …")).unwrap_or_default();
+    assert!(row.contains("noble-rs ─"), "the end of the folder stays: {text}");
+    assert!(text.lines().all(|l| l.chars().count() <= 110), "overflow:\n{text}");
+
+    // Too little room for the folder: the name alone.
+    let name = "n".repeat(60);
+    app.projects[idx].name = name.clone();
+    let text = render(&mut app, 110, 30);
+    save("home-card-title-name-only-110x30", &text);
+    assert!(!text.lines().any(|l| l.contains(&name[..10]) && l.contains(" · ")), "{text}");
+    assert!(text.lines().all(|l| l.chars().count() <= 110), "overflow:\n{text}");
+}
+
+/// Without the card (a small window) the footer row keeps the git status sentence, which the card would otherwise show.
+#[test]
+fn footer_keeps_the_git_summary_without_the_card() {
+    for (w, h) in [(76, 24), (56, 18)] {
+        let mut app = demo_app(w, h);
+        let text = render(&mut app, w, h);
+        save(&format!("home-footer-{w}x{h}"), &text);
+        assert!(!text.contains("RECENT COMMITS"), "no card at {w}x{h}: {text}");
+        assert!(text.contains("3 uncommitted changes"), "the summary is the footer's at {w}x{h}: {text}");
+    }
+}
+
+/// Home's CPU graph scales to its highest sample, 25, 50 or 100 percent, and names a scale below 100 at its top right.
+/// RAM has no graph of its own: its line is the only RAM row.
+#[test]
+fn home_cpu_graph_scales_to_its_peak() {
+    let mut app = demo_app(160, 45);
+    let row_under_cpu = |text: &str| -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let cpu = lines.iter().position(|l| l.contains("CPU")).expect("the CPU line");
+        lines[cpu + 1].to_string()
+    };
+    // A quiet history (highest sample 40%): the scale is 50% and labelled on the graph's top row.
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 40.0;
+    }
+    let text = render(&mut app, 160, 45);
+    save("home-cpu-scale-160x45", &text);
+    assert!(row_under_cpu(&text).contains("50%"), "{text}");
+    // The peak alone sets the scale: 20% is 25%, 90% has no label.
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 20.0;
+    }
+    assert!(row_under_cpu(&render(&mut app, 160, 45)).contains("25%"));
+    for v in app.sensors.cpu_hist.iter_mut() {
+        *v = 90.0;
+    }
+    let text = render(&mut app, 160, 45);
+    assert!(!text.contains("25%") && !text.contains("50%"), "a full scale is not labelled: {text}");
+    // The RAM line is one row: the label reads the memory percentage and no graph follows it.
+    let lines: Vec<&str> = text.lines().collect();
+    let ram = lines.iter().position(|l| l.contains("RAM")).expect("the RAM line");
+    assert!(lines[ram + 1].contains("11.8G of 32.0G"), "{text}");
+}
+
+/// With one row left under the agent sessions the "BACKGROUND" header is left out, and the background session
+/// still shows on that row.
+#[test]
+fn background_header_gives_way_to_a_single_row() {
+    use noble::bg::BgSession;
+    // 160x18: the AI panel is 6 rows high, so three agent rows leave the last one for the background session.
+    let mut app = demo_app(160, 18);
+    let now = chrono::Utc::now().timestamp();
+    let dir = std::env::temp_dir();
+    let mut records = Vec::new();
+    for _ in 0..3 {
+        app.new_tab(dir.clone(), None, Some("agent".into()));
+        records.push((app.tabs.last().expect("a tab").focus, hook_rec("prompt", now, 0)));
+    }
+    // One list of every pane's record: the records apply as the whole set.
+    app.apply_hook_records(records.into_iter().collect());
+    app.run(Action::Bridge);
+    app.bg_sessions = vec![BgSession {
+        id: "run1a2b".into(),
+        cwd: Some(dir.clone()),
+        name: "Fix the build".into(),
+        state: "running".into(),
+        started: now - 600,
+    }];
+    let text = render(&mut app, 160, 18);
+    save("bridge-bg-one-row-160x18", &text);
+    assert!(text.contains("Fix the build"), "the session is not hidden: {text}");
+    assert!(!text.contains("BACKGROUND"), "no header for one row: {text}");
+    app.tabs.clear();
+    app.panes.clear();
 }

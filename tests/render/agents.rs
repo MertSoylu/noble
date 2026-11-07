@@ -534,8 +534,8 @@ fn jump_to_waiting_agent() {
     }
 }
 
-/// The one-time "Show agent status in NOBLE?" notice: bottom right, click enables (same path as Settings;
-/// headless only toasts), the x dismisses. An available update takes the slot first.
+/// The one-time "Show agent status in NOBLE?" notice: bottom right on the status bar's row, click enables (same path
+/// as Settings; headless only toasts), the x dismisses. An available update takes the slot first.
 #[test]
 fn hooks_offer_notice() {
     use noble::app::Hit;
@@ -545,8 +545,12 @@ fn hooks_offer_notice() {
     app.agents_found = vec![noble::hooks::Agent::Claude];
     let text = render(&mut app, 120, 32);
     save("hooks-offer-120x32", &text);
-    assert!(text.lines().nth(30).unwrap().contains("Show agent status in NOBLE?"), "{text}");
-    for (w, h) in [(80, 24), (40, 12), (30, 8)] {
+    // The status bar's row (H-1) under the panels' bottom border; the action buttons above it (H-3) stay whole.
+    assert!(text.lines().nth(31).unwrap().contains("Show agent status in NOBLE?"), "{text}");
+    let buttons = text.lines().nth(29).unwrap();
+    // "Open" is on the button row on every machine (the launcher chips depend on the CLIs installed).
+    assert!(buttons.contains("⏎ Open") && !buttons.contains("Show agent"), "{text}");
+    for (w, h) in [(160, 45), (80, 24), (40, 12), (30, 8)] {
         save(&format!("hooks-offer-{w}x{h}"), &render(&mut app, w, h));
     }
     assert_no_doubled_frame(&render(&mut app, 30, 8));

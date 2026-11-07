@@ -1167,6 +1167,8 @@ impl App {
                 }
             }
             Hit::OpenSelected => self.open_selected(),
+            // The same action as Home's `a` key.
+            Hit::AddProject => self.run(Action::AddProjectFolder),
             Hit::AiRefresh => self.refresh_ai(),
             Hit::Setting(i)
                 if self.settings_items().get(i)
@@ -1496,6 +1498,7 @@ impl App {
             self.overlay = Some(Overlay::Confirm(Confirm {
                 title: "PASTE".into(),
                 body: format!("{lines} line{s} — each may run as a command. Paste?"),
+                yes: "paste",
                 action: ConfirmAction::Paste { pane, text },
             }));
             return;

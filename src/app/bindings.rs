@@ -12,6 +12,7 @@ use super::{App, Overlay, ToastLevel, ToastTarget};
 use crate::config::{self, KeysCfg};
 use crate::keys::{Action, Chord, chords_of, default_direct_bindings, default_prefix_bindings};
 use crate::term::input::is_altgr_char;
+use crate::ui::hud;
 
 /// The table a binding belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +164,7 @@ pub fn geometry(area: Rect) -> Option<Geometry> {
     if w < 40 || h < 10 {
         return None;
     }
-    let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 3, w, h);
+    let rect = Rect::new(area.x + (area.width - w) / 2, hud::box_top(area, h), w, h);
     let width = w - 4;
     let wide = width >= 80;
     let (group_w, title_at, key_w) = if wide { (7, 8, 16) } else { (0, 0, 9) };
@@ -678,6 +679,13 @@ mod tests {
         assert_eq!(parsed.keys.prefix_bindings, cfg.prefix_bindings);
         assert_eq!(parsed.keys.direct_bindings, cfg.direct_bindings);
         assert_eq!(parsed.keys.prefix_bindings.get("v").map(String::as_str), Some("none"));
+    }
+
+    /// The editor starts on row 1 at 110x30: the top bar (row 0) stays visible, with a row free below the box.
+    #[test]
+    fn the_editor_box_leaves_the_top_bar_free() {
+        let g = geometry(Rect::new(0, 0, 110, 30)).expect("fits");
+        assert_eq!((g.rect.y, g.rect.bottom()), (1, 29));
     }
 
     #[test]

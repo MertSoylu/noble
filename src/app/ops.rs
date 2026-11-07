@@ -540,6 +540,7 @@ impl App {
                 self.overlay = Some(Overlay::Confirm(Confirm {
                     title: "CLOSE PANE".into(),
                     body: format!("{what} is still running — close it?"),
+                    yes: "close",
                     action: ConfirmAction::ClosePane(id),
                 }));
             }
@@ -566,6 +567,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "CLOSE TAB".into(),
             body,
+            yes: "close",
             action: ConfirmAction::CloseTab(tab.id),
         }));
     }
@@ -937,6 +939,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "TERMINATE PROCESS".into(),
             body: format!("{name} · pid {pid}"),
+            yes: "terminate",
             action: ConfirmAction::Kill { pid, started, name },
         }));
     }
@@ -951,6 +954,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "QUIT NOBLE".into(),
             body: format!("{n} shell{} running{saved}", if n == 1 { "" } else { "s" }),
+            yes: "quit",
             action: ConfirmAction::Quit,
         }));
     }
@@ -961,6 +965,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "REMOVE PROJECT".into(),
             body: format!("“{name}” leaves the list. A on Home adds it back."),
+            yes: "remove",
             action: ConfirmAction::RemoveProject(path),
         }));
     }
@@ -969,6 +974,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "DELETE WORKSPACE".into(),
             body: name.clone(),
+            yes: "delete",
             action: ConfirmAction::DeleteWorkspace(name),
         }));
     }
@@ -1036,6 +1042,7 @@ impl App {
                     self.overlay = Some(Overlay::Confirm(Confirm {
                         title: "REPLACE WORKSPACE".into(),
                         body: format!("“{value}” exists — replace it?"),
+                        yes: "replace",
                         action: ConfirmAction::ReplaceWorkspace(value),
                     }));
                 } else {

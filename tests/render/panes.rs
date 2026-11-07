@@ -855,7 +855,7 @@ fn closing_a_tab_with_several_panes_asks_first() {
     assert_eq!(app.tabs[0].panes().len(), 3);
     app.run(Action::CloseTab);
     let text = render(&mut app, 110, 30);
-    assert!(text.contains("CLOSE TAB") && text.contains("close the tab and its 3 panes?"), "{text}");
+    assert!(text.contains("CLOSE TAB") && text.contains("Close the tab and its 3 panes?"), "{text}");
     // No keeps the tab and all its panes.
     app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     assert!(app.overlay.is_none());

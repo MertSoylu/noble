@@ -49,7 +49,7 @@ fn cpu(buf: &mut Buffer, area: Rect, app: &App) {
     let Some(last) = &s.last else { return };
     let cores = last.cores.len().max(1);
     let col_w: u16 = 16;
-    let cols = (w / col_w).clamp(1, 8) as usize;
+    let cols = core_columns(cores, (w / col_w).clamp(1, 8) as usize);
     let core_rows = cores.div_ceil(cols) as u16;
     let avail = inner.height.saturating_sub(1);
     let core_rows = if avail >= core_rows + 3 { core_rows } else { 0 };
@@ -74,10 +74,23 @@ fn cpu(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
+/// Columns of the per-core grid: the largest count up to `max_cols` that divides `cores` evenly, so the
+/// last row is full, when that count is at least half of `max_cols`; otherwise `max_cols` (a short last
+/// row). With no more cores than `max_cols` they fit on one row, so the grid has one column per core.
+fn core_columns(cores: usize, max_cols: usize) -> usize {
+    let max_cols = max_cols.max(1);
+    let cores = cores.max(1);
+    if cores <= max_cols {
+        return cores;
+    }
+    let even = (1..=max_cols).rev().find(|&c| cores.is_multiple_of(c)).unwrap_or(1);
+    if even >= max_cols.div_ceil(2) { even } else { max_cols }
+}
+
 fn memory(buf: &mut Buffer, area: Rect, app: &App) {
     let th = &app.theme;
     let s = &app.sensors;
-    let inner = hud::frame(buf, area, "MEMORY · NET · DISK", "", false, th);
+    let inner = hud::frame(buf, area, "Memory · Net · Disk", "", false, th);
     if inner.height < 2 || inner.width < 16 {
         return;
     }
@@ -116,11 +129,12 @@ fn memory(buf: &mut Buffer, area: Rect, app: &App) {
             buf,
             x,
             y,
+            // Each rate takes the color of its graph below: download accent2, upload accent.
             &[
                 ("↓ ", Style::default().fg(th.accent2)),
-                (&util::fmt_rate(last.rx_rate), th.text()),
+                (&util::fmt_rate(last.rx_rate), Style::default().fg(th.accent2)),
                 ("   ↑ ", Style::default().fg(th.accent)),
-                (&util::fmt_rate(last.tx_rate), th.text()),
+                (&util::fmt_rate(last.tx_rate), Style::default().fg(th.accent)),
             ],
             w,
         );
@@ -169,7 +183,7 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
     } else {
         format!("{}/{total} · sort {sort_name} {arrow}", procs.len())
     };
-    let inner = hud::frame(buf, area, "PROCESSES", &tag, true, th);
+    let inner = hud::frame(buf, area, "Processes", &tag, true, th);
     if inner.height < 3 || inner.width < 24 {
         return;
     }
@@ -191,12 +205,23 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         }
         y += 1;
     }
-    // Columns: PID | NAME | CPU% + bar | MEM
+    // Columns: PID | NAME | CPU% + bar | MEM. The bar takes the spare width left after NAME's natural width (the
+    // longest listed name plus 2, at least 16), kept between 12 and 40 cells; NAME takes whatever the bar leaves.
+    // The longest name comes from the whole filtered list, so the columns do not move while scrolling.
     let pid_w = 8u16;
     let cpu_w = 7u16;
-    let bar_w = if w >= 70 { 12u16 } else { 0 };
     let mem_w = 9u16;
+    let longest = procs.iter().map(|p| util::width(&p.name)).max().unwrap_or(0);
+    let bar_w = if w >= 70 {
+        let spare = (w as usize).saturating_sub((pid_w + cpu_w + 1 + mem_w) as usize + (longest + 2).max(16));
+        spare.clamp(12, 40) as u16
+    } else {
+        0
+    };
     let name_w = w.saturating_sub(pid_w + cpu_w + 1 + bar_w + mem_w);
+    // The bars fill relative to the busiest listed process; the 5% floor keeps an idle list from showing
+    // full bars for 0.1%. The colors stay by absolute load.
+    let top = procs.iter().map(|p| p.cpu as f64).fold(0.0, f64::max);
     let header = |key: SortKey, label: &str| {
         let active = app.system.sort == key;
         let text = if active { format!("{label}{arrow}") } else { label.to_string() };
@@ -257,7 +282,8 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         );
         cx += 1;
         if bar_w > 0 {
-            hud::bar(buf, cx, ry, bar_w, cpu.min(100.0) * 2.0, th.level(cpu * 2.0), th);
+            let fill = (cpu / top.max(5.0) * 100.0).clamp(0.0, 100.0);
+            hud::bar(buf, cx, ry, bar_w, fill, th.level(cpu * 2.0), th);
             cx += bar_w;
         }
         hud::put(buf, cx, ry, &util::pad_left(&util::fmt_bytes(p.mem), mem_w as usize), th.text().bg(bgc), mem_w);
@@ -276,5 +302,43 @@ fn processes(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)
         cx = hud::button(buf, cx, by, key, label, th, enabled);
         hits.push((Rect::new(start, by, cx - start, 1), hit));
         cx += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::core_columns;
+
+    #[test]
+    fn core_columns_fill_the_last_row_when_an_even_split_is_close() {
+        assert_eq!(core_columns(16, 5), 4);
+        assert_eq!(core_columns(12, 5), 4);
+        assert_eq!(core_columns(6, 5), 3);
+        assert_eq!(core_columns(32, 8), 8);
+    }
+
+    #[test]
+    fn core_columns_keep_the_maximum_when_no_even_split_is_close() {
+        // 7 has no divisor between 2 and 5; 1 is under half of 5, so the last row stays short.
+        assert_eq!(core_columns(7, 5), 5);
+        assert_eq!(core_columns(17, 8), 8);
+    }
+
+    #[test]
+    fn core_columns_put_fewer_cores_than_columns_on_one_row() {
+        assert_eq!(core_columns(1, 5), 1);
+        assert_eq!(core_columns(2, 5), 2);
+        assert_eq!(core_columns(8, 8), 8);
+    }
+
+    #[test]
+    fn core_columns_stay_in_range() {
+        assert_eq!(core_columns(0, 0), 1);
+        for cores in 1..=64 {
+            for max in 1..=8 {
+                let c = core_columns(cores, max);
+                assert!((1..=max).contains(&c), "cores {cores}, max {max}: {c}");
+            }
+        }
     }
 }
