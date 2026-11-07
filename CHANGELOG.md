@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-11-07
+
 ### Changed
 - Warning and critical colors are told apart in every theme: Amber's critical red, Solarized's and Solarized
   Light's critical (now magenta) and Everforest's warning (now yellow) changed, so a bar at 64% no longer looks like
@@ -965,7 +967,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.1...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.2...HEAD
+[1.14.2]: https://github.com/MertSoylu/noble/compare/v1.14.1...v1.14.2
 [1.14.1]: https://github.com/MertSoylu/noble/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/MertSoylu/noble/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/MertSoylu/noble/compare/v1.12.3...v1.13.0
