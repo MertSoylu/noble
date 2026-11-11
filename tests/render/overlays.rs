@@ -245,7 +245,7 @@ fn help_has_columns_a_filter_and_runs_rows() {
 #[test]
 fn confirm_wraps_a_long_question() {
     use noble::app::{Confirm, ConfirmAction, Overlay};
-    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let body = "Still running: cargo watch --exec 'test --workspace --all-features' in this tab — close it anyway?";
     let mut app = demo_app(110, 30);
     app.overlay = Some(Overlay::Confirm(Confirm {
         title: "CLOSE PANE".into(),
@@ -255,9 +255,8 @@ fn confirm_wraps_a_long_question() {
     }));
     let text = render(&mut app, 110, 30);
     save("confirm-wrap-110x30", &text);
-    // The question is drawn with a capital first letter.
-    let shown = "Cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
-    assert_eq!(box_text(&text, "CLOSE PANE"), shown, "{text}");
+    // The question is drawn as it is: the command keeps its lower case.
+    assert_eq!(box_text(&text, "CLOSE PANE"), body, "{text}");
     assert!(text.contains(" y  close") && text.contains("cancel"), "{text}");
     let small = render(&mut app, 30, 8);
     save("confirm-wrap-30x8", &small);
@@ -274,7 +273,7 @@ fn confirm_wraps_a_long_question() {
 #[test]
 fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
     use noble::app::{Confirm, ConfirmAction, Overlay};
-    let body = "cargo watch --exec 'test --workspace --all-features' is still running in this tab — close it anyway?";
+    let body = "Still running: cargo watch --exec 'test --workspace --all-features' in this tab — close it anyway?";
     let mut app = demo_app(110, 30);
     for (w, h) in [(16u16, 8u16), (30, 8)] {
         app.overlay = None;
@@ -310,10 +309,10 @@ fn confirm_narrow_keeps_chips_inside_and_marks_the_cut() {
         let shown: Vec<String> = (top + 1..bottom - 1).map(row).filter(|l| !l.trim().is_empty()).collect();
         let shown = shown.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         assert!(shown.ends_with('…'), "the cut question has no ellipsis at {w}x{h}: {shown:?}\n{text}");
-        // The question is drawn with a capital first letter: compared in lower case.
+        // Compared in lower case and without spaces (the wrap breaks lines at spaces).
         let words: String =
             shown.trim_end_matches('…').chars().filter(|c| *c != ' ').collect::<String>().to_lowercase();
-        assert!(body.replace(' ', "").starts_with(&words), "{shown:?}");
+        assert!(body.replace(' ', "").to_lowercase().starts_with(&words), "{shown:?}");
         assert!(words.len() > 10, "too little of the question is shown at {w}x{h}: {shown:?}");
     }
     // At 16 columns the n/esc chip does not fit inside the frame: it is left out, and so is its click target.
@@ -341,9 +340,8 @@ fn wrapped_confirm_text_keeps_whole_words() {
         action: noble::app::ConfirmAction::Quit,
     }));
     let text = render(&mut app, 110, 30);
-    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there (the first one
-    // capitalized, as every question is drawn).
-    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), format!("X{}", "x".repeat(119)), "{text}");
+    // Cut pieces are joined with a space by `box_text`: the letters themselves must all be there, as they are.
+    assert_eq!(box_text(&text, "WIDE").replace(' ', ""), "x".repeat(120), "{text}");
 }
 
 /// A question box has one blank row between its text and its buttons, and the yes chip names the action: a close
@@ -354,7 +352,7 @@ fn confirm_box_has_one_blank_row_and_names_its_action() {
     let mut app = demo_app(110, 30);
     app.overlay = Some(Overlay::Confirm(Confirm {
         title: "CLOSE PANE".into(),
-        body: "cargo test is still running — close it?".into(),
+        body: "Still running: cargo test — close it?".into(),
         yes: "close",
         action: ConfirmAction::Quit,
     }));
@@ -368,7 +366,7 @@ fn confirm_box_has_one_blank_row_and_names_its_action() {
     let rows = box_rows(&text, "CLOSE PANE");
     assert_eq!(rows.len(), 4, "{rows:?}");
     assert!(rows[0].trim().is_empty(), "{rows:?}");
-    assert_eq!(rows[1].trim(), "Cargo test is still running — close it?", "{rows:?}");
+    assert_eq!(rows[1].trim(), "Still running: cargo test — close it?", "{rows:?}");
     assert!(rows[2].trim().is_empty(), "one blank row above the buttons: {rows:?}");
     assert!(rows[3].contains(" y  close") && rows[3].contains("n/esc"), "{rows:?}");
 
@@ -385,7 +383,7 @@ fn confirm_box_has_one_blank_row_and_names_its_action() {
     assert!(rows.last().is_some_and(|r| r.contains(" y  paste") && r.contains("n/esc")), "{rows:?}");
 }
 
-/// A close asked while a command runs names that command, drawn with a capital first letter. The command is the one
+/// A close asked while a command runs names that command exactly as typed. The command is the one
 /// typed on the line above the shell's command mark (the prompt is left out).
 #[test]
 fn close_pane_question_names_the_typed_command() {
@@ -404,7 +402,7 @@ fn close_pane_question_names_the_typed_command() {
     app.run(Action::ClosePane);
     let text = render(&mut app, 110, 30);
     save("confirm-close-typed-110x30", &text);
-    assert_eq!(box_text(&text, "CLOSE PANE"), "Cargo test is still running — close it?", "{text}");
+    assert_eq!(box_text(&text, "CLOSE PANE"), "Still running: cargo test — close it?", "{text}");
 }
 
 /// Moves the toasts' start back, as if they had been on screen for `secs` seconds.
@@ -795,4 +793,18 @@ fn keyboard_reference_action_rows_read_in_title_case() {
     let prefix = sections.iter().find(|s| s.title.starts_with("PREFIX")).expect("the prefix section");
     assert!(prefix.rows.iter().any(|r| r.desc == "Go to Tab"), "{:?}", prefix.rows);
     assert!(prefix.rows.iter().any(|r| r.desc == "Send Prefix to the Shell"), "{:?}", prefix.rows);
+}
+
+/// Names in a confirmation are shown exactly as they are: a lower-case workspace and process name keep their
+/// first letter (shell commands and names are case-sensitive).
+#[test]
+fn confirm_shows_names_unchanged() {
+    let mut app = demo_app(110, 30);
+    app.request_delete_workspace("myws".into());
+    let text = render(&mut app, 110, 30);
+    assert_eq!(box_text(&text, "DELETE WORKSPACE"), "myws", "{text}");
+    app.overlay = None;
+    app.request_kill(12, 0, "bash".into());
+    let text = render(&mut app, 110, 30);
+    assert_eq!(box_text(&text, "TERMINATE PROCESS"), "bash · pid 12", "{text}");
 }

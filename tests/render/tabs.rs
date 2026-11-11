@@ -770,3 +770,61 @@ fn tab_close_button_shows_on_active_and_hovered_tab() {
     assert_eq!(app.tabs[0].name.as_deref(), Some("second"));
     app.run(Action::CloseTab);
 }
+
+/// A right or middle click presses no button: on a tab's close cell and on a confirmation's "y" chip it does
+/// nothing, while the left click still works. (A middle click on the tab itself closes it, as in a browser.)
+#[test]
+fn other_mouse_buttons_press_no_buttons() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::{Confirm, ConfirmAction, Hit, Overlay};
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "first");
+    named_tab(&mut app, "second");
+    render(&mut app, 120, 30);
+    let tabs = app.tabs.len();
+    let close = find_hit(&app, |h| *h == Hit::TabClose(0)).expect("close cell");
+    for button in [MouseButton::Right, MouseButton::Middle] {
+        for kind in [MouseEventKind::Down(button), MouseEventKind::Up(button)] {
+            mouse(&mut app, kind, close.x, close.y);
+        }
+        assert_eq!(app.tabs.len(), tabs, "{button:?} on the close cell closed a tab");
+        assert!(app.overlay.is_none(), "{button:?} opened {:?}", app.overlay.is_some());
+    }
+    click(&mut app, close.x, close.y);
+    assert!(app.overlay.is_none() && app.tabs.len() == tabs - 1, "the left click closes the tab");
+
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        title: "QUIT NOBLE".into(),
+        body: "1 shell running".into(),
+        yes: "quit",
+        action: ConfirmAction::Quit,
+    }));
+    render(&mut app, 120, 30);
+    let yes = find_hit(&app, |h| *h == Hit::ConfirmYes).expect("yes chip");
+    for button in [MouseButton::Right, MouseButton::Middle] {
+        for kind in [MouseEventKind::Down(button), MouseEventKind::Up(button)] {
+            mouse(&mut app, kind, yes.x, yes.y);
+        }
+        assert!(!app.quit && matches!(app.overlay, Some(Overlay::Confirm(_))), "{button:?} confirmed the dialog");
+    }
+    click(&mut app, yes.x, yes.y);
+    assert!(app.quit, "the left click confirms");
+}
+
+/// A right click does not count towards a double click: a right click and then a left click on the same cell is
+/// two single clicks.
+#[test]
+fn right_click_is_not_part_of_a_double_click() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::Hit;
+    let mut app = demo_app(120, 30);
+    named_tab(&mut app, "first");
+    named_tab(&mut app, "second");
+    render(&mut app, 120, 30);
+    let second = find_hit(&app, |h| *h == Hit::Tab(1)).expect("second tab");
+    // The active tab: a double click would open the rename prompt. The right click opens the tab menu first.
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Right), second.x + 1, second.y);
+    app.overlay = None;
+    click(&mut app, second.x + 1, second.y);
+    assert!(app.overlay.is_none(), "a right click then a left click is not a double click");
+}

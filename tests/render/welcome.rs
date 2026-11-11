@@ -263,6 +263,11 @@ fn welcome_card_cuts_text_at_word_boundaries() {
         })
         .collect();
     app.show_welcome();
+    // The Shell row exists only with two installed shells; the card gets a fixed list so the test does not
+    // depend on this machine ("" is auto, as in `shell_options`).
+    let Some(noble::app::Overlay::Welcome(w)) = &mut app.overlay else { panic!("no welcome card") };
+    w.shells = vec![String::new(), "bash".into(), "zsh".into()];
+    w.shell = 0;
     // Nine launchers show as "c  x  e  …" (10 columns), so the texts keep 48 columns: each one is whole.
     let text = render(&mut app, 120, 34);
     save("welcome-cut-120x34", &text);
