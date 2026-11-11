@@ -432,8 +432,13 @@ impl App {
             return;
         }
         let Some(text) = self.config_text_for_settings() else { return };
-        let updated = crate::config::set_value(&text, section, key, value_toml);
-        self.write_config(updated);
+        // A change that would break config.toml is refused: nothing is written, the change lasts this session.
+        match crate::config::set_value_checked(&text, section, key, value_toml) {
+            Ok(updated) => {
+                self.write_config(updated);
+            }
+            Err(e) => self.toast(ToastLevel::Warn, e),
+        }
     }
 
     /// Writes the edited config; a failure is reported (the change then only lasts this session).
@@ -458,8 +463,12 @@ impl App {
             return;
         }
         let Some(text) = self.config_text_for_settings() else { return };
-        let updated = crate::config::set_launchers(&text, &self.cfg.launchers);
-        self.write_config(updated);
+        match crate::config::set_launchers_checked(&text, &self.cfg.launchers) {
+            Ok(updated) => {
+                self.write_config(updated);
+            }
+            Err(e) => self.toast(ToastLevel::Warn, e),
+        }
     }
 
     /// Shows/hides a launcher or flips its shortcut to the next key

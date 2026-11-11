@@ -6,6 +6,30 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- Settings no longer write a `config.toml` that stops parsing. A spaced header (`[ general ]`), a quoted key
+  (`"theme" = …`) and a line inside a multi-line string are found and edited in place; a section written as dotted
+  keys or an inline table is refused with a warning instead of getting a second copy, and a change whose result
+  would not parse or not hold the new value is not saved (edit `config.toml` by hand). `[[ launchers ]]` is
+  recognized when the launcher list is saved, and a CRLF file keeps its line endings.
+- Confirmation dialogs show commands, process names and workspace names exactly as they are instead of
+  capitalizing the first letter ("Still running: cargo watch … — close it?").
+- A right or middle click no longer presses buttons: it does not close a tab, confirm a dialog, close a pane, start
+  an agent or follow a notification. Only left clicks count towards a double click.
+- Pasting works in the System process filter, the Settings search, the keyboard reference's filter and the key
+  bindings editor's filter.
+- Two agent hooks of one pane that ran at the same time could lose the pane's status; each hook now writes its own
+  temporary file.
+- The suggested name for "Save workspace" is built from whole tab names instead of ending in "…".
+
+### Security
+- Bracketed paste drops all control characters except tab and line breaks (C0, DEL and C1): a pasted Ctrl+C no
+  longer interrupts the shell and lets the rest of the clipboard run as typed commands.
+- AI provider requests, which carry the providers' tokens, are only made over https.
+- Release archives are published together: the release is created as a draft, every platform uploads to it, and it
+  goes public only after all builds succeeded, so `noble update` is never offered an archive that is missing. The
+  CI and audit workflows run with read-only token permissions.
+
 ## [1.14.2] - 2026-11-07
 
 ### Changed

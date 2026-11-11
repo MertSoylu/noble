@@ -67,11 +67,19 @@ fn centered_offset(line: usize, rows: usize, dropped: usize, history: usize) -> 
 }
 
 /// The parts of a paste: the start and end markers (empty without bracketed paste) around the body. Inside
-/// bracketed paste every ESC is dropped: a pasted `ESC[201~` would otherwise end the paste early and run the
-/// rest as typed input (other terminals sanitize the same way).
+/// bracketed paste every control character is dropped except tab and the carriage return that line breaks became
+/// (C0 without `\t`/`\r`, DEL and the C1 range U+0080..U+009F): a pasted `ESC[201~` would otherwise end the paste
+/// early, and a pasted Ctrl+C or Ctrl+D would reach the tty (SIGINT, end of input), the shell would leave paste
+/// mode and the rest of the clipboard would run as typed commands. Other terminals sanitize the same way. Without
+/// bracketed paste the text is sent as it is (a paste with line breaks is confirmed first, `App::paste_into`).
 fn paste_parts(text: &str, bracketed: bool) -> (&'static str, String, &'static str) {
     let body = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed { ("\x1b[200~", body.replace('\x1b', ""), "\x1b[201~") } else { ("", body, "") }
+    if bracketed {
+        let clean = body.chars().filter(|c| matches!(c, '\t' | '\r') || !c.is_control()).collect();
+        ("\x1b[200~", clean, "\x1b[201~")
+    } else {
+        ("", body, "")
+    }
 }
 
 /// Pane title: the process name from the shell's OSC title. `C:\WINDOWS\system32\cmd.exe`
@@ -2220,6 +2228,21 @@ mod tests {
         assert_eq!(payload(evil, true), "\x1b[200~ls[201~\rrm -rf x\x1b[201~");
         assert_eq!(payload("a\r\nb\nc", true), "\x1b[200~a\rb\rc\x1b[201~");
         assert_eq!(payload("a\r\nb\nc", false), "a\rb\rc");
+    }
+
+    /// Control characters other than tab and line breaks never reach the tty from a bracketed paste; text,
+    /// tabs, line breaks and non-ASCII letters survive. Without bracketed paste the text is untouched.
+    #[test]
+    fn bracketed_paste_drops_control_characters() {
+        let payload = |text: &str, bracketed: bool| {
+            let (head, body, tail) = paste_parts(text, bracketed);
+            format!("{head}{body}{tail}")
+        };
+        let bracketed = |inner: &str| format!("\x1b[200~{inner}\x1b[201~");
+        assert_eq!(payload("a\x03b\x04c\x1ad\x7fe\u{9b}f\u{85}g\x00h\x08i", true), bracketed("abcdefghi"));
+        assert_eq!(payload("a\tb\nc\r\nd\re", true), bracketed("a\tb\rc\rd\re"));
+        assert_eq!(payload("héllo wörld — 日本語 🙂 ¡ÿ!", true), bracketed("héllo wörld — 日本語 🙂 ¡ÿ!"));
+        assert_eq!(payload("a\x03b", false), "a\x03b");
     }
 
     #[test]

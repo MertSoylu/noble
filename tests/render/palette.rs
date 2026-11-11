@@ -343,3 +343,56 @@ fn notification_list_shows_levels_and_collapses_repeats() {
     let shown: Vec<(&str, &str)> = st.all.iter().map(|i| (i.group, i.hint.as_str())).collect();
     assert_eq!(shown, [("ERROR", ""), ("INFO", ""), ("ERROR", "")], "{shown:?}");
 }
+
+/// A paste goes into every text field that takes typed text: it counts as typing the first line there.
+#[test]
+fn paste_reaches_every_filter() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use noble::app::{Overlay, View};
+    let paste = |app: &mut App, text: &str| {
+        app.handle(AppEvent::Input(Event::Paste(text.into())));
+    };
+    let press = |app: &mut App, code: KeyCode| {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    };
+    let mut app = demo_app(110, 30);
+
+    // The System process filter.
+    app.run(Action::System);
+    assert_eq!(app.view, View::System);
+    press(&mut app, KeyCode::Char('/'));
+    paste(&mut app, "cargo\nignored");
+    assert_eq!(app.system.filter, "cargo");
+    press(&mut app, KeyCode::Esc);
+
+    // The Settings search resets the selected row.
+    app.run(Action::Settings);
+    press(&mut app, KeyCode::Char('/'));
+    assert!(app.settings_filtering);
+    app.settings_sel = 3;
+    paste(&mut app, "theme\nignored");
+    assert_eq!(app.settings_filter, "theme");
+    assert_eq!(app.settings_sel, 0);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    app.view = View::Bridge;
+
+    // The keyboard reference resets the selection and the scroll.
+    app.run(Action::Help);
+    if let Some(Overlay::Help(st)) = &mut app.overlay {
+        st.selected = 4;
+        st.scroll = 2;
+    }
+    paste(&mut app, "split\nignored");
+    let Some(Overlay::Help(st)) = &app.overlay else { panic!("help is open") };
+    assert_eq!((st.query.as_str(), st.selected, st.scroll), ("split", 0, 0));
+    app.overlay = None;
+
+    // The key bindings' filter takes a paste only after `/`.
+    app.open_bindings();
+    paste(&mut app, "split");
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.query.is_empty()));
+    press(&mut app, KeyCode::Char('/'));
+    paste(&mut app, "split\nignored");
+    assert!(matches!(&app.overlay, Some(Overlay::Bindings(st)) if st.query == "split" && st.selected == 0));
+}

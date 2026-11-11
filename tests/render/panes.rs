@@ -280,7 +280,7 @@ fn risky_terminal_actions_ask_first() {
     assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
     let text = render(&mut app, 110, 30);
     save("confirm-close-pane-110x30", &text);
-    assert!(text.contains("CLOSE PANE") && text.contains("still running"), "{text}");
+    assert!(text.contains("CLOSE PANE") && text.contains("Still running"), "{text}");
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.overlay.is_none() && app.panes.contains_key(&id), "esc keeps the pane");
     app.run(Action::CloseTab);

@@ -7,6 +7,9 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   advisories:
     runs-on: ubuntu-24.04
