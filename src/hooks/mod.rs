@@ -596,8 +596,10 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
     };
     let _ = crate::util::create_private_dir(&dir);
     if let Ok(text) = serde_json::to_string(&rec) {
-        let tmp = dir.join(format!("{instance}-{pane}.tmp"));
-        // A stale temp file (a crash) is replaced: the record is written as a new file each time.
+        // The process id is part of the name: hooks of one pane that run at the same time (parallel tool events)
+        // each have a temp file of their own, so none deletes another's before its rename.
+        let tmp = dir.join(format!("{instance}-{pane}.{}.tmp", std::process::id()));
+        // A stale temp file (a crash, a reused process id) is replaced: the record is written as a new file each time.
         let _ = std::fs::remove_file(&tmp);
         // Windows: the reader may have the record open, so the rename is retried (`replace_file`).
         if crate::store::create_new_file(&tmp, &text).and_then(|()| crate::store::replace_file(&tmp, &file)).is_err() {
@@ -617,14 +619,15 @@ pub fn hook_reply(agent: Agent, arg: &str) -> Option<&'static str> {
     }
 }
 
-/// Deletes a pane's record and its subagent markers.
+/// Deletes a pane's record, its subagent markers and the temp files of hooks that were writing it (a hook that
+/// crashed leaves one; `prune` removes the rest after a day).
 fn remove_pane_files(dir: &Path, instance: impl std::fmt::Display, pane: impl std::fmt::Display) {
     let _ = std::fs::remove_file(dir.join(format!("{instance}-{pane}.json")));
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let prefix = format!("{instance}-{pane}.");
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&prefix) && name.ends_with(".sub") {
+        if name.starts_with(&prefix) && (name.ends_with(".sub") || name.ends_with(".tmp")) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -736,7 +739,8 @@ fn started_before_write(start: u64, written: SystemTime) -> bool {
     start <= written + START_SLACK_SECS
 }
 
-/// Deletes a pane's record and its subagent markers.
+/// Deletes a pane's record, its subagent markers and the temp files of hooks that were writing it (a hook that
+/// crashed leaves one; `prune` removes the rest after a day).
 pub fn remove_record(data: &Path, instance: u32, pane: PaneId) {
     remove_pane_files(&agents_dir(data), instance, pane);
 }
@@ -1053,7 +1057,7 @@ mod tests {
         run_cli(Agent::Claude, "stop", "{}", &data, Some("420"), Some("1")); // running instance, shares the digits
         run_cli(Agent::Claude, "notification", "{}", &data, Some("7"), Some("2")); // crashed long ago
         let dir = agents_dir(&data);
-        std::fs::write(dir.join("42-5.tmp"), "{").unwrap(); // write cut short by a crash
+        std::fs::write(dir.join("42-5.4711.tmp"), "{").unwrap(); // write cut short by a crash
         std::fs::write(dir.join("notes.json"), "{}").unwrap(); // no instance prefix
         let day_old = SystemTime::now() - std::time::Duration::from_secs(2 * STALE_FILE_SECS);
         for name in ["7-2.json", "notes.json"] {
@@ -1061,12 +1065,38 @@ mod tests {
         }
         prune_with(&data, 42, SystemTime::now(), |pid, _| pid == 420);
         assert!(read_records(&data, 42).is_empty());
-        assert!(!dir.join("42-5.tmp").exists());
+        assert!(!dir.join("42-5.4711.tmp").exists());
         assert!(read_records(&data, 7).is_empty(), "day-old record of a crashed instance");
         assert!(!dir.join("notes.json").exists(), "no instance prefix: only the day limit applies");
         assert_eq!(read_records(&data, 420)[&1].event, "stop", "another running instance is untouched");
         // Without an agents folder there is nothing to do.
         prune(&data.join("missing"), 42);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A temp file of a hook that is still writing (or crashed) is never read as a record, goes with its pane's
+    /// files, and a stale one of a crashed instance goes after the day limit.
+    #[test]
+    fn temp_files_are_not_records_and_go_with_the_pane() {
+        let data = temp("tmpfiles");
+        run_cli(Agent::Claude, "prompt", "{}", &data, Some("42"), Some("1"));
+        let dir = agents_dir(&data);
+        std::fs::write(dir.join("42-1.9001.tmp"), r#"{"event":"stop"}"#).unwrap();
+        std::fs::write(dir.join("42-10.9001.tmp"), "{").unwrap();
+        let records = read_records(&data, 42);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[&1].event, "prompt", "the temp file is not the record");
+        // The hook leaves no temp file of its own behind.
+        let own = format!(".{}.tmp", std::process::id());
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().ends_with(&own)));
+        remove_pane_files(&dir, 42, 1);
+        assert!(!dir.join("42-1.json").exists() && !dir.join("42-1.9001.tmp").exists());
+        assert!(dir.join("42-10.9001.tmp").exists(), "another pane's temp file stays (prefix `42-1.` only)");
+        // A crashed instance's temp file is stale after a day.
+        std::fs::write(dir.join("7-3.55.tmp"), "{").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(2 * STALE_FILE_SECS);
+        prune_with(&data, 99, later, |_, _| false);
+        assert!(!dir.join("7-3.55.tmp").exists());
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -1102,7 +1132,7 @@ mod tests {
 
     #[test]
     fn owner_pid_reads_the_instance_prefix() {
-        assert_eq!(owner_pid("42-5.tmp"), Some(42));
+        assert_eq!(owner_pid("42-5.4711.tmp"), Some(42));
         assert_eq!(owner_pid("420-1.agent-002.sub"), Some(420));
         assert_eq!(owner_pid("notes.json"), None, "no prefix");
         assert_eq!(owner_pid("-1.json"), None, "empty instance");

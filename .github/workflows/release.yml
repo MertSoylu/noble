@@ -1,5 +1,9 @@
 # On a `v*` tag, builds ready-to-run Windows, Linux and macOS binaries and uploads them
-# to the GitHub release (so users don't need a Rust toolchain).
+# to the GitHub release (so users don't need a Rust toolchain). The release is published last:
+# `draft` creates it as a draft with the CHANGELOG notes, every `build` job uploads its archive and checksum
+# to the draft, and `publish` makes it public (and the latest release) only when all builds succeeded. Until
+# then `noble update` and the in-app update notice see no new version, so no platform is offered an archive
+# that is not there yet; a failed build leaves an unpublished draft.
 # The Linux binaries are static (musl): they run on any distribution, old glibc included. The Windows
 # binaries link the C runtime statically (`.cargo/config.toml`): no VC++ redistributable is needed.
 # The macOS binaries are ad-hoc signed by the linker (not notarized): a download from the
@@ -14,15 +18,55 @@ on:
   # Manual run: builds and smoke-tests every archive without publishing (a dry run).
   workflow_dispatch:
 
+# Read-only by default; only the jobs that write the release ask for more.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Tag only: the release as a draft, with this version's CHANGELOG.md section as its text.
+  draft:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      # The release text is this version's CHANGELOG.md section. GitHub's generated notes only list the
+      # merged PRs and call the maintainer a "new contributor"; a missing section fails the release.
+      - name: Release notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The section's lines, without the `[x.y.z]: <url>` link definitions at the end of the file.
+          awk -v h="## [$version]" '
+            index($0, "## [") == 1 { on = (index($0, h) == 1); next }
+            /^\[[^]]*\]: / { next }
+            on' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          # The compare link from `[x.y.z]: <url>`; the whole CHANGELOG.md if there is none.
+          link=$(awk -v p="[$version]: " 'index($0, p) == 1 { print substr($0, length(p) + 1) }' CHANGELOG.md)
+          echo "**Full changelog:** ${link:-https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md}" >> notes.md
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+
   build:
+    # On a tag after `draft`; a manual run has no `draft` (skipped) and publishes nothing.
+    needs: draft
+    if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
+    permissions:
+      contents: write
     strategy:
+      # One platform failing does not cancel the others; the release stays a draft then.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -82,29 +126,24 @@ jobs:
           printf '%s  %s\n' "$hash" "$archive" > "${{ matrix.archive }}.sha256"
           cat "$archive.sha256"
           $sum -c "$archive.sha256"
-      # The release text is this version's CHANGELOG.md section. GitHub's generated notes only list the
-      # merged PRs and call the maintainer a "new contributor"; a missing section fails the release.
-      - name: Release notes
+      - name: Upload to the draft release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          # The section's lines, without the `[x.y.z]: <url>` link definitions at the end of the file.
-          awk -v h="## [$version]" '
-            index($0, "## [") == 1 { on = (index($0, h) == 1); next }
-            /^\[[^]]*\]: / { next }
-            on' CHANGELOG.md > notes.md
-          if ! grep -q '[^[:space:]]' notes.md; then
-            echo "::error::CHANGELOG.md has no section for $version"
-            exit 1
-          fi
-          # The compare link from `[x.y.z]: <url>`; the whole CHANGELOG.md if there is none.
-          link=$(awk -v p="[$version]: " 'index($0, p) == 1 { print substr($0, length(p) + 1) }' CHANGELOG.md)
-          echo "**Full changelog:** ${link:-https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md}" >> notes.md
-      - uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            ${{ matrix.archive }}
-            ${{ matrix.archive }}.sha256
-          body_path: notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.archive }}" "${{ matrix.archive }}.sha256" --clobber
+
+  # Tag only, and only when every archive is uploaded (a failed or cancelled build skips this job).
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

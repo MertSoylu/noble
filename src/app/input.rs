@@ -87,14 +87,35 @@ impl App {
                 p.insert(text.lines().next().unwrap_or(""));
                 return;
             }
+            // The keyboard reference's filter: a typed letter resets the selection and the scroll.
+            Some(Overlay::Help(st)) => {
+                st.query.push_str(text.lines().next().unwrap_or(""));
+                st.selected = 0;
+                st.scroll = 0;
+                return;
+            }
+            // The key bindings' filter (`/`); while a key is awaited or a replace is asked, text is not taken.
+            Some(Overlay::Bindings(st)) => {
+                if st.filtering && st.capture.is_none() && st.replace.is_none() {
+                    st.query.push_str(text.lines().next().unwrap_or(""));
+                    st.selected = 0;
+                }
+                return;
+            }
             Some(_) => return,
             None => {}
         }
+        let line = text.lines().next().unwrap_or("");
         if let Some(id) = self.focused_pane().filter(|id| self.panes.contains_key(id)) {
             self.paste_into(id, text.to_string());
         } else if self.view == View::Bridge && self.bridge.filtering {
-            self.bridge.filter.push_str(text.lines().next().unwrap_or(""));
+            self.bridge.filter.push_str(line);
             self.bridge.proj_sel = 0;
+        } else if self.view == View::System && self.system.filtering {
+            self.system.filter.push_str(line);
+        } else if self.view == View::Settings && self.settings_filtering {
+            self.settings_filter.push_str(line);
+            self.settings_sel = 0;
         }
     }
 
@@ -981,11 +1002,17 @@ impl App {
 
     fn mouse_down(&mut self, btn: MouseButton, m: &MouseEvent) {
         let (x, y) = (m.column, m.row);
-        let double =
-            self.last_click.is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
-        self.last_click = Some((Instant::now(), x, y));
-        // 1 → 2 → 3 → back to 1 while the clicks keep coming quickly on the same cell.
-        self.click_streak = if double { self.click_streak % 3 + 1 } else { 1 };
+        // Only left clicks count towards a double click: a right click before a left click is not one.
+        let left = btn == MouseButton::Left;
+        let double = left
+            && self
+                .last_click
+                .is_some_and(|(t, lx, ly)| t.elapsed() < Duration::from_millis(450) && lx == x && ly == y);
+        if left {
+            self.last_click = Some((Instant::now(), x, y));
+            // 1 → 2 → 3 → back to 1 while the clicks keep coming quickly on the same cell.
+            self.click_streak = if double { self.click_streak % 3 + 1 } else { 1 };
+        }
         // A click ends a pending prefix (the next key is a plain key again).
         self.prefix_armed = false;
         // A click ends the keyboard focus on a project's quick actions.
@@ -1011,6 +1038,19 @@ impl App {
                     return;
                 }
                 _ => {}
+            }
+        }
+        // Another button acts only where it has a meaning of its own; a right or middle click never presses a
+        // button, confirms a dialog or follows a toast.
+        if btn != MouseButton::Left {
+            let own = matches!(
+                (&hit, btn),
+                (Hit::Pane { .. } | Hit::Backdrop, _)
+                    | (Hit::Tab(_), MouseButton::Middle)
+                    | (Hit::Setting(_), MouseButton::Right)
+            );
+            if !own {
+                return;
             }
         }
         match hit {

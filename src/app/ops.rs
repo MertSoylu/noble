@@ -114,10 +114,10 @@ impl App {
                 if self.tabs.is_empty() {
                     self.toast(ToastLevel::Warn, "no terminal tabs to save");
                 } else {
-                    let value = self.tabs.iter().map(|t| t.origin.clone()).collect::<Vec<_>>().join(" + ");
+                    let names: Vec<&str> = self.tabs.iter().map(|t| t.origin.as_str()).collect();
                     self.overlay = Some(Overlay::Prompt(Prompt::new(
                         "SAVE WORKSPACE AS",
-                        crate::util::truncate(&value, 32),
+                        workspace_suggestion(&names),
                         PromptPurpose::SaveWorkspace,
                     )));
                 }
@@ -539,7 +539,7 @@ impl App {
             Some(what) => {
                 self.overlay = Some(Overlay::Confirm(Confirm {
                     title: "CLOSE PANE".into(),
-                    body: format!("{what} is still running — close it?"),
+                    body: format!("Still running: {what} — close it?"),
                     yes: "close",
                     action: ConfirmAction::ClosePane(id),
                 }));
@@ -559,10 +559,14 @@ impl App {
             return self.remove_tab(i);
         }
         let body = if busy.is_empty() {
-            format!("close the tab and its {} panes?", ids.len())
+            format!("Close the tab and its {} panes?", ids.len())
         } else {
-            let what = if busy.len() == 1 { busy[0].clone() } else { format!("{} programs", busy.len()) };
-            format!("{what} still running — close the tab?")
+            // Names are shown as they are (commands are case-sensitive), so the sentence starts with a fixed word.
+            if busy.len() == 1 {
+                format!("Still running: {} — close the tab?", busy[0])
+            } else {
+                format!("{} programs still running — close the tab?", busy.len())
+            }
         };
         self.overlay = Some(Overlay::Confirm(Confirm {
             title: "CLOSE TAB".into(),
@@ -1245,5 +1249,60 @@ fn has_launch(n: &SavedNode) -> bool {
     match n {
         SavedNode::Leaf { launch, .. } => launch.is_some(),
         SavedNode::Split { a, b, .. } => has_launch(a) || has_launch(b),
+    }
+}
+
+/// Longest suggested workspace name, in columns.
+const WORKSPACE_NAME_MAX: usize = 32;
+
+/// The suggested name of a workspace: whole tab names joined with " + " while the result stays within
+/// `WORKSPACE_NAME_MAX` columns (at least the first one, cut without an ellipsis if it alone is longer), so the
+/// default never ends in "…" and is saved that way.
+fn workspace_suggestion(names: &[&str]) -> String {
+    let mut out = String::new();
+    for name in names {
+        let joined = if out.is_empty() { name.to_string() } else { format!("{out} + {name}") };
+        if crate::util::width(&joined) > WORKSPACE_NAME_MAX {
+            break;
+        }
+        out = joined;
+    }
+    if out.is_empty() {
+        // The first name alone is too long: cut it at a character boundary, no ellipsis.
+        let mut width = 0;
+        for c in names.first().copied().unwrap_or("").chars() {
+            let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if width + w > WORKSPACE_NAME_MAX {
+                break;
+            }
+            width += w;
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_suggestion;
+
+    /// The suggested workspace name is made of whole tab names and never ends in an ellipsis.
+    #[test]
+    fn workspace_suggestion_uses_whole_tab_names() {
+        assert_eq!(workspace_suggestion(&["api"]), "api");
+        assert_eq!(workspace_suggestion(&["api", "web", "docs"]), "api + web + docs");
+        // "alpha-service + beta-service" is 28 columns; adding " + gamma-service" would pass 32.
+        assert_eq!(
+            workspace_suggestion(&["alpha-service", "beta-service", "gamma-service"]),
+            "alpha-service + beta-service"
+        );
+        // A first name that is too long on its own is cut without "…".
+        let long = "x".repeat(50);
+        assert_eq!(workspace_suggestion(&[long.as_str(), "b"]), "x".repeat(32));
+        // The next name does not fit: the first one stays whole.
+        assert_eq!(workspace_suggestion(&["a".repeat(30).as_str(), "bb"]), "a".repeat(30));
+        // Wide characters count by columns.
+        assert_eq!(workspace_suggestion(&["日本語日本語日本語日本語日本語", "x"]), "日本語日本語日本語日本語日本語");
+        assert_eq!(workspace_suggestion(&[]), "");
     }
 }

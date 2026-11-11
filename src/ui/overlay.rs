@@ -37,7 +37,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
             // The question wraps over as many rows as it needs: the box grows with it (within the
             // area) and the Yes/No row stays at the bottom.
             let text_w = (w as usize).saturating_sub(4);
-            let lines = wrap_text(&capitalized(&c.body), text_w);
+            let lines = wrap_text(&c.body, text_w);
             let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
             let rect = centered(area, w, rows.saturating_add(5).min(area.height));
             hits.push((rect, Hit::Inert));
@@ -702,15 +702,6 @@ fn agent_hooks(buf: &mut Buffer, area: Rect, app: &App, selected: usize, hits: &
     hud::key_hints(buf, x, by, iw, &[("space", "on/off"), ("esc", "close")], th);
 }
 
-/// `text` with its first character in upper case; the rest is kept as written (`close it?` → `Close it?`).
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
-
 /// Word-wraps `text` to lines of at most `width` columns (by display width); a word wider than
 /// a line is cut into pieces. Newlines count as spaces.
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -1139,7 +1130,7 @@ fn key_bindings(buf: &mut Buffer, area: Rect, app: &App, st: &BindingsState, hit
 
 #[cfg(test)]
 mod tests {
-    use super::{capitalized, fit_words, launcher_keys_text, launcher_what, wrap_text};
+    use super::{fit_words, launcher_keys_text, launcher_what, wrap_text};
     use crate::util;
 
     #[test]
@@ -1199,16 +1190,5 @@ mod tests {
         assert!(wide.iter().all(|l| util::width(l) <= 5), "{wide:?}");
         assert!(wrap_text("", 10).is_empty());
         assert!(wrap_text("abc", 0).is_empty());
-    }
-
-    #[test]
-    fn capitalized_uppercases_only_the_first_character() {
-        assert_eq!(capitalized("a command is still running"), "A command is still running");
-        assert_eq!(capitalized("cargo test — close it?"), "Cargo test — close it?");
-        // Already capitalized, a symbol, a non-ASCII letter, and empty text.
-        assert_eq!(capitalized("Already"), "Already");
-        assert_eq!(capitalized("“quoted”"), "“quoted”");
-        assert_eq!(capitalized("élan"), "Élan");
-        assert_eq!(capitalized(""), "");
     }
 }
