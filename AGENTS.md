@@ -80,7 +80,9 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
 - **App submodules:** `app/mod.rs` holds the state types and the event dispatch (`App::handle`, `apply`, `tick`);
   `notify.rs` (toasts, notices, the update notice, PTY output → notifications), `redraw.rs` (animations and the
   next wake-up), `session.rs` (auto-save, restore, shutdown), `power.rs` (battery, clock, sensor rate), `reload.rs`
-  (live config reload), `git.rs` (git status requests) and `quota.rs` (quota warnings from the cached numbers: a full
+  (live config reload), `git.rs` (git status requests), `arrange.rs` (rearranging panes: swaps, moves next to a pane
+  or along an edge, rotation, flips and moves into another tab, and the title drag `Drag::Pane` with its `PaneDrop`;
+  the tree operations are in `term/layout.rs`) and `quota.rs` (quota warnings from the cached numbers: a full
   quota on a launcher, the agent pane's `⚠ 5h 92%`, the reset notice) hold the methods on `App`.
 - **Redraw (battery-friendly):** there is no fixed frame rate. `App::handle` returns `true` if the event changed
   something visible (e.g. a sensor event while in a terminal returns `false`); anything that changes over time
@@ -109,7 +111,8 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   bottom line during it, so none pops away on arrival. `App::focus_reveal` draws the bars over the panes without a
   resize: the bottom bar only while the prefix is armed (the update notice is drawn with it, so it shows only then), the
   top bar once the pointer has rested on row 0 for `EDGE_DWELL` (`track_focus_edge` runs on every mouse event and only
-  row 0 starts a dwell; `redraw_after` wakes for it). Nothing else covers the last row, so a program's mouse clicks
+  row 0 starts a dwell, never on a pane's buttons or its title text (`on_title_text`), so the top panes' titles stay
+  clickable and draggable; moving onto either hides a revealed bar; `redraw_after` wakes for it). Nothing else covers the last row, so a program's mouse clicks
   there reach it. Other tabs' markers show as the `Hit::FocusAlert` chip on the top row (the pane title row), at the
   rightmost place on that row with no click target under it (`ui::alert_slot`: a pane's buttons with their brackets, a
   failed command's badge, a divider); no chip when there is no such place. A config reload changes the flag only when

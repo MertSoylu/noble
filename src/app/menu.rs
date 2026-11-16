@@ -39,6 +39,12 @@ pub enum MenuCmd {
     OpenLink(crate::term::link::Link),
     /// An action run on a pane (the pane is focused first): the command output actions of its menu.
     PaneAction(PaneId, crate::keys::Action),
+    /// Opens the list of ways to rearrange the panes around this one (swaps, edges, rotation, flip).
+    ArrangeMenu(PaneId),
+    /// Opens the list of tabs the pane can move into (and a new one).
+    MoveToTabMenu(PaneId),
+    /// Moves the pane into the tab with this id (`App::move_pane_into_tab`).
+    MoveToTab(PaneId, TabId),
 }
 
 #[derive(Clone, Debug)]
@@ -139,13 +145,16 @@ impl App {
             item("Split down", &hint(A::SplitDown), MenuCmd::Split(pane, Dir::Col)),
             item("Zoom / restore", &hint(A::Zoom), MenuCmd::Zoom(pane)),
         ]);
-        // Arranging needs a second pane in the tab.
-        if self.tabs.iter().any(|t| t.root.contains(pane) && t.panes().len() > 1) {
+        // Arranging needs a second pane in the tab; moving into another tab needs another tab or a second pane.
+        let multi = self.tabs.iter().any(|t| t.root.contains(pane) && t.panes().len() > 1);
+        if multi {
             items.extend([
                 item("Equalize splits", &hint(A::EqualizePanes), MenuCmd::PaneAction(pane, A::EqualizePanes)),
-                item("Swap with next pane", &hint(A::SwapPane), MenuCmd::PaneAction(pane, A::SwapPane)),
-                item("Move to new tab", &hint(A::MovePaneToTab), MenuCmd::PaneAction(pane, A::MovePaneToTab)),
+                item("Arrange panes ›", "drag title", MenuCmd::ArrangeMenu(pane)),
             ]);
+        }
+        if multi || self.tabs.len() > 1 {
+            items.push(item("Move to tab ›", "", MenuCmd::MoveToTabMenu(pane)));
         }
         // The commands the shell marked in this pane: jumps, copy, and the send to an agent (see `app/blocks.rs`).
         if p.last_output_block().is_some() {
@@ -171,6 +180,58 @@ impl App {
             item("Close pane", &hint(A::ClosePane), MenuCmd::ClosePane(pane)).sep().danger(),
         ]);
         self.open_menu(label, x, y, items);
+    }
+
+    /// The ways to rearrange the panes around `pane`, at the same place: a swap with each neighbour it has, with the next
+    /// and previous pane, a move along each edge of the tab, rotation and turning its split the other way.
+    pub fn open_arrange_menu(&mut self, pane: PaneId, x: u16, y: u16) {
+        use crate::keys::Action as A;
+        use crate::term::layout::{Direction, neighbor};
+        let body = self.body();
+        let Some(ti) = self.tab_of(pane) else { return };
+        let rects = self.tabs[ti].root.layout(body).0;
+        let hint = |a| self.keymap.hint(a).unwrap_or_default();
+        let act = |label: &str, a: A| item(label, &hint(a), MenuCmd::PaneAction(pane, a));
+        let mut items = Vec::new();
+        for (d, label, a) in [
+            (Direction::Left, "Swap with pane on the left", A::SwapLeft),
+            (Direction::Right, "Swap with pane on the right", A::SwapRight),
+            (Direction::Up, "Swap with pane above", A::SwapUp),
+            (Direction::Down, "Swap with pane below", A::SwapDown),
+        ] {
+            if neighbor(&rects, pane, d).is_some() {
+                items.push(act(label, a));
+            }
+        }
+        items.extend([act("Swap with next pane", A::SwapPane), act("Swap with previous pane", A::SwapPanePrev)]);
+        items.extend([
+            act("Move to left edge", A::MoveEdgeLeft).sep(),
+            act("Move to right edge", A::MoveEdgeRight),
+            act("Move to top edge", A::MoveEdgeUp),
+            act("Move to bottom edge", A::MoveEdgeDown),
+            act("Rotate panes forward", A::RotatePanes).sep(),
+            act("Rotate panes backward", A::RotatePanesBack),
+            act("Flip split (side by side ↔ stacked)", A::FlipSplit),
+        ]);
+        self.open_menu("Arrange panes".into(), x, y, items);
+    }
+
+    /// The tabs `pane` can move into, at the same place: a new tab of its own (when its tab keeps another pane), then
+    /// every other tab by its title.
+    pub fn open_move_to_tab_menu(&mut self, pane: PaneId, x: u16, y: u16) {
+        let Some(ti) = self.tab_of(pane) else { return };
+        let mut items = Vec::new();
+        if self.tabs[ti].panes().len() > 1 {
+            let hint = self.keymap.hint(crate::keys::Action::MovePaneToTab).unwrap_or_default();
+            items.push(item("New tab", &hint, MenuCmd::PaneAction(pane, crate::keys::Action::MovePaneToTab)));
+        }
+        // A rule between the new tab and the existing ones.
+        let rule = !items.is_empty();
+        for (n, (i, t)) in self.tabs.iter().enumerate().filter(|(i, _)| *i != ti).enumerate() {
+            let it = item(&format!("{}  {}", i + 1, self.tab_title(i)), "", MenuCmd::MoveToTab(pane, t.id));
+            items.push(if n == 0 && rule { it.sep() } else { it });
+        }
+        self.open_menu("Move to tab".into(), x, y, items);
     }
 
     /// The launchers a pane menu offers to run in a split next to the pane, at the same place.
@@ -237,6 +298,9 @@ impl App {
                 }
             }
             MenuCmd::LaunchMenu(pane) => self.open_launch_menu(pane, at.0, at.1),
+            MenuCmd::ArrangeMenu(pane) => self.open_arrange_menu(pane, at.0, at.1),
+            MenuCmd::MoveToTabMenu(pane) => self.open_move_to_tab_menu(pane, at.0, at.1),
+            MenuCmd::MoveToTab(pane, tab) => self.move_pane_into_tab(pane, tab),
             MenuCmd::Zoom(pane) => {
                 if let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) {
                     self.toggle_zoom(ti, pane);

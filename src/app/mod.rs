@@ -3,6 +3,7 @@
 
 mod agent_hooks;
 mod agents;
+mod arrange;
 pub mod bindings;
 mod blocks;
 mod focus;
@@ -44,6 +45,7 @@ use crate::term::pane::{CommandResult, Pane, ShellSpec, resolve_shell};
 use crate::term::{Tab, TabAlert, TabId};
 use crate::theme::Theme;
 
+pub use arrange::PaneDrop;
 pub use bindings::BindingsState;
 pub use help::HelpState;
 pub use live::PrEntry;
@@ -534,6 +536,15 @@ pub(crate) enum Drag {
     Forward {
         pane: PaneId,
         inner: Rect,
+    },
+    /// A pane's title dragged to rearrange the panes (`app/arrange.rs`). Nothing happens until the pointer leaves the
+    /// cell it was pressed on (`moved`), so a click or a double click on the title stays one; `drop` is what a release
+    /// at the pointer would do.
+    Pane {
+        pane: PaneId,
+        start: (u16, u16),
+        moved: bool,
+        drop: Option<PaneDrop>,
     },
 }
 
@@ -1511,6 +1522,7 @@ impl App {
             Drag::Select { .. } => "select",
             Drag::Forward { .. } => "forward",
             Drag::Tab { .. } => "tab",
+            Drag::Pane { .. } => "pane",
         })
     }
 

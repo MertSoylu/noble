@@ -22,6 +22,33 @@ pub enum Direction {
     Down,
 }
 
+impl Direction {
+    pub const ALL: [Direction; 4] = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+
+    /// The split that puts something on this side: side by side for left and right, stacked otherwise.
+    pub fn axis(self) -> Dir {
+        match self {
+            Direction::Left | Direction::Right => Dir::Row,
+            Direction::Up | Direction::Down => Dir::Col,
+        }
+    }
+
+    /// The side comes first in its split (`a`): left or top.
+    fn first(self) -> bool {
+        matches!(self, Direction::Left | Direction::Up)
+    }
+
+    /// The side's name for the UI ("left", "top" …).
+    pub fn edge_name(self) -> &'static str {
+        match self {
+            Direction::Left => "left",
+            Direction::Right => "right",
+            Direction::Up => "top",
+            Direction::Down => "bottom",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Leaf(PaneId),
@@ -118,6 +145,120 @@ impl Node {
                 a.swap_ids(x, y);
                 b.swap_ids(x, y);
             }
+        }
+    }
+
+    /// Puts the new leaf `new` on side `side` of the `target` leaf, which gives up `share` (0..1) of its size to it.
+    pub fn insert_beside(&mut self, target: PaneId, new: PaneId, side: Direction, share: f32) -> bool {
+        match self {
+            Node::Leaf(id) if *id == target => {
+                let old = std::mem::replace(self, Node::Leaf(0));
+                *self = Node::wrapped(old, new, side, share);
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { a, b, .. } => {
+                a.insert_beside(target, new, side, share) || b.insert_beside(target, new, side, share)
+            }
+        }
+    }
+
+    /// `node` with the leaf `new` added on side `side` across its whole length, taking `share` of it.
+    fn wrapped(node: Node, new: PaneId, side: Direction, share: f32) -> Node {
+        let share = share.clamp(0.05, 0.95);
+        let leaf = Box::new(Node::Leaf(new));
+        let (ratio, a, b) =
+            if side.first() { (share, leaf, Box::new(node)) } else { (1.0 - share, Box::new(node), leaf) };
+        Node::Split { dir: side.axis(), ratio, a, b }
+    }
+
+    /// Moves pane `id` next to pane `target`, on its side `side`; the target gives up half its size. The tree is
+    /// unchanged (`false`) unless both are different leaves of it.
+    pub fn move_beside(&mut self, id: PaneId, target: PaneId, side: Direction) -> bool {
+        if id == target || !self.contains(id) || !self.contains(target) {
+            return false;
+        }
+        let mut next = self.clone();
+        if !(next.remove(id) && next.insert_beside(target, id, side, 0.5)) {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Moves pane `id` to side `side` of the whole tree, across its full height (left/right) or width (top/bottom),
+    /// with an even share among the parts on that axis. `false` (unchanged) for a lone pane or one not in the tree.
+    pub fn move_to_edge(&mut self, id: PaneId, side: Direction) -> bool {
+        let mut rest = self.clone();
+        if !rest.remove(id) {
+            return false;
+        }
+        rest.add_at_edge(id, side);
+        *self = rest;
+        true
+    }
+
+    /// Adds the new leaf `new` on side `side` of the whole tree (see `move_to_edge`).
+    pub fn add_at_edge(&mut self, new: PaneId, side: Direction) {
+        let parts = self.weight(side.axis()) + 1;
+        let old = std::mem::replace(self, Node::Leaf(0));
+        *self = Node::wrapped(old, new, side, 1.0 / parts as f32);
+    }
+
+    /// Moves every pane one place along the pane order (the last to the first with `forward`); the sizes stay.
+    pub fn rotate(&mut self, forward: bool) -> bool {
+        let mut ids = self.leaves();
+        if ids.len() < 2 {
+            return false;
+        }
+        if forward {
+            ids.rotate_right(1);
+        } else {
+            ids.rotate_left(1);
+        }
+        self.relabel(&mut ids.into_iter());
+        true
+    }
+
+    fn relabel(&mut self, ids: &mut impl Iterator<Item = PaneId>) {
+        match self {
+            Node::Leaf(id) => *id = ids.next().unwrap_or(*id),
+            Node::Split { a, b, .. } => {
+                a.relabel(ids);
+                b.relabel(ids);
+            }
+        }
+    }
+
+    /// Turns the split that holds pane `id` the other way: side by side becomes stacked and back. The order and the
+    /// ratio stay (left becomes top). `false` for a lone pane.
+    pub fn flip(&mut self, id: PaneId) -> bool {
+        match self {
+            Node::Leaf(_) => false,
+            Node::Split { dir, a, b, .. } => {
+                if a.contains(id) && a.flip(id) || b.contains(id) && b.flip(id) {
+                    return true;
+                }
+                if !matches!(**a, Node::Leaf(x) if x == id) && !matches!(**b, Node::Leaf(x) if x == id) {
+                    return false;
+                }
+                *dir = match dir {
+                    Dir::Row => Dir::Col,
+                    Dir::Col => Dir::Row,
+                };
+                true
+            }
+        }
+    }
+
+    /// Same panes in the same places, ratios aside: a move that would change nothing visible but the sizes.
+    pub fn same_shape(&self, other: &Node) -> bool {
+        match (self, other) {
+            (Node::Leaf(x), Node::Leaf(y)) => x == y,
+            (Node::Split { dir: d1, a: a1, b: b1, .. }, Node::Split { dir: d2, a: a2, b: b2, .. }) => {
+                d1 == d2 && a1.same_shape(a2) && b1.same_shape(b2)
+            }
+            _ => false,
         }
     }
 
@@ -466,6 +607,97 @@ mod tests {
         assert!(!n.swap(1, 1));
         assert!(!n.swap(1, 9));
         assert_eq!(n.leaves(), vec![3, 2, 1]);
+    }
+
+    /// A 2×2 grid: (1 / 2) | (3 / 4) — 1 top left, 2 bottom left, 3 top right, 4 bottom right.
+    fn grid() -> Node {
+        let mut n = Node::Leaf(1);
+        n.split(1, 3, Dir::Row);
+        n.split(1, 2, Dir::Col);
+        n.split(3, 4, Dir::Col);
+        n
+    }
+
+    fn rect_of(n: &Node, id: PaneId) -> Rect {
+        n.layout(area()).0.into_iter().find(|(p, _)| *p == id).map(|(_, r)| r).unwrap()
+    }
+
+    #[test]
+    fn move_beside_puts_a_pane_on_each_side_of_another() {
+        // Bottom left to the right of the top right pane: the right column's top row is split in two.
+        let mut n = grid();
+        assert!(n.move_beside(2, 3, Direction::Right));
+        assert_eq!(rect_of(&n, 1), Rect::new(0, 0, 50, 40), "1 takes the whole left column");
+        assert_eq!(rect_of(&n, 2), Rect::new(75, 0, 25, 20));
+        assert_eq!(rect_of(&n, 3), Rect::new(50, 0, 25, 20));
+        for (side, expect) in [
+            (Direction::Left, Rect::new(50, 0, 25, 20)),
+            (Direction::Up, Rect::new(50, 0, 50, 10)),
+            (Direction::Down, Rect::new(50, 10, 50, 10)),
+        ] {
+            let mut n = grid();
+            assert!(n.move_beside(2, 3, side));
+            assert_eq!(rect_of(&n, 2), expect, "{side:?}");
+        }
+        // Top and bottom of a two-pane stack swap places by moving one below the other.
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Col);
+        assert!(n.move_beside(1, 2, Direction::Down));
+        assert_eq!(n.leaves(), vec![2, 1]);
+        // Nothing for a pane onto itself or an unknown pane.
+        let mut n = grid();
+        assert!(!n.move_beside(2, 2, Direction::Left));
+        assert!(!n.move_beside(2, 9, Direction::Left));
+        assert!(!n.move_beside(9, 2, Direction::Left));
+        assert_eq!(n, grid());
+    }
+
+    #[test]
+    fn move_to_edge_spans_the_whole_side() {
+        for (side, expect) in [
+            (Direction::Left, Rect::new(0, 0, 33, 40)),
+            (Direction::Right, Rect::new(67, 0, 33, 40)),
+            (Direction::Up, Rect::new(0, 0, 100, 20)),
+            (Direction::Down, Rect::new(0, 20, 100, 20)),
+        ] {
+            let mut n = grid();
+            assert!(n.move_to_edge(2, side));
+            assert_eq!(rect_of(&n, 2), expect, "{side:?}");
+            assert_eq!(n.leaves().len(), 4);
+        }
+        // A lone pane has no edge to move to.
+        let mut leaf = Node::Leaf(1);
+        assert!(!leaf.move_to_edge(1, Direction::Left));
+        assert!(!grid().move_to_edge(9, Direction::Left));
+        // Already there: the shape stays.
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, Dir::Row);
+        let before = n.clone();
+        assert!(n.move_to_edge(1, Direction::Left));
+        assert!(n.same_shape(&before));
+        assert!(!n.same_shape(&grid()));
+    }
+
+    #[test]
+    fn rotate_and_flip() {
+        let mut n = grid();
+        let sizes = n.layout(area()).0.iter().map(|(_, r)| *r).collect::<Vec<_>>();
+        assert!(n.rotate(true));
+        assert_eq!(n.leaves(), vec![4, 1, 2, 3]);
+        assert!(n.rotate(false));
+        assert_eq!(n, grid());
+        assert_eq!(n.layout(area()).0.iter().map(|(_, r)| *r).collect::<Vec<_>>(), sizes);
+        assert!(!Node::Leaf(1).rotate(true));
+        // The left column (1 / 2) turns into a row: 1 and 2 side by side in the left half.
+        let mut n = grid();
+        assert!(n.flip(2));
+        assert_eq!(rect_of(&n, 1), Rect::new(0, 0, 25, 40));
+        assert_eq!(rect_of(&n, 2), Rect::new(25, 0, 25, 40));
+        assert_eq!(rect_of(&n, 3), Rect::new(50, 0, 50, 20), "the other column stays");
+        assert!(n.flip(2));
+        assert_eq!(n, grid());
+        assert!(!Node::Leaf(1).flip(1));
+        assert!(!grid().flip(9));
     }
 
     #[test]

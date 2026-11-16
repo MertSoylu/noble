@@ -56,8 +56,8 @@ position bar with the search matches on it and a `↓ live · 12` chip counting 
 or hovered pane shows its buttons on the title line: `◫` split right, `⊟` split down, `⤢` zoom, `✕` close.
 In a split tab the panes without the focus fade a little (`dim_inactive`), so the focused one stands out.
 Focus mode (`prefix f`, or `focus_mode` in the config) hides the top and bottom bars on a terminal tab, so its panes
-get the whole screen: the top bar comes back while the pointer rests on the top row, the bottom bar while the prefix is
-armed, and a `◆ 2` chip on the top row shows the markers of the other tabs.
+get the whole screen: the top bar comes back while the pointer rests on the top row (on a line, not on a pane's title or
+buttons, which stay clickable and draggable), the bottom bar while the prefix is armed, and a `◆ 2` chip on the top row shows the markers of the other tabs.
 Programs can rely on the usual terminal queries: synchronized output (no half-drawn frames), the pane's colors
 (OSC 4 / 10 / 11 / 12, `COLORFGBG`, color scheme notices) so AI CLIs pick the right light or dark theme, focus
 reports, XTVERSION, DECRQM, the kitty keyboard protocol (flag 1 only, one flag stack per screen) and, on Windows,
@@ -260,7 +260,10 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | `alt+p`\* | command palette | `x` / `X` | close pane / tab |
 | | | `T` | reopen the last closed tab |
 | `alt+m` | system monitor | `z` | zoom pane |
-| | | `=` `}` `!` | equalize splits · swap with the next pane · move the pane to a new tab |
+| | | `=` `}` `{` `!` | equalize splits · swap with the next / previous pane · move the pane to a new tab |
+| | | `alt+arrows` | swap the pane with its neighbour on that side |
+| | | `ctrl+arrows` | move the pane along that edge of the tab (full height or width) |
+| | | `ctrl+o` `alt+o` `F` | rotate the panes forward / backward · flip a split (side by side ↔ stacked) |
 | `alt+s`\* | settings | `S` `m` | settings · system monitor |
 | `alt+z` | zoom pane | `← → ↑ ↓` `o` | move focus |
 | `alt+o` | next pane | `shift+arrows` `H J K L` | move divider |
@@ -326,6 +329,11 @@ so these actions do nothing there.
   tabs that do not fit · drag tabs to reorder, double-click to rename, middle-click to close · the pane buttons `◫ ⊟ ⤢ ✕` (split right, split down, zoom, close) show on the focused
   pane and on the one under the mouse, and the status bar names the hovered one with its shortcut ·
   double-click a pane's title to zoom it (again to restore) ·
+  drag a pane's title to rearrange: onto the middle of another pane to swap the two, onto its outer quarter to go
+  next to it on that side, onto the outermost cells of the window to run along that edge, onto another tab of the
+  strip to move it there (a pane alone in its tab takes the tab along) or onto `+` for a tab of its own; the place
+  is outlined and the status bar says what a release does (`esc` cancels). The pane menu has the same as
+  Arrange panes › and Move to tab › ·
   drag dividers · drag to select text (copied on release), double-click a word, triple-click a line; the pane menu has Copy for a selection · right-click pastes (text with line breaks asks first unless the app uses bracketed paste; an app that captures the mouse gets the clicks, drags and wheel instead) · wheel scrolls ·
   scrolled back, click the position bar in the pane's last column to jump there, or the `↓ live` chip (any key
   typed into the pane works too) to return to the newest output; the wheel keeps scrolling over both ·
@@ -411,7 +419,9 @@ show = true              # false hides it from Home (Settings → Quick launch)
 ```
 
 **Actions** for bindings: `bridge system settings new_tab close_tab reopen_tab next_tab prev_tab tab_1…tab_9 move_tab_left
-move_tab_right split_right split_down close_pane zoom equalize_panes swap_pane move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
+move_tab_right split_right split_down close_pane zoom equalize_panes swap_pane swap_pane_prev swap_pane_left swap_pane_right swap_pane_up swap_pane_down
+move_pane_left_edge move_pane_right_edge move_pane_top_edge move_pane_bottom_edge rotate_panes rotate_panes_back flip_split
+move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks

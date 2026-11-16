@@ -221,8 +221,10 @@ fn resting_on_a_pane_button_does_not_reveal_the_top_bar() {
         .expect("a pane button on the top row");
     assert_eq!(button.y, 0, "the pane title row is the top row in focus mode");
 
-    // Away from the buttons the dwell still works; moving onto a button cancels it and the buttons stay usable.
-    mouse(&mut app, Moved, 2, 0);
+    // Away from the buttons and the title the dwell still works; moving onto a button cancels it and the buttons stay
+    // usable.
+    let line = title_line_cell(&app);
+    mouse(&mut app, Moved, line, 0);
     std::thread::sleep(Duration::from_millis(450));
     assert!(has_top_bar(&render(&mut app, 110, 30)));
     mouse(&mut app, Moved, button.x, 0);
@@ -232,6 +234,63 @@ fn resting_on_a_pane_button_does_not_reveal_the_top_bar() {
     let text = render(&mut app, 110, 30);
     assert!(!has_top_bar(&text), "the bar stays away while the pointer rests on a button\n{text}");
     assert!(find_hit(&app, |h| matches!(h, Hit::PaneClose(_))).is_some());
+}
+
+/// A cell of the top row on a pane title's line: no button and no title text (the dwell reveals the bar there).
+fn title_line_cell(app: &App) -> u16 {
+    let at = |x: u16| {
+        let pos = ratatui::layout::Position { x, y: 0 };
+        app.hits.iter().filter(|(r, _)| r.contains(pos)).map(|(_, h)| h.clone()).collect::<Vec<_>>()
+    };
+    (0..app.size.0)
+        .find(|&x| matches!(at(x).as_slice(), [Hit::PaneTitle(_)]))
+        .expect("a plain line cell on the top row")
+}
+
+/// In focus mode the top row is the top panes' title row: resting on a title's text keeps the bar away, and moving
+/// onto it hides a revealed bar, so the title can be clicked, double-clicked and dragged to move the pane.
+#[test]
+fn resting_on_a_pane_title_does_not_reveal_the_top_bar() {
+    use crossterm::event::MouseButton;
+    use crossterm::event::MouseEventKind::{Down, Drag, Moved, Up};
+    let (w, h) = (110, 30);
+    let mut app = demo_app(w, h);
+    app.new_tab(std::env::temp_dir(), None, Some("titles".into()));
+    let left = app.tabs[0].focus;
+    app.run(Action::SplitRight);
+    let right = app.tabs[0].focus;
+    app.run(Action::FocusMode);
+    render(&mut app, w, h);
+    let title = |app: &App, id| {
+        app.hits.iter().filter(|(_, h)| *h == Hit::PaneTitle(id)).map(|(r, _)| *r).min_by_key(|r| r.width).unwrap()
+    };
+    let t = title(&app, left);
+    assert_eq!(t.y, 0, "the title row is the top row in focus mode");
+
+    mouse(&mut app, Moved, t.x + 2, 0);
+    std::thread::sleep(Duration::from_millis(450));
+    let text = render(&mut app, w, h);
+    assert!(
+        !has_top_bar(&text),
+        "the bar stays away from a title
+{text}"
+    );
+
+    // A bar revealed from the line goes away when the pointer reaches a title.
+    let line = title_line_cell(&app);
+    mouse(&mut app, Moved, line, 0);
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(has_top_bar(&render(&mut app, w, h)));
+    mouse(&mut app, Moved, t.x + 2, 0);
+    assert!(!has_top_bar(&render(&mut app, w, h)));
+
+    // The title takes the drag: the left pane goes to the middle of the right one and the two swap.
+    let r = title(&app, right);
+    let target = (r.x + 20, h / 2);
+    mouse(&mut app, Down(MouseButton::Left), t.x + 2, 0);
+    mouse(&mut app, Drag(MouseButton::Left), target.0, target.1);
+    mouse(&mut app, Up(MouseButton::Left), target.0, target.1);
+    assert_eq!(app.tabs[0].panes(), vec![right, left]);
 }
 
 #[test]

@@ -75,7 +75,19 @@ impl App {
                 _ => self.no_op("no pane here — open a terminal tab first"),
             },
             Action::EqualizePanes => self.equalize_panes(),
-            Action::SwapPane => self.swap_pane(),
+            Action::SwapPane => self.swap_step(1),
+            Action::SwapPanePrev => self.swap_step(-1),
+            Action::SwapLeft => self.swap_dir(Direction::Left),
+            Action::SwapRight => self.swap_dir(Direction::Right),
+            Action::SwapUp => self.swap_dir(Direction::Up),
+            Action::SwapDown => self.swap_dir(Direction::Down),
+            Action::MoveEdgeLeft => self.move_to_edge(Direction::Left),
+            Action::MoveEdgeRight => self.move_to_edge(Direction::Right),
+            Action::MoveEdgeUp => self.move_to_edge(Direction::Up),
+            Action::MoveEdgeDown => self.move_to_edge(Direction::Down),
+            Action::RotatePanes => self.rotate_panes(true),
+            Action::RotatePanesBack => self.rotate_panes(false),
+            Action::FlipSplit => self.flip_split(),
             Action::MovePaneToTab => match self.focused_pane() {
                 Some(id) => self.move_pane_to_tab(id),
                 None => self.no_op("no pane here — open a terminal tab first"),
@@ -607,23 +619,6 @@ impl App {
         }
     }
 
-    /// Swaps the focused pane with the next one in pane order (the last with the first); the focus
-    /// moves with the pane.
-    pub fn swap_pane(&mut self) {
-        let Some(tab) = self.current_tab_mut() else {
-            return self.no_op("no pane here — open a terminal tab first");
-        };
-        let panes = tab.panes();
-        if panes.len() < 2 {
-            return self.no_op("only one pane — nothing to swap");
-        }
-        let i = panes.iter().position(|p| *p == tab.focus).unwrap_or(0);
-        tab.root.swap(tab.focus, panes[(i + 1) % panes.len()]);
-        tab.zoomed = false;
-        // A zoom animation still running would draw its pane over the tiled layout.
-        self.zoom_anim = None;
-    }
-
     /// Takes a pane out of its tab into a new tab of its own, opened right after it; the shell and
     /// what runs in it go along unchanged.
     pub fn move_pane_to_tab(&mut self, id: PaneId) {
@@ -639,7 +634,7 @@ impl App {
 
     /// Takes pane `id` out of tab `ti`'s tree (it must have another pane); a focused pane hands the
     /// focus to its neighbour, as tmux does.
-    fn detach_pane(&mut self, ti: usize, id: PaneId) {
+    pub(super) fn detach_pane(&mut self, ti: usize, id: PaneId) {
         let body = self.body();
         let tab = &mut self.tabs[ti];
         let (rects, _) = tab.root.layout(body);
