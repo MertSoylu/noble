@@ -46,14 +46,14 @@ jobs:
             archive: noble-macos-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install musl tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Smoke test
         shell: bash
@@ -101,7 +101,7 @@ jobs:
           # The compare link from `[x.y.z]: <url>`; the whole CHANGELOG.md if there is none.
           link=$(awk -v p="[$version]: " 'index($0, p) == 1 { print substr($0, length(p) + 1) }' CHANGELOG.md)
           echo "**Full changelog:** ${link:-https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md}" >> notes.md
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
