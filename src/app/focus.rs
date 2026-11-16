@@ -34,17 +34,32 @@ impl App {
     /// Follows the pointer: a dwell starts when it moves onto the top row and ends when it leaves that row. Only
     /// focus mode on a terminal tab has a dwell to track.
     pub(super) fn track_focus_edge(&mut self, x: u16, y: u16) {
-        // A pane's own buttons (split, zoom, close) sit on the top row; resting on one must not cover it with a bar.
-        // The hits of the last frame still list them while a bar is drawn over them.
-        let on_pane_button = self.hits.iter().any(|(r, h)| {
-            matches!(h, Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_)) && r.contains(Position::new(x, y))
-        });
-        let on_top = y == 0 && self.focus_mode_active() && !on_pane_button;
+        // The top row is the title row of the top panes: their buttons (split, zoom, close) and their title text, which
+        // is clicked, double-clicked and dragged (to move the pane). Resting on either must not cover it with a bar; the
+        // line between them still reveals it. The hits of the last frame still list them while a bar is drawn over
+        // them, so moving onto one also hides a revealed bar.
+        let at = Position::new(x, y);
+        let on_pane_button = self
+            .hits
+            .iter()
+            .any(|(r, h)| matches!(h, Hit::PaneSplit { .. } | Hit::PaneZoom(_) | Hit::PaneClose(_)) && r.contains(at));
+        let on_top = y == 0 && self.focus_mode_active() && !on_pane_button && !self.on_title_text(at);
         if !on_top {
             self.focus_top_since = None;
         } else if self.focus_top_since.is_none() {
             self.focus_top_since = Some(Instant::now());
         }
+    }
+
+    /// Whether `at` is on a pane title's text. A title row has two click targets for its pane (`ui::terminal`
+    /// `pane_frame`): the whole row, and the title text pushed again on top of the dividers; only the text has both.
+    fn on_title_text(&self, at: Position) -> bool {
+        let mut titles = self.hits.iter().filter_map(|(r, h)| match h {
+            Hit::PaneTitle(p) if r.contains(at) => Some(*p),
+            _ => None,
+        });
+        let Some(first) = titles.next() else { return false };
+        titles.any(|p| p == first)
     }
 
     /// Time until a pending top-row dwell ends (its bar then appears): `redraw_after` wakes up for it.

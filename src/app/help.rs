@@ -196,6 +196,7 @@ pub fn sections(app: &App) -> Vec<Section> {
             ("double-click title", "zoom / restore the pane"),
             ("middle-click tab", "close the tab"),
             ("drag border", "resize panes"),
+            ("drag pane title", "move the pane: swap, beside another, along an edge, into another tab"),
             ("drag text", "select (copied on release)"),
             ("right-click", "paste into terminal"),
             ("ctrl+click", "open a link or file:line (underlined while ctrl is held)"),

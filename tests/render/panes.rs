@@ -795,7 +795,8 @@ fn pane_arranging_actions() {
     };
     // One pane: nothing to arrange, so the menu leaves the rows out and the actions only say why.
     app.open_pane_menu(first, 10, 5);
-    assert!(!labels(&app).iter().any(|l| l == "Equalize splits" || l == "Move to new tab"), "{:?}", labels(&app));
+    let none = ["Equalize splits", "Arrange panes ›", "Move to tab ›"];
+    assert!(!labels(&app).iter().any(|l| none.contains(&l.as_str())), "{:?}", labels(&app));
     app.overlay = None;
     for a in [Action::EqualizePanes, Action::SwapPane, Action::MovePaneToTab] {
         app.run(a);
@@ -809,9 +810,19 @@ fn pane_arranging_actions() {
     assert_eq!(app.tabs[0].panes(), vec![first, second, third]);
     app.open_pane_menu(third, 10, 5);
     let l = labels(&app);
-    for want in ["Equalize splits", "Swap with next pane", "Move to new tab"] {
+    for want in ["Equalize splits", "Arrange panes ›", "Move to tab ›"] {
         assert!(l.iter().any(|x| x == want), "{want} missing: {l:?}");
     }
+    // The sub-lists: the arrangements (a swap only toward a neighbour there is), and a new tab.
+    app.run_menu(MenuCmd::ArrangeMenu(third));
+    let l = labels(&app);
+    for want in ["Swap with pane on the left", "Swap with pane above", "Swap with next pane", "Move to top edge"] {
+        assert!(l.iter().any(|x| x == want), "{want} missing: {l:?}");
+    }
+    assert!(!l.iter().any(|x| x == "Swap with pane below" || x == "Swap with pane on the right"), "{l:?}");
+    app.overlay = None;
+    app.run_menu(MenuCmd::MoveToTabMenu(third));
+    assert_eq!(labels(&app), vec!["New tab"]);
     app.overlay = None;
 
     // Equalize: a lopsided divider goes back to even halves, and a zoomed tab shows its layout.
@@ -842,6 +853,194 @@ fn pane_arranging_actions() {
     app.run(Action::CloseTab);
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.tabs.is_empty());
+}
+
+/// Every way to rearrange panes from the keyboard: a swap toward each side, a move along each edge of the tab,
+/// rotation both ways and turning a split; each keeps the panes (and their shells) and the focus on the moved pane,
+/// and one that would change nothing leaves the layout alone.
+#[test]
+fn panes_rearrange_from_the_keyboard() {
+    use noble::term::layout::PaneId;
+    use ratatui::layout::Rect;
+    let mut app = demo_app(120, 32);
+    app.new_tab(std::env::temp_dir(), None, Some("grid".into()));
+    // A 2×2 grid: a top left, b top right, c bottom left, d bottom right.
+    let a = app.tabs[0].focus;
+    app.run(Action::SplitRight);
+    let b = app.tabs[0].focus;
+    app.run(Action::SplitDown);
+    let d = app.tabs[0].focus;
+    app.run(Action::FocusLeft);
+    app.run(Action::SplitDown);
+    let c = app.tabs[0].focus;
+    let body = app.body();
+    let rect = |app: &App, id: PaneId| {
+        app.tabs[0].root.layout(body).0.into_iter().find(|(p, _)| *p == id).map(|(_, r)| r).unwrap()
+    };
+    let grid = [a, b, c, d].map(|p| rect(&app, p));
+    assert!(grid[0].x < grid[1].x && grid[0].y < grid[2].y, "{grid:?}");
+
+    // Bottom left to top right in two swaps: up, then right; the pane keeps the focus all the way.
+    app.run(Action::SwapUp);
+    assert_eq!((rect(&app, c), app.tabs[0].focus), (grid[0], c));
+    app.run(Action::SwapRight);
+    assert_eq!((rect(&app, c), app.tabs[0].focus), (grid[1], c));
+    // Nothing above the top row: the layout stays.
+    let before = app.tabs[0].root.clone();
+    app.run(Action::SwapUp);
+    assert_eq!(app.tabs[0].root, before);
+    // Swap with the previous pane in order and back with the next.
+    app.run(Action::SwapPanePrev);
+    assert_ne!(app.tabs[0].root, before);
+    app.run(Action::SwapPane);
+    assert_eq!(app.tabs[0].root, before);
+
+    // Along each edge: the pane spans the whole side of the tab.
+    type Spans = fn(Rect, Rect) -> bool;
+    let edges: [(Action, Spans); 4] = [
+        (Action::MoveEdgeLeft, |r, b| r.x == b.x && r.height == b.height),
+        (Action::MoveEdgeRight, |r, b| r.right() == b.right() && r.height == b.height),
+        (Action::MoveEdgeUp, |r, b| r.y == b.y && r.width == b.width),
+        (Action::MoveEdgeDown, |r, b| r.bottom() == b.bottom() && r.width == b.width),
+    ];
+    for (action, check) in edges {
+        app.run(action);
+        assert!(check(rect(&app, c), body), "{action:?}: {:?} in {body:?}", rect(&app, c));
+        assert_eq!(app.tabs[0].panes().len(), 4);
+        assert_eq!(app.tabs[0].focus, c);
+        // Again: already there, nothing changes.
+        let before = app.tabs[0].root.clone();
+        app.run(action);
+        assert_eq!(app.tabs[0].root, before, "{action:?} twice");
+    }
+
+    // Rotation moves every pane one place and back; flipping turns the bottom pane's split the other way.
+    let before = app.tabs[0].root.clone();
+    app.run(Action::RotatePanes);
+    assert_ne!(app.tabs[0].root, before);
+    app.run(Action::RotatePanesBack);
+    assert_eq!(app.tabs[0].root, before);
+    let wide = rect(&app, c);
+    app.run(Action::FlipSplit);
+    let flipped = rect(&app, c);
+    assert!(flipped.height > wide.height && flipped.width < wide.width, "{wide:?} → {flipped:?}");
+    let text = render(&mut app, 120, 32);
+    save("panes-rearranged-120x32", &text);
+    for p in [a, b, c, d] {
+        assert!(app.panes.contains_key(&p), "every pane keeps running");
+    }
+}
+
+/// A pane's title dragged with the mouse: onto the middle of another pane swaps them, onto the side of one goes next
+/// to it, onto the outermost cells goes along that edge, and onto another tab of the strip moves it there (a pane alone
+/// in its tab takes the tab along). The status bar says what a release does; Esc and a click do nothing.
+#[test]
+fn panes_rearrange_by_dragging_the_title() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use noble::app::Hit;
+    use ratatui::layout::Rect;
+    let (w, h) = (120, 32);
+    let mut app = demo_app(w, h);
+    app.new_tab(std::env::temp_dir(), None, Some("drag".into()));
+    let top = app.tabs[0].focus;
+    app.run(Action::SplitDown);
+    let bottom = app.tabs[0].focus;
+    app.run(Action::SplitRight);
+    let right = app.tabs[0].focus;
+    render(&mut app, w, h);
+    let body = app.body();
+    let title = |app: &App, id| find_hit(app, |h| *h == Hit::PaneTitle(id)).unwrap();
+    let tile = |app: &App, id| app.tabs[0].root.layout(body).0.into_iter().find(|(p, _)| *p == id).unwrap().1;
+    let drag = |app: &mut App, from: Rect, to: (u16, u16)| {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), from.x + 3, from.y);
+        mouse(app, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+    };
+    let up = |app: &mut App, at: (u16, u16)| mouse(app, MouseEventKind::Up(MouseButton::Left), at.0, at.1);
+    let middle = |r: Rect| (r.x + r.width / 2, r.y + r.height / 2);
+
+    // A click on a title moves nothing.
+    let before = app.tabs[0].root.clone();
+    let t = title(&app, right);
+    // (Not the cell the drags below press: two presses there in a row would be a double click.)
+    click(&mut app, t.x + 6, t.y);
+    assert_eq!(app.tabs[0].root, before);
+
+    // The middle of the top pane: a swap, shown on the status bar and outlined before the release.
+    let mid = middle(tile(&app, top));
+    let from = title(&app, right);
+    drag(&mut app, from, mid);
+    let text = render(&mut app, w, h);
+    save("pane-drag-swap-120x32", &text);
+    assert!(text.contains("swap with"), "{text}");
+    let old_top = tile(&app, top);
+    up(&mut app, mid);
+    assert_eq!(tile(&app, right), old_top, "the dragged pane took the top pane's place");
+    assert_eq!(app.tabs[0].focus, right);
+
+    // Esc cancels a drag: the release changes nothing.
+    render(&mut app, w, h);
+    let before = app.tabs[0].root.clone();
+    let mid = middle(tile(&app, bottom));
+    let from = title(&app, top);
+    drag(&mut app, from, mid);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    up(&mut app, mid);
+    assert_eq!(app.tabs[0].root, before);
+
+    // The left quarter of the bottom pane: the dragged one goes to its left, on the same row.
+    render(&mut app, w, h);
+    let t = tile(&app, bottom);
+    let at = (t.x + t.width / 8, t.y + t.height / 2);
+    let from = title(&app, right);
+    drag(&mut app, from, at);
+    let text = render(&mut app, w, h);
+    assert!(text.contains("left of"), "{text}");
+    up(&mut app, at);
+    let (r, b) = (tile(&app, right), tile(&app, bottom));
+    assert!(r.right() <= b.x && r.y == b.y, "{r:?} {b:?}");
+
+    // Three columns now (right | bottom | top). The window's right edge: the leftmost pane runs the whole height
+    // along it; the one already there would change nothing.
+    render(&mut app, w, h);
+    let at = (body.right() - 1, body.y + body.height / 2);
+    let from = title(&app, top);
+    drag(&mut app, from, at);
+    assert!(render(&mut app, w, h).contains("nothing changes here"));
+    up(&mut app, at);
+    render(&mut app, w, h);
+    let from = title(&app, right);
+    drag(&mut app, from, at);
+    let text = render(&mut app, w, h);
+    save("pane-drag-edge-120x32", &text);
+    assert!(text.contains("along the right edge"), "{text}");
+    up(&mut app, at);
+    let r = tile(&app, right);
+    assert!(r.right() == body.right() && r.height == body.height, "{r:?} in {body:?}");
+
+    // Onto another tab of the strip: the pane joins it along its right side and that tab shows.
+    app.new_tab(std::env::temp_dir(), None, Some("other".into()));
+    let lone = app.tabs[1].focus;
+    app.go_tab(1);
+    render(&mut app, w, h);
+    let tab = find_hit(&app, |h| *h == Hit::Tab(1)).unwrap();
+    let from = title(&app, top);
+    drag(&mut app, from, (tab.x + 1, tab.y));
+    let text = render(&mut app, w, h);
+    assert!(text.contains("into tab"), "{text}");
+    up(&mut app, (tab.x + 1, tab.y));
+    assert_eq!(app.tabs[1].panes(), vec![lone, top]);
+    assert_eq!((app.view, app.tabs[1].focus), (View::Term(1), top));
+    assert_eq!(app.tabs[0].panes().len(), 2);
+
+    // A pane alone in its tab moves into another from the menu, taking its tab along.
+    app.run(Action::MovePaneToTab);
+    assert_eq!(app.tabs.len(), 3);
+    let alone = app.tabs[2].focus;
+    let first = app.tabs[0].id;
+    app.run_menu(noble::app::MenuCmd::MoveToTab(alone, first));
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.view, View::Term(0));
+    assert!(app.tabs[0].panes().contains(&alone) && app.panes.contains_key(&alone));
 }
 
 /// Closing a tab with several panes asks first, idle or not; a single idle pane still closes at once.

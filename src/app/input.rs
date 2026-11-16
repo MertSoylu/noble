@@ -113,6 +113,11 @@ impl App {
         }
         // NOBLE's screens and bindings see the legacy key (Ctrl+i is Tab, `keys::legacy_key`); a pane gets `raw`.
         let k = legacy_key(raw);
+        // Esc cancels a pane drag: the release then does nothing.
+        if k.code == KeyCode::Esc && matches!(self.drag, Some(Drag::Pane { .. })) {
+            self.drag = None;
+            return;
+        }
         if self.overlay.is_some() {
             // A prefix armed before the overlay opened must not fire after it closes.
             self.prefix_armed = false;
@@ -962,7 +967,7 @@ impl App {
             MouseEventKind::Moved => {
                 // Moving without a button: the release was lost (e.g. outside the window), end a divider
                 // drag so the deferred PTY resize happens.
-                if matches!(self.drag, Some(Drag::Divider { .. })) {
+                if matches!(self.drag, Some(Drag::Divider { .. } | Drag::Pane { .. })) {
                     self.drag = None;
                 }
                 let over = match self.hit_at(m.column, m.row) {
@@ -1048,6 +1053,9 @@ impl App {
                     // A third click starts over rather than undoing the zoom.
                     self.last_click = None;
                     self.click_streak = 0;
+                } else if btn == MouseButton::Left && self.overlay.is_none() {
+                    // A drag of the title moves the pane: in a split tab, or into another tab.
+                    self.drag = Some(Drag::Pane { pane: p, start: (x, y), moved: false, drop: None });
                 }
             }
             Hit::MenuItem(i) => {
@@ -1332,6 +1340,12 @@ impl App {
                 let (pane, inner) = (*pane, *inner);
                 self.forward_mouse(pane, inner, m);
             }
+            Some(Drag::Pane { pane, start, moved, .. }) => {
+                let (pane, start) = (*pane, *start);
+                let moved = *moved || start != (x, y);
+                let drop = if moved { self.drop_at(pane, x, y) } else { None };
+                self.drag = Some(Drag::Pane { pane, start, moved, drop });
+            }
             Some(Drag::Tab { index }) => {
                 let from = *index;
                 // Each tab's slot on the bar: its hit rect plus the "× " after it.
@@ -1375,6 +1389,17 @@ impl App {
             }
             Some(Drag::Forward { pane, inner }) => {
                 self.forward_mouse(pane, inner, m);
+            }
+            // The drop is the one shown while dragging; a release where it would change nothing does nothing. A press
+            // right after a drag is no double click, even where another title has come to lie.
+            Some(Drag::Pane { pane, moved, drop, .. }) => {
+                if moved {
+                    self.last_click = None;
+                    self.click_streak = 0;
+                }
+                if let Some(drop) = drop {
+                    self.apply_drop(pane, drop);
+                }
             }
             _ => {}
         }

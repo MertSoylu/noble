@@ -159,8 +159,8 @@ fn help_has_columns_a_filter_and_runs_rows() {
     let geo = app.help_geometry("").expect("the reference fits at 160x45");
     assert_eq!(geo.columns.len(), 2, "two columns from 120 columns");
     assert!(matches!(geo.columns[1].first(), Some(noble::app::help::Line::Header(_))), "a section starts column 2");
-    // The sections are ~88 lines: two columns of 40 rows still scroll a little.
-    assert!(geo.max_scroll() > 0 && geo.max_scroll() < 20, "{geo:?}");
+    // The sections are ~100 lines: two columns of 40 rows still scroll a little.
+    assert!(geo.max_scroll() > 0 && geo.max_scroll() < 30, "{geo:?}");
     for (w, h) in [(110, 30), (60, 20), (30, 8)] {
         save(&format!("help-{w}x{h}"), &render(&mut app, w, h));
     }

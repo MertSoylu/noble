@@ -156,6 +156,18 @@ impl App {
                 | Action::Zoom
                 | Action::EqualizePanes
                 | Action::SwapPane
+                | Action::SwapPanePrev
+                | Action::SwapLeft
+                | Action::SwapRight
+                | Action::SwapUp
+                | Action::SwapDown
+                | Action::MoveEdgeLeft
+                | Action::MoveEdgeRight
+                | Action::MoveEdgeUp
+                | Action::MoveEdgeDown
+                | Action::RotatePanes
+                | Action::RotatePanesBack
+                | Action::FlipSplit
                 | Action::MovePaneToTab
                 | Action::FocusLeft
                 | Action::FocusRight

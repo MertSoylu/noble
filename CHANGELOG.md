@@ -6,6 +6,22 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Rearranging panes. Drag a pane's title: onto the middle of another pane to swap the two, onto its outer quarter to
+  go next to it on that side, onto the outermost cells of the window to run along that whole edge, onto another tab of
+  the strip to move the pane into it (a pane alone in its tab takes the tab along), or onto `+` for a new tab. The
+  landing place is outlined while dragging, the status bar says what a release does, and `esc` cancels.
+- Keys for the same: prefix `alt+arrows` swaps with the neighbour on that side, `ctrl+arrows` moves the pane along
+  that edge of the tab, `{` swaps with the previous pane, `ctrl+o` / `alt+o` rotate the panes, and `F` flips the
+  split around the pane (side by side ↔ stacked). On macOS, where Mission Control and some terminals take those
+  arrows, the palette, the pane menu and the drag do the same, and every key can be rebound.
+- The pane menu groups these under Arrange panes ›, and Move to tab › lists a new tab and every other tab.
+
+### Fixed
+- Focus mode: the top bar no longer comes up over the top panes' titles. It appears only while the pointer rests on
+  the line between a title and the buttons, and goes away when the pointer reaches a title, so the titles of the top
+  panes can be clicked, double-clicked and dragged.
+
 ## [1.14.2] - 2026-11-07
 
 ### Changed

@@ -79,6 +79,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Term(i) => terminal::draw(buf, body, app, i, &mut hits),
     };
     let cursor = slide(buf, body, app).then_some(cursor).flatten();
+    // A dragged pane shows where a release puts it, over the panes and the tab strip.
+    terminal::drop_preview(buf, app, &hits);
     // A revealed bar in focus mode is a blocker first: its empty cells must not reach the pane hits under it.
     if focus && reveal_top && area.height >= 1 {
         hits.push((Rect::new(0, 0, area.width, 1), Hit::Bar));
@@ -724,6 +726,13 @@ fn hints(app: &App) -> Vec<(String, String)> {
             // A kept filter is cleared by esc first (see `settings_key`), then the page is left.
             let back = if app.settings_filter.is_empty() { "back" } else { "clear" };
             vec![h("↑↓", "move"), h("⏎", "change"), h("←→", "adjust"), h("/", "search"), h("esc", back)]
+        }
+        View::Term(_) if matches!(app.drag, Some(crate::app::Drag::Pane { moved: true, .. })) => {
+            let what = match &app.drag {
+                Some(crate::app::Drag::Pane { drop: Some(d), .. }) => app.drop_label(*d),
+                _ => "nothing changes here".to_string(),
+            };
+            vec![("release".into(), what), h("esc", "cancel")]
         }
         View::Term(_) if app.search.is_some() => {
             vec![h("type", "search"), h("⏎ ↑", "older"), h("↓", "newer"), h("esc", "close")]

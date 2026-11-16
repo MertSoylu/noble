@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::hud;
-use crate::app::{AgentBadge, AgentState, App, Hit, LinkHover, SearchState};
+use crate::app::{AgentBadge, AgentState, App, Hit, LinkHover, PaneDrop, SearchState};
 use crate::keys::Action;
 use crate::term::layout::{Dir, PaneId, frame_rect};
 use crate::term::pane::{Pane, Progress, ProgressState};
@@ -951,6 +951,39 @@ fn search_bar(buf: &mut Buffer, inner: Rect, s: &SearchState, th: &Theme) {
     }
     let color = if s.matches.is_empty() && !s.query.is_empty() { th.warn } else { th.accent2 };
     hud::put_right(buf, rx, y, &count, Style::default().fg(color).bg(bg).add_modifier(Modifier::BOLD));
+}
+
+/// While a pane's title is dragged (`Drag::Pane`): the place a release would give it, tinted and outlined in the accent
+/// color with what happens written in the middle, or the tab (or +) of the strip it would go into.
+pub fn drop_preview(buf: &mut Buffer, app: &App, hits: &[(Rect, Hit)]) {
+    let Some(crate::app::Drag::Pane { pane, drop: Some(drop), .. }) = &app.drag else { return };
+    let th = &app.theme;
+    let strong = Style::default().fg(th.on_accent).bg(th.accent).add_modifier(Modifier::BOLD);
+    let target = match drop {
+        PaneDrop::Tab(id) => {
+            hits.iter().find(|(_, h)| matches!(h, Hit::Tab(i) if app.tabs.get(*i).is_some_and(|t| t.id == *id)))
+        }
+        PaneDrop::NewTab => hits.iter().find(|(_, h)| *h == Hit::NewTab),
+        _ => None,
+    };
+    if let Some((r, _)) = target {
+        for x in r.left()..r.right() {
+            if let Some(c) = buf.cell_mut((x, r.y)) {
+                c.set_style(strong);
+            }
+        }
+        return;
+    }
+    let Some(rect) = app.drop_preview(*pane, *drop) else { return };
+    if rect.width < 4 || rect.height < 2 {
+        return;
+    }
+    hud::fade_rect(buf, Outline::closed(rect).inner(), th.accent, 0.22);
+    hud::frame(buf, rect, "", "", true, th);
+    hud::tint_frame(buf, Outline::closed(rect), th.accent);
+    let label = format!(" {} ", app.drop_label(*drop));
+    let label = util::truncate(&label, rect.width.saturating_sub(2) as usize);
+    hud::put_center(buf, rect, rect.y + rect.height / 2, &label, strong);
 }
 
 /// Linear interpolation between two rectangles.

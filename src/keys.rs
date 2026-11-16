@@ -250,6 +250,18 @@ pub enum Action {
     Zoom,
     EqualizePanes,
     SwapPane,
+    SwapPanePrev,
+    SwapLeft,
+    SwapRight,
+    SwapUp,
+    SwapDown,
+    MoveEdgeLeft,
+    MoveEdgeRight,
+    MoveEdgeUp,
+    MoveEdgeDown,
+    RotatePanes,
+    RotatePanesBack,
+    FlipSplit,
     MovePaneToTab,
     FocusLeft,
     FocusRight,
@@ -296,7 +308,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 66] = [
+    pub const ALL: [Action; 78] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -320,6 +332,18 @@ impl Action {
         Action::Zoom,
         Action::EqualizePanes,
         Action::SwapPane,
+        Action::SwapPanePrev,
+        Action::SwapLeft,
+        Action::SwapRight,
+        Action::SwapUp,
+        Action::SwapDown,
+        Action::MoveEdgeLeft,
+        Action::MoveEdgeRight,
+        Action::MoveEdgeUp,
+        Action::MoveEdgeDown,
+        Action::RotatePanes,
+        Action::RotatePanesBack,
+        Action::FlipSplit,
         Action::MovePaneToTab,
         Action::FocusLeft,
         Action::FocusRight,
@@ -384,6 +408,18 @@ impl Action {
                     Action::Zoom => "zoom",
                     Action::EqualizePanes => "equalize_panes",
                     Action::SwapPane => "swap_pane",
+                    Action::SwapPanePrev => "swap_pane_prev",
+                    Action::SwapLeft => "swap_pane_left",
+                    Action::SwapRight => "swap_pane_right",
+                    Action::SwapUp => "swap_pane_up",
+                    Action::SwapDown => "swap_pane_down",
+                    Action::MoveEdgeLeft => "move_pane_left_edge",
+                    Action::MoveEdgeRight => "move_pane_right_edge",
+                    Action::MoveEdgeUp => "move_pane_top_edge",
+                    Action::MoveEdgeDown => "move_pane_bottom_edge",
+                    Action::RotatePanes => "rotate_panes",
+                    Action::RotatePanesBack => "rotate_panes_back",
+                    Action::FlipSplit => "flip_split",
                     Action::MovePaneToTab => "move_pane_to_tab",
                     Action::FocusLeft => "focus_left",
                     Action::FocusRight => "focus_right",
@@ -457,6 +493,18 @@ impl Action {
             Action::Zoom => "Zoom / Restore Pane".into(),
             Action::EqualizePanes => "Equalize Splits".into(),
             Action::SwapPane => "Swap With Next Pane".into(),
+            Action::SwapPanePrev => "Swap With Previous Pane".into(),
+            Action::SwapLeft => "Swap Pane Left".into(),
+            Action::SwapRight => "Swap Pane Right".into(),
+            Action::SwapUp => "Swap Pane Up".into(),
+            Action::SwapDown => "Swap Pane Down".into(),
+            Action::MoveEdgeLeft => "Move Pane to Left Edge".into(),
+            Action::MoveEdgeRight => "Move Pane to Right Edge".into(),
+            Action::MoveEdgeUp => "Move Pane to Top Edge".into(),
+            Action::MoveEdgeDown => "Move Pane to Bottom Edge".into(),
+            Action::RotatePanes => "Rotate Panes Forward".into(),
+            Action::RotatePanesBack => "Rotate Panes Backward".into(),
+            Action::FlipSplit => "Flip Split (side by side ↔ stacked)".into(),
             Action::MovePaneToTab => "Move Pane to New Tab".into(),
             Action::FocusLeft => "Focus Pane Left".into(),
             Action::FocusRight => "Focus Pane Right".into(),
@@ -527,6 +575,18 @@ impl Action {
             | Action::Zoom
             | Action::EqualizePanes
             | Action::SwapPane
+            | Action::SwapPanePrev
+            | Action::SwapLeft
+            | Action::SwapRight
+            | Action::SwapUp
+            | Action::SwapDown
+            | Action::MoveEdgeLeft
+            | Action::MoveEdgeRight
+            | Action::MoveEdgeUp
+            | Action::MoveEdgeDown
+            | Action::RotatePanes
+            | Action::RotatePanesBack
+            | Action::FlipSplit
             | Action::MovePaneToTab
             | Action::FocusLeft
             | Action::FocusRight
@@ -593,6 +653,18 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("z"), Action::Zoom),
         (c("="), Action::EqualizePanes),
         (c("}"), Action::SwapPane),
+        (c("{"), Action::SwapPanePrev),
+        (c("alt+left"), Action::SwapLeft),
+        (c("alt+right"), Action::SwapRight),
+        (c("alt+up"), Action::SwapUp),
+        (c("alt+down"), Action::SwapDown),
+        (c("ctrl+left"), Action::MoveEdgeLeft),
+        (c("ctrl+right"), Action::MoveEdgeRight),
+        (c("ctrl+up"), Action::MoveEdgeUp),
+        (c("ctrl+down"), Action::MoveEdgeDown),
+        (c("ctrl+o"), Action::RotatePanes),
+        (c("alt+o"), Action::RotatePanesBack),
+        (c("F"), Action::FlipSplit),
         (c("!"), Action::MovePaneToTab),
         (c("left"), Action::FocusLeft),
         (c("right"), Action::FocusRight),
