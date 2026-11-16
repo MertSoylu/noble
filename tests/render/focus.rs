@@ -143,7 +143,8 @@ fn pointer_dwell_on_the_top_row_reveals_the_top_bar_only() {
     render(&mut app, 110, 30);
 
     // The top row: nothing until the pointer has rested there for the dwell.
-    mouse(&mut app, Moved, 40, 0);
+    let line = title_line_cell(&app);
+    mouse(&mut app, Moved, line, 0);
     let text = render(&mut app, 110, 30);
     assert!(!has_top_bar(&text), "no reveal before the dwell");
     assert!(app.redraw_after().is_some(), "a wake-up is scheduled for the dwell");
@@ -168,7 +169,8 @@ fn pointer_dwell_on_the_top_row_reveals_the_top_bar_only() {
     assert_eq!(app.focus_reveal(), (false, false), "no dwell starts on the last row");
 
     // Moving from the top row straight onto the last row hides the top bar at once.
-    mouse(&mut app, Moved, 40, 0);
+    let line = title_line_cell(&app);
+    mouse(&mut app, Moved, line, 0);
     std::thread::sleep(Duration::from_millis(450));
     assert!(has_top_bar(&render(&mut app, 110, 30)));
     mouse(&mut app, Moved, 40, 29);
@@ -300,7 +302,9 @@ fn revealed_top_bar_takes_the_clicks_on_its_row() {
     app.new_tab(std::env::temp_dir(), None, Some("second".into()));
     app.run(Action::FocusMode);
     assert_eq!(app.view, View::Term(1));
-    mouse(&mut app, MouseEventKind::Moved, 40, 0);
+    render(&mut app, 110, 30);
+    let line = title_line_cell(&app);
+    mouse(&mut app, MouseEventKind::Moved, line, 0);
     std::thread::sleep(Duration::from_millis(450));
     render(&mut app, 110, 30);
     let home = find_hit(&app, |h| *h == Hit::TabBridge).expect("Home button in the revealed bar");
@@ -323,7 +327,9 @@ fn revealed_bars_block_clicks_on_their_empty_cells() {
     // The top bar comes by the pointer's rest on the top row, the bottom bar by the prefix.
     for row in [0, 29] {
         if row == 0 {
-            mouse(&mut app, MouseEventKind::Moved, 40, 0);
+            render(&mut app, 110, 30);
+            let line = title_line_cell(&app);
+            mouse(&mut app, MouseEventKind::Moved, line, 0);
             std::thread::sleep(Duration::from_millis(450));
         } else {
             app.on_key(ctrl_a());
