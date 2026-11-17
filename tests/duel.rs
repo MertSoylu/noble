@@ -76,6 +76,10 @@ fn plan(project: &Path, data: &Path, id: &str) -> Plan {
     }
 }
 
+fn real(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 fn branches(project: &Path) -> Vec<String> {
     git(project, &["branch", "--list", "--format=%(refname:short)"]).lines().map(str::to_string).collect()
 }
@@ -103,8 +107,10 @@ fn worktrees_are_created_compared_and_removed() {
         assert!(wt.join("a.txt").is_file(), "{side:?}: the tree of HEAD is checked out");
         assert_eq!(git(wt, &["rev-parse", "--abbrev-ref", "HEAD"]), s.branch);
         assert_eq!(git(wt, &["rev-parse", "HEAD"]), head);
+        // By their real names: on Windows the worktree is kept by its long name, the temp folder may be an 8.3 one.
+        let (real_wt, real_data, real_project) = (real(wt), real(&data), real(&project));
         assert!(
-            wt.starts_with(&data) && !wt.starts_with(&project),
+            real_wt.starts_with(&real_data) && !real_wt.starts_with(&real_project),
             "{side:?}: under the data folder, never in the repository"
         );
     }

@@ -169,6 +169,21 @@ fn without_private(path: &str) -> &str {
     path
 }
 
+/// `dir` by its long, real name on Windows (`canonicalize` without its `\\?\` prefix); a network path, or one that
+/// cannot be resolved, stays as given. Linux and macOS: `dir` unchanged.
+fn real_name(dir: &Path) -> PathBuf {
+    if !cfg!(windows) {
+        return dir.to_path_buf();
+    }
+    match std::fs::canonicalize(dir) {
+        Ok(real) => match real.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
+            Some(local) if !local.starts_with("UNC\\") => PathBuf::from(local),
+            _ => dir.to_path_buf(),
+        },
+        Err(_) => dir.to_path_buf(),
+    }
+}
+
 /// Is `path` the folder `root` or inside it?
 pub fn is_inside(path: &Path, root: &Path) -> bool {
     let (p, r) = (norm(path), norm(root));
@@ -316,9 +331,13 @@ pub fn create(plan: &Plan) -> Result<DuelRecord, String> {
         }
     }
     util::create_private_dir(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    // The folder by its real name, as a shell in it reports it: on Windows the data folder may be known by an 8.3
+    // short name (`C:\Users\RUNNER~1\…`) while the shell says `C:\Users\runneradmin\…`, and the panes are found
+    // by their folder (`side_of`). Linux and macOS keep the path as given (`norm` folds macOS's `/private`).
+    let dir = real_name(&dir);
     let mut made: Vec<(Side, PathBuf)> = Vec::new();
     for side in Side::BOTH {
-        let path = worktree_path(&plan.data, &plan.name, &plan.id, side);
+        let path = dir.join(side.letter());
         let branch = branch_name(&plan.id, side);
         let step = path
             .to_str()
@@ -339,7 +358,7 @@ pub fn create(plan: &Plan) -> Result<DuelRecord, String> {
         agent: agent.clone(),
         launcher: launcher.clone(),
         branch: branch_name(&plan.id, s),
-        worktree: worktree_path(&plan.data, &plan.name, &plan.id, s).display().to_string(),
+        worktree: dir.join(s.letter()).display().to_string(),
         extra: Default::default(),
     };
     Ok(DuelRecord {
