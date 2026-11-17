@@ -69,6 +69,26 @@ impl App {
         }
     }
 
+    /// One Warn notification when a fresh fetch makes a window's pace forecast say it fills before its reset
+    /// ("Claude Code 5h quota will run out ~14:20 at this pace"), at most once per window: `quota_paced` holds the reset
+    /// time each warning was raised for, and a later reset time (`pace::warn_due`) is a new window. It runs only when
+    /// quota data arrives (no timer, no request) and is off with `warn_at = 0`, like the other quota warnings. The
+    /// gate lives in memory: after a restart inside the same window the first fetch warns once more, which is cheaper
+    /// and safer than persisting it (a stored gate could silence a warning that was never seen).
+    pub(super) fn warn_pace(&mut self, state: &ProviderState, now: i64) {
+        if self.cfg.ai.warn_at == 0 || !self.cfg.ai.enabled {
+            return;
+        }
+        for f in crate::pace::forecasts(&self.usage_history, state, now) {
+            let key = (state.id, f.label.clone());
+            if !crate::pace::warn_due(self.quota_paced.get(&key).copied(), f.resets_at) {
+                continue;
+            }
+            self.quota_paced.insert(key, f.resets_at);
+            self.toast(ToastLevel::Warn, crate::pace::warning_text(state.name, &f, now, &chrono::Local));
+        }
+    }
+
     /// Notices the armed windows whose cached reset time has come ("Claude Code 5h quota reset"). Runs on every tick;
     /// `quota_reset_wake` wakes the loop for the next one. Off while `warn_at` is 0 or AI is disabled.
     pub(super) fn check_quota_resets(&mut self, now: i64) {
@@ -226,5 +246,69 @@ mod tests {
         app.handle(AppEvent::Ai(Box::new(state("claude", "Claude Code", vec![win("5H", 97, Some(t))]))));
         app.cfg.ai.warn_at = 0;
         assert_eq!(app.agent_quota_warning("claude"), None, "warn_at 0 is off");
+    }
+
+    /// A fetch at `now` with `used` percent, after history that rose 10% an hour.
+    fn paced_fetch(app: &mut App, id: &'static str, name: &'static str, label: &str, used: u8, reset: i64) {
+        let mut s = state(id, name, vec![win(label, used, Some(reset))]);
+        s.fetched_at = Some(now());
+        app.handle(AppEvent::Ai(Box::new(s)));
+    }
+
+    #[test]
+    fn pace_warning_comes_once_per_window_and_again_for_the_next() {
+        let mut app = App::headless(Config::default(), (100, 30));
+        let t = now();
+        app.usage_history.record(&UsageHistory::key("claude", "5H"), t - 3600, 40);
+        // 20% an hour, 40% left: full in 2 hours; the window resets in 3h20m.
+        let r1 = t + 12_000;
+        paced_fetch(&mut app, "claude", "Claude Code", "5H", 60, r1);
+        let got = texts(&app);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].starts_with("Claude Code 5h quota will run out ~") && got[0].ends_with(" at this pace"),
+            "{got:?}"
+        );
+        assert_eq!(app.toasts[0].level, ToastLevel::Warn);
+        // The next fetches of the same window (its reset time rounded differently) say nothing.
+        app.toasts.clear();
+        paced_fetch(&mut app, "claude", "Claude Code", "5H", 61, r1 + 59);
+        assert!(app.toasts.is_empty(), "{:?}", texts(&app));
+        // Another provider's window has its own gate.
+        app.usage_history.record(&UsageHistory::key("codex", "5H"), t - 3600, 40);
+        paced_fetch(&mut app, "codex", "Codex", "5H", 60, r1);
+        assert_eq!(texts(&app).len(), 1, "{:?}", texts(&app));
+        // The window ended and the next one is forecast to fill too (its reset time is later): one more warning.
+        app.toasts.clear();
+        paced_fetch(&mut app, "claude", "Claude Code", "5H", 61, r1 + 1860);
+        assert_eq!(texts(&app).len(), 1, "{:?}", texts(&app));
+    }
+
+    #[test]
+    fn pace_warning_covers_the_weekly_window_and_respects_warn_at() {
+        let mut app = App::headless(Config::default(), (100, 30));
+        let t = now();
+        // The weekly rule looks back 24 hours: the first sample is the oldest it takes (the window began before it).
+        app.usage_history.record(&UsageHistory::key("codex", "WEEK"), t - 24 * 3600 + 5, 20);
+        app.cfg.ai.warn_at = 0;
+        paced_fetch(&mut app, "codex", "Codex", "WEEK", 40, t + 5 * 86_400);
+        assert!(app.toasts.is_empty(), "warn_at 0 turns the pace warning off too");
+        app.cfg.ai.warn_at = 90;
+        // 20% a day, 60% left: 3 days, and the week resets in 5.
+        paced_fetch(&mut app, "codex", "Codex", "WEEK", 40, t + 5 * 86_400);
+        let got = texts(&app);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].starts_with("Codex week quota will run out ~"), "{got:?}");
+        assert!(got[0].contains(" at this pace"), "{got:?}");
+    }
+
+    #[test]
+    fn no_pace_warning_when_the_window_resets_first() {
+        let mut app = App::headless(Config::default(), (100, 30));
+        let t = now();
+        app.usage_history.record(&UsageHistory::key("claude", "5H"), t - 3600, 50);
+        // 10% an hour, 40% left: 4 hours, and the window resets in 3.
+        paced_fetch(&mut app, "claude", "Claude Code", "5H", 60, t + 3 * 3600);
+        assert!(app.toasts.is_empty(), "{:?}", texts(&app));
     }
 }

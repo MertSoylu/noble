@@ -6,10 +6,12 @@ mod agents;
 mod arrange;
 pub mod bindings;
 mod blocks;
+mod duel;
 mod focus;
 pub mod fx;
 mod git;
 pub mod help;
+pub mod inbox;
 mod input;
 mod live;
 mod menu;
@@ -47,7 +49,9 @@ use crate::theme::Theme;
 
 pub use arrange::PaneDrop;
 pub use bindings::BindingsState;
+pub use duel::{CompareState, DuelAgent, DuelEvent, DuelField, DuelForm, DuelHit, DuelView, EndState, EndStep};
 pub use help::HelpState;
+pub use inbox::{InboxItem, InboxState, PermissionOptions, QuickAnswer};
 pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
@@ -330,8 +334,12 @@ pub enum Overlay {
     Help(HelpState),
     /// The key bindings editor (Settings → Key bindings).
     Bindings(BindingsState),
+    /// The Agent Inbox: every agent that needs you, with a preview of its pane (`app/inbox.rs`).
+    Inbox(InboxState),
     Confirm(Confirm),
     Prompt(Prompt),
+    /// Agent duel: the start form, the compare overlay or the end dialog (`app/duel.rs`).
+    Duel(DuelView),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,6 +526,15 @@ pub enum Hit {
     Port(u16),
     /// A notification (by its `Toast::id`): a click dismisses it, and runs its `ToastTarget`.
     Toast(u64),
+    /// Home's "◆ N need you" chips: open the Agent Inbox (as `Action::AgentInbox`).
+    Inbox,
+    /// A row of the Agent Inbox, by its pane (the list changes as records arrive, so a row is not an index): the
+    /// first click selects it, a click on the selected row goes to the pane.
+    InboxRow(PaneId),
+    /// A quick answer chip of the Agent Inbox's selected row.
+    InboxAnswer(QuickAnswer),
+    /// A target of an agent duel overlay (`app/duel.rs`).
+    Duel(DuelHit),
 }
 
 pub(crate) enum Drag {
@@ -899,6 +916,8 @@ pub struct App {
     quota_warned: std::collections::HashSet<(String, String, Option<i64>)>,
     /// Quota windows past `warn_at` that have not reset yet: (provider id, window) → (provider name, reset time).
     quota_armed: std::collections::BTreeMap<(&'static str, String), (&'static str, i64)>,
+    /// The pace warning's gate: (provider id, window) → the reset time of the window it was raised for (`quota.rs`).
+    quota_paced: std::collections::BTreeMap<(&'static str, String), i64>,
     /// Send BEL once to the outer terminal (flashes the taskbar).
     pub outer_bell: bool,
     /// Text of the notification to forward to the outer terminal (OSC 9 / 777, see `outer`); taken by the frame loop.
@@ -1193,6 +1212,7 @@ impl App {
             battery_warned: 100,
             quota_warned: Default::default(),
             quota_armed: Default::default(),
+            quota_paced: Default::default(),
             outer_bell: false,
             outer_notice: None,
             outer_shown: Default::default(),
@@ -1237,6 +1257,7 @@ impl App {
             | AppEvent::KillResult { .. }
             | AppEvent::LaunchFailed(_)
             | AppEvent::Update(_)
+            | AppEvent::Duel(_)
             | AppEvent::Quit => true,
             AppEvent::PtyOutput => false,
             AppEvent::SensorStatic(_) | AppEvent::Sensors(_) => matches!(self.view, View::Bridge | View::System),
@@ -1324,6 +1345,7 @@ impl App {
             }
             AppEvent::Pr(path, info) => return self.set_pr(path, info),
             AppEvent::BgSessions(list) => return self.set_bg_sessions(list),
+            AppEvent::Duel(ev) => self.on_duel_event(ev),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();
                 self.edit_ui_state(|d| {
@@ -1350,8 +1372,9 @@ impl App {
         })
     }
 
-    /// New quota data: recorded in history, warns once per window over the threshold and arms the reset notice
-    /// of the windows over it (`quota.rs`).
+    /// New quota data: recorded in history, warns once per window over the threshold, warns once per window that
+    /// would fill before its reset at this pace, and arms the reset notice of the windows over the threshold
+    /// (`quota.rs`).
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
         let ts = state.fetched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -1363,7 +1386,9 @@ impl App {
         if limit == 0 {
             return;
         }
-        self.arm_quota_resets(state, &usage.windows, chrono::Utc::now().timestamp());
+        let now = chrono::Utc::now().timestamp();
+        self.arm_quota_resets(state, &usage.windows, now);
+        self.warn_pace(state, now);
         for w in &usage.windows {
             let key = (state.id.to_string(), w.label.clone(), w.resets_at);
             if w.used < limit || self.quota_warned.contains(&key) {

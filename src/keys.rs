@@ -296,6 +296,7 @@ pub enum Action {
     DismissUpdate,
     Passthrough,
     JumpToAgent,
+    AgentInbox,
     OpenLink,
     EnableHooks,
     DismissHooksOffer,
@@ -305,10 +306,13 @@ pub enum Action {
     NextCommand,
     CopyLastOutput,
     SendLastOutput,
+    StartDuel,
+    CompareDuel,
+    EndDuel,
 }
 
 impl Action {
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 82] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -378,6 +382,7 @@ impl Action {
         Action::DismissUpdate,
         Action::Passthrough,
         Action::JumpToAgent,
+        Action::AgentInbox,
         Action::OpenLink,
         Action::EnableHooks,
         Action::DismissHooksOffer,
@@ -387,6 +392,9 @@ impl Action {
         Action::NextCommand,
         Action::CopyLastOutput,
         Action::SendLastOutput,
+        Action::StartDuel,
+        Action::CompareDuel,
+        Action::EndDuel,
     ];
 
     pub fn id(&self) -> String {
@@ -454,6 +462,7 @@ impl Action {
                     Action::DismissUpdate => "dismiss_update",
                     Action::Passthrough => "passthrough",
                     Action::JumpToAgent => "jump_to_agent",
+                    Action::AgentInbox => "agent_inbox",
                     Action::OpenLink => "open_link",
                     Action::EnableHooks => "enable_hooks",
                     Action::DismissHooksOffer => "dismiss_hooks_offer",
@@ -463,6 +472,9 @@ impl Action {
                     Action::NextCommand => "next_command",
                     Action::CopyLastOutput => "copy_last_output",
                     Action::SendLastOutput => "send_last_output",
+                    Action::StartDuel => "start_duel",
+                    Action::CompareDuel => "compare_duel",
+                    Action::EndDuel => "end_duel",
                     Action::GoTab(_) => unreachable!(),
                 };
                 s.to_string()
@@ -539,6 +551,7 @@ impl Action {
             Action::DismissUpdate => "Dismiss Update Notice".into(),
             Action::Passthrough => "Pass Keys to the App".into(),
             Action::JumpToAgent => "Jump to Waiting Agent".into(),
+            Action::AgentInbox => "Agent Inbox".into(),
             Action::OpenLink => "Open Link on Screen".into(),
             Action::EnableHooks => "Enable Agent Status Hooks".into(),
             Action::DismissHooksOffer => "Dismiss Agent Status Offer".into(),
@@ -548,6 +561,9 @@ impl Action {
             Action::NextCommand => "Jump to Next Command".into(),
             Action::CopyLastOutput => "Copy Last Output".into(),
             Action::SendLastOutput => "Send Last Output to Agent".into(),
+            Action::StartDuel => "Start Agent Duel…".into(),
+            Action::CompareDuel => "Compare Agent Duel".into(),
+            Action::EndDuel => "End Agent Duel…".into(),
         }
     }
 
@@ -559,7 +575,8 @@ impl Action {
             | Action::Settings
             | Action::Palette
             | Action::Help
-            | Action::JumpToAgent => "NAV",
+            | Action::JumpToAgent
+            | Action::AgentInbox => "NAV",
             Action::NewTab
             | Action::CloseTab
             | Action::ReopenTab
@@ -697,6 +714,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("f"), Action::FocusMode),
         (c("i"), Action::Passthrough),
         (c("a"), Action::JumpToAgent),
+        (c("I"), Action::AgentInbox),
         (c("u"), Action::OpenLink),
         (c("y"), Action::SendLastOutput),
     ];

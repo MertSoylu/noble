@@ -225,6 +225,14 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   prefix `T` share it. `[terminal] resume_agents` (default on) turns both off. Home: `projects::claude_activity` stats
   `~/.claude/projects/<claude_folder_name>` in the scan thread (never a transcript; `None` under `ai::isolated`);
   `Hit::ClaudeContinue` runs `continue_command`.
+- **Agent Inbox:** `app/inbox.rs` (state `InboxState` in `Overlay::Inbox`, the list `App::inbox_items`, sorted longest wait
+  first, the selection follows its pane and falls back to its place: `resolve`) and `ui/inbox.rs` (drawing; rows are
+  `Hit::InboxRow(pane)`, Home's chips `Hit::Inbox`). The preview reads `Pane::live_rows` (the live screen whatever the
+  scroll offset). Quick answers are for Claude permission prompts only: `permission_record` (the record) and
+  `permission_options` (the screen shows `Do you want …` above `1. Yes` and a `No…` option, strict by design) must both
+  hold, checked again when the key is pressed; the digit sent is the one the screen shows, through `App::pane_key` (the
+  pane's normal input path, which calls `answer_prompt`). Anything else is jump only. While the inbox is open any PTY
+  output redraws (`on_pty_output`) and `redraw_after` wakes once a minute for the waiting times.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); `app/agent_hooks.rs` holds the per-agent install state
   and the popup toggles; the state types stay in `app/mod.rs`. A key that answers a Claude prompt in the focused pane
@@ -322,6 +330,20 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `~/.copilot`, `~/.config/opencode`, `~/.gemini` or `~/.cursor`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS`
   (`ai::isolated`), which turns off every agent's settings path (`settings_path` returns None) and AI credential
   detection.
+- **Agent duel:** `duel.rs` holds everything that is not UI: ids, branch names (`noble/duel-<id>-a|b`) and folders
+  (`<data>/duels/<project>-<id>/a|b`, never inside the repository), `prompt_form` (the agents with a verified way to
+  start with a first prompt: claude and codex positional, copilot `-i`, opencode `--prompt`; an agent is added only
+  when its form is known, never guessed), `launch_line` (the task as one word quoted by `ShellSpec::command_with_arg`,
+  so cmd.exe refuses `"`, `%`, `!` and line breaks and the form says so), and the blocking git work (`create`,
+  `compare`, `dirty_counts`, `end`). That work runs through `projects::git_checked` (the `git_run` rules, plus the exit
+  status and git's error line, `ai::run_command_checked`) on one background thread per request, and the answer comes
+  back as `AppEvent::Duel(DuelEvent)`. `create` never reuses or deletes a branch that exists. Records live in
+  `UiStateData::duels` (`store::DuelRecord`, `extra` kept) until End succeeds; `app/duel.rs` holds the form, compare
+  and end states (`Overlay::Duel(DuelView)`, `Hit::Duel(DuelHit)`), `ui/duel.rs` draws them. A duel tab is found
+  from its panes' folders (`duel_of_tab`), so it works after a session restore; its panes keep the plain launcher, so a
+  restore starts the agent again without the task. End asks git for uncommitted changes first, closes the duel's panes
+  only when nothing is lost or the user pressed `f`, then removes the worktrees (Windows retries a closed pane's
+  folder for a few seconds); branches are deleted only when the user picked them.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); the vendored pty's (`src/pty/cmdbuilder.rs`) `\"` escaping breaks quoted
   paths in cmd.
@@ -348,6 +370,14 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `None`. `app/live.rs` schedules the requests (`request_home_live_data`) and handles `AppEvent::Ports` and
   `AppEvent::Pr`. Tests never run `gh`: `ai::isolated` turns it off in e2e, and headless apps have no `services`,
   so they send no request.
+- **Quota pace:** `pace.rs` is pure (history, window and `now` are arguments; the time zone is a parameter, tests use a
+  fixed offset). `rule(label)` maps a window label to its `Rule` (look-back, minimum span, length): `5H` looks back 2 h
+  (15 min of samples), `WEEK` and `OPUS` (every provider's 7-day window, as `ai::json::normalize_label` produces them)
+  24 h (3 h); other labels have no forecast. `forecasts` feeds Home's lines (`pace::line`, one row at any width, so
+  `ui/bridge.rs` `ai_height` counts them) and `App::warn_pace` (`app/quota.rs`, called from `on_fresh_usage` only when
+  quota data arrives; off with `warn_at = 0`). `quota_paced` keeps the reset time each warning was raised for;
+  `pace::warn_due` treats a reset time within `SAME_WINDOW_SLACK` as the same window. The gate is not persisted: a
+  restart inside the same window warns once more.
 - **Background Claude sessions:** `bg.rs` runs `claude agents --json --all` through `ai::run_command` (10 s) on a
   background thread (`AppEvent::BgSessions`) and keeps the `background` entries. `app/live.rs` asks for them only while
   Home is open, at most once a minute (every 3 minutes on battery), and only with a `claude` launcher. Any failure gives

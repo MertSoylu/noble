@@ -50,6 +50,8 @@ pub enum AppEvent {
         raw: String,
         scan: bool,
     },
+    /// An agent duel's git work finished (`duel.rs`, `app/duel.rs`).
+    Duel(crate::app::DuelEvent),
 }
 
 pub type Tx = std::sync::mpsc::Sender<AppEvent>;

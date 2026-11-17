@@ -154,7 +154,7 @@ pub fn warned_window(state: &ProviderState, warn_at: u8, now: i64) -> Option<&Wi
 /// (`& 'C:\Program Files\agy.exe' --x` from PowerShell, `"C:\Tools\claude.exe" --resume id` from cmd, `'/opt/my
 /// tools/kilo' run` from a POSIX shell). Inside PowerShell single quotes `''` is one quote, as `pane::pwsh_quote`
 /// writes it.
-fn program_word(command: &str) -> &str {
+pub(crate) fn program_word(command: &str) -> &str {
     let s = command.trim().trim_start_matches('&').trim_start();
     let Some(quote) = s.chars().next().filter(|&c| matches!(c, '\'' | '"')) else {
         return s.split_whitespace().next().unwrap_or("");
@@ -378,6 +378,47 @@ pub fn run_command(mut cmd: std::process::Command, timeout: Duration) -> Result<
     // Every outcome ends here (the guard drops): a helper that the command started may still run after the command
     // itself finished, so its whole tree is killed and the child is reaped.
     result
+}
+
+/// Like [`run_command`], but the exit status counts: a command that fails is an `Err` carrying the first line of
+/// its stderr (or its exit status when it printed none), so a caller that changes something (`git worktree add`)
+/// can say why it did not work. Both streams are capped at 1 MiB. Background calls only, like `run_command`.
+pub fn run_command_checked(mut cmd: std::process::Command, timeout: Duration) -> Result<String, String> {
+    use std::io::Read;
+    const CAP: u64 = 1 << 20;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut tracked = spawn_tracked(cmd)?;
+    let stdout = tracked.0.stdout.take().ok_or("no stdout")?;
+    let stderr = tracked.0.stderr.take().ok_or("no stderr")?;
+    // The readers are never joined (see `run_command`): the guard's tree kill closes the pipes they wait on.
+    let reader = |mut pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut pipe).take(CAP).read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        rx
+    };
+    let (out_rx, err_rx) = (reader(Box::new(stdout)), reader(Box::new(stderr)));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match tracked.0.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => return Err("timeout".into()),
+            Err(e) => return Err(format!("cannot wait for the command: {e}")),
+        }
+    };
+    // The command has exited: what it wrote is already in the pipes, so the readers finish at once.
+    let grace = Duration::from_secs(2);
+    let out = String::from_utf8_lossy(&out_rx.recv_timeout(grace).unwrap_or_default()).into_owned();
+    let err = String::from_utf8_lossy(&err_rx.recv_timeout(grace).unwrap_or_default()).into_owned();
+    if status.success() {
+        return Ok(out);
+    }
+    let line = err.lines().map(str::trim).find(|l| !l.is_empty());
+    Err(line.map_or_else(|| format!("exited with {status}"), str::to_string))
 }
 
 /// Runs a prepared command and returns whether it exited with success. Its output is discarded, and its process

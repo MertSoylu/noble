@@ -1542,6 +1542,23 @@ impl Pane {
         Some(name.map_or_else(|| "a command".into(), |n| util::truncate(&n, 60)))
     }
 
+    /// The text of every row of the live screen (trailing blanks trimmed), whatever the scroll position: the Agent
+    /// Inbox reads what a waiting agent shows now, also from a pane that is scrolled back. The view stays where it was.
+    pub fn live_rows(&self) -> Vec<String> {
+        let mut p = lock(&self.parser);
+        let screen = p.screen_mut();
+        let original = screen.scrollback();
+        if original != 0 {
+            screen.set_scrollback(0);
+        }
+        let cols = crate::term::screen_size(screen).1;
+        let rows = screen.rows(0, cols).map(|r| r.trim_end().to_string()).collect();
+        if original != 0 {
+            screen.set_scrollback(original);
+        }
+        rows
+    }
+
     /// Visible line text (for link detection).
     pub fn visible_row(&self, row: u16) -> Option<String> {
         let p = lock(&self.parser);

@@ -87,6 +87,11 @@ impl App {
                 p.insert(text.lines().next().unwrap_or(""));
                 return;
             }
+            // The duel's task is the one field that takes a paste of several lines.
+            Some(Overlay::Duel(_)) => {
+                self.duel_paste(text);
+                return;
+            }
             Some(_) => return,
             None => {}
         }
@@ -195,7 +200,13 @@ impl App {
 
     fn term_key(&mut self, k: KeyEvent) {
         let Some(id) = self.focused_pane() else { return };
-        let Some(p) = self.panes.get_mut(&id) else { return };
+        self.pane_key(id, k);
+    }
+
+    /// A key typed to a pane's program: the pane's normal input path (its modes, the command clock, the prompt
+    /// answer). The Agent Inbox's quick answers use it too. `false` when the key did not reach the pane.
+    pub(super) fn pane_key(&mut self, id: PaneId, k: KeyEvent) -> bool {
+        let Some(p) = self.panes.get_mut(&id) else { return false };
         p.selection = None;
         p.scroll_reset();
         let (mode, alt) = {
@@ -215,9 +226,12 @@ impl App {
         }
         if !p.write(&encode_key(&k, mode)) {
             self.input_refused();
-        } else if answers_prompt(&k) {
+            return false;
+        }
+        if answers_prompt(&k) {
             self.answer_prompt(id);
         }
+        true
     }
 
     fn overlay_key(&mut self, k: KeyEvent) {
@@ -515,6 +529,8 @@ impl App {
                 _ => true,
             },
             Overlay::Bindings(st) => self.bindings_key(st, k),
+            Overlay::Inbox(st) => self.inbox_key(st, k),
+            Overlay::Duel(view) => self.duel_key(view, k),
             Overlay::Confirm(_) => match k.code {
                 // Enter is deliberately not "yes": these dialogs guard destructive actions, so only y confirms.
                 KeyCode::Char('y' | 'Y') => {
@@ -1086,6 +1102,7 @@ impl App {
                 }
             }
             Hit::Toast(id) => self.toast_clicked(id),
+            Hit::Duel(h) => self.duel_click(h),
             Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),
@@ -1248,6 +1265,9 @@ impl App {
             Hit::SystemTerminate => self.terminate_selected(),
             Hit::HomeSearch => self.start_home_filter(),
             Hit::BindingsRow(i) => self.bindings_click(i, double),
+            Hit::Inbox => self.open_inbox(),
+            Hit::InboxRow(pane) => self.inbox_click(pane),
+            Hit::InboxAnswer(answer) => self.inbox_chip(answer),
             Hit::HelpRow(i) => {
                 if let Some(Overlay::Help(st)) = &self.overlay {
                     let query = st.query.clone();

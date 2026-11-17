@@ -55,7 +55,9 @@ fn draw_columns(
         }
         // One column has no AI panel: a one-line strip keeps quota and "needs you" in sight.
         let strip_h = u16::from(
-            hero_h > 0 && area.height >= 16 && quota_strip(buf, area.x, area.y + hero_h, area.width, app, sessions),
+            hero_h > 0
+                && area.height >= 16
+                && quota_strip(buf, area.x, area.y + hero_h, area.width, app, sessions, hits),
         );
         let top = hero_h + strip_h;
         projects(buf, Rect::new(area.x, area.y + top, area.width, area.height - top), app, agents, hits);
@@ -194,8 +196,17 @@ fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 /// The one-line quota summary of narrow Home: "◆ 2 need you · claude 71% · codex 92%~". Whole items only,
-/// dropped from the end when they do not fit. Returns `false` (drawing nothing) when there is nothing to say.
-fn quota_strip(buf: &mut Buffer, x: u16, y: u16, w: u16, app: &App, sessions: &[crate::app::AgentSession]) -> bool {
+/// dropped from the end when they do not fit. Returns `false` (drawing nothing) when there is nothing to say. The
+/// "needs you" item opens the Agent Inbox (`Hit::Inbox`).
+fn quota_strip(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    w: u16,
+    app: &App,
+    sessions: &[crate::app::AgentSession],
+    hits: &mut Vec<(Rect, Hit)>,
+) -> bool {
     let th = &app.theme;
     let needs = sessions.iter().filter(|s| s.state == AgentState::NeedsYou).count();
     let mut items: Vec<(String, Style)> = Vec::new();
@@ -226,7 +237,11 @@ fn quota_strip(buf: &mut Buffer, x: u16, y: u16, w: u16, app: &App, sessions: &[
         if i > 0 {
             cx = hud::put(buf, cx, y, sep, Style::default().fg(th.line), end.saturating_sub(cx));
         }
+        let from = cx;
         cx = hud::put(buf, cx, y, text, *style, end.saturating_sub(cx));
+        if needs > 0 && i == 0 {
+            hits.push((Rect::new(from, y, cx - from, 1), Hit::Inbox));
+        }
     }
     true
 }
@@ -985,7 +1000,7 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, bg: usize) -> 
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
         let note = u16::from(matches!(p.status, Status::Error(_) | Status::Expired));
-        let pace = u16::from(pace_line(app, p).is_some());
+        let pace = pace_forecasts(app, p).len() as u16;
         h += 1 + rows + note + pace + 1;
     }
     h
@@ -995,19 +1010,10 @@ fn reset_in(ts: i64) -> String {
     crate::ai::reset_in(ts, chrono::Utc::now().timestamp())
 }
 
-/// "At this pace 5h fills in 1h20m": the warning text shown when the 5 hour
-/// window would fill before it resets. No estimate is made for the weekly window.
-fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
-    let u = p.usage.as_ref()?;
-    let now = chrono::Utc::now().timestamp();
-    let w = u.windows.iter().find(|w| w.label == "5H")?;
-    let reset = w.resets_at?;
-    let key = crate::store::UsageHistory::key(p.id, &w.label);
-    let eta = app.usage_history.pace_eta(&key, reset.saturating_sub(5 * 3600), now, w.used)?;
-    (now.saturating_add(eta.min(i64::MAX as u64) as i64) < reset).then(|| {
-        let name = crate::ai::window_name(&w.label);
-        format!("▲ {name} full in ~{} at this pace", util::fmt_duration(Duration::from_secs(eta)))
-    })
+/// Windows that would fill before they reset at the current pace (the 5-hour and the weekly ones), one line each
+/// (`pace::line`). The count is the same at every width, so `ai_height` can use it.
+fn pace_forecasts(app: &App, p: &ProviderState) -> Vec<crate::pace::Forecast> {
+    crate::pace::forecasts(&app.usage_history, p, chrono::Utc::now().timestamp())
 }
 
 /// Age of cached quota numbers ("~5m", "~2h"); `None` while they are fresh, missing or
@@ -1048,6 +1054,34 @@ fn bg_row(buf: &mut Buffer, x: u16, y: u16, w: u16, s: &crate::bg::BgSession, th
     hud::put_right(buf, x + w, y, &s.state, Style::default().fg(color));
 }
 
+/// "◆ 2 need you" on the AI panel's top line, after its title: opens the Agent Inbox. Drawn only while an agent needs
+/// you and the line has room for it beside the title and the age tag.
+fn inbox_chip(
+    buf: &mut Buffer,
+    area: Rect,
+    tag: &str,
+    sessions: &[crate::app::AgentSession],
+    th: &Theme,
+    hits: &mut Vec<(Rect, Hit)>,
+) {
+    let needs = sessions.iter().filter(|s| s.state == AgentState::NeedsYou).count();
+    if needs == 0 {
+        return;
+    }
+    let chip = format!(" ◆ {needs} {} you ", if needs == 1 { "needs" } else { "need" });
+    // After " AI usage " (the title and a blank on each side); the age tag keeps the right end.
+    let x = area.x + 12;
+    let tag_w = if tag.is_empty() { 0 } else { util::width(tag) as u16 + 4 };
+    let room = area.right().saturating_sub(1 + tag_w).saturating_sub(x);
+    let w = util::width(&chip) as u16;
+    if w > room {
+        return;
+    }
+    let style = Style::default().fg(th.warn).add_modifier(Modifier::BOLD);
+    let end = hud::put(buf, x, area.y, &chip, style, w);
+    hits.push((Rect::new(x, area.y, end - x, 1), Hit::Inbox));
+}
+
 fn ai_panel(
     buf: &mut Buffer,
     area: Rect,
@@ -1065,6 +1099,7 @@ fn ai_panel(
     if inner.height == 0 || inner.width < 16 {
         return;
     }
+    inbox_chip(buf, area, &tag, sessions, th, hits);
     let ms = app.started.elapsed().as_millis();
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
@@ -1187,9 +1222,12 @@ fn ai_panel(
             hud::put(buf, x, y, &note, th.dim(), w);
             y += 1;
         }
-        if let Some(text) = pace_line(app, p)
-            && y < bottom
-        {
+        let now = chrono::Utc::now().timestamp();
+        for f in pace_forecasts(app, p) {
+            if y >= bottom {
+                break;
+            }
+            let text = crate::pace::line(&f, now, &chrono::Local, w as usize);
             hud::put(buf, x, y, &text, Style::default().fg(th.warn), w);
             y += 1;
         }

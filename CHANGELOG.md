@@ -7,6 +7,12 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Agent Inbox (prefix `I`, palette: Agent Inbox, `agent_inbox` in the key bindings): one overlay that lists every agent
+  across all tabs that needs you, longest wait first, with its tab and project, what it asks and how long it has
+  waited. The selected row previews the last lines of that pane's screen. `↑↓` select, `⏎` goes to the pane, `esc`
+  closes; rows and Home's `◆ N need you` chips are clickable. A Claude Code permission prompt that the pane still
+  shows can be answered from the inbox with `y` / `n`: NOBLE types the option number the dialog shows, only when the
+  record and the screen both say permission prompt. Every other agent and question is jump only.
 - Rearranging panes. Drag a pane's title: onto the middle of another pane to swap the two, onto its outer quarter to
   go next to it on that side, onto the outermost cells of the window to run along that whole edge, onto another tab of
   the strip to move the pane into it (a pane alone in its tab takes the tab along), or onto `+` for a new tab. The
@@ -16,6 +22,24 @@ All notable changes to NOBLE are documented here. The format is based on
   split around the pane (side by side ↔ stacked). On macOS, where Mission Control and some terminals take those
   arrows, the palette, the pane menu and the drag do the same, and every key can be rebound.
 - The pane menu groups these under Arrange panes ›, and Move to tab › lists a new tab and every other tab.
+- Agent duel: the same task for two coding agents, each in its own git worktree, side by side. **Start Agent Duel…**
+  (palette, or the project menu on Home) takes two installed agents (Claude Code, Codex, GitHub Copilot, OpenCode:
+  the ones with a documented way to start with a first prompt) and the task, creates the branches `noble/duel-<id>-a`
+  and `-b` from the project's HEAD in worktrees under NOBLE's data folder, and opens a `⚔ duel <id>` tab with both
+  agents running. **Compare Agent Duel** shows each side's files, added and removed lines, commits and uncommitted
+  work next to each other, with the git commands to inspect or merge it (NOBLE never merges). **End Agent Duel…**
+  closes the panes and removes the worktrees (forcing only on an explicit `f` when they hold uncommitted changes) and
+  keeps the branches unless you pick one to delete. Duels are kept in `state.json`.
+
+- Quota pace forecast on Home's AI panel for the weekly window too (every provider's 7-day window, and Claude's Opus
+  allowance), shown only when it would fill before its reset. The 5-hour forecast uses the last 2 hours of use, the
+  weekly one the last 24 hours (at least 3 hours of samples).
+- A one-time warning when fresh quota numbers show a window filling up before its reset ("Claude Code 5h quota will run
+  out ~14:20 at this pace"), once per provider and window; `warn_at = 0` turns it off.
+
+### Changed
+- The pace line says when the window fills on the clock and when it resets: `▲ 5h full ~14:20 (in 1h20m) · resets
+  15:00`, shortened step by step on a narrow panel.
 
 ### Fixed
 - Focus mode: the top bar no longer comes up over the top panes' titles. It appears only while the pointer rests on

@@ -33,6 +33,8 @@ pub enum MenuCmd {
     Launch(usize, PathBuf),
     /// Opens the list of launchers that start in the project's folder (`Launch`), where the project menu is.
     StartMenu(PathBuf),
+    /// The start form of an agent duel in this project.
+    StartDuel(PathBuf),
     GitPull(PathBuf),
     TogglePin(PathBuf),
     RemoveProject(PathBuf),
@@ -118,6 +120,13 @@ impl App {
             items.push(item("Copy path", "", MenuCmd::CopyText(cwd.display().to_string())));
             items.push(item("Open folder", "", MenuCmd::OpenFolder(cwd)));
         }
+        // A tab of an agent duel: compare the two sides, or end the duel.
+        if self.duel_of_tab(i).is_some() {
+            let pane = self.tabs[i].focus;
+            let act = |label: &str, a| item(label, &hint(a), MenuCmd::PaneAction(pane, a));
+            items.push(act("Compare duel", crate::keys::Action::CompareDuel).sep());
+            items.push(act("End duel…", crate::keys::Action::EndDuel));
+        }
         items.push(item("Close tab", &hint(crate::keys::Action::CloseTab), MenuCmd::CloseTab(key)).sep().danger());
         self.open_menu(self.tab_title(i), x, y, items);
     }
@@ -171,6 +180,11 @@ impl App {
         // Quick launchers run next to this pane, in its directory: one row opens their list.
         if self.quick_launchers().next().is_some() {
             items.push(item("Launch in split ›", "", MenuCmd::LaunchMenu(pane)));
+        }
+        // A pane of an agent duel: compare the two sides, or end the duel.
+        if self.tab_of(pane).is_some_and(|ti| self.duel_of_tab(ti).is_some()) {
+            items.push(item("Compare duel", &hint(A::CompareDuel), MenuCmd::PaneAction(pane, A::CompareDuel)));
+            items.push(item("End duel…", &hint(A::EndDuel), MenuCmd::PaneAction(pane, A::EndDuel)));
         }
         items.extend([
             item(pass_label, &hint(A::Passthrough), MenuCmd::Passthrough(pane)),
@@ -270,6 +284,10 @@ impl App {
         items.push(item("Copy path", "", MenuCmd::CopyText(path.display().to_string())));
         if repo {
             items.push(item("Git pull", "", MenuCmd::GitPull(path.clone())).sep());
+            // Two agents, one task, two worktrees (`app/duel.rs`); off while no installed agent can take a task.
+            let mut duel = item("Start agent duel…", "", MenuCmd::StartDuel(path.clone()));
+            duel.enabled = !self.duel_agents().is_empty();
+            items.push(duel);
         }
         let pin = if self.ui_state.is_pinned(&path) { "Unpin" } else { "Pin to top" };
         items.push(item(pin, "", MenuCmd::TogglePin(path.clone())).sep());
@@ -340,6 +358,7 @@ impl App {
             MenuCmd::OpenProject(path) => self.open_project_shell(path),
             MenuCmd::Launch(i, path) => self.launch(i, Some(path)),
             MenuCmd::StartMenu(path) => self.open_start_menu(path, at.0, at.1),
+            MenuCmd::StartDuel(path) => self.open_duel_form(Some(path)),
             MenuCmd::GitPull(path) => self.git_pull(&path),
             MenuCmd::TogglePin(path) => self.toggle_pin(&path),
             MenuCmd::RemoveProject(path) => self.request_remove_project(path),

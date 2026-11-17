@@ -195,6 +195,8 @@ impl App {
                 | Action::Passthrough => in_term,
                 Action::Update | Action::DismissUpdate => self.update_notice().is_some(),
                 Action::ReopenTab => !self.closed_tabs.is_empty(),
+                Action::StartDuel => self.duel_project().is_some_and(|p| p.repo),
+                Action::CompareDuel | Action::EndDuel => self.target_duel().is_some(),
                 Action::EnableHooks | Action::DismissHooksOffer => self.hooks_offer_notice(),
                 Action::Palette => false,
                 _ => true,

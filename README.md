@@ -85,7 +85,8 @@ chip, or press `T` (shift+t) for the list, to run it in a new tab in the project
 **🤖 AI quota and sessions**<br>
 5-hour and weekly limits for Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code, read
 from the logins the CLIs already keep. See which agent is working and which one is waiting for you (every agent with status hooks on),
-on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you.
+on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you, and the
+Agent Inbox (prefix `I`) lists all of them in one place.
 
 </td>
 <td valign="top">
@@ -274,6 +275,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass keys to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn, then error) |
+| | | `I` | Agent Inbox: every agent that needs you, with a preview of its screen |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
 | | | `y` | send the last command's output to the agent pane (pasted, not run: press ⏎ yourself) |
 | | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
@@ -424,8 +426,9 @@ move_pane_left_edge move_pane_right_edge move_pane_top_edge move_pane_bottom_edg
 move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
-remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
-dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output`.
+remove_project send_prefix passthrough jump_to_agent agent_inbox open_link update dismiss_update enable_hooks
+dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output start_duel compare_duel
+end_duel`.
 
 </details>
 
@@ -464,6 +467,21 @@ Enter, which submits.
   output (at most 400 lines and 64 KiB), into the agent pane of the same tab (or else the one last sent to), led by a
   context line such as `~/app $ cargo test → exit 101`. It is pasted, never run: read it, then press ⏎ yourself. A multi-line paste into a
   shell that has not enabled bracketed paste asks first.
+- **Agent duel:** the same task for two agents, side by side, then compare. **Start Agent Duel…** (palette, or ⋯ →
+  Start agent duel… on a git project) asks for two agents (the same one twice is fine) and the task. NOBLE then
+  creates two git worktrees from the project's current HEAD, on the branches `noble/duel-<id>-a` and `-b`, in its own
+  data folder (`duels/<project>-<id>/a` and `b`, never inside the repository), and opens a tab `⚔ duel <id>` with the
+  agents in two panes, each in its worktree with the task as its first prompt. The agents offered are the installed
+  quick launchers whose command line takes a first prompt in a documented form: Claude Code (`claude "task"`), Codex
+  (`codex "task"`), GitHub Copilot (`copilot -i "task"`) and OpenCode (`opencode --prompt "task"`). An agent whose form
+  is not known is left out rather than guessed at. The task reaches the agent as one quoted word in every shell
+  (cmd.exe cannot quote line breaks, `"`, `%` or `!`, and the form says so). **Compare Agent Duel** lists, for each
+  side, the files it changed with their added and removed lines (commits, uncommitted edits and new files alike), and
+  the `git` commands that inspect it or merge its branch; NOBLE never merges, commits or pushes. **End Agent Duel…**
+  closes the duel's panes and removes both worktrees, asking first when one holds uncommitted changes (only the `f`
+  key then forces the removal), and keeps both branches unless you pick one to delete as well. Duels are remembered
+  in `state.json`, so Compare and End work after a restart; a restored duel pane starts its agent again without the
+  task.
 - **Progress:** a program's progress report (OSC 9;4, which Claude Code sends) shows in the pane title as `42%`, a
   spinner, `✗` on an error or `‖` when paused, and as a busy dot on the tab.
 - **Background Claude sessions:** `claude --bg` sessions are listed in Home's AI usage panel, and a click attaches to
@@ -549,6 +567,23 @@ its next prompt, but stops spinning) and the laptop is plugged in; otherwise it 
 **Prefix `a`** (Jump to Waiting Agent) goes to the next pane, across tabs, whose agent needs you, else to the
 next one whose agent finished its answer, else to the next one whose agent failed.
 
+**Agent Inbox** (prefix `I`, palette: Agent Inbox, or a click on Home's `◆ 2 need you` in the AI usage panel's top line
+or the quota strip) is one overlay for every agent that needs you, in any tab, so several of them can be handled
+without jumping into each pane. A row shows the state mark, the agent, its tab (and pane, in a split tab), its
+project, what it asks (`Claude asks to run Bash`) and how long it has waited; the one waiting longest is on top. The
+selected row also shows the last lines of that pane's screen, so you see what you would approve. `↑↓` select, `⏎` (or
+a click on the selected row) goes to the pane, `esc` closes; a click on another row selects it. The list follows the
+records while it is open: an agent that stops waiting leaves it, and the selection stays on its agent or at its
+place. With nothing waiting it reads "No agent is waiting for you".
+
+Quick answers exist for one case only: **a Claude Code permission prompt that the pane still shows**. `y` answers
+yes and `n` answers no (the `y yes` / `n no` chips do the same by mouse). NOBLE types the number that the dialog shows
+for the option (a dialog without "don't ask again" has no option 3, so `n` sends 2 there) into the pane like a key you
+typed there, and the session reads **working** at once, as after answering in the pane. Both must agree for the
+chips and keys to be offered: the pane's record is Claude's permission request, and the screen shows the dialog
+("Do you want …" above a plain `1. Yes` and a `No` option). Claude's questions, Codex, Copilot and every other agent
+are jump only, and "yes, and don't ask again" is never sent. Nothing is answered without your key press or click.
+
 </details>
 
 ## 🤖 AI quota
@@ -568,8 +603,13 @@ own token rotation). The last good numbers are cached and shown with `~` until t
 
 Only providers you are signed in to (and that have a quota plan) are shown. Quotas are fetched **only while
 the Home screen is open**: right away when you come back to it (if the last fetch is 30 s or older) and then every `refresh_minutes`. While you work
-in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
-fill up before it resets.
+in a terminal NOBLE makes no network calls. It also forecasts the 5-hour and the weekly windows (7-day, including
+Claude's Opus allowance) from the usage history: when a window would fill up before it resets at the current pace, Home
+shows `▲ 5h full ~14:20 (in 1h20m) · resets 15:00` in local time (the line shortens on a narrow panel, and a weekly
+window names the day: `▲ week full ~Thu 10:02`). The 5-hour pace is the last 2 hours of use, the weekly pace the last 24
+hours, so a night's pause is part of it. When fresh numbers first show a window filling up before its reset, NOBLE
+raises one warning (`Claude Code 5h quota will run out ~14:20 at this pace`), once per window and provider; it is off
+with `warn_at = 0`, like the other quota warnings.
 
 The same cached numbers drive three more warnings, with no extra request: an agent whose quota is full (100%) gets a
 `⚠` on its launcher on Home, and launching it says when the quota resets (`resets in 1h12m`). An agent's pane title

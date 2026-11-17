@@ -100,7 +100,8 @@ impl App {
             }
         }
         // The blinking cursor of the palette and of prompts (steady on battery, see `cursor_lit`).
-        if self.live_clock() && matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
+        let typing = matches!(&self.overlay, Some(Overlay::Duel(super::DuelView::Form(_))));
+        if self.live_clock() && (typing || matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_)))) {
             want(Duration::from_millis(500));
         }
         // The live timer of a command running in a visible pane (see `pane::live_timer`). A pane
@@ -120,6 +121,14 @@ impl App {
         for since in self.visible_panes().into_iter().filter_map(|p| self.agent_badge(p)?.working_since) {
             let into_minute = (now_ms - since * 1000).rem_euclid(60_000) as u64;
             want(Duration::from_millis(60_000 - into_minute + 5));
+        }
+        // The Agent Inbox's waiting times change once a minute.
+        if matches!(self.overlay, Some(Overlay::Inbox(_))) {
+            let now_s = chrono::Utc::now().timestamp_millis();
+            for since in self.inbox_items().iter().filter_map(|i| i.since) {
+                let into_minute = (now_s - since * 1000).rem_euclid(60_000) as u64;
+                want(Duration::from_millis(60_000 - into_minute + 5));
+            }
         }
         // A synchronized-output block still open: the frame is drawn when its time is up, even if no byte comes. A
         // pane outside a block adds nothing here (one atomic load), so an idle terminal gets no wake-up.

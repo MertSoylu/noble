@@ -86,7 +86,9 @@ impl App {
                 });
             }
         }
-        let mut shown = progress || signals.iter().any(|s| s.visible);
+        // The Agent Inbox previews the screens of waiting agents, which are mostly in tabs that are not shown.
+        let inbox = matches!(self.overlay, Some(Overlay::Inbox(_)));
+        let mut shown = progress || signals.iter().any(|s| s.visible || inbox);
         for mut sig in signals {
             if let Some(p) = self.panes.get_mut(&sig.id) {
                 p.last_output = Some(Instant::now());

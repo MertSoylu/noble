@@ -466,6 +466,58 @@ fn quota_warning_fires_once() {
     assert!(app.toasts.is_empty());
 }
 
+/// Home's AI panel forecasts the 5-hour and the weekly window that would fill before they reset: when on the clock,
+/// in how long, and the reset; the line shortens with the panel and the panel's height follows the line count.
+#[test]
+fn pace_forecast_lines_on_home() {
+    let mut app = demo_app(160, 45);
+    let now = chrono::Utc::now().timestamp();
+    let state = |week: Option<u8>| ProviderState {
+        id: "claude",
+        name: "Claude Code",
+        login_hint: "claude",
+        presence: Presence::Ready,
+        status: Status::Ok,
+        usage: Some(Usage {
+            windows: [("5H", 70, now + 4 * 3600)]
+                .into_iter()
+                .chain(week.map(|u| ("WEEK", u, now + 6 * 86_400)))
+                .map(|(label, used, reset)| Window { label: label.into(), used, resets_at: Some(reset) })
+                .collect(),
+            plan: None,
+            note: None,
+        }),
+        fetched_at: Some(now),
+    };
+    // 5h: 20% in the last hour, 30% left: full in 1h30m, the window resets in 4h. Week: 1% an hour over a day,
+    // 46% left: full in 1d21h (the first sample is a few seconds short of a day), the week resets in 6 days.
+    app.usage_history.series.clear(); // the demo's own samples are newer than these
+    app.usage_history.record("claude/5H", now - 3600, 50);
+    app.usage_history.record("claude/WEEK", now - 24 * 3600 + 5, 30);
+    app.handle(AppEvent::Ai(Box::new(state(None))));
+    let text = render(&mut app, 160, 45);
+    save("bridge-pace-forecast-5h-160x45", &text);
+    let line = text.lines().find(|l| l.contains("▲ 5h full ~")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("(in 1h30m) · resets "), "{line}");
+    assert!(!text.contains("▲ week"), "no weekly window yet");
+
+    app.handle(AppEvent::Ai(Box::new(state(Some(54)))));
+    let text = render(&mut app, 160, 45);
+    save("bridge-pace-forecast-week-160x45", &text);
+    let week = text.lines().find(|l| l.contains("▲ week full ~")).unwrap_or_else(|| panic!("{text}"));
+    assert!(week.contains("(in 1d21h)"), "{week}");
+    assert_eq!(text.lines().filter(|l| l.contains("▲")).count(), 2, "{text}");
+
+    // Narrower panels drop the reset, then the duration; every size is drawn (the dumps are reviewed for overflow).
+    let mut seen = Vec::new();
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-pace-forecast-{w}x{h}"), &text);
+        seen.extend(text.lines().filter(|l| l.contains("▲ 5h")).map(|l| l.trim().to_string()));
+    }
+    assert!(seen.iter().any(|l| !l.contains("resets")), "a size shortens the line: {seen:?}");
+}
+
 /// A full quota marks its launcher on Home with ⚠, and launching it says when it resets. A window past `warn_at`
 /// shows in the agent pane's title ("⚠ 5h 92%"); when such a window resets, NOBLE says so at its reset time.
 #[test]
@@ -778,12 +830,13 @@ fn project_menu_groups_launchers_and_rules() {
             "Open folder",
             "Copy path",
             "Git pull",
+            "Start agent duel…",
             "Pin to top",
             "Remove from list"
         ]
     );
     let seps: Vec<bool> = items.iter().map(|i| i.sep).collect();
-    assert_eq!(seps, [false, false, true, false, false, true, true, false]);
+    assert_eq!(seps, [false, false, true, false, false, true, false, true, false]);
     assert_eq!(items[1].cmd, MenuCmd::StartMenu(path.clone()));
     let dangers: Vec<&str> = items.iter().filter(|i| i.danger).map(|i| i.label.as_str()).collect();
     assert_eq!(dangers, ["Remove from list"]);
@@ -804,18 +857,18 @@ fn project_menu_groups_launchers_and_rules() {
             }
         }
     }
-    let remove = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    let remove = find_hit(&app, |h| *h == Hit::MenuItem(8)).unwrap();
     assert_eq!(buf[(remove.x + 2, remove.y)].fg, app.theme.crit, "the removal is in the critical color");
     let copy = find_hit(&app, |h| *h == Hit::MenuItem(4)).unwrap();
     assert_ne!(buf[(copy.x + 2, copy.y)].fg, app.theme.crit, "a plain item keeps the text color");
 
-    // Seven steps from the first item reach the last one (the rules are no steps), and one more wraps round.
+    // Eight steps from the first item reach the last one (the rules are no steps), and one more wraps round.
     let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
-    for _ in 0..7 {
+    for _ in 0..8 {
         key(&mut app, KeyCode::Down);
     }
     let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
-    assert_eq!(m.selected, 7);
+    assert_eq!(m.selected, 8);
     key(&mut app, KeyCode::Down);
     let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
     assert_eq!(m.selected, 0);
@@ -846,20 +899,26 @@ fn project_menu_groups_launchers_and_rules() {
 /// launchers that are hidden on Home do not count.
 #[test]
 fn project_menu_keeps_few_launchers_inline() {
-    use noble::app::Hit;
+    use noble::app::{Hit, MenuCmd};
     let mut app = demo_app(110, 30);
     app.launchers = vec![quick_launcher("c", "claude", true), quick_launcher("x", "codex", true)];
     app.launchers.push(quick_launcher("e", "opencode", false));
     app.launchers.push(quick_launcher("i", "copilot", false));
     let items = open_first_project_menu(&mut app);
-    let starts: Vec<(&str, &str)> =
-        items.iter().filter(|i| i.label.starts_with("Start")).map(|i| (i.label.as_str(), i.hint.as_str())).collect();
-    assert_eq!(starts, [("Start claude", "c"), ("Start codex", "x")]);
+    // (The agent duel row is no launcher: it has its own test.)
+    let launchers = |items: &[noble::app::MenuItem]| -> Vec<(String, String)> {
+        let plain = items.iter().filter(|i| !matches!(i.cmd, MenuCmd::StartDuel(_)));
+        plain.filter(|i| i.label.starts_with("Start")).map(|i| (i.label.clone(), i.hint.clone())).collect()
+    };
+    assert_eq!(
+        launchers(&items),
+        [("Start claude".to_string(), "c".to_string()), ("Start codex".to_string(), "x".to_string())]
+    );
     assert!(!items.iter().any(|i| i.label.contains("agent ›")), "no list row for two launchers");
     // Three shown is still inline (the list starts above three).
     app.launchers.push(quick_launcher("o", "pi", true));
     let items = open_first_project_menu(&mut app);
-    assert_eq!(items.iter().filter(|i| i.label.starts_with("Start ")).count(), 3);
+    assert_eq!(launchers(&items).len(), 3);
     assert!(!items.iter().any(|i| i.label.contains("agent ›")));
     // The menu's rows still hit their items.
     render(&mut app, 110, 30);
@@ -881,11 +940,11 @@ fn project_menu_near_the_bottom_fits_with_its_rules() {
     assert!(frame.bottom() <= 30, "the frame stays on the screen: {frame:?}");
     let rules = (frame.y + 1..frame.bottom() - 1).filter(|&y| buf[(frame.x + 1, y)].symbol() == "─").count();
     assert_eq!(rules, 3, "one rule above each of the three groups' first items");
-    for i in 0..8 {
+    for i in 0..9 {
         let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).unwrap_or_else(|| panic!("row {i} is drawn"));
         assert!(row.y > frame.y && row.bottom() < frame.bottom(), "row {i} sits inside the frame");
     }
-    let last = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    let last = find_hit(&app, |h| *h == Hit::MenuItem(8)).unwrap();
     assert_eq!(last.y + 1, frame.bottom() - 1, "the removal is the last row, above the bottom border");
     for (w, h) in SIZES {
         save(&format!("menu-project-rules-{w}x{h}"), &render(&mut app, w, h));
@@ -1011,14 +1070,15 @@ fn quota_pace_warning_line() {
     app.usage_history.record(&key, now, 71);
     let text = render(&mut app, 160, 45);
     save("bridge-pace-160x45", &text);
-    assert!(text.contains("▲ 5h full in ~37m at this pace"), "{text}");
-    // No estimate for the weekly window even when it fills fast (5 hour window only).
+    assert!(text.contains("▲ 5h full ~"), "{text}");
+    assert!(text.contains("(in 37m)"), "{text}");
+    // The weekly window needs at least 3 hours of samples: an hour of fast use is no forecast yet.
     let week = noble::store::UsageHistory::key("codex", "WEEK");
     app.usage_history = noble::store::UsageHistory::memory();
     app.usage_history.record(&week, now - 3600, 80);
     app.usage_history.record(&week, now, 92);
     let text = render(&mut app, 160, 45);
-    assert!(!text.contains("at this pace"), "{text}");
+    assert!(!text.contains("▲ week"), "{text}");
 }
 
 /// New release: a notice appears bottom right on the status bar's row, on every page and not only in a terminal,
