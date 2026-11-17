@@ -6,6 +6,7 @@ mod agents;
 mod animation;
 mod common;
 mod crash_hunt;
+mod duel;
 mod focus;
 mod fullscreen;
 mod hints;

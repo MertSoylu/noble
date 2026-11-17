@@ -100,7 +100,8 @@ impl App {
             }
         }
         // The blinking cursor of the palette and of prompts (steady on battery, see `cursor_lit`).
-        if self.live_clock() && matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_))) {
+        let typing = matches!(&self.overlay, Some(Overlay::Duel(super::DuelView::Form(_))));
+        if self.live_clock() && (typing || matches!(self.overlay, Some(Overlay::Palette(_) | Overlay::Prompt(_)))) {
             want(Duration::from_millis(500));
         }
         // The live timer of a command running in a visible pane (see `pane::live_timer`). A pane

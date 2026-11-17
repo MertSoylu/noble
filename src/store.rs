@@ -804,8 +804,50 @@ pub struct UiStateData {
     pub shell_keys_told: Vec<String>,
     /// Palette commands run lately, newest first (`App::palette_key`); listed first on an empty query.
     pub palette_recent: Vec<String>,
+    /// Agent duels that are not ended yet, oldest first (`duel.rs`): what Compare and End need after a restart.
+    pub duels: Vec<DuelRecord>,
     /// Fields this build does not know (a newer build wrote them): kept as they are when the file is saved again,
     /// so an older build sharing `state.json` does not drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One side of an agent duel: the agent, its own branch and its own worktree.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DuelSide {
+    /// The agent's id (`ai::agent_kind`: "claude", "codex" …).
+    pub agent: String,
+    /// The quick launcher's command the agent runs with (without the prompt).
+    pub launcher: String,
+    /// The branch the worktree has checked out (`noble/duel-<id>-a`).
+    pub branch: String,
+    /// The worktree folder, under NOBLE's data folder.
+    pub worktree: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// An agent duel (`duel.rs`): the same task given to two agents, each in its own worktree of one repository.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DuelRecord {
+    /// Short id (`duel::new_id`), part of both branch names and of the worktree folder.
+    pub id: String,
+    /// The project's folder (the repository both worktrees belong to).
+    pub project: String,
+    /// The project's name when the duel started.
+    pub name: String,
+    /// The commit both worktrees started from (a full hash).
+    pub base: String,
+    /// The branch the project had checked out then (`None` on a detached HEAD).
+    pub base_branch: Option<String>,
+    /// The task, as typed.
+    pub prompt: String,
+    /// Unix seconds.
+    pub created: i64,
+    pub a: DuelSide,
+    pub b: DuelSide,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -1571,6 +1613,66 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
         assert_eq!(json["layout_version"], 3);
         assert_eq!(json["running"], serde_json::json!(["1-1-0"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An agent duel survives a restart (`state.json`): every field comes back, a duel a newer build wrote with more
+    /// fields keeps them when this build saves the file again, and an old file without duels loads as none.
+    #[test]
+    fn duels_are_kept_in_state_json_with_unknown_fields() {
+        let dir = scratch_dir("noble-store-duels");
+        let state = dir.join("state.json");
+        let rec = DuelRecord {
+            id: "k3x9qa".into(),
+            project: "/home/me/app".into(),
+            name: "app".into(),
+            base: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".into(),
+            base_branch: Some("main".into()),
+            prompt: "fix the bug\nthen add a test".into(),
+            created: 1_700_000_000,
+            a: DuelSide {
+                agent: "claude".into(),
+                launcher: "claude --model opus".into(),
+                branch: "noble/duel-k3x9qa-a".into(),
+                worktree: "/data/duels/app-k3x9qa/a".into(),
+                extra: Default::default(),
+            },
+            b: DuelSide {
+                agent: "codex".into(),
+                launcher: "codex".into(),
+                branch: "noble/duel-k3x9qa-b".into(),
+                worktree: "/data/duels/app-k3x9qa/b".into(),
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        };
+        let mut ui = UiState::load(state.clone());
+        assert!(ui.data.duels.is_empty(), "no file: no duels");
+        ui.modify(|d| d.duels.push(rec.clone()));
+        assert_eq!(UiState::load(state.clone()).data.duels, vec![rec.clone()], "the record round-trips");
+
+        // A newer build's extra fields (on the file, a duel and a side) stay through a save by this build.
+        let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        json["future"] = serde_json::json!(1);
+        json["duels"][0]["score"] = serde_json::json!({"a": 3});
+        json["duels"][0]["a"]["model"] = serde_json::json!("opus");
+        std::fs::write(&state, json.to_string()).unwrap();
+        let mut ui = UiState::load(state.clone());
+        ui.modify(|d| d.welcomed = true);
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        assert_eq!(json["future"], 1);
+        assert_eq!(json["duels"][0]["score"], serde_json::json!({"a": 3}));
+        assert_eq!(json["duels"][0]["a"]["model"], "opus");
+        assert_eq!(json["duels"][0]["b"]["branch"], "noble/duel-k3x9qa-b");
+
+        // Ending the duel removes its record and nothing else.
+        let mut ui = UiState::load(state.clone());
+        ui.modify(|d| d.duels.retain(|r| r.id != "k3x9qa"));
+        let back = UiState::load(state.clone());
+        assert!(back.data.duels.is_empty() && back.data.welcomed);
+        // A state file from before duels existed has none.
+        std::fs::write(&state, r#"{"welcomed": true}"#).unwrap();
+        assert!(UiState::load(state).data.duels.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -22,6 +22,14 @@ All notable changes to NOBLE are documented here. The format is based on
   split around the pane (side by side ↔ stacked). On macOS, where Mission Control and some terminals take those
   arrows, the palette, the pane menu and the drag do the same, and every key can be rebound.
 - The pane menu groups these under Arrange panes ›, and Move to tab › lists a new tab and every other tab.
+- Agent duel: the same task for two coding agents, each in its own git worktree, side by side. **Start Agent Duel…**
+  (palette, or the project menu on Home) takes two installed agents (Claude Code, Codex, GitHub Copilot, OpenCode:
+  the ones with a documented way to start with a first prompt) and the task, creates the branches `noble/duel-<id>-a`
+  and `-b` from the project's HEAD in worktrees under NOBLE's data folder, and opens a `⚔ duel <id>` tab with both
+  agents running. **Compare Agent Duel** shows each side's files, added and removed lines, commits and uncommitted
+  work next to each other, with the git commands to inspect or merge it (NOBLE never merges). **End Agent Duel…**
+  closes the panes and removes the worktrees (forcing only on an explicit `f` when they hold uncommitted changes) and
+  keeps the branches unless you pick one to delete. Duels are kept in `state.json`.
 
 - Quota pace forecast on Home's AI panel for the weekly window too (every provider's 7-day window, and Claude's Opus
   allowance), shown only when it would fill before its reset. The 5-hour forecast uses the last 2 hours of use, the

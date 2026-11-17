@@ -6,6 +6,7 @@ mod agents;
 mod arrange;
 pub mod bindings;
 mod blocks;
+mod duel;
 mod focus;
 pub mod fx;
 mod git;
@@ -48,6 +49,7 @@ use crate::theme::Theme;
 
 pub use arrange::PaneDrop;
 pub use bindings::BindingsState;
+pub use duel::{CompareState, DuelAgent, DuelEvent, DuelField, DuelForm, DuelHit, DuelView, EndState, EndStep};
 pub use help::HelpState;
 pub use inbox::{InboxItem, InboxState, PermissionOptions, QuickAnswer};
 pub use live::PrEntry;
@@ -336,6 +338,8 @@ pub enum Overlay {
     Inbox(InboxState),
     Confirm(Confirm),
     Prompt(Prompt),
+    /// Agent duel: the start form, the compare overlay or the end dialog (`app/duel.rs`).
+    Duel(DuelView),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,6 +533,8 @@ pub enum Hit {
     InboxRow(PaneId),
     /// A quick answer chip of the Agent Inbox's selected row.
     InboxAnswer(QuickAnswer),
+    /// A target of an agent duel overlay (`app/duel.rs`).
+    Duel(DuelHit),
 }
 
 pub(crate) enum Drag {
@@ -1251,6 +1257,7 @@ impl App {
             | AppEvent::KillResult { .. }
             | AppEvent::LaunchFailed(_)
             | AppEvent::Update(_)
+            | AppEvent::Duel(_)
             | AppEvent::Quit => true,
             AppEvent::PtyOutput => false,
             AppEvent::SensorStatic(_) | AppEvent::Sensors(_) => matches!(self.view, View::Bridge | View::System),
@@ -1338,6 +1345,7 @@ impl App {
             }
             AppEvent::Pr(path, info) => return self.set_pr(path, info),
             AppEvent::BgSessions(list) => return self.set_bg_sessions(list),
+            AppEvent::Duel(ev) => self.on_duel_event(ev),
             AppEvent::Update(Ok(version)) => {
                 let checked = chrono::Utc::now().timestamp();
                 self.edit_ui_state(|d| {

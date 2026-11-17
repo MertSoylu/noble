@@ -193,6 +193,9 @@ impl App {
             Action::EnableHooks => self.accept_hooks_offer(),
             Action::DismissHooksOffer => self.dismiss_hooks_offer(),
             Action::Notifications => self.open_notifications(),
+            Action::StartDuel => self.open_duel_form(None),
+            Action::CompareDuel => self.open_compare(),
+            Action::EndDuel => self.request_end_duel(),
         }
     }
 
@@ -486,6 +489,12 @@ impl App {
     /// Splits the focused pane; `command` (already wrapped for the shell) runs in the new pane.
     /// Returns the new pane when the split happened.
     fn split_with(&mut self, dir: Dir, command: Option<&str>) -> Option<PaneId> {
+        self.split_with_in(dir, None, command)
+    }
+
+    /// `split_with`, with the new pane starting in `cwd` instead of the focused pane's folder (an agent duel's
+    /// second worktree).
+    pub(super) fn split_with_in(&mut self, dir: Dir, cwd: Option<PathBuf>, command: Option<&str>) -> Option<PaneId> {
         let body = self.body();
         let Some(tab) = self.current_tab() else {
             self.toast(ToastLevel::Info, "open a terminal tab first");
@@ -508,7 +517,7 @@ impl App {
         let tile = after.layout(body).0.into_iter().find(|(id, _)| *id == PaneId::MAX).map(|(_, r)| r);
         let inner = crate::ui::pane_outline(tile.unwrap_or(rect), body, self.focus_mode_active()).inner();
         let (rows, cols) = (inner.height, inner.width);
-        let cwd = self.panes.get(&focus).map(|p| p.cwd()).unwrap_or_else(home);
+        let cwd = cwd.unwrap_or_else(|| self.panes.get(&focus).map(|p| p.cwd()).unwrap_or_else(home));
         let new = self.spawn_pane(&cwd, command, rows, cols)?;
         if let Some(tab) = self.current_tab_mut() {
             tab.root.split(focus, new, dir);

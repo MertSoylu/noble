@@ -33,6 +33,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Help(st) => help(buf, area, app, st, hits),
         Overlay::Bindings(st) => key_bindings(buf, area, app, st, hits),
         Overlay::Inbox(st) => super::inbox::draw(buf, area, app, st, hits),
+        Overlay::Duel(view) => super::duel::draw(buf, area, app, view, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
             // The question wraps over as many rows as it needs: the box grows with it (within the
