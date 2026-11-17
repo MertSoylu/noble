@@ -54,6 +54,10 @@ fn repo(dir: &Path) {
     git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     git(dir, &["config", "user.email", "duel@example.com"]);
     git(dir, &["config", "user.name", "Duel Test"]);
+    // NOBLE's own git runs read the system config (Git for Windows sets `core.autocrlf = true` there), these test
+    // commands do not (`GIT_CONFIG_NOSYSTEM`): the repository's own setting makes both check out and commit the same
+    // line endings, so a side's diff counts only the lines the test changed.
+    git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(dir.join("b.txt"), "alpha\nbeta\n").unwrap();
     git(dir, &["add", "-A"]);

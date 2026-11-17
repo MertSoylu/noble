@@ -458,6 +458,8 @@ fn a_duel_starts_two_agents_in_two_worktrees_and_ends_cleanly() {
     git(&project, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     git(&project, &["config", "user.email", "duel@example.com"]);
     git(&project, &["config", "user.name", "Duel Test"]);
+    // Same line endings for NOBLE's git (system config: autocrlf on Windows) and this test's (no system config).
+    git(&project, &["config", "core.autocrlf", "false"]);
     std::fs::write(project.join("a.txt"), "one\n").unwrap();
     git(&project, &["add", "-A"]);
     git(&project, &["commit", "-q", "-m", "first"]);
