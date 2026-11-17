@@ -10,7 +10,9 @@
 #   { id = "RUSTSEC-0000-0000", reason = "only reachable via X, which NOBLE does not use; drop when Y updates" }
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no vulnerability); NOBLE uses it for time arithmetic and local formatting only. Drop after moving to jiff or time" },
+]
 
 [licenses]
 # The licenses the dependency tree actually uses (all compatible with NOBLE's MIT license).
