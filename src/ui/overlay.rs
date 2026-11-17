@@ -32,6 +32,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, hits: &mut Vec<(Rect, Hit)>
         Overlay::Menu(m) => menu(buf, area, app, m, hits),
         Overlay::Help(st) => help(buf, area, app, st, hits),
         Overlay::Bindings(st) => key_bindings(buf, area, app, st, hits),
+        Overlay::Inbox(st) => super::inbox::draw(buf, area, app, st, hits),
         Overlay::Confirm(c) => {
             let w = 52.min(area.width.saturating_sub(2));
             // The question wraps over as many rows as it needs: the box grows with it (within the
@@ -777,7 +778,7 @@ fn ellipsize(line: &str, width: usize) -> String {
 }
 
 /// A box centered across `area` and a third of the free rows down; it keeps the top bar free (`hud::box_top`).
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect::new(area.x + (area.width - w) / 2, hud::box_top(area, h), w, h)
@@ -818,7 +819,7 @@ fn halo(buf: &mut Buffer, rect: Rect, th: &Theme) {
 }
 
 /// A filled box with an accent-colored frame.
-fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui::style::Color) -> Rect {
+pub(super) fn boxed(buf: &mut Buffer, rect: Rect, title: &str, th: &Theme, accent: ratatui::style::Color) -> Rect {
     halo(buf, rect, th);
     hud::fill(buf, rect, Style::default().bg(th.raised).fg(th.fg));
     let inner = hud::frame(buf, rect, title, "", true, th);

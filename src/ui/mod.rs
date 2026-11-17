@@ -3,6 +3,7 @@
 mod boot;
 mod bridge;
 pub mod hud;
+mod inbox;
 mod overlay;
 mod settings;
 mod system;

@@ -85,7 +85,8 @@ chip, or press `T` (shift+t) for the list, to run it in a new tab in the project
 **🤖 AI quota and sessions**<br>
 5-hour and weekly limits for Claude Code, Codex, Antigravity, OpenCode Go, Kilo Code and Command Code, read
 from the logins the CLIs already keep. See which agent is working and which one is waiting for you (every agent with status hooks on),
-on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you.
+on Home, in each pane's title and as a dot on its tab; prefix `a` jumps to the next agent waiting for you, and the
+Agent Inbox (prefix `I`) lists all of them in one place.
 
 </td>
 <td valign="top">
@@ -274,6 +275,7 @@ working. With `passthrough = "once"` (Settings → Pass keys to the app) there i
 | | | `<` `>` `.` | move tab left / right · pane menu (copy path, open folder …) |
 | | | `i` | pass keys to the app (lock / next key) |
 | | | `a` | jump to the next agent waiting for you (needs you first, then your turn, then error) |
+| | | `I` | Agent Inbox: every agent that needs you, with a preview of its screen |
 | | | `u` | list the links on the pane's screen (URLs, `file:line`) and open one |
 | | | `y` | send the last command's output to the agent pane (pasted, not run: press ⏎ yourself) |
 | | | `,` `w` `:` `space` `?` `r` `q` | rename · save workspace · palette · keys · reload config · quit |
@@ -424,7 +426,7 @@ move_pane_left_edge move_pane_right_edge move_pane_top_edge move_pane_bottom_edg
 move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
-remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
+remove_project send_prefix passthrough jump_to_agent agent_inbox open_link update dismiss_update enable_hooks
 dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output`.
 
 </details>
@@ -548,6 +550,23 @@ only turns while a working agent is visible, its pane is printing (an interrupte
 its next prompt, but stops spinning) and the laptop is plugged in; otherwise it is a still `…`.
 **Prefix `a`** (Jump to Waiting Agent) goes to the next pane, across tabs, whose agent needs you, else to the
 next one whose agent finished its answer, else to the next one whose agent failed.
+
+**Agent Inbox** (prefix `I`, palette: Agent Inbox, or a click on Home's `◆ 2 need you` in the AI usage panel's top line
+or the quota strip) is one overlay for every agent that needs you, in any tab, so several of them can be handled
+without jumping into each pane. A row shows the state mark, the agent, its tab (and pane, in a split tab), its
+project, what it asks (`Claude asks to run Bash`) and how long it has waited; the one waiting longest is on top. The
+selected row also shows the last lines of that pane's screen, so you see what you would approve. `↑↓` select, `⏎` (or
+a click on the selected row) goes to the pane, `esc` closes; a click on another row selects it. The list follows the
+records while it is open: an agent that stops waiting leaves it, and the selection stays on its agent or at its
+place. With nothing waiting it reads "No agent is waiting for you".
+
+Quick answers exist for one case only: **a Claude Code permission prompt that the pane still shows**. `y` answers
+yes and `n` answers no (the `y yes` / `n no` chips do the same by mouse). NOBLE types the number that the dialog shows
+for the option (a dialog without "don't ask again" has no option 3, so `n` sends 2 there) into the pane like a key you
+typed there, and the session reads **working** at once, as after answering in the pane. Both must agree for the
+chips and keys to be offered: the pane's record is Claude's permission request, and the screen shows the dialog
+("Do you want …" above a plain `1. Yes` and a `No` option). Claude's questions, Codex, Copilot and every other agent
+are jump only, and "yes, and don't ask again" is never sent. Nothing is answered without your key press or click.
 
 </details>
 

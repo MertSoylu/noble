@@ -225,6 +225,14 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   prefix `T` share it. `[terminal] resume_agents` (default on) turns both off. Home: `projects::claude_activity` stats
   `~/.claude/projects/<claude_folder_name>` in the scan thread (never a transcript; `None` under `ai::isolated`);
   `Hit::ClaudeContinue` runs `continue_command`.
+- **Agent Inbox:** `app/inbox.rs` (state `InboxState` in `Overlay::Inbox`, the list `App::inbox_items`, sorted longest wait
+  first, the selection follows its pane and falls back to its place: `resolve`) and `ui/inbox.rs` (drawing; rows are
+  `Hit::InboxRow(pane)`, Home's chips `Hit::Inbox`). The preview reads `Pane::live_rows` (the live screen whatever the
+  scroll offset). Quick answers are for Claude permission prompts only: `permission_record` (the record) and
+  `permission_options` (the screen shows `Do you want …` above `1. Yes` and a `No…` option, strict by design) must both
+  hold, checked again when the key is pressed; the digit sent is the one the screen shows, through `App::pane_key` (the
+  pane's normal input path, which calls `answer_prompt`). Anything else is jump only. While the inbox is open any PTY
+  output redraws (`on_pty_output`) and `redraw_after` wakes once a minute for the waiting times.
 - **Agents:** `app/agents.rs` holds the hook-record and agent-session logic (`apply_hook_records`,
   `agent_sessions_by_project`, the one-time hooks offer); `app/agent_hooks.rs` holds the per-agent install state
   and the popup toggles; the state types stay in `app/mod.rs`. A key that answers a Claude prompt in the focused pane

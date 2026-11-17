@@ -146,6 +146,7 @@ impl App {
             },
             Action::Passthrough => self.passthrough(),
             Action::JumpToAgent => self.jump_to_agent(),
+            Action::AgentInbox => self.open_inbox(),
             Action::OpenLink => self.open_link_menu(),
             Action::PrevCommand => self.step_command(false),
             Action::NextCommand => self.step_command(true),

@@ -10,6 +10,7 @@ mod focus;
 mod fullscreen;
 mod hints;
 mod home;
+mod inbox;
 mod overlays;
 mod palette;
 mod panes;
