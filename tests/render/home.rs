@@ -466,6 +466,58 @@ fn quota_warning_fires_once() {
     assert!(app.toasts.is_empty());
 }
 
+/// Home's AI panel forecasts the 5-hour and the weekly window that would fill before they reset: when on the clock,
+/// in how long, and the reset; the line shortens with the panel and the panel's height follows the line count.
+#[test]
+fn pace_forecast_lines_on_home() {
+    let mut app = demo_app(160, 45);
+    let now = chrono::Utc::now().timestamp();
+    let state = |week: Option<u8>| ProviderState {
+        id: "claude",
+        name: "Claude Code",
+        login_hint: "claude",
+        presence: Presence::Ready,
+        status: Status::Ok,
+        usage: Some(Usage {
+            windows: [("5H", 70, now + 4 * 3600)]
+                .into_iter()
+                .chain(week.map(|u| ("WEEK", u, now + 6 * 86_400)))
+                .map(|(label, used, reset)| Window { label: label.into(), used, resets_at: Some(reset) })
+                .collect(),
+            plan: None,
+            note: None,
+        }),
+        fetched_at: Some(now),
+    };
+    // 5h: 20% in the last hour, 30% left: full in 1h30m, the window resets in 4h. Week: 1% an hour over a day,
+    // 46% left: full in 1d21h (the first sample is a few seconds short of a day), the week resets in 6 days.
+    app.usage_history.series.clear(); // the demo's own samples are newer than these
+    app.usage_history.record("claude/5H", now - 3600, 50);
+    app.usage_history.record("claude/WEEK", now - 24 * 3600 + 5, 30);
+    app.handle(AppEvent::Ai(Box::new(state(None))));
+    let text = render(&mut app, 160, 45);
+    save("bridge-pace-forecast-5h-160x45", &text);
+    let line = text.lines().find(|l| l.contains("▲ 5h full ~")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("(in 1h30m) · resets "), "{line}");
+    assert!(!text.contains("▲ week"), "no weekly window yet");
+
+    app.handle(AppEvent::Ai(Box::new(state(Some(54)))));
+    let text = render(&mut app, 160, 45);
+    save("bridge-pace-forecast-week-160x45", &text);
+    let week = text.lines().find(|l| l.contains("▲ week full ~")).unwrap_or_else(|| panic!("{text}"));
+    assert!(week.contains("(in 1d21h)"), "{week}");
+    assert_eq!(text.lines().filter(|l| l.contains("▲")).count(), 2, "{text}");
+
+    // Narrower panels drop the reset, then the duration; every size is drawn (the dumps are reviewed for overflow).
+    let mut seen = Vec::new();
+    for (w, h) in SIZES {
+        let text = render(&mut app, w, h);
+        save(&format!("bridge-pace-forecast-{w}x{h}"), &text);
+        seen.extend(text.lines().filter(|l| l.contains("▲ 5h")).map(|l| l.trim().to_string()));
+    }
+    assert!(seen.iter().any(|l| !l.contains("resets")), "a size shortens the line: {seen:?}");
+}
+
 /// A full quota marks its launcher on Home with ⚠, and launching it says when it resets. A window past `warn_at`
 /// shows in the agent pane's title ("⚠ 5h 92%"); when such a window resets, NOBLE says so at its reset time.
 #[test]
@@ -1011,14 +1063,15 @@ fn quota_pace_warning_line() {
     app.usage_history.record(&key, now, 71);
     let text = render(&mut app, 160, 45);
     save("bridge-pace-160x45", &text);
-    assert!(text.contains("▲ 5h full in ~37m at this pace"), "{text}");
-    // No estimate for the weekly window even when it fills fast (5 hour window only).
+    assert!(text.contains("▲ 5h full ~"), "{text}");
+    assert!(text.contains("(in 37m)"), "{text}");
+    // The weekly window needs at least 3 hours of samples: an hour of fast use is no forecast yet.
     let week = noble::store::UsageHistory::key("codex", "WEEK");
     app.usage_history = noble::store::UsageHistory::memory();
     app.usage_history.record(&week, now - 3600, 80);
     app.usage_history.record(&week, now, 92);
     let text = render(&mut app, 160, 45);
-    assert!(!text.contains("at this pace"), "{text}");
+    assert!(!text.contains("▲ week"), "{text}");
 }
 
 /// New release: a notice appears bottom right on the status bar's row, on every page and not only in a terminal,

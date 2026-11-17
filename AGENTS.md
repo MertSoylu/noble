@@ -348,6 +348,14 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `None`. `app/live.rs` schedules the requests (`request_home_live_data`) and handles `AppEvent::Ports` and
   `AppEvent::Pr`. Tests never run `gh`: `ai::isolated` turns it off in e2e, and headless apps have no `services`,
   so they send no request.
+- **Quota pace:** `pace.rs` is pure (history, window and `now` are arguments; the time zone is a parameter, tests use a
+  fixed offset). `rule(label)` maps a window label to its `Rule` (look-back, minimum span, length): `5H` looks back 2 h
+  (15 min of samples), `WEEK` and `OPUS` (every provider's 7-day window, as `ai::json::normalize_label` produces them)
+  24 h (3 h); other labels have no forecast. `forecasts` feeds Home's lines (`pace::line`, one row at any width, so
+  `ui/bridge.rs` `ai_height` counts them) and `App::warn_pace` (`app/quota.rs`, called from `on_fresh_usage` only when
+  quota data arrives; off with `warn_at = 0`). `quota_paced` keeps the reset time each warning was raised for;
+  `pace::warn_due` treats a reset time within `SAME_WINDOW_SLACK` as the same window. The gate is not persisted: a
+  restart inside the same window warns once more.
 - **Background Claude sessions:** `bg.rs` runs `claude agents --json --all` through `ai::run_command` (10 s) on a
   background thread (`AppEvent::BgSessions`) and keeps the `background` entries. `app/live.rs` asks for them only while
   Home is open, at most once a minute (every 3 minutes on battery), and only with a `claude` launcher. Any failure gives

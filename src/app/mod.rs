@@ -899,6 +899,8 @@ pub struct App {
     quota_warned: std::collections::HashSet<(String, String, Option<i64>)>,
     /// Quota windows past `warn_at` that have not reset yet: (provider id, window) → (provider name, reset time).
     quota_armed: std::collections::BTreeMap<(&'static str, String), (&'static str, i64)>,
+    /// The pace warning's gate: (provider id, window) → the reset time of the window it was raised for (`quota.rs`).
+    quota_paced: std::collections::BTreeMap<(&'static str, String), i64>,
     /// Send BEL once to the outer terminal (flashes the taskbar).
     pub outer_bell: bool,
     /// Text of the notification to forward to the outer terminal (OSC 9 / 777, see `outer`); taken by the frame loop.
@@ -1193,6 +1195,7 @@ impl App {
             battery_warned: 100,
             quota_warned: Default::default(),
             quota_armed: Default::default(),
+            quota_paced: Default::default(),
             outer_bell: false,
             outer_notice: None,
             outer_shown: Default::default(),
@@ -1350,8 +1353,9 @@ impl App {
         })
     }
 
-    /// New quota data: recorded in history, warns once per window over the threshold and arms the reset notice
-    /// of the windows over it (`quota.rs`).
+    /// New quota data: recorded in history, warns once per window over the threshold, warns once per window that
+    /// would fill before its reset at this pace, and arms the reset notice of the windows over the threshold
+    /// (`quota.rs`).
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
         let ts = state.fetched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -1363,7 +1367,9 @@ impl App {
         if limit == 0 {
             return;
         }
-        self.arm_quota_resets(state, &usage.windows, chrono::Utc::now().timestamp());
+        let now = chrono::Utc::now().timestamp();
+        self.arm_quota_resets(state, &usage.windows, now);
+        self.warn_pace(state, now);
         for w in &usage.windows {
             let key = (state.id.to_string(), w.label.clone(), w.resets_at);
             if w.used < limit || self.quota_warned.contains(&key) {

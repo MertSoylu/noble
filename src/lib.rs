@@ -13,6 +13,7 @@ pub mod event;
 pub mod hooks;
 pub mod keys;
 pub mod outer;
+pub mod pace;
 pub mod ports;
 pub mod pr;
 pub mod projects;

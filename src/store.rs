@@ -962,14 +962,23 @@ impl UsageHistory {
         }
     }
 
-    /// When the window fills at this pace (seconds): only while usage has been
-    /// rising for at least 15 minutes (since the window start or the last 2 hours).
-    pub fn pace_eta(&self, key: &str, window_start: i64, now: i64, used: u8) -> Option<u64> {
+    /// When the window fills at this pace (seconds from `now`): only while usage rose across at least `min_span`
+    /// seconds of samples taken since the window started and within the last `look_back` seconds. The window kind's
+    /// `pace::Rule` chooses both; `now` is passed in, never read.
+    pub fn pace_eta(
+        &self,
+        key: &str,
+        window_start: i64,
+        now: i64,
+        used: u8,
+        look_back: i64,
+        min_span: i64,
+    ) -> Option<u64> {
         let list = self.series.get(key)?;
-        let since = window_start.max(now.saturating_sub(2 * 3600));
+        let since = window_start.max(now.saturating_sub(look_back));
         let recent: Vec<&(i64, u8)> = list.iter().filter(|(t, _)| *t >= since && *t <= now).collect();
         let (&(t0, u0), &(t1, u1)) = (*recent.first()?, *recent.last()?);
-        if t1.saturating_sub(t0) < 15 * 60 || u1 <= u0 || used >= 100 {
+        if t1.saturating_sub(t0) < min_span || u1 <= u0 || used >= 100 {
             return None;
         }
         let per_sec = (u1 - u0) as f64 / t1.saturating_sub(t0) as f64;
@@ -1135,8 +1144,8 @@ mod tests {
         let mut p = UsageHistory::memory();
         p.record("c/5H", 10_000, 50);
         p.record("c/5H", 11_800, 60);
-        assert_eq!(p.pace_eta("c/5H", 9_000, 11_800, 60), Some(7_200));
-        assert_eq!(p.pace_eta("c/5H", 11_000, 11_800, 60), None, "only one sample in this window");
+        assert_eq!(p.pace_eta("c/5H", 9_000, 11_800, 60, 7_200, 900), Some(7_200));
+        assert_eq!(p.pace_eta("c/5H", 11_000, 11_800, 60, 7_200, 900), None, "only one sample in this window");
     }
 
     #[test]
@@ -1261,8 +1270,8 @@ mod tests {
             let mut h = UsageHistory::load(file.clone());
             h.file = None;
             let t = now();
-            let _ = h.pace_eta("claude/5h", t - 3600, t, 50);
-            let _ = h.pace_eta("claude/5h", i64::MIN, t, 99);
+            let _ = h.pace_eta("claude/5h", t - 3600, t, 50, 7_200, 900);
+            let _ = h.pace_eta("claude/5h", i64::MIN, t, 99, 7_200, 900);
             let _ = h.resample("claude/5h", t - 5 * 3600, t, 40);
             h.record("claude/5h", t, 30);
             // Startup and shutdown of the session merge on the same damaged file (they rewrite it).

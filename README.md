@@ -568,8 +568,13 @@ own token rotation). The last good numbers are cached and shown with `~` until t
 
 Only providers you are signed in to (and that have a quota plan) are shown. Quotas are fetched **only while
 the Home screen is open**: right away when you come back to it (if the last fetch is 30 s or older) and then every `refresh_minutes`. While you work
-in a terminal NOBLE makes no network calls. It also warns when, at the current pace, the 5-hour window would
-fill up before it resets.
+in a terminal NOBLE makes no network calls. It also forecasts the 5-hour and the weekly windows (7-day, including
+Claude's Opus allowance) from the usage history: when a window would fill up before it resets at the current pace, Home
+shows `▲ 5h full ~14:20 (in 1h20m) · resets 15:00` in local time (the line shortens on a narrow panel, and a weekly
+window names the day: `▲ week full ~Thu 10:02`). The 5-hour pace is the last 2 hours of use, the weekly pace the last 24
+hours, so a night's pause is part of it. When fresh numbers first show a window filling up before its reset, NOBLE
+raises one warning (`Claude Code 5h quota will run out ~14:20 at this pace`), once per window and provider; it is off
+with `warn_at = 0`, like the other quota warnings.
 
 The same cached numbers drive three more warnings, with no extra request: an agent whose quota is full (100%) gets a
 `⚠` on its launcher on Home, and launching it says when the quota resets (`resets in 1h12m`). An agent's pane title

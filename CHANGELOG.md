@@ -17,6 +17,16 @@ All notable changes to NOBLE are documented here. The format is based on
   arrows, the palette, the pane menu and the drag do the same, and every key can be rebound.
 - The pane menu groups these under Arrange panes ›, and Move to tab › lists a new tab and every other tab.
 
+- Quota pace forecast on Home's AI panel for the weekly window too (every provider's 7-day window, and Claude's Opus
+  allowance), shown only when it would fill before its reset. The 5-hour forecast uses the last 2 hours of use, the
+  weekly one the last 24 hours (at least 3 hours of samples).
+- A one-time warning when fresh quota numbers show a window filling up before its reset ("Claude Code 5h quota will run
+  out ~14:20 at this pace"), once per provider and window; `warn_at = 0` turns it off.
+
+### Changed
+- The pace line says when the window fills on the clock and when it resets: `▲ 5h full ~14:20 (in 1h20m) · resets
+  15:00`, shortened step by step on a narrow panel.
+
 ### Fixed
 - Focus mode: the top bar no longer comes up over the top panes' titles. It appears only while the pointer rests on
   the line between a title and the buttons, and goes away when the pointer reaches a title, so the titles of the top

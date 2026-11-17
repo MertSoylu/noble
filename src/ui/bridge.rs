@@ -985,7 +985,7 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, bg: usize) -> 
     for p in list {
         let rows = p.usage.as_ref().map(|u| u.windows.len().min(3) as u16).unwrap_or(1).max(1);
         let note = u16::from(matches!(p.status, Status::Error(_) | Status::Expired));
-        let pace = u16::from(pace_line(app, p).is_some());
+        let pace = pace_forecasts(app, p).len() as u16;
         h += 1 + rows + note + pace + 1;
     }
     h
@@ -995,19 +995,10 @@ fn reset_in(ts: i64) -> String {
     crate::ai::reset_in(ts, chrono::Utc::now().timestamp())
 }
 
-/// "At this pace 5h fills in 1h20m": the warning text shown when the 5 hour
-/// window would fill before it resets. No estimate is made for the weekly window.
-fn pace_line(app: &App, p: &ProviderState) -> Option<String> {
-    let u = p.usage.as_ref()?;
-    let now = chrono::Utc::now().timestamp();
-    let w = u.windows.iter().find(|w| w.label == "5H")?;
-    let reset = w.resets_at?;
-    let key = crate::store::UsageHistory::key(p.id, &w.label);
-    let eta = app.usage_history.pace_eta(&key, reset.saturating_sub(5 * 3600), now, w.used)?;
-    (now.saturating_add(eta.min(i64::MAX as u64) as i64) < reset).then(|| {
-        let name = crate::ai::window_name(&w.label);
-        format!("▲ {name} full in ~{} at this pace", util::fmt_duration(Duration::from_secs(eta)))
-    })
+/// Windows that would fill before they reset at the current pace (the 5-hour and the weekly ones), one line each
+/// (`pace::line`). The count is the same at every width, so `ai_height` can use it.
+fn pace_forecasts(app: &App, p: &ProviderState) -> Vec<crate::pace::Forecast> {
+    crate::pace::forecasts(&app.usage_history, p, chrono::Utc::now().timestamp())
 }
 
 /// Age of cached quota numbers ("~5m", "~2h"); `None` while they are fresh, missing or
@@ -1187,9 +1178,12 @@ fn ai_panel(
             hud::put(buf, x, y, &note, th.dim(), w);
             y += 1;
         }
-        if let Some(text) = pace_line(app, p)
-            && y < bottom
-        {
+        let now = chrono::Utc::now().timestamp();
+        for f in pace_forecasts(app, p) {
+            if y >= bottom {
+                break;
+            }
+            let text = crate::pace::line(&f, now, &chrono::Local, w as usize);
             hud::put(buf, x, y, &text, Style::default().fg(th.warn), w);
             y += 1;
         }
