@@ -30,8 +30,8 @@ impl App {
     }
 
     /// The time the clocks show: now, or the fixed `clock` of the screenshots.
-    pub fn now(&self) -> chrono::DateTime<chrono::Local> {
-        self.clock.unwrap_or_else(chrono::Local::now)
+    pub fn now(&self) -> jiff::Zoned {
+        self.clock.clone().unwrap_or_else(jiff::Zoned::now)
     }
 
     /// Whether a text field's cursor is drawn now: it blinks every 500 ms, and like the

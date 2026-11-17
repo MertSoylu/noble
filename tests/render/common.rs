@@ -177,7 +177,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
                 behind: 0,
                 branch: Some("main".into()),
                 last_subject: Some("feat: HUD bridge".into()),
-                last_commit: Some(chrono::Utc::now().timestamp() - 7200),
+                last_commit: Some(noble::util::unix_now() - 7200),
                 commits: [
                     ("a1b2c3d", 7200, "feat: HUD bridge"),
                     ("9f8e7d6", 5 * 3600, "fix: hover buttons no longer leak text"),
@@ -187,7 +187,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
                 .iter()
                 .map(|(h, ago, s)| noble::projects::Commit {
                     hash: h.to_string(),
-                    time: chrono::Utc::now().timestamp() - ago,
+                    time: noble::util::unix_now() - ago,
                     author: "Mert".into(),
                     subject: s.to_string(),
                 })
@@ -205,7 +205,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
         mk("Noble", "main", 60 * 5, Some(GitInfo { dirty: 54, ..Default::default() })),
         mk("scratch", "dev", 60 * 24 * 40, None),
     ]));
-    let reset = chrono::Utc::now().timestamp() + 2 * 3600 + 14 * 60;
+    let reset = noble::util::unix_now() + 2 * 3600 + 14 * 60;
     let states = vec![
         ProviderState {
             id: "claude",
@@ -221,7 +221,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
                 plan: Some("MAX".into()),
                 note: None,
             }),
-            fetched_at: Some(chrono::Utc::now().timestamp() - 120),
+            fetched_at: Some(noble::util::unix_now() - 120),
         },
         ProviderState {
             id: "codex",
@@ -237,7 +237,7 @@ pub(crate) fn demo_app(w: u16, h: u16) -> App {
                 plan: Some("PLUS".into()),
                 note: None,
             }),
-            fetched_at: Some(chrono::Utc::now().timestamp() - 3600),
+            fetched_at: Some(noble::util::unix_now() - 3600),
         },
     ];
     for s in states {
@@ -482,8 +482,7 @@ pub(crate) fn set_power(app: &mut App, plugged: bool) {
 
 /// Nothing asks for fast frames: only the top bar's clock (once a minute) and the like.
 pub(crate) fn idle_redraw(app: &App) -> bool {
-    use chrono::Timelike;
-    app.redraw_after().is_none_or(|d| d > Duration::from_millis(150)) || chrono::Local::now().second() == 59
+    app.redraw_after().is_none_or(|d| d > Duration::from_millis(150)) || jiff::Zoned::now().second() == 59
 }
 
 pub(crate) const SPIN: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";

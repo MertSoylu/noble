@@ -567,7 +567,7 @@ mod tests {
     fn the_list_holds_the_agents_that_need_you_and_follows_the_records() {
         use crate::hooks::{PERMISSION_REQUEST, PROMPT, STOP};
         let (mut app, panes) = app_with_agents(3);
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let mut ask = rec(PERMISSION_REQUEST, Some("Claude asks to run Bash"), None);
         ask.ts = now - 120;
         let mut late = rec(PERMISSION_REQUEST, Some("Claude asks to run Edit"), None);
@@ -594,7 +594,7 @@ mod tests {
     fn the_selection_stays_sensible_when_the_selected_agent_stops_waiting() {
         use crate::hooks::{PERMISSION_REQUEST, STOP};
         let (mut app, panes) = app_with_agents(3);
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let at = |secs: i64| {
             let mut r = rec(PERMISSION_REQUEST, Some("Claude asks to run Bash"), None);
             r.ts = now - secs;
@@ -632,7 +632,7 @@ mod tests {
     fn enter_goes_to_the_selected_pane() {
         use crate::hooks::PERMISSION_REQUEST;
         let (mut app, panes) = app_with_agents(2);
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let mut r = rec(PERMISSION_REQUEST, Some("Claude asks to run Bash"), None);
         r.ts = now - 5;
         records(&mut app, vec![(panes[0], r)]);
@@ -650,7 +650,7 @@ mod tests {
     fn no_quick_answer_without_a_dialog_on_the_screen() {
         use crate::hooks::PERMISSION_REQUEST;
         let (mut app, panes) = app_with_agents(1);
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let mut r = rec(PERMISSION_REQUEST, Some("Claude asks to run Bash"), None);
         r.ts = now - 5;
         records(&mut app, vec![(panes[0], r)]);
@@ -670,7 +670,7 @@ mod tests {
     fn the_screen_and_the_record_must_both_say_permission_prompt() {
         use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST};
         let (mut app, panes) = app_with_agents(3);
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let dialog: &[u8] =
             b"Do you want to proceed?\r\n\x1b[36m\xe2\x9d\xaf 1. Yes\x1b[m\r\n  2. No, and tell Claude what to do differently\r\n";
         for p in &panes {

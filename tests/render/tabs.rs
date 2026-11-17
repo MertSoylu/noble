@@ -335,7 +335,7 @@ fn tab_strip_shows_agent_dots() {
     for (tab, name) in app.tabs.iter_mut().zip(["first", "second", "third"]) {
         tab.name = Some(name.into());
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     // Tab 1: one pane finished and one needs you, so ◆. Tab 2: working.
     app.view = View::Term(2);
     app.take_dirty();

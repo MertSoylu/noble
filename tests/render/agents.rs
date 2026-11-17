@@ -22,7 +22,7 @@ fn claude_hook_states_drive_sessions() {
     let rec = |event: &str, msg: Option<&str>| HookRecord {
         event: event.into(),
         message: msg.map(str::to_string),
-        ts: chrono::Utc::now().timestamp(),
+        ts: noble::util::unix_now(),
         agent: None,
         session: None,
         subagents: 0,
@@ -71,7 +71,7 @@ fn an_answer_typed_in_a_claude_pane_reads_as_working() {
     wait_idle(&mut app, pane);
     std::thread::sleep(Duration::from_millis(1100));
     assert_eq!(app.view, View::Term(0));
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     app.apply_hook_records([(pane, hook_rec(PERMISSION_REQUEST, now, 0))].into());
     assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
     app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
@@ -105,7 +105,7 @@ fn claude_subagents_keep_the_session_working() {
     let pane = app.tabs[0].focus;
     app.run(Action::Bridge);
     app.toasts.clear();
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let rec = |event: &str, ts: i64, subagents: usize| HookRecord {
         event: event.into(),
         message: (event == "notification").then(|| "Claude needs your permission to use Bash".into()),
@@ -365,7 +365,7 @@ fn agent_state_change_marks_the_frame_dirty() {
         session: None,
         subagents: 0,
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
 
     // In the terminal the state shows in the pane title and the tab's dot.
     app.take_dirty();
@@ -406,7 +406,7 @@ fn pane_title_shows_the_agent_state() {
     render(&mut app, 110, 30);
     assert!(idle_redraw(&app), "{:?}", app.redraw_after());
 
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     app.take_dirty();
     app.apply_hook_records([(pane, hook_rec("prompt", now - 125, 2))].into());
     assert!(app.take_dirty(), "a changed state in the visible tab asks for a frame");
@@ -502,7 +502,7 @@ fn jump_to_waiting_agent() {
     assert_ne!(other, b);
     app.run(Action::Zoom);
     assert!(app.tabs[1].zoomed);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let recs = |x: &str, y: &str| -> std::collections::HashMap<_, _> {
         [(a, hook_rec(x, now, 0)), (b, hook_rec(y, now, 0))].into()
     };
@@ -589,7 +589,7 @@ fn permission_request_and_failed_turn() {
     let rec = |event: &str, message: Option<&str>| HookRecord {
         event: event.into(),
         message: message.map(str::to_string),
-        ts: chrono::Utc::now().timestamp(),
+        ts: noble::util::unix_now(),
         agent: None,
         session: None,
         subagents: 0,
@@ -634,7 +634,7 @@ fn another_agents_record_shows_under_its_name() {
     let record = HookRecord {
         event: "notification".into(),
         message: Some("Codex needs your approval".into()),
-        ts: chrono::Utc::now().timestamp(),
+        ts: noble::util::unix_now(),
         agent: Some(Agent::Codex),
         session: None,
         subagents: 0,

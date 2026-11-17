@@ -33,7 +33,6 @@ impl App {
     /// loading indicator, notification timeout… `None`: never changes.
     /// The main loop draws only when that moment arrives (or an event fires).
     pub fn redraw_after(&self) -> Option<Duration> {
-        use chrono::Timelike;
         if self.moving() {
             return Some(Duration::from_millis(16));
         }
@@ -43,14 +42,14 @@ impl App {
         if let Some(d) = self.fx.next_frame() {
             want(d);
         }
-        let now = chrono::Local::now();
-        let into_sec = now.timestamp_subsec_millis().min(999) as u64;
+        let now = jiff::Zoned::now();
+        let into_sec = now.millisecond().clamp(0, 999) as u64;
         let to_second = Duration::from_millis(1000 - into_sec + 5);
         match self.view {
             // Home: seconds of the big clock and its two blinking dots (absent on battery).
             View::Bridge if self.live_clock() => want(to_second),
             // On other screens only HH:MM in the top strip.
-            _ => want(to_second + Duration::from_secs(59 - now.second().min(59) as u64)),
+            _ => want(to_second + Duration::from_secs(59 - now.second().clamp(0, 59) as u64)),
         }
         let loading = match self.view {
             View::Bridge => {
@@ -117,14 +116,14 @@ impl App {
         if self.agent_spinning() {
             want(Duration::from_millis(crate::ui::hud::AGENT_SPIN_MS));
         }
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::util::unix_now_ms();
         for since in self.visible_panes().into_iter().filter_map(|p| self.agent_badge(p)?.working_since) {
             let into_minute = (now_ms - since * 1000).rem_euclid(60_000) as u64;
             want(Duration::from_millis(60_000 - into_minute + 5));
         }
         // The Agent Inbox's waiting times change once a minute.
         if matches!(self.overlay, Some(Overlay::Inbox(_))) {
-            let now_s = chrono::Utc::now().timestamp_millis();
+            let now_s = crate::util::unix_now_ms();
             for since in self.inbox_items().iter().filter_map(|i| i.since) {
                 let into_minute = (now_s - since * 1000).rem_euclid(60_000) as u64;
                 want(Duration::from_millis(60_000 - into_minute + 5));

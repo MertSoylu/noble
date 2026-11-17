@@ -84,7 +84,7 @@ pub(super) fn draw(buf: &mut Buffer, area: Rect, app: &App, st: &InboxState, hit
     let (list_h, preview_h) = rows_for(inner.height, n);
     let offset = (at + 1).saturating_sub(list_h);
     let glide = app.fx.glide("agent-inbox", at);
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::util::unix_now();
     for (row, (i, item)) in items.iter().enumerate().skip(offset).take(list_h).enumerate() {
         let y = inner.y + row as u16;
         let line = Rect::new(inner.x, y, inner.width, 1);

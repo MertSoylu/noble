@@ -590,7 +590,7 @@ fn restored_agent_pane_resumes_its_conversation() {
     assert!(wait(&mut app, "claude --model opus"), "the launcher never ran");
     // The agent's session-start record reports its conversation id.
     let id = app.tabs[0].panes()[0];
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let record = noble::hooks::HookRecord {
         event: noble::hooks::SESSION_START.into(),
         message: None,

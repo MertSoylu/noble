@@ -19,7 +19,7 @@ impl App {
             ToastLevel::Warn => Some(Duration::from_secs(4)),
             _ => Some(Duration::from_secs(3)),
         };
-        self.notices.push_back(Notice { text: text.clone(), level, at: chrono::Local::now(), target: target.clone() });
+        self.notices.push_back(Notice { text: text.clone(), level, at: jiff::Zoned::now(), target: target.clone() });
         while self.notices.len() > NOTICE_HISTORY {
             self.notices.pop_front();
         }
@@ -216,7 +216,7 @@ impl App {
         }
         let latest = self.ui_state.data.update_latest.clone();
         self.set_latest_version(&latest);
-        let age = chrono::Utc::now().timestamp().saturating_sub(self.ui_state.data.update_checked);
+        let age = crate::util::unix_now().saturating_sub(self.ui_state.data.update_checked);
         let wait = (crate::update::CHECK_INTERVAL - age).clamp(0, crate::update::CHECK_INTERVAL);
         self.next_update_check = Some(Instant::now() + Duration::from_secs(wait as u64));
     }

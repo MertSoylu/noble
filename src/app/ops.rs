@@ -1121,7 +1121,7 @@ impl App {
     pub fn snapshot(&self, name: &str) -> Workspace {
         Workspace {
             name: name.to_string(),
-            saved_at: chrono::Utc::now().timestamp(),
+            saved_at: crate::util::unix_now(),
             tabs: self.tabs.iter().map(|t| self.saved_tab(t)).collect(),
             extra: Default::default(),
         }

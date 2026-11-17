@@ -32,11 +32,15 @@ pub fn reset_at(v: &Value, keys: &[&str]) -> Option<i64> {
     for key in keys {
         match obj.get(*key) {
             Some(Value::String(s)) if !s.is_empty() => {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                    return Some(dt.timestamp());
+                // An instant with an offset ("Z" or "+02:00"); an annotation like `[Europe/Paris]` is not RFC 3339.
+                if !s.contains('[')
+                    && let Ok(t) = s.parse::<jiff::Timestamp>()
+                {
+                    return Some(t.as_second());
                 }
-                if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                    return d.and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp());
+                // A bare date is midnight UTC.
+                if let Ok(d) = s.parse::<jiff::civil::Date>() {
+                    return d.to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_second());
                 }
                 if let Ok(n) = s.parse::<f64>() {
                     return Some(unix(n, key));
@@ -181,10 +185,7 @@ mod tests {
     fn window_shapes() {
         let w = window_from(&json!({"utilization": 71.4, "resets_at": "2026-09-22T18:00:00Z"}), "5H").unwrap();
         assert_eq!(w.used, 71);
-        assert_eq!(
-            w.resets_at,
-            Some(chrono::DateTime::parse_from_rfc3339("2026-09-22T18:00:00Z").unwrap().timestamp())
-        );
+        assert_eq!(w.resets_at, Some("2026-09-22T18:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second()));
         let w = window_from(&json!({"usedPercent": 18, "windowDurationMins": 300, "resetsAt": 1_779_459_394}), "X")
             .unwrap();
         assert_eq!((w.label.as_str(), w.used, w.resets_at), ("5H", 18, Some(1_779_459_394)));

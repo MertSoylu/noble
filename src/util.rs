@@ -6,6 +6,16 @@ use std::time::Duration;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Now as unix seconds (the format every stored timestamp uses).
+pub fn unix_now() -> i64 {
+    jiff::Timestamp::now().as_second()
+}
+
+/// Now as unix milliseconds.
+pub fn unix_now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
+}
+
 /// Is this a dev install: `install.cmd` / `install.sh` install the binary as `noble-dev` so it
 /// runs side by side with the stable `noble`.
 pub fn is_dev_build() -> bool {

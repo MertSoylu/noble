@@ -784,7 +784,7 @@ pub fn spawn(
                 let Ok((i, result)) = res_rx.recv_timeout(left) else { break };
                 pending -= 1;
                 let def = &defs[i];
-                let now = chrono::Utc::now().timestamp();
+                let now = crate::util::unix_now();
                 let cached = cache.get(def.id).cloned();
                 let state = match result {
                     Ok(usage) => {

@@ -368,7 +368,7 @@ pub fn create(plan: &Plan) -> Result<DuelRecord, String> {
         base,
         base_branch,
         prompt: plan.prompt.clone(),
-        created: chrono::Utc::now().timestamp(),
+        created: crate::util::unix_now(),
         a: side(Side::A, &plan.a),
         b: side(Side::B, &plan.b),
         extra: Default::default(),

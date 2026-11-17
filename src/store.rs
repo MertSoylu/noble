@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::term::layout::SavedNode;
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    crate::util::unix_now()
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {

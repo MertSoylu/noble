@@ -26,11 +26,12 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 # Wayland: data-control protocol, falling back to X11 (XWayland).
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
-chrono = "0.4.45"
 crossterm = "0.29.0"
 dirs = "7.0.0"
 # Trait downcasts of the vendored PTY layer (`src/pty`); already in the tree through wayland-backend, so no new crate.
 downcast-rs = "2.0.2"
+# Local time and unix-second arithmetic (formatting, RFC 3339 parsing); finds the system zone on Windows, Linux and macOS.
+jiff = "0.2.39"
 # itoa and vte are the dependencies of the vendored vt100 emulator (`src/vt100`); vte/std as upstream enabled it.
 itoa = "1.0.18"
 # Warnings and errors of the vendored PTY layer (`src/pty`); already in the tree, and NOBLE installs no logger.
