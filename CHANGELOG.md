@@ -7,6 +7,12 @@ All notable changes to NOBLE are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Agent Inbox (prefix `I`, palette: Agent Inbox, `agent_inbox` in the key bindings): one overlay that lists every agent
+  across all tabs that needs you, longest wait first, with its tab and project, what it asks and how long it has
+  waited. The selected row previews the last lines of that pane's screen. `↑↓` select, `⏎` goes to the pane, `esc`
+  closes; rows and Home's `◆ N need you` chips are clickable. A Claude Code permission prompt that the pane still
+  shows can be answered from the inbox with `y` / `n`: NOBLE types the option number the dialog shows, only when the
+  record and the screen both say permission prompt. Every other agent and question is jump only.
 - Rearranging panes. Drag a pane's title: onto the middle of another pane to swap the two, onto its outer quarter to
   go next to it on that side, onto the outermost cells of the window to run along that whole edge, onto another tab of
   the strip to move the pane into it (a pane alone in its tab takes the tab along), or onto `+` for a new tab. The

@@ -10,6 +10,7 @@ mod focus;
 pub mod fx;
 mod git;
 pub mod help;
+pub mod inbox;
 mod input;
 mod live;
 mod menu;
@@ -48,6 +49,7 @@ use crate::theme::Theme;
 pub use arrange::PaneDrop;
 pub use bindings::BindingsState;
 pub use help::HelpState;
+pub use inbox::{InboxItem, InboxState, PermissionOptions, QuickAnswer};
 pub use live::PrEntry;
 pub use menu::{Menu, MenuCmd, MenuItem, ProjectAct};
 pub use palette::{PaletteCmd, PaletteItem, PaletteState};
@@ -330,6 +332,8 @@ pub enum Overlay {
     Help(HelpState),
     /// The key bindings editor (Settings → Key bindings).
     Bindings(BindingsState),
+    /// The Agent Inbox: every agent that needs you, with a preview of its pane (`app/inbox.rs`).
+    Inbox(InboxState),
     Confirm(Confirm),
     Prompt(Prompt),
 }
@@ -518,6 +522,13 @@ pub enum Hit {
     Port(u16),
     /// A notification (by its `Toast::id`): a click dismisses it, and runs its `ToastTarget`.
     Toast(u64),
+    /// Home's "◆ N need you" chips: open the Agent Inbox (as `Action::AgentInbox`).
+    Inbox,
+    /// A row of the Agent Inbox, by its pane (the list changes as records arrive, so a row is not an index): the
+    /// first click selects it, a click on the selected row goes to the pane.
+    InboxRow(PaneId),
+    /// A quick answer chip of the Agent Inbox's selected row.
+    InboxAnswer(QuickAnswer),
 }
 
 pub(crate) enum Drag {

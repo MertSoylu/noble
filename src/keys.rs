@@ -296,6 +296,7 @@ pub enum Action {
     DismissUpdate,
     Passthrough,
     JumpToAgent,
+    AgentInbox,
     OpenLink,
     EnableHooks,
     DismissHooksOffer,
@@ -308,7 +309,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 79] = [
         Action::Bridge,
         Action::System,
         Action::Settings,
@@ -378,6 +379,7 @@ impl Action {
         Action::DismissUpdate,
         Action::Passthrough,
         Action::JumpToAgent,
+        Action::AgentInbox,
         Action::OpenLink,
         Action::EnableHooks,
         Action::DismissHooksOffer,
@@ -454,6 +456,7 @@ impl Action {
                     Action::DismissUpdate => "dismiss_update",
                     Action::Passthrough => "passthrough",
                     Action::JumpToAgent => "jump_to_agent",
+                    Action::AgentInbox => "agent_inbox",
                     Action::OpenLink => "open_link",
                     Action::EnableHooks => "enable_hooks",
                     Action::DismissHooksOffer => "dismiss_hooks_offer",
@@ -539,6 +542,7 @@ impl Action {
             Action::DismissUpdate => "Dismiss Update Notice".into(),
             Action::Passthrough => "Pass Keys to the App".into(),
             Action::JumpToAgent => "Jump to Waiting Agent".into(),
+            Action::AgentInbox => "Agent Inbox".into(),
             Action::OpenLink => "Open Link on Screen".into(),
             Action::EnableHooks => "Enable Agent Status Hooks".into(),
             Action::DismissHooksOffer => "Dismiss Agent Status Offer".into(),
@@ -559,7 +563,8 @@ impl Action {
             | Action::Settings
             | Action::Palette
             | Action::Help
-            | Action::JumpToAgent => "NAV",
+            | Action::JumpToAgent
+            | Action::AgentInbox => "NAV",
             Action::NewTab
             | Action::CloseTab
             | Action::ReopenTab
@@ -697,6 +702,7 @@ pub fn default_prefix_bindings() -> Vec<(Chord, Action)> {
         (c("f"), Action::FocusMode),
         (c("i"), Action::Passthrough),
         (c("a"), Action::JumpToAgent),
+        (c("I"), Action::AgentInbox),
         (c("u"), Action::OpenLink),
         (c("y"), Action::SendLastOutput),
     ];

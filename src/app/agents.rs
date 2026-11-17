@@ -37,7 +37,7 @@ fn same_prompt(old: &crate::hooks::HookRecord, new: &crate::hooks::HookRecord) -
 /// working: Claude sends no event for an answer, so the record still says "needs you" until its next event. The
 /// question's own records were written before the answer (its permission request and its notification, in either
 /// order) and the next question comes after it, so only a "needs you" record at or before the answer is masked.
-fn shown_state(rec: &crate::hooks::HookRecord, answered: Option<i64>) -> Option<AgentState> {
+pub(super) fn shown_state(rec: &crate::hooks::HookRecord, answered: Option<i64>) -> Option<AgentState> {
     match hook_state(rec)? {
         AgentState::NeedsYou if answered.is_some_and(|at| rec.ts <= at) => Some(AgentState::Working),
         state => Some(state),
