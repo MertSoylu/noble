@@ -322,6 +322,20 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `~/.copilot`, `~/.config/opencode`, `~/.gemini` or `~/.cursor`, so e2e sets `NOBLE_NO_SYSTEM_INTEGRATIONS`
   (`ai::isolated`), which turns off every agent's settings path (`settings_path` returns None) and AI credential
   detection.
+- **Agent duel:** `duel.rs` holds everything that is not UI: ids, branch names (`noble/duel-<id>-a|b`) and folders
+  (`<data>/duels/<project>-<id>/a|b`, never inside the repository), `prompt_form` (the agents with a verified way to
+  start with a first prompt: claude and codex positional, copilot `-i`, opencode `--prompt`; an agent is added only
+  when its form is known, never guessed), `launch_line` (the task as one word quoted by `ShellSpec::command_with_arg`,
+  so cmd.exe refuses `"`, `%`, `!` and line breaks and the form says so), and the blocking git work (`create`,
+  `compare`, `dirty_counts`, `end`). That work runs through `projects::git_checked` (the `git_run` rules, plus the exit
+  status and git's error line, `ai::run_command_checked`) on one background thread per request, and the answer comes
+  back as `AppEvent::Duel(DuelEvent)`. `create` never reuses or deletes a branch that exists. Records live in
+  `UiStateData::duels` (`store::DuelRecord`, `extra` kept) until End succeeds; `app/duel.rs` holds the form, compare
+  and end states (`Overlay::Duel(DuelView)`, `Hit::Duel(DuelHit)`), `ui/duel.rs` draws them. A duel tab is found
+  from its panes' folders (`duel_of_tab`), so it works after a session restore; its panes keep the plain launcher, so a
+  restore starts the agent again without the task. End asks git for uncommitted changes first, closes the duel's panes
+  only when nothing is lost or the user pressed `f`, then removes the worktrees (Windows retries a closed pane's
+  folder for a few seconds); branches are deleted only when the user picked them.
 - **cmd.exe commands:** the command is passed through the `NOBLE_LAUNCH` environment variable, not as an
   argument (`cmd /K %NOBLE_LAUNCH%`); the vendored pty's (`src/pty/cmdbuilder.rs`) `\"` escaping breaks quoted
   paths in cmd.

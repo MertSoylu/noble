@@ -87,6 +87,11 @@ impl App {
                 p.insert(text.lines().next().unwrap_or(""));
                 return;
             }
+            // The duel's task is the one field that takes a paste of several lines.
+            Some(Overlay::Duel(_)) => {
+                self.duel_paste(text);
+                return;
+            }
             Some(_) => return,
             None => {}
         }
@@ -515,6 +520,7 @@ impl App {
                 _ => true,
             },
             Overlay::Bindings(st) => self.bindings_key(st, k),
+            Overlay::Duel(view) => self.duel_key(view, k),
             Overlay::Confirm(_) => match k.code {
                 // Enter is deliberately not "yes": these dialogs guard destructive actions, so only y confirms.
                 KeyCode::Char('y' | 'Y') => {
@@ -1086,6 +1092,7 @@ impl App {
                 }
             }
             Hit::Toast(id) => self.toast_clicked(id),
+            Hit::Duel(h) => self.duel_click(h),
             Hit::Port(port) => self.open_link(crate::term::link::Link::Url(format!("http://localhost:{port}"))),
             Hit::TabClose(i) => self.request_close_tab(i),
             Hit::NewTab => self.run(Action::NewTab),

@@ -9,6 +9,7 @@ pub mod bg;
 pub mod clipboard;
 pub mod config;
 pub mod doctor;
+pub mod duel;
 pub mod event;
 pub mod hooks;
 pub mod keys;

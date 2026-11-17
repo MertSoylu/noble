@@ -547,13 +547,29 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// `overrides` are the `-c` settings from [`repo_program_overrides`]. `None` on failure or timeout;
 /// stdout is capped by `ai::run_command`.
 fn git_run(path: &Path, git: &Path, overrides: &[String], args: &[&str]) -> Option<String> {
+    crate::ai::run_command(git_command(path, git, overrides, args), GIT_TIMEOUT).ok()
+}
+
+/// The command `git_run` and `git_checked` start: no optional locks, no prompts, the `-c` overrides first.
+fn git_command(path: &Path, git: &Path, overrides: &[String], args: &[&str]) -> std::process::Command {
     let mut cmd = util::command_for(git);
     cmd.arg("--no-optional-locks");
     for setting in overrides {
         cmd.arg("-c").arg(setting);
     }
     cmd.arg("-C").arg(path).args(args).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0");
-    crate::ai::run_command(cmd, GIT_TIMEOUT).ok()
+    cmd
+}
+
+/// A background `git -C <path> <args>` whose exit status counts: its stdout, or the reason it failed (git's first
+/// error line, "timeout", or why there was no git). For the agent duel (`duel.rs`), which creates and removes
+/// worktrees and has to tell the user why that did not work. It runs like every background git: the repository's own
+/// programs are switched off (`repo_program_overrides`), and nothing runs when its config cannot be read. Call it
+/// from a background thread only (it waits for git, up to `timeout`: a checkout of a big repository takes a while).
+pub fn git_checked(path: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+    let git = util::which("git").filter(|g| git_is_real(g)).ok_or("git is not installed")?;
+    let overrides = repo_program_overrides(path, &git).ok_or("the repository's git config cannot be read")?;
+    crate::ai::run_command_checked(git_command(path, &git, &overrides, args), timeout)
 }
 
 /// `git -c` settings that stop a background git from running programs the repository names itself: the

@@ -425,7 +425,8 @@ move_pane_to_tab focus_left focus_right focus_up focus_down focus_next
 resize_left resize_right resize_up resize_down pane_menu palette help quit reload_config open_config cycle_theme
 refresh_ai rescan_projects rename_tab save_workspace scroll_up scroll_down search focus_mode add_project_folder add_project
 remove_project send_prefix passthrough jump_to_agent open_link update dismiss_update enable_hooks
-dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output`.
+dismiss_hooks_offer notifications prev_command next_command copy_last_output send_last_output start_duel compare_duel
+end_duel`.
 
 </details>
 
@@ -464,6 +465,21 @@ Enter, which submits.
   output (at most 400 lines and 64 KiB), into the agent pane of the same tab (or else the one last sent to), led by a
   context line such as `~/app $ cargo test → exit 101`. It is pasted, never run: read it, then press ⏎ yourself. A multi-line paste into a
   shell that has not enabled bracketed paste asks first.
+- **Agent duel:** the same task for two agents, side by side, then compare. **Start Agent Duel…** (palette, or ⋯ →
+  Start agent duel… on a git project) asks for two agents (the same one twice is fine) and the task. NOBLE then
+  creates two git worktrees from the project's current HEAD, on the branches `noble/duel-<id>-a` and `-b`, in its own
+  data folder (`duels/<project>-<id>/a` and `b`, never inside the repository), and opens a tab `⚔ duel <id>` with the
+  agents in two panes, each in its worktree with the task as its first prompt. The agents offered are the installed
+  quick launchers whose command line takes a first prompt in a documented form: Claude Code (`claude "task"`), Codex
+  (`codex "task"`), GitHub Copilot (`copilot -i "task"`) and OpenCode (`opencode --prompt "task"`). An agent whose form
+  is not known is left out rather than guessed at. The task reaches the agent as one quoted word in every shell
+  (cmd.exe cannot quote line breaks, `"`, `%` or `!`, and the form says so). **Compare Agent Duel** lists, for each
+  side, the files it changed with their added and removed lines (commits, uncommitted edits and new files alike), and
+  the `git` commands that inspect it or merge its branch; NOBLE never merges, commits or pushes. **End Agent Duel…**
+  closes the duel's panes and removes both worktrees, asking first when one holds uncommitted changes (only the `f`
+  key then forces the removal), and keeps both branches unless you pick one to delete as well. Duels are remembered
+  in `state.json`, so Compare and End work after a restart; a restored duel pane starts its agent again without the
+  task.
 - **Progress:** a program's progress report (OSC 9;4, which Claude Code sends) shows in the pane title as `42%`, a
   spinner, `✗` on an error or `‖` when paused, and as a busy dot on the tab.
 - **Background Claude sessions:** `claude --bg` sessions are listed in Home's AI usage panel, and a click attaches to

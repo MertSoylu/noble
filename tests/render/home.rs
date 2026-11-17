@@ -778,12 +778,13 @@ fn project_menu_groups_launchers_and_rules() {
             "Open folder",
             "Copy path",
             "Git pull",
+            "Start agent duel…",
             "Pin to top",
             "Remove from list"
         ]
     );
     let seps: Vec<bool> = items.iter().map(|i| i.sep).collect();
-    assert_eq!(seps, [false, false, true, false, false, true, true, false]);
+    assert_eq!(seps, [false, false, true, false, false, true, false, true, false]);
     assert_eq!(items[1].cmd, MenuCmd::StartMenu(path.clone()));
     let dangers: Vec<&str> = items.iter().filter(|i| i.danger).map(|i| i.label.as_str()).collect();
     assert_eq!(dangers, ["Remove from list"]);
@@ -804,18 +805,18 @@ fn project_menu_groups_launchers_and_rules() {
             }
         }
     }
-    let remove = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    let remove = find_hit(&app, |h| *h == Hit::MenuItem(8)).unwrap();
     assert_eq!(buf[(remove.x + 2, remove.y)].fg, app.theme.crit, "the removal is in the critical color");
     let copy = find_hit(&app, |h| *h == Hit::MenuItem(4)).unwrap();
     assert_ne!(buf[(copy.x + 2, copy.y)].fg, app.theme.crit, "a plain item keeps the text color");
 
-    // Seven steps from the first item reach the last one (the rules are no steps), and one more wraps round.
+    // Eight steps from the first item reach the last one (the rules are no steps), and one more wraps round.
     let key = |app: &mut App, c: KeyCode| app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
-    for _ in 0..7 {
+    for _ in 0..8 {
         key(&mut app, KeyCode::Down);
     }
     let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
-    assert_eq!(m.selected, 7);
+    assert_eq!(m.selected, 8);
     key(&mut app, KeyCode::Down);
     let Some(Overlay::Menu(m)) = &app.overlay else { panic!("menu closed") };
     assert_eq!(m.selected, 0);
@@ -846,20 +847,26 @@ fn project_menu_groups_launchers_and_rules() {
 /// launchers that are hidden on Home do not count.
 #[test]
 fn project_menu_keeps_few_launchers_inline() {
-    use noble::app::Hit;
+    use noble::app::{Hit, MenuCmd};
     let mut app = demo_app(110, 30);
     app.launchers = vec![quick_launcher("c", "claude", true), quick_launcher("x", "codex", true)];
     app.launchers.push(quick_launcher("e", "opencode", false));
     app.launchers.push(quick_launcher("i", "copilot", false));
     let items = open_first_project_menu(&mut app);
-    let starts: Vec<(&str, &str)> =
-        items.iter().filter(|i| i.label.starts_with("Start")).map(|i| (i.label.as_str(), i.hint.as_str())).collect();
-    assert_eq!(starts, [("Start claude", "c"), ("Start codex", "x")]);
+    // (The agent duel row is no launcher: it has its own test.)
+    let launchers = |items: &[noble::app::MenuItem]| -> Vec<(String, String)> {
+        let plain = items.iter().filter(|i| !matches!(i.cmd, MenuCmd::StartDuel(_)));
+        plain.filter(|i| i.label.starts_with("Start")).map(|i| (i.label.clone(), i.hint.clone())).collect()
+    };
+    assert_eq!(
+        launchers(&items),
+        [("Start claude".to_string(), "c".to_string()), ("Start codex".to_string(), "x".to_string())]
+    );
     assert!(!items.iter().any(|i| i.label.contains("agent ›")), "no list row for two launchers");
     // Three shown is still inline (the list starts above three).
     app.launchers.push(quick_launcher("o", "pi", true));
     let items = open_first_project_menu(&mut app);
-    assert_eq!(items.iter().filter(|i| i.label.starts_with("Start ")).count(), 3);
+    assert_eq!(launchers(&items).len(), 3);
     assert!(!items.iter().any(|i| i.label.contains("agent ›")));
     // The menu's rows still hit their items.
     render(&mut app, 110, 30);
@@ -881,11 +888,11 @@ fn project_menu_near_the_bottom_fits_with_its_rules() {
     assert!(frame.bottom() <= 30, "the frame stays on the screen: {frame:?}");
     let rules = (frame.y + 1..frame.bottom() - 1).filter(|&y| buf[(frame.x + 1, y)].symbol() == "─").count();
     assert_eq!(rules, 3, "one rule above each of the three groups' first items");
-    for i in 0..8 {
+    for i in 0..9 {
         let row = find_hit(&app, |h| *h == Hit::MenuItem(i)).unwrap_or_else(|| panic!("row {i} is drawn"));
         assert!(row.y > frame.y && row.bottom() < frame.bottom(), "row {i} sits inside the frame");
     }
-    let last = find_hit(&app, |h| *h == Hit::MenuItem(7)).unwrap();
+    let last = find_hit(&app, |h| *h == Hit::MenuItem(8)).unwrap();
     assert_eq!(last.y + 1, frame.bottom() - 1, "the removal is the last row, above the bottom border");
     for (w, h) in SIZES {
         save(&format!("menu-project-rules-{w}x{h}"), &render(&mut app, w, h));
