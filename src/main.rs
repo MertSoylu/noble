@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
         } else {
             // At the hard cap nothing more is appended: a run that panics in a loop cannot fill the disk.
             let thread = std::thread::current().name().unwrap_or("?").to_string();
-            let line = format!("[{}] panic in thread '{thread}': {info}", chrono::Local::now().format("%F %T"));
+            let line = format!("[{}] panic in thread '{thread}': {info}", jiff::Zoned::now().strftime("%F %T"));
             noble::util::append_log_line(&log_file, LOG_HARD_CAP, &line);
         }
     }));

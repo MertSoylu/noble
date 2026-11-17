@@ -480,7 +480,7 @@ fn pane_frame(
     let has_agent = agent.is_some();
     let (label, state) = match agent {
         Some((b, working)) => {
-            let [full, ..] = agent_title(&b, working, chrono::Utc::now().timestamp(), title_style, th);
+            let [full, ..] = agent_title(&b, working, crate::util::unix_now(), title_style, th);
             let mut parts = full.into_iter();
             lead.extend(parts.next());
             (parts.next().unwrap_or_default(), parts.collect::<Vec<_>>())

@@ -19,13 +19,13 @@ impl App {
 
     /// Does the launcher's agent have a full quota now? Its chip shows ⚠ (`ui::bridge`).
     pub fn launcher_quota_full(&self, command: &str) -> bool {
-        self.full_quota(command, chrono::Utc::now().timestamp()).is_some()
+        self.full_quota(command, crate::util::unix_now()).is_some()
     }
 
     /// Launching an agent whose quota is full says when it resets ("Claude Code 5h quota is full · resets in 1h12m").
     /// The launch itself goes on.
     pub(super) fn warn_full_quota(&mut self, command: &str) {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         let text = match self.full_quota(command, now) {
             Some((state, window)) => {
                 let name = crate::ai::window_name(&window.label);
@@ -44,7 +44,7 @@ impl App {
     /// reset yet. `None` while none is, or when `warn_at` is 0.
     pub fn agent_quota_warning(&self, kind: &str) -> Option<String> {
         let state = self.quota_providers().find(|p| Some(p.id) == crate::ai::quota_provider(kind))?;
-        let w = crate::ai::warned_window(state, self.cfg.ai.warn_at, chrono::Utc::now().timestamp())?;
+        let w = crate::ai::warned_window(state, self.cfg.ai.warn_at, crate::util::unix_now())?;
         Some(format!("{} {}%", crate::ai::window_name(&w.label), w.used))
     }
 
@@ -85,7 +85,7 @@ impl App {
                 continue;
             }
             self.quota_paced.insert(key, f.resets_at);
-            self.toast(ToastLevel::Warn, crate::pace::warning_text(state.name, &f, now, &chrono::Local));
+            self.toast(ToastLevel::Warn, crate::pace::warning_text(state.name, &f, now, &jiff::tz::TimeZone::system()));
         }
     }
 
@@ -111,7 +111,7 @@ impl App {
 
     /// When the next armed reset comes, for `redraw_after`: only times still ahead, so a due one never spins the loop.
     pub(super) fn quota_reset_wake(&self) -> Option<Duration> {
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::util::unix_now_ms();
         self.quota_armed
             .values()
             .map(|&(_, t)| t.saturating_mul(1000) - now_ms)
@@ -144,7 +144,7 @@ mod tests {
     }
 
     fn now() -> i64 {
-        chrono::Utc::now().timestamp()
+        crate::util::unix_now()
     }
 
     fn texts(app: &App) -> Vec<String> {

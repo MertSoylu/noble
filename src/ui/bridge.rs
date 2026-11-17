@@ -126,32 +126,34 @@ fn version_label() -> String {
 
 /// Big clock + greeting (5 rows).
 fn hero(buf: &mut Buffer, area: Rect, app: &App) {
-    use chrono::Timelike;
     let th = &app.theme;
     let now = app.now();
-    let time = now.format(if app.cfg.general.clock_24h { "%H:%M" } else { "%I:%M" }).to_string();
+    let time = now.strftime(if app.cfg.general.clock_24h { "%H:%M" } else { "%I:%M" }).to_string();
     let x = area.x + 1;
     let y = area.y + 1;
     let live = app.live_clock();
-    let colon =
-        if !live || now.second().is_multiple_of(2) { th.accent_bold() } else { Style::default().fg(th.accent_dim) };
+    let colon = if !live || (now.second() as u32).is_multiple_of(2) {
+        th.accent_bold()
+    } else {
+        Style::default().fg(th.accent_dim)
+    };
     hud::big_text(buf, x, y, &time, th.accent_bold(), colon);
     let mut tx = x + hud::big_width(&time) + 1;
     let seconds = app.cfg.general.show_seconds && live;
     if seconds || !app.cfg.general.clock_24h {
         let small = match (seconds, app.cfg.general.clock_24h) {
-            (true, true) => now.format("%S").to_string(),
-            (true, false) => now.format("%S %p").to_string(),
-            _ => now.format("%p").to_string(),
+            (true, true) => now.strftime("%S").to_string(),
+            (true, false) => now.strftime("%S %p").to_string(),
+            _ => now.strftime("%p").to_string(),
         };
         hud::put(buf, tx, y + 2, &small, Style::default().fg(th.accent_dim), 6);
         tx += util::width(&small) as u16 + 1;
     }
     let tx = tx + 3;
     let w = area.right().saturating_sub(tx);
-    let greet = format!("{}, ", greeting(now.hour()));
+    let greet = format!("{}, ", greeting(now.hour() as u32));
     hud::put_spans(buf, tx, y, &[(&greet, th.text()), (&capitalize(&app.operator), th.accent_bold())], w);
-    hud::put(buf, tx, y + 1, &now.format("%A, %d %B").to_string(), th.dim(), w);
+    hud::put(buf, tx, y + 1, &now.strftime("%A, %d %B").to_string(), th.dim(), w);
     let sep = Style::default().fg(th.line);
     hud::put_spans(
         buf,
@@ -164,7 +166,6 @@ fn hero(buf: &mut Buffer, area: Rect, app: &App) {
 
 /// One-line clock + greeting (narrow windows).
 fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
-    use chrono::Timelike;
     let th = &app.theme;
     let now = app.now();
     let fmt = match (app.cfg.general.clock_24h, app.cfg.general.show_seconds && app.live_clock()) {
@@ -175,10 +176,10 @@ fn hero_compact(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let y = area.y + area.height.saturating_sub(1) / 2;
     let x = area.x + 1;
-    let x = hud::put(buf, x, y, &now.format(fmt).to_string(), th.accent_bold(), area.width);
+    let x = hud::put(buf, x, y, &now.strftime(fmt).to_string(), th.accent_bold(), area.width);
     let sep = Style::default().fg(th.line);
-    let hello = format!("   {}, ", greeting(now.hour()));
-    let date = now.format("%a %d %b").to_string();
+    let hello = format!("   {}, ", greeting(now.hour() as u32));
+    let date = now.strftime("%a %d %b").to_string();
     hud::put_spans(
         buf,
         x,
@@ -251,7 +252,7 @@ fn ago(t: SystemTime) -> String {
 }
 
 fn ago_ts(ts: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::util::unix_now();
     util::fmt_ago(Duration::from_secs(now.saturating_sub(ts).max(0) as u64))
 }
 
@@ -1007,13 +1008,13 @@ fn ai_height(app: &App, list: &[&ProviderState], sessions: usize, bg: usize) -> 
 }
 
 fn reset_in(ts: i64) -> String {
-    crate::ai::reset_in(ts, chrono::Utc::now().timestamp())
+    crate::ai::reset_in(ts, crate::util::unix_now())
 }
 
 /// Windows that would fill before they reset at the current pace (the 5-hour and the weekly ones), one line each
 /// (`pace::line`). The count is the same at every width, so `ai_height` can use it.
 fn pace_forecasts(app: &App, p: &ProviderState) -> Vec<crate::pace::Forecast> {
-    crate::pace::forecasts(&app.usage_history, p, chrono::Utc::now().timestamp())
+    crate::pace::forecasts(&app.usage_history, p, crate::util::unix_now())
 }
 
 /// Age of cached quota numbers ("~5m", "~2h"); `None` while they are fresh, missing or
@@ -1222,12 +1223,12 @@ fn ai_panel(
             hud::put(buf, x, y, &note, th.dim(), w);
             y += 1;
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         for f in pace_forecasts(app, p) {
             if y >= bottom {
                 break;
             }
-            let text = crate::pace::line(&f, now, &chrono::Local, w as usize);
+            let text = crate::pace::line(&f, now, &jiff::tz::TimeZone::system(), w as usize);
             hud::put(buf, x, y, &text, Style::default().fg(th.warn), w);
             y += 1;
         }

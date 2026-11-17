@@ -15,7 +15,6 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::style::{Color, Modifier};
 
-use chrono::TimeZone;
 use noble::ai::{Presence, ProviderState, Status, Usage, Window};
 use noble::app::{App, PrEntry, View};
 use noble::bg::BgSession;
@@ -153,7 +152,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     let mut app = App::headless(cfg, (w, h));
     app.operator = "ada".into();
     // A fixed time, so the images change only when the screens do.
-    app.clock = chrono::Local.with_ymd_and_hms(2026, 9, 30, 18, 20, 0).single();
+    app.clock = jiff::civil::date(2026, 9, 30).at(18, 20, 0, 0).to_zoned(jiff::tz::TimeZone::system()).ok();
     // Show the screen tips, not the first-run prefix hint.
     app.ui_state.data.prefix_used = true;
     // The image must not depend on which CLIs are installed on this machine.
@@ -234,7 +233,7 @@ fn demo(theme: &str, w: u16, h: u16) -> App {
     }
 
     let now = SystemTime::now();
-    let ts = chrono::Utc::now().timestamp();
+    let ts = noble::util::unix_now();
     let commit = |hash: &str, ago: i64, subject: &str| Commit {
         hash: hash.into(),
         time: ts - ago,
@@ -408,7 +407,7 @@ fn terminals(app: &mut App) {
     app.tabs[0].alert = Some(noble::term::TabAlert::Done);
     // Hook records as the agents write them: Claude working, Codex waiting for you (its pane is visible, so no
     // notice), Copilot idle at its prompt, OpenCode working. `apply_hook_records` reads them like the real ones.
-    let ts = chrono::Utc::now().timestamp();
+    let ts = noble::util::unix_now();
     let record = |agent: Agent, event: &str| HookRecord {
         event: event.into(),
         message: None,

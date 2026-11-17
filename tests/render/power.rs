@@ -91,7 +91,7 @@ fn redraw_only_when_something_visible_changes() {
     app.handle(AppEvent::Sensors(Box::new(sample.clone())));
     assert!(!app.live_clock());
     let home = app.redraw_after().unwrap();
-    assert!(home > Duration::from_millis(1005) || chrono::Local::now().format("%S").to_string() == "59", "{home:?}");
+    assert!(home > Duration::from_millis(1005) || jiff::Zoned::now().strftime("%S").to_string() == "59", "{home:?}");
     // Terminal: sensor/project events do not wake the screen, the clock draws once a minute.
     app.new_tab(std::env::temp_dir(), None, Some("quiet".into()));
     app.toasts.clear();
@@ -107,7 +107,7 @@ fn redraw_only_when_something_visible_changes() {
     let palette = app.redraw_after().unwrap();
     // At second 59 the top strip's HH:MM is due within a second (as for Home above).
     assert!(
-        palette > Duration::from_millis(500) || chrono::Local::now().format("%S").to_string() == "59",
+        palette > Duration::from_millis(500) || jiff::Zoned::now().strftime("%S").to_string() == "59",
         "{palette:?}"
     );
     // Plugged in, it blinks twice a second. Plugging in or unplugging redraws at once, even over a terminal.

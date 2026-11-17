@@ -395,7 +395,7 @@ fn launchers_only_installed_and_configurable() {
 #[test]
 fn bridge_shows_agent_sessions_and_usage_graph() {
     let mut app = demo_app(160, 45);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     app.usage_history = noble::store::UsageHistory::memory();
     for i in 0..30 {
         let key = noble::store::UsageHistory::key("claude", "5H");
@@ -454,7 +454,7 @@ fn quota_warning_fires_once() {
             plan: None,
             note: None,
         }),
-        fetched_at: Some(chrono::Utc::now().timestamp()),
+        fetched_at: Some(noble::util::unix_now()),
     };
     app.handle(AppEvent::Ai(Box::new(state(50))));
     assert!(app.toasts.is_empty());
@@ -471,7 +471,7 @@ fn quota_warning_fires_once() {
 #[test]
 fn pace_forecast_lines_on_home() {
     let mut app = demo_app(160, 45);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let state = |week: Option<u8>| ProviderState {
         id: "claude",
         name: "Claude Code",
@@ -528,7 +528,7 @@ fn quota_warnings_on_launcher_pane_and_reset() {
     let claude =
         noble::config::Launcher { key: "c".into(), name: "claude".into(), command: "echo claude".into(), show: true };
     app.launchers = vec![(claude, true)];
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let state = |id: &'static str, name: &'static str, used: u8, resets_at: i64| ProviderState {
         id,
         name,
@@ -573,7 +573,7 @@ fn quota_warnings_on_launcher_pane_and_reset() {
 
     // A window past `warn_at` that resets: the notice comes at its reset time (the tick checks it).
     app.toasts.clear();
-    let soon = chrono::Utc::now().timestamp() + 2;
+    let soon = noble::util::unix_now() + 2;
     app.handle(AppEvent::Ai(Box::new(state("codex", "Codex", 93, soon))));
     assert!(app.toasts.iter().any(|t| t.text.starts_with("Codex 5h usage at 93%")), "{:?}", app.toasts.len());
     app.toasts.clear();
@@ -1063,7 +1063,7 @@ fn remove_and_add_projects() {
 #[test]
 fn quota_pace_warning_line() {
     let mut app = demo_app(160, 45);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let key = noble::store::UsageHistory::key("claude", "5H");
     app.usage_history = noble::store::UsageHistory::memory();
     app.usage_history.record(&key, now - 40 * 60, 40);
@@ -1198,7 +1198,7 @@ fn expired_state(id: &'static str, name: &'static str, hint: &'static str, used:
             plan: None,
             note: None,
         }),
-        fetched_at: Some(chrono::Utc::now().timestamp() - 3600),
+        fetched_at: Some(noble::util::unix_now() - 3600),
     }))
 }
 
@@ -1397,7 +1397,7 @@ fn project_card_commits_follow_the_height() {
         (0..n)
             .map(|i| noble::projects::Commit {
                 hash: format!("c{i:06}"),
-                time: chrono::Utc::now().timestamp() - 3600 * (i as i64 + 1),
+                time: noble::util::unix_now() - 3600 * (i as i64 + 1),
                 author: "Mert".into(),
                 subject: format!("commit number {i}"),
             })
@@ -1437,7 +1437,7 @@ fn bridge_lists_background_claude_sessions() {
     use noble::app::Hit;
     use noble::bg::BgSession;
     let mut app = demo_app(160, 45);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let dir = std::env::temp_dir();
     let session = |id: &str, name: &str, state: &str, started: i64| BgSession {
         id: id.into(),
@@ -1570,7 +1570,7 @@ fn background_header_gives_way_to_a_single_row() {
     use noble::bg::BgSession;
     // 160x18: the AI panel is 6 rows high, so three agent rows leave the last one for the background session.
     let mut app = demo_app(160, 18);
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     let dir = std::env::temp_dir();
     let mut records = Vec::new();
     for _ in 0..3 {

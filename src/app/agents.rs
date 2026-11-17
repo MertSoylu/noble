@@ -187,7 +187,7 @@ impl App {
     /// cleared by it. Should one ever emit them, its next hook event (every prompt,
     /// notification and stop) writes a newer record and the state comes back.
     pub(super) fn clear_agent(&mut self, pane: PaneId) {
-        self.agent_cleared.insert(pane, chrono::Utc::now().timestamp());
+        self.agent_cleared.insert(pane, crate::util::unix_now());
         self.agent_working_since.remove(&pane);
         self.agent_answered.remove(&pane);
         if self.agent_hooks.remove(&pane).is_some() {
@@ -250,7 +250,7 @@ impl App {
         {
             return;
         }
-        self.agent_answered.insert(pane, chrono::Utc::now().timestamp());
+        self.agent_answered.insert(pane, crate::util::unix_now());
         self.dirty = true;
     }
 
@@ -564,10 +564,10 @@ mod tests {
         apply(&mut app, pane, rec("prompt", 100, 0));
         assert!(!app.agent_hooks.contains_key(&pane));
         // A record newer than the clearing is a new session.
-        apply(&mut app, pane, rec("prompt", chrono::Utc::now().timestamp() + 5, 0));
+        apply(&mut app, pane, rec("prompt", crate::util::unix_now() + 5, 0));
         assert_eq!(state(&app, pane), Some(AgentState::Working));
         // The session ends: the record goes.
-        apply(&mut app, pane, rec(crate::hooks::SESSION_END, chrono::Utc::now().timestamp() + 6, 0));
+        apply(&mut app, pane, rec(crate::hooks::SESSION_END, crate::util::unix_now() + 6, 0));
         assert!(!app.agent_hooks.contains_key(&pane));
         // A record of a pane that does not exist is dropped.
         apply(&mut app, 9999, rec("prompt", 100, 0));
@@ -682,7 +682,7 @@ mod tests {
     fn an_answered_claude_prompt_reads_as_working_until_the_next_record() {
         use crate::hooks::{NOTIFICATION, PERMISSION_REQUEST, STOP};
         let (mut app, pane) = app_with_pane();
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         apply(&mut app, pane, rec(PERMISSION_REQUEST, now - 2, 0));
         assert_eq!(app.agent_state(pane), Some(("claude", AgentState::NeedsYou)));
         assert_eq!(app.agents_waiting(), 1);
@@ -716,7 +716,7 @@ mod tests {
     fn answers_change_only_a_claude_pane_that_needs_you() {
         use crate::hooks::{Agent, PERMISSION_REQUEST, PROMPT};
         let (mut app, pane) = app_with_pane();
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         apply(&mut app, pane, rec(PROMPT, now - 2, 0));
         app.answer_prompt(pane);
         assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
@@ -734,7 +734,7 @@ mod tests {
     fn answering_clears_the_outer_waiting_marks() {
         use crate::hooks::PERMISSION_REQUEST;
         let (mut app, pane) = app_with_pane();
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]0;NOBLE\x07"));
         apply(&mut app, pane, rec(PERMISSION_REQUEST, now - 2, 0));
         assert_eq!(app.outer_sequences(true).as_deref(), Some("\x1b]9;4;4;0\x1b\\\x1b]0;NOBLE · ◆ 1\x07"));

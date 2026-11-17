@@ -54,7 +54,7 @@ pub fn registry() -> Vec<ProviderDef> {
 }
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    crate::util::unix_now()
 }
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────

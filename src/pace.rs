@@ -4,7 +4,8 @@
 //! local time zone are passed in, so the forecast, its text and the once-per-window warning gate are testable with
 //! fixed times. `ui/bridge.rs` draws the lines on Home, `app/quota.rs` raises the warning when new quota data arrives.
 
-use chrono::{DateTime, Datelike, TimeZone};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 use crate::ai::{ProviderState, Window};
 use crate::store::UsageHistory;
@@ -77,23 +78,16 @@ pub fn forecasts(history: &UsageHistory, p: &ProviderState, now: i64) -> Vec<For
 
 /// A moment as a local clock time: "14:20" on the day of `now`, "Thu 14:20" on another day (a weekly window fills days
 /// ahead). 24-hour on every platform and locale.
-pub fn clock<Tz: TimeZone>(ts: i64, now: i64, tz: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let at: Option<DateTime<Tz>> = tz.timestamp_opt(ts, 0).single();
-    let Some(at) = at else { return String::new() };
-    let same_day = tz.timestamp_opt(now, 0).single().is_some_and(|n| n.num_days_from_ce() == at.num_days_from_ce());
-    if same_day { at.format("%H:%M").to_string() } else { at.format("%a %H:%M").to_string() }
+pub fn clock(ts: i64, now: i64, tz: &TimeZone) -> String {
+    let Ok(at) = Timestamp::from_second(ts).map(|t| t.to_zoned(tz.clone())) else { return String::new() };
+    let same_day = Timestamp::from_second(now).is_ok_and(|n| n.to_zoned(tz.clone()).date() == at.date());
+    if same_day { at.strftime("%H:%M").to_string() } else { at.strftime("%a %H:%M").to_string() }
 }
 
 /// The Home line, shortened until it fits `width` cells:
 /// `▲ 5h full ~14:20 (in 1h20m) · resets 15:00`, then without the reset, then without the duration, then bare.
 /// The line is always one row, so the panel's height does not depend on the width.
-pub fn line<Tz: TimeZone>(f: &Forecast, now: i64, tz: &Tz, width: usize) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
+pub fn line(f: &Forecast, now: i64, tz: &TimeZone, width: usize) -> String {
     let name = crate::ai::window_name(&f.label);
     let at = clock(f.full_at, now, tz);
     let left = crate::ai::reset_in(f.full_at, now);
@@ -109,10 +103,7 @@ where
 }
 
 /// The notification text: "Claude Code 5h quota will run out ~14:20 at this pace".
-pub fn warning_text<Tz: TimeZone>(name: &str, f: &Forecast, now: i64, tz: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
+pub fn warning_text(name: &str, f: &Forecast, now: i64, tz: &TimeZone) -> String {
     format!(
         "{name} {} quota will run out ~{} at this pace",
         crate::ai::window_name(&f.label),
@@ -135,12 +126,12 @@ pub fn warn_due(warned: Option<i64>, resets_at: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::FixedOffset;
+    use jiff::tz::{Offset, TimeZone};
 
     const H: i64 = 3600;
 
-    fn utc() -> FixedOffset {
-        FixedOffset::east_opt(0).unwrap()
+    fn utc() -> TimeZone {
+        TimeZone::fixed(Offset::UTC)
     }
 
     fn win(label: &str, used: u8, resets_at: Option<i64>) -> Window {
@@ -215,10 +206,10 @@ mod tests {
         // Midnight is the other day, whatever the distance.
         assert_eq!(clock(T0 + 12 * H, T0, &utc()), "Thu 00:00");
         // The zone shifts the clock and the day boundary: 12:00 UTC is 23:00 at +11, so 14:20 UTC is tomorrow there.
-        let east = FixedOffset::east_opt(11 * 3600).unwrap();
+        let east = TimeZone::fixed(Offset::constant(11));
         assert_eq!(clock(T0 + 60, T0, &east), "23:01");
         assert_eq!(clock(T0 + 2 * H + 20 * 60, T0, &east), "Thu 01:20");
-        let west = FixedOffset::west_opt(5 * 3600).unwrap();
+        let west = TimeZone::fixed(Offset::constant(-5));
         assert_eq!(clock(T0 + 2 * H + 20 * 60, T0, &west), "09:20");
     }
 

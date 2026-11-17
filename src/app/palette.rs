@@ -341,7 +341,7 @@ impl App {
         let items = rows
             .into_iter()
             .map(|(n, count)| PaletteItem {
-                title: format!("{}  {}", n.at.format("%H:%M:%S"), n.text),
+                title: format!("{}  {}", n.at.strftime("%H:%M:%S"), n.text),
                 group: level_name(n.level),
                 hint: if count > 1 { format!("×{count}") } else { String::new() },
                 cmd: PaletteCmd::Notice { text: n.text.clone(), target: n.target.clone(), level: n.level },

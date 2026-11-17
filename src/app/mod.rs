@@ -409,7 +409,7 @@ impl Toast {
 pub struct Notice {
     pub text: String,
     pub level: ToastLevel,
-    pub at: chrono::DateTime<chrono::Local>,
+    pub at: jiff::Zoned,
     /// Where choosing it in the list leads (as the toast's click does).
     pub target: Option<ToastTarget>,
 }
@@ -862,7 +862,7 @@ pub struct App {
     pub operator: String,
     /// The time the clocks show instead of now (the README screenshots); `None` in the app.
     #[doc(hidden)]
-    pub clock: Option<chrono::DateTime<chrono::Local>>,
+    pub clock: Option<jiff::Zoned>,
     /// Repos whose git status was requested and when (to thin out repeats).
     git_requested: HashMap<PathBuf, Instant>,
     pub search: Option<SearchState>,
@@ -1347,7 +1347,7 @@ impl App {
             AppEvent::BgSessions(list) => return self.set_bg_sessions(list),
             AppEvent::Duel(ev) => self.on_duel_event(ev),
             AppEvent::Update(Ok(version)) => {
-                let checked = chrono::Utc::now().timestamp();
+                let checked = crate::util::unix_now();
                 self.edit_ui_state(|d| {
                     d.update_checked = checked;
                     d.update_latest = version.clone();
@@ -1377,7 +1377,7 @@ impl App {
     /// (`quota.rs`).
     fn on_fresh_usage(&mut self, state: &ProviderState) {
         let Some(usage) = &state.usage else { return };
-        let ts = state.fetched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let ts = state.fetched_at.unwrap_or_else(crate::util::unix_now);
         for w in &usage.windows {
             self.usage_history.record(&UsageHistory::key(state.id, &w.label), ts, w.used);
         }
@@ -1386,7 +1386,7 @@ impl App {
         if limit == 0 {
             return;
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         self.arm_quota_resets(state, &usage.windows, now);
         self.warn_pace(state, now);
         for w in &usage.windows {
@@ -1398,7 +1398,7 @@ impl App {
             let reset = w
                 .resets_at
                 .map(|t| {
-                    let left = t.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64;
+                    let left = t.saturating_sub(crate::util::unix_now()).max(0) as u64;
                     format!(" · resets in {}", crate::util::fmt_duration(Duration::from_secs(left)))
                 })
                 .unwrap_or_default();
@@ -1498,7 +1498,7 @@ impl App {
         let now = Instant::now();
         let linger = self.toast_linger();
         self.toasts.retain(|t| t.expires_at().is_none_or(|u| u + linger > now));
-        self.check_quota_resets(chrono::Utc::now().timestamp());
+        self.check_quota_resets(crate::util::unix_now());
         self.request_visible_git();
         self.sync_power_state();
         self.request_home_live_data();

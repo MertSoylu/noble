@@ -102,7 +102,7 @@ impl App {
 
     /// The background sessions Home lists: running ones, and finished ones for a day (`BgSession::shown`).
     pub fn shown_bg_sessions(&self) -> Vec<(usize, &crate::bg::BgSession)> {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::util::unix_now();
         self.bg_sessions.iter().enumerate().filter(|(_, s)| s.shown(now)).collect()
     }
 

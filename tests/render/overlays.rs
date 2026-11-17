@@ -579,7 +579,7 @@ fn two_tabs_second_split(app: &mut App) -> (noble::term::layout::PaneId, noble::
 
 /// The agent in `pane` needs you while its tab is in the background (a hook record, as Claude writes it).
 fn needs_you(app: &mut App, pane: noble::term::layout::PaneId) {
-    let now = chrono::Utc::now().timestamp();
+    let now = noble::util::unix_now();
     app.apply_hook_records(std::collections::HashMap::from([(pane, hook_rec("notification", now, 0))]));
 }
 

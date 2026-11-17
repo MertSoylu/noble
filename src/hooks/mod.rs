@@ -589,7 +589,7 @@ pub fn run_cli(agent: Agent, event: &str, stdin: &str, data: &Path, instance: Op
     let rec = HookRecord {
         event: event.to_string(),
         message,
-        ts: chrono::Utc::now().timestamp(),
+        ts: crate::util::unix_now(),
         agent: Some(agent),
         session: resume::session_id(agent, &input),
         subagents: 0,

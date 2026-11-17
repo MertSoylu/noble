@@ -337,7 +337,7 @@ fn clock_text(app: &App, seconds: bool) -> String {
         (false, true) => "%I:%M:%S %p",
         (false, false) => "%I:%M %p",
     };
-    now.format(fmt).to_string()
+    now.strftime(fmt).to_string()
 }
 
 /// One terminal tab of the top bar, measured before it is drawn.

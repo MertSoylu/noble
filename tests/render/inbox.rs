@@ -24,7 +24,7 @@ fn record(event: &str, message: Option<&str>, ago: i64, agent: Option<Agent>) ->
     HookRecord {
         event: event.into(),
         message: message.map(Into::into),
-        ts: chrono::Utc::now().timestamp() - ago,
+        ts: noble::util::unix_now() - ago,
         agent,
         session: None,
         subagents: 0,

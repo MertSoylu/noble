@@ -40,6 +40,7 @@ All notable changes to NOBLE are documented here. The format is based on
 ### Changed
 - The pace line says when the window fills on the clock and when it resets: `▲ 5h full ~14:20 (in 1h20m) · resets
   15:00`, shortened step by step on a narrow panel.
+- chrono replaced by jiff; RUSTSEC-2026-0543 no longer ignored.
 
 ### Fixed
 - Focus mode: the top bar no longer comes up over the top panes' titles. It appears only while the pointer rests on
