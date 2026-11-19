@@ -6,6 +6,8 @@ All notable changes to NOBLE are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-19
+
 ### Added
 - Agent Inbox (prefix `I`, palette: Agent Inbox, `agent_inbox` in the key bindings): one overlay that lists every agent
   across all tabs that needs you, longest wait first, with its tab and project, what it asks and how long it has
@@ -43,6 +45,14 @@ All notable changes to NOBLE are documented here. The format is based on
 - chrono replaced by jiff; RUSTSEC-2026-0543 no longer ignored.
 
 ### Fixed
+- OpenCode 2 showed "Plugin failed: …\noble.js" and "1 plugin failed" for NOBLE's status plugin: OpenCode 2 loads
+  only a default export with an `id` and a `setup()`. The plugin now has one and still works with OpenCode 1.4 and
+  newer (OpenCode 1.0 to 1.3 can no longer load it); NOBLE rewrites an installed plugin at its next start. OpenCode 2
+  runs plugins in a background service that every terminal shares, so its plugin cannot tell panes apart and forwards
+  nothing.
+- Agent states without hooks: an agent that reports its own state with OSC 7501 (OpenCode 2, Codex) now shows it in
+  the pane title, the tab strip, Home and the Agent Inbox (working and your turn; needs you and error are read too but
+  not yet seen live). A hook record still comes first.
 - Focus mode: the top bar no longer comes up over the top panes' titles. It appears only while the pointer rests on
   the line between a title and the buttons, and goes away when the pointer reaches a title, so the titles of the top
   panes can be clicked, double-clicked and dragged.
@@ -1008,7 +1018,8 @@ First public release.
 - `install.cmd` installs the working tree as `noble-dev`, next to a stable `noble`.
 - `cargo run --example screenshots` regenerates the README images.
 
-[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.14.2...HEAD
+[Unreleased]: https://github.com/MertSoylu/noble/compare/v1.15.0...HEAD
+[1.15.0]: https://github.com/MertSoylu/noble/compare/v1.14.2...v1.15.0
 [1.14.2]: https://github.com/MertSoylu/noble/compare/v1.14.1...v1.14.2
 [1.14.1]: https://github.com/MertSoylu/noble/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/MertSoylu/noble/compare/v1.13.0...v1.14.0

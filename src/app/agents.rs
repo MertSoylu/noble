@@ -1,5 +1,6 @@
-//! Agent tracking: the state of the AI agents running in panes (from Claude's hook records or guessed from
-//! the launcher command / window title), their badges and the session lists shown on Home and in the tab strip.
+//! Agent tracking: the state of the AI agents running in panes (from their hook records, their own OSC 7501 state
+//! reports, or guessed from the launcher command / window title), their badges and the session lists shown on Home
+//! and in the tab strip.
 
 use std::collections::HashMap;
 
@@ -21,6 +22,17 @@ pub(super) fn hook_state(rec: &crate::hooks::HookRecord) -> Option<AgentState> {
         _ => return None,
     };
     Some(if state == AgentState::Idle && rec.subagents > 0 { AgentState::Working } else { state })
+}
+
+/// The state an agent's own report (OSC 7501) shows: a turn that is done is the user's turn, like idle.
+pub(super) fn report_state(state: crate::term::pane::ReportState) -> AgentState {
+    use crate::term::pane::ReportState;
+    match state {
+        ReportState::Working => AgentState::Working,
+        ReportState::Blocked => AgentState::NeedsYou,
+        ReportState::Error => AgentState::Error,
+        ReportState::Idle | ReportState::Done => AgentState::Idle,
+    }
 }
 
 /// Two records of one permission prompt: the agent sends a permission request and a notification for it, in
@@ -214,8 +226,8 @@ impl App {
         }
     }
 
-    /// The AI agent running in a pane and its state: from Claude's hook record, else
-    /// guessed from the launcher command (while it still runs) or the window title.
+    /// The AI agent running in a pane and its state: from the agent's hook record, else from the state the agent
+    /// reports itself (OSC 7501), else guessed from the launcher command (while it still runs) or the window title.
     pub fn agent_state(&self, pane: PaneId) -> Option<(&'static str, AgentState)> {
         // A record whose event this build does not map falls through to the guess below.
         if let Some(rec) = self.agent_hooks.get(&pane)
@@ -226,7 +238,14 @@ impl App {
         let p = self.panes.get(&pane)?;
         // Once the launcher command has exited, the pane runs whatever was typed at the prompt.
         let command = p.command.as_deref().filter(|_| p.launch_running());
-        let kind = crate::ai::agent_kind(command, &p.label())?;
+        let guessed = crate::ai::agent_kind(command, &p.label());
+        // The agent's own state report (OSC 7501), when it names the agent or the pane's agent is known otherwise.
+        if let Some(report) = p.agent_report()
+            && let Some(kind) = report.app.map(crate::hooks::Agent::id).or(guessed)
+        {
+            return Some((kind, report_state(report.state)));
+        }
+        let kind = guessed?;
         // Only a notice (bell, notification) means the agent asks for the user; a finished or failed command does not.
         let alert = self.tabs.iter().any(|t| t.alert == Some(TabAlert::Notice) && t.root.contains(pane));
         // Without hooks the progress report (OSC 9;4) is the only sign that the agent works.
@@ -619,6 +638,43 @@ mod tests {
         assert!(app.tab_busy(shell_tab));
         feed_pane(&app, shell, b"\x1b]9;4;0\x07");
         assert!(!app.tab_busy(shell_tab));
+    }
+
+    /// An agent's own state report (OSC 7501: OpenCode 2, Codex) gives the pane its agent and state without hooks. A
+    /// hook record still wins, an app NOBLE does not know needs the launcher to name the agent, and the shell's prompt
+    /// (the agent exited) ends the report.
+    #[test]
+    fn an_agent_state_report_drives_a_pane_without_hooks() {
+        let (mut app, pane) = app_with_pane();
+        let tab = app.tabs.iter().position(|t| t.root.contains(pane)).expect("tab");
+        feed_pane(&app, pane, b"\x1b]7501;state=idle:app=opencode\x1b\\");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Idle)));
+        feed_pane(&app, pane, b"\x1b]7501;state=working:id=ses_1:app=opencode\x1b\\");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Working)));
+        assert_eq!(app.tab_agent_state(tab), Some(AgentState::Working));
+        feed_pane(&app, pane, b"\x1b]7501;state=blocked:app=opencode:kind=permission\x1b\\");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::NeedsYou)));
+        assert_eq!(app.agents_waiting(), 1);
+        feed_pane(&app, pane, b"\x1b]7501;state=error:app=opencode\x1b\\");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Error)));
+        feed_pane(&app, pane, b"\x1b]7501;state=done:app=codex\x07");
+        assert_eq!(app.agent_state(pane), Some(("codex", AgentState::Idle)), "a finished turn is the user's turn");
+        // A hook record wins over the report.
+        let mut claude = rec("prompt", 100, 0);
+        claude.agent = Some(crate::hooks::Agent::Claude);
+        apply(&mut app, pane, claude);
+        assert_eq!(app.agent_state(pane), Some(("claude", AgentState::Working)));
+        app.clear_agent(pane);
+        // An app NOBLE does not know: only a launcher that names the agent gives the report a name.
+        feed_pane(&app, pane, b"\x1b]7501;state=working:app=zed\x07");
+        assert_eq!(app.agent_state(pane), None);
+        app.panes.get_mut(&pane).unwrap().command = Some("opencode".into());
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Working)));
+        // The shell's prompt came back: the agent exited, and only the launcher's guess is left.
+        feed_pane(&app, pane, b"\x1b]133;A\x07");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Running)));
+        feed_pane(&app, pane, b"\x1b]7501;state=working:app=opencode\x07\x1b]7501;state=clear\x07");
+        assert_eq!(app.agent_state(pane), Some(("opencode", AgentState::Running)), "cleared by the agent");
     }
 
     /// The dev build's outer title says `NOBLE dev`, like its top bar.

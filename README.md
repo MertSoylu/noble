@@ -536,7 +536,12 @@ The hooks apply to sessions started after the install: restart an agent that is 
   only in a NOBLE pane. A subagent (a child session the task tool starts) does not change the pane's state: its busy,
   idle and error events are left out, so the tab does not show idle while the main session still works. A permission
   request from a subagent still shows as waiting for you. The plugin recognizes a subagent from the sessions OpenCode
-  creates while it runs, so one that started before the plugin was loaded counts as the main session.
+  creates while it runs, so one that started before the plugin was loaded counts as the main session. This is
+  OpenCode 1.x (1.4 and newer). OpenCode 2 runs plugins in one background service that every terminal shares, so the
+  plugin cannot tell which pane an event is for and forwards nothing there (it still loads, so OpenCode reports no
+  failed plugin). NOBLE reads OpenCode 2's state from the reports its interface writes to the pane instead (working
+  and your turn; waiting for you and error are read too but not yet seen live), with or without the hooks; the same
+  reports give Codex a state without hooks.
 - **Antigravity CLI:** NOBLE shows working from each model call, idle when the turn stops, and an error when the turn
   stopped with one. agy has no permission, notification, subagent or session-end event, so an agent waiting for a
   permission answer still shows as working. NOBLE clears the pane's state when the shell prompt comes back. The resume id
