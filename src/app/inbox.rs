@@ -173,15 +173,15 @@ pub fn preview_lines(rows: &[String], max: usize) -> Vec<&str> {
 }
 
 impl App {
-    /// The agents that need the user, in every tab (`agent_state` says so: a hook record, or a bell on an agent
-    /// without hooks), longest waiting first.
+    /// The agents that need the user, in every tab (`agent_state` says so: a hook record, the agent's own OSC 7501
+    /// report, or a bell on an agent without hooks), longest waiting first.
     pub fn inbox_items(&self) -> Vec<InboxItem> {
         let mut items = Vec::new();
         for (ti, tab) in self.tabs.iter().enumerate() {
             let panes = tab.panes();
             for (k, &pane) in panes.iter().enumerate() {
                 let Some((kind, AgentState::NeedsYou)) = self.agent_state(pane) else { continue };
-                // The record that makes it wait; a pane that waits on a bell only has none.
+                // The record that makes it wait; a pane that waits on a bell or a state report only has none.
                 let rec = self
                     .agent_hooks
                     .get(&pane)

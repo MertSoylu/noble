@@ -23,8 +23,8 @@ use super::input::KeyMode;
 #[cfg(test)]
 use super::osc::same_host;
 pub use super::osc::{
-    Callbacks, FOCUS_REPORTS, Hyperlink, Progress, ProgressState, cwd_url_host, is_network_path, msys_to_windows,
-    parse_cwd_url, windows_cwd,
+    AgentReport, Callbacks, FOCUS_REPORTS, Hyperlink, Progress, ProgressState, ReportState, cwd_url_host,
+    is_network_path, msys_to_windows, parse_cwd_url, windows_cwd,
 };
 
 /// The stable number of the first line of the live screen: lines scrolled out so far plus the scrollback length.
@@ -1357,6 +1357,17 @@ impl Pane {
     /// Whether the progress report changed since the last call (a changed bar redraws the pane's title and tab).
     pub fn take_progress_changed(&self) -> bool {
         std::mem::take(&mut lock(&self.parser).callbacks_mut().progress_changed)
+    }
+
+    /// The state the agent in the pane reported itself (OSC 7501, `osc::AgentReport`): `None` after `state=clear` and
+    /// once the shell prompt came back.
+    pub fn agent_report(&self) -> Option<AgentReport> {
+        lock(&self.parser).callbacks().agent_report
+    }
+
+    /// Whether the agent's state report changed since the last call (the pane's title and tab show it).
+    pub fn take_agent_report_changed(&self) -> bool {
+        std::mem::take(&mut lock(&self.parser).callbacks_mut().agent_report_changed)
     }
 
     /// Whether the program in the pane set focus reports (`CSI ? 1004 h`, not reset since).

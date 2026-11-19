@@ -209,6 +209,12 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   `App::agent_state` makes an agent without hooks Working while its report is busy (`pane_busy`); the title badge is
   `ui/terminal.rs` `progress_badge`, the tab's busy dot `ui/mod.rs` `tab_cell`. A busy report with no percentage spins
   through `agent_spinning` (`redraw_after`), never on battery.
+- **Agent state reports:** `term/osc.rs` stores OSC 7501 `state=<idle|working|blocked|done|error>[:app=<id>…]`
+  (`AgentReport`, `state=clear` takes it back; written by OpenCode 2's interface and Codex) in
+  `Callbacks::agent_report`, and the prompt marks clear it. The query `7501;?` is not answered (its reply is not
+  known). `App::agent_state` uses it after the hook record and before the launcher guess (`report_state`: blocked is
+  NeedsYou, done is Idle); `take_agent_report_changed` redraws in `on_pty_output`. It is OpenCode 2's only per-pane
+  state: its plugins cannot tell panes apart.
 - **Command blocks:** `term/blocks.rs` (pure: `CommandBlock`, the epoch and history pruning, the context line, the
   agent size cap) and `Callbacks::blocks` (`osc.rs`: `133;C` opens a block with the typed line above the cursor, `133;D`
   closes it with the exit code). Line numbers are `screen_base` based; a column change (reflow) drops every block.
@@ -287,7 +293,10 @@ keys and the config schema, and `CONTRIBUTING.md` for the contributor guide.
   registry and `HOOK_ARGS`); one module per agent: `claude.rs` (`~/.claude/settings.json`), `codex.rs`
   (`hooks.json` under `$CODEX_HOME`), `copilot.rs` (its own `noble.json` under `$COPILOT_HOME/hooks`), `opencode.rs`
   (its own plugin file `plugins/noble.js`; a subagent's events come tagged `subagent: true` with `rootSessionID`, and
-  `hook_arg` lets only their permission requests and answers through), `antigravity.rs` (`~/.gemini/config/hooks.json`: NOBLE's own `noble` key of
+  `hook_arg` lets only their permission requests and answers through; its default export `{ id, setup, server }` loads
+  in OpenCode 1.4+, which calls `server()`, and in 2.x, which calls `setup()` and fails a plugin without one; `setup`
+  forwards nothing, since OpenCode 2 runs plugins in one background service shared by every terminal, without the
+  pane's environment), `antigravity.rs` (`~/.gemini/config/hooks.json`: NOBLE's own `noble` key of
   flat handler lists under SessionStart, PreInvocation and Stop; `enabled: false` counts as not installed; no
   `PreToolUse`, whose reply would decide the tool's permission) and `cursor.rs` (`~/.cursor/hooks.json`: `version` 1
   and flat entries under sessionStart, beforeSubmitPrompt, postToolUse, afterShellExecution, afterFileEdit and stop; no

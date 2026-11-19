@@ -45,6 +45,11 @@ pub struct Callbacks {
     /// `progress` changed since the app last took the flag (`Pane::take_progress_changed`): the pane's title and
     /// tab need a redraw.
     pub progress_changed: bool,
+    /// The state the agent in the pane reported itself with OSC 7501 (see `AgentReport`). Cleared by `state=clear` and
+    /// by the next prompt mark (`shell_prompt`), like `progress`.
+    pub agent_report: Option<AgentReport>,
+    /// `agent_report` changed since the app last took the flag (`Pane::take_agent_report_changed`).
+    pub agent_report_changed: bool,
     /// OSC 8 links (newest last, capped in number).
     pub hyperlinks: std::collections::VecDeque<Hyperlink>,
     /// An OSC 8 link opened but not yet closed: (absolute line, column, address).
@@ -118,6 +123,8 @@ impl Callbacks {
         self.title.clear();
         // The program that reported its progress has exited with the prompt (a bar left behind would read as busy).
         self.store_progress(None);
+        // So has the agent that reported its state.
+        self.store_agent_report(None);
         // A program that exited without popping its keyboard flags must not leave the shell with CSI u keys, and the
         // ask that went with it must not make the shell's Shift+Enter a CSI u either (`kitty_asked`).
         self.kitty = Default::default();
@@ -187,6 +194,61 @@ impl Progress {
     }
 }
 
+/// An agent's own report of its state: `OSC 7501 ; state=<state>[:<key>=<value>…]`, ended by BEL or ST. OpenCode 2's
+/// terminal interface and Codex write it to the pane (seen: `state=idle:app=opencode`,
+/// `state=working:id=<session>:app=opencode:title=<base64>`, `state=working:app=codex`, `state=done:app=codex`); it is
+/// the per-pane signal of an agent whose hooks cannot name the pane (OpenCode 2 runs its plugins in a background service
+/// that every terminal shares). `state=clear` takes the report back. Only `state` and `app` are read. The query
+/// `7501;?` (Claude Code, Antigravity and OpenCode ask it) is not answered: its reply format is not known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentReport {
+    pub state: ReportState,
+    /// The agent the `app` field names, when NOBLE knows it (`hooks::Agent::from_id`).
+    pub app: Option<crate::hooks::Agent>,
+}
+
+/// The states of an OSC 7501 report. `idle` and `working` were seen from OpenCode 2.3 and Codex 0.169, `done` from
+/// Codex; `blocked` and `error` are the other names in their programs and are not verified live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportState {
+    /// `idle`: waiting for a prompt.
+    Idle,
+    /// `working`: running a turn.
+    Working,
+    /// `blocked`: waiting for the user (a permission, a question).
+    Blocked,
+    /// `done`: the turn finished.
+    Done,
+    /// `error`: the turn failed.
+    Error,
+}
+
+impl AgentReport {
+    /// The report in an OSC 7501 payload (the text after `7501;`). `Some(None)` for `state=clear`; `None` for the
+    /// query (`?`), a missing or unknown state, or anything else that changes nothing.
+    fn parse(payload: &str) -> Option<Option<AgentReport>> {
+        let mut state = None;
+        let mut app = None;
+        for field in payload.trim().split(':') {
+            match field.split_once('=') {
+                Some(("state", value)) => state = Some(value.trim()),
+                Some(("app", value)) => app = crate::hooks::Agent::from_id(value.trim()),
+                _ => {}
+            }
+        }
+        let state = match state? {
+            "clear" => return Some(None),
+            "idle" => ReportState::Idle,
+            "working" => ReportState::Working,
+            "blocked" => ReportState::Blocked,
+            "done" => ReportState::Done,
+            "error" => ReportState::Error,
+            _ => return None,
+        };
+        Some(Some(AgentReport { state, app }))
+    }
+}
+
 impl crate::vt100::Callbacks for Callbacks {
     fn set_window_title(&mut self, _: &mut crate::vt100::Screen, title: &[u8]) {
         self.title = String::from_utf8_lossy(title).trim().to_string();
@@ -238,6 +300,12 @@ impl crate::vt100::Callbacks for Callbacks {
             }
             // OSC 9;4;<state>[;<progress>]: ConEmu's progress report (`Progress`). It is no notification.
             [b"9", b"4", state, rest @ ..] => self.set_progress(state, rest.first().copied()),
+            // OSC 7501;state=…: an agent's report of its own state (`AgentReport`).
+            [b"7501", rest @ ..] => {
+                if let Some(next) = AgentReport::parse(&join(rest)) {
+                    self.store_agent_report(next);
+                }
+            }
             // OSC 9;<text>: iTerm2-style notification. Numeric subcodes (other ConEmu
             // extensions) are not notifications.
             [b"9", rest @ ..] if !rest.is_empty() && !rest[0].iter().all(u8::is_ascii_digit) => {
@@ -593,6 +661,14 @@ impl Callbacks {
         if next != self.progress {
             self.progress = next;
             self.progress_changed = true;
+        }
+    }
+
+    /// Stores an agent's state report and flags the change when it differs from the stored one.
+    fn store_agent_report(&mut self, next: Option<AgentReport>) {
+        if next != self.agent_report {
+            self.agent_report = next;
+            self.agent_report_changed = true;
         }
     }
 }
@@ -1076,6 +1152,46 @@ mod tests {
             assert!(p.callbacks().progress.is_some());
             p.process(mark);
             assert_eq!(p.callbacks().progress, None, "{mark:?}");
+        }
+    }
+
+    /// OSC 7501: an agent's state report, ended by BEL or ST (OpenCode sends ST), as OpenCode 2.3 and Codex 0.169 write
+    /// it. `state=clear` and a prompt mark take it back; the query, an unknown state and a payload without one change
+    /// nothing, and an unknown `app` is kept as no agent.
+    #[test]
+    fn agent_state_reports_set_and_clear() {
+        use crate::hooks::Agent;
+        let mut p = parser(10, 40);
+        let report = |state, app| Some(AgentReport { state, app });
+        p.process(b"\x1b]7501;?\x1b\\");
+        assert_eq!(p.callbacks().agent_report, None, "the query is no report");
+        assert!(!p.callbacks().agent_report_changed);
+        p.process(b"\x1b]7501;state=idle:app=opencode\x1b\\");
+        assert_eq!(p.callbacks().agent_report, report(ReportState::Idle, Some(Agent::OpenCode)));
+        assert!(std::mem::take(&mut p.callbacks_mut().agent_report_changed));
+        p.process(b"\x1b]7501;state=working:id=ses_e0c5:app=opencode:title=TmV3IHNlc3Npb24=\x1b\\");
+        assert_eq!(p.callbacks().agent_report, report(ReportState::Working, Some(Agent::OpenCode)));
+        assert!(std::mem::take(&mut p.callbacks_mut().agent_report_changed));
+        p.process(b"\x1b]7501;state=working:id=ses_e0c5:app=opencode:title=b3RoZXI=\x1b\\");
+        assert!(!p.callbacks().agent_report_changed, "the same state again is no change");
+        p.process(b"\x1b]7501;state=done:app=codex\x07");
+        assert_eq!(p.callbacks().agent_report, report(ReportState::Done, Some(Agent::Codex)));
+        p.process(b"\x1b]7501;state=blocked:app=codex:kind=permission\x07");
+        assert_eq!(p.callbacks().agent_report, report(ReportState::Blocked, Some(Agent::Codex)));
+        p.process(b"\x1b]7501;state=error:app=zed\x07");
+        assert_eq!(p.callbacks().agent_report, report(ReportState::Error, None), "an app NOBLE does not know");
+        for ignored in [&b"\x1b]7501;state=sleeping:app=codex\x07"[..], b"\x1b]7501;app=codex\x07", b"\x1b]7501\x07"] {
+            p.process(ignored);
+            assert_eq!(p.callbacks().agent_report, report(ReportState::Error, None), "{ignored:?}");
+        }
+        p.process(b"\x1b]7501;state=clear\x07");
+        assert_eq!(p.callbacks().agent_report, None);
+        assert!(p.callbacks().agent_report_changed);
+        assert!(!p.callbacks().prompt && p.callbacks().notice.is_none(), "a report is no prompt mark or notice");
+        for mark in [&b"\x1b]7;file://h/tmp\x07"[..], b"\x1b]9;9;C:\\x\x1b\\", b"\x1b]133;A\x07", b"\x1b]133;D;0\x07"] {
+            p.process(b"\x1b]7501;state=working:app=codex\x07");
+            p.process(mark);
+            assert_eq!(p.callbacks().agent_report, None, "the agent exited: {mark:?}");
         }
     }
 

@@ -5,6 +5,13 @@
 //! payload). A subagent's events are tagged by the plugin (see [`is_subagent`]). Install writes the file only when it
 //! is missing or already NOBLE's; uninstall deletes only NOBLE's file. Startup rewrites an older NOBLE file whose text
 //! differs (`upgrade`), so a plugin change reaches existing installs without a version marker.
+//!
+//! The file loads in both OpenCode generations: its default export is `{ id, setup, server }`. OpenCode 1.x (1.4 and
+//! newer) calls `server()`, which forwards the events. OpenCode 2 calls `setup()` and fails a plugin without one ("Plugin
+//! failed" in its interface, which an older file with only a named export caused). OpenCode 2 runs plugins in a
+//! background service shared by every terminal, without the pane's environment, so `setup` forwards nothing: the state
+//! of an OpenCode 2 session comes from the OSC 7501 reports its interface writes to the pane (`term::osc::AgentReport`).
+//! OpenCode 1.0 to 1.3 call every export as a plugin function and cannot load this file.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -37,6 +44,9 @@ const TEMPLATE: &str = r##"__MARKER__: written by NOBLE when the hooks are insta
 // A child session (a subagent the task tool starts, its `info.parentID` names the parent) is forwarded with
 // `subagent: true` and the top session's id as `rootSessionID`, so NOBLE does not take its status for the pane's own.
 // Outside NOBLE (no NOBLE_PANE or NOBLE_INSTANCE in the environment) it does nothing. It never throws or waits.
+// OpenCode 1.x (1.4 and newer) calls `server()` of the default export. OpenCode 2 calls `setup()`: its plugins run in
+// a background service that every terminal shares, so no event can be told apart by pane there and `setup` does
+// nothing; NOBLE reads OpenCode 2's state from the reports (OSC 7501) its terminal interface writes to the pane.
 import { spawn } from "node:child_process";
 
 const NOBLE_BIN = __NOBLE_BIN__;
@@ -60,7 +70,7 @@ function forward(payload) {
   }
 }
 
-export const NoblePlugin = async () => ({
+const server = async () => ({
   event: async ({ event }) => {
     try {
       const env = globalThis.process?.env ?? {};
@@ -78,6 +88,8 @@ export const NoblePlugin = async () => ({
     }
   },
 });
+
+export default { id: "noble", setup() {}, server };
 "##;
 
 /// `noble.js` in OpenCode's plugin folder; `None` when `ai::isolated` is set or there is no home folder.
@@ -547,6 +559,9 @@ mod tests {
         assert!(text.contains("childRoots.set(info.id"), "the top session is kept per child");
         assert!(text.contains("subagent: true, rootSessionID: root"), "the forwarded event is tagged");
         assert!(text.contains(r#"event.type === "session.created""#), "creation events are read, not forwarded");
+        // OpenCode 2 refuses a plugin without a default `{ id, setup }` ("Plugin failed"); 1.x calls its `server()`.
+        assert!(text.contains(r#"export default { id: "noble", setup() {}, server };"#), "{text}");
+        assert!(!text.contains("export const"), "only the default export, the one both generations read");
     }
 
     /// Runs the rendered plugin under node (when it is installed) with `spawn` replaced by a recorder, feeds it
@@ -573,8 +588,15 @@ globalThis.__nobleTestSpawn = {{
 delete process.env.NOBLE_PANE;
 delete process.env.NOBLE_INSTANCE;
 if ({inside}) {{ process.env.NOBLE_PANE = "3"; process.env.NOBLE_INSTANCE = "42"; }}
-const {{ NoblePlugin }} = await import("./plugin.mjs");
-const hooks = await NoblePlugin({{}});
+const mod = await import("./plugin.mjs");
+// OpenCode 2 reads the default export's `id` and `setup()`; OpenCode 1.x calls its `server()` and nothing else.
+const plugin = mod.default;
+if (Object.keys(mod).join() !== "default") throw new Error("exports: " + Object.keys(mod).join());
+if (typeof plugin.id !== "string" || !plugin.id) throw new Error("no id");
+if (typeof plugin.setup !== "function" || typeof plugin.server !== "function") throw new Error("no setup or server");
+// OpenCode 2's setup gets a context with every domain; it must not use any of them nor start anything.
+if (plugin.setup({{}}) !== undefined || calls.length !== 0) throw new Error("setup did something");
+const hooks = await plugin.server({{}});
 for (const event of {events}) await hooks.event({{ event }});
 console.log(JSON.stringify(calls));
 "#,

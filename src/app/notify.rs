@@ -71,6 +71,8 @@ impl App {
                     clip = Some(c);
                 }
                 progress |= pane.take_progress_changed();
+                // An agent's own state report (OSC 7501) shows on the tab strip too.
+                progress |= pane.take_agent_report_changed();
                 let started = pane.take_started();
                 let prompt = pane.take_prompt();
                 signals.push(PaneSignal {
