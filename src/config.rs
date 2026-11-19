@@ -819,18 +819,113 @@ fn bracket_depth(line: &str, mut depth: usize) -> usize {
     depth
 }
 
+/// The delimiter of the multi-line string (`"""` or `'''`) still open after `line`, given the one open before it.
+/// Quotes of single-line strings and comments are skipped, so a `"""` inside them does not count.
+fn multiline_after(line: &str, open: Option<&'static str>) -> Option<&'static str> {
+    let mut open = open;
+    let mut rest = line;
+    loop {
+        if let Some(delim) = open {
+            // Inside a basic string a backslash escapes the next character (`\"""`); a literal one has no escapes.
+            let mut skip = false;
+            let mut end = None;
+            for (i, c) in rest.char_indices() {
+                if skip {
+                    skip = false;
+                } else if delim == "\"\"\"" && c == '\\' {
+                    skip = true;
+                } else if rest[i..].starts_with(delim) {
+                    end = Some(i + delim.len());
+                    break;
+                }
+            }
+            match end {
+                Some(e) => {
+                    open = None;
+                    rest = &rest[e..];
+                }
+                None => return Some(delim),
+            }
+        } else {
+            let mut quote: Option<char> = None;
+            let mut escaped = false;
+            let mut start = None;
+            for (i, c) in rest.char_indices() {
+                match quote {
+                    Some('"') if escaped => escaped = false,
+                    Some('"') if c == '\\' => escaped = true,
+                    Some(q) if c == q => quote = None,
+                    Some(_) => {}
+                    None if rest[i..].starts_with("\"\"\"") => {
+                        start = Some((i + 3, "\"\"\""));
+                        break;
+                    }
+                    None if rest[i..].starts_with("'''") => {
+                        start = Some((i + 3, "'''"));
+                        break;
+                    }
+                    None if c == '"' || c == '\'' => quote = Some(c),
+                    None if c == '#' => return None,
+                    None => {}
+                }
+            }
+            match start {
+                Some((e, delim)) => {
+                    open = Some(delim);
+                    rest = &rest[e..];
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+/// The key of an assignment line, also when its value goes on over several lines (`keys = [`). The text before
+/// the first `=` outside quotes is parsed as TOML, so `"theme" = …` gives `theme`; `None` for comments, headers,
+/// blank lines and dotted keys.
+fn assignment_key(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let value = strip_value(t);
+    if value.len() == t.len() {
+        return None;
+    }
+    let lhs = &t[..t.len() - value.len() - 1];
+    let table: toml::Table = toml::from_str(&format!("{lhs} = 0")).ok()?;
+    let mut keys = table.iter();
+    let (key, v) = keys.next()?;
+    (keys.next().is_none() && !v.is_table()).then(|| key.clone())
+}
+
+/// The line ending of a text: CRLF when it has any (Notepad on Windows), otherwise LF. `lines()` drops the `\r`,
+/// so a rewrite joins with this to keep the file's endings.
+fn eol_of(text: &str) -> &'static str {
+    if text.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
 /// Updates a `key = value` line in a section preserving its comments; appends the
 /// line at the end of the section when missing, and creates the section at the end
-/// of the file when it does not exist.
+/// of the file when it does not exist. The section header is read like `edit_binding` does (`[ general ]`
+/// counts), the key through its TOML form (`"theme"` counts), lines inside multi-line strings are left alone and
+/// the file keeps its line endings. Use `set_value_checked` to write the result to disk.
 pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> String {
     let header = format!("[{section}]");
     let mut out: Vec<String> = Vec::new();
     let mut in_section = false;
     let mut section_seen = false;
     let mut done = false;
+    let mut string_open: Option<&'static str> = None;
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
+        let inside_string = string_open.is_some();
+        string_open = multiline_after(line, string_open);
+        if inside_string {
+            out.push(line.to_string());
+            continue;
+        }
         if trimmed.starts_with('[') {
             if in_section && !done {
                 // Append at the end of the section (before the trailing blank lines).
@@ -842,29 +937,30 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
                 out.extend(tail);
                 done = true;
             }
-            in_section = strip_comment(trimmed).trim_end() == header;
+            in_section = header_name(line).as_deref() == Some(section);
             section_seen |= in_section;
-        } else if in_section && !done {
-            let lhs = trimmed.split('=').next().unwrap_or("").trim();
-            if lhs == key && !trimmed.starts_with('#') {
-                let comment = comment_start(line).map(|i| &line[i..]).unwrap_or("");
-                let new_line = format!("{key} = {value_toml}");
-                let padded = if comment.is_empty() {
-                    new_line
+        } else if in_section && !done && assignment_key(line).as_deref() == Some(key) {
+            let comment = comment_start(line).map(|i| &line[i..]).unwrap_or("");
+            let new_line = format!("{key} = {value_toml}");
+            let padded = if comment.is_empty() {
+                new_line
+            } else {
+                let pad = 25usize.saturating_sub(new_line.len()).max(1);
+                format!("{new_line}{}{}", " ".repeat(pad), comment.trim_start())
+            };
+            out.push(padded);
+            done = true;
+            // A multi-line value: drop its continuation lines too (an array/table, or a multi-line string).
+            let mut depth = bracket_depth(strip_value(line), 0);
+            while depth > 0 || string_open.is_some() {
+                let Some(next) = lines.next() else { break };
+                if string_open.is_some() {
+                    string_open = multiline_after(next, string_open);
                 } else {
-                    let pad = 25usize.saturating_sub(new_line.len()).max(1);
-                    format!("{new_line}{}{}", " ".repeat(pad), comment.trim_start())
-                };
-                out.push(padded);
-                done = true;
-                // A multi-line array/table value: drop its continuation lines too.
-                let mut depth = bracket_depth(strip_value(line), 0);
-                while depth > 0 {
-                    let Some(next) = lines.next() else { break };
                     depth = bracket_depth(next, depth);
                 }
-                continue;
             }
+            continue;
         }
         out.push(line.to_string());
     }
@@ -877,13 +973,44 @@ pub fn set_value(text: &str, section: &str, key: &str, value_toml: &str) -> Stri
             out.push(format!("{key} = {value_toml}"));
         }
     }
-    let mut s = out.join("\n");
-    s.push('\n');
+    let eol = eol_of(text);
+    let mut s = out.join(eol);
+    s.push_str(eol);
     s
 }
 
-/// Replaces every `[[launchers]]` block with the given list; everything else
-/// (comments included) is preserved. The blocks go where the first one was, or at the end.
+/// `set_value` for a file that is going to be written: refuses a section written in another form (inline table
+/// or dotted keys: a header would duplicate it) and checks the result, which must parse as a config and hold
+/// exactly `value_toml` at `[section] key`. The error says that nothing was saved.
+pub fn set_value_checked(text: &str, section: &str, key: &str, value_toml: &str) -> Result<String, String> {
+    if defined_without_header(text, section) {
+        return Err(format!(
+            "not saved: {section} is written in another form in config.toml (inline or dotted keys): edit it by hand"
+        ));
+    }
+    let refused = |why: &str| format!("not saved, the change would break config.toml ({why}): edit it by hand");
+    let wanted = toml::from_str::<toml::Table>(&format!("v = {value_toml}"))
+        .ok()
+        .and_then(|mut t| t.remove("v"))
+        .ok_or_else(|| refused("the value is not valid TOML"))?;
+    let updated = set_value(text, section, key, value_toml);
+    if let Err(e) = parse(&updated) {
+        return Err(refused(&e.text));
+    }
+    let doc: toml::Table = updated.parse().map_err(|_| refused("it does not parse"))?;
+    let mut node = Some(&doc);
+    for part in section.split('.') {
+        node = node.and_then(|t| t.get(part)).and_then(toml::Value::as_table);
+    }
+    if node.and_then(|t| t.get(key)) != Some(&wanted) {
+        return Err(refused("the line could not be placed"));
+    }
+    Ok(updated)
+}
+
+/// Replaces every `[[launchers]]` block (also spelled `[[ launchers ]]`) with the given list; everything else
+/// (comments included) is preserved, and so are the file's line endings. The blocks go where the first one was,
+/// or at the end.
 pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut insert_at = None;
@@ -891,7 +1018,7 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_block = strip_comment(trimmed).trim_end() == "[[launchers]]";
+            in_block = array_header_name(line).as_deref() == Some("launchers");
             if in_block {
                 // The block content (trailing blank lines included) is skipped.
                 insert_at.get_or_insert(out.len());
@@ -927,9 +1054,31 @@ pub fn set_launchers(text: &str, list: &[Launcher]) -> String {
         blocks.push(String::new());
     }
     out.splice(at..at, blocks);
-    let mut s = out.join("\n");
-    s.push('\n');
+    let eol = eol_of(text);
+    let mut s = out.join(eol);
+    s.push_str(eol);
     s
+}
+
+/// `set_launchers` for a file that is going to be written: the result must parse as a config and hold exactly
+/// the given launchers (read from the raw TOML, since `parse` adds missing default launchers). Otherwise the
+/// error says that nothing was saved.
+pub fn set_launchers_checked(text: &str, list: &[Launcher]) -> Result<String, String> {
+    let refused = |why: &str| format!("not saved, the change would break config.toml ({why}): edit it by hand");
+    let updated = set_launchers(text, list);
+    if let Err(e) = parse(&updated) {
+        return Err(refused(&e.text));
+    }
+    let doc: toml::Table = updated.parse().map_err(|_| refused("it does not parse"))?;
+    let written: Option<Vec<Launcher>> = match doc.get("launchers") {
+        None => Some(Vec::new()),
+        Some(toml::Value::Array(a)) => a.iter().map(|v| v.clone().try_into().ok()).collect(),
+        Some(_) => None,
+    };
+    if written.as_deref() != Some(list) {
+        return Err(refused("the launchers could not be placed"));
+    }
+    Ok(updated)
 }
 
 /// The key of a `key = value` line, `None` for comments, headers, blank lines and anything that is not
@@ -1370,6 +1519,94 @@ providers = [\"claude\", \"gemini\"]
                 assert!(parse(&out).is_ok(), "{text:?}\n→\n{out}");
             }
         }
+    }
+
+    /// The checked edit ends in a file that parses and holds the value, or in a refusal.
+    fn checked_theme(text: &str) -> Result<String, String> {
+        set_value_checked(text, "general", "theme", "\"ice\"")
+    }
+
+    fn theme_of(text: &str) -> String {
+        let doc: toml::Table = text.parse().unwrap();
+        doc["general"]["theme"].as_str().unwrap().to_string()
+    }
+
+    /// A spaced header, a quoted key and a commented line are found, not duplicated.
+    #[test]
+    fn set_value_finds_spaced_headers_and_quoted_keys() {
+        let out = checked_theme("[ general ]\ntheme = \"amber\"\n").unwrap();
+        assert_eq!(theme_of(&out), "ice");
+        assert_eq!(out.matches("general").count(), 1, "{out}");
+        let out = checked_theme("[general]\n\"theme\" = \"amber\" # keep\n").unwrap();
+        assert_eq!(theme_of(&out), "ice");
+        assert!(out.contains("# keep") && out.matches("theme").count() == 1, "{out}");
+        let out = checked_theme("[ \"general\" ]\n").unwrap();
+        assert_eq!(theme_of(&out), "ice");
+    }
+
+    /// A section written as dotted keys or an inline table is refused with the file untouched.
+    #[test]
+    fn set_value_checked_refuses_other_forms() {
+        for text in ["general.theme = \"amber\"\n", "general = { theme = \"amber\" }\n"] {
+            let e = checked_theme(text).unwrap_err();
+            assert!(e.contains("not saved") && e.contains("by hand"), "{e}");
+        }
+    }
+
+    /// A line inside a multi-line string is not a header and not the key: the real value is replaced.
+    #[test]
+    fn set_value_skips_multiline_strings() {
+        let text = "[general]\noperator = \"\"\"\n[x]\ntheme = \"fake\"\n\"\"\"\ntheme = \"amber\"\n";
+        let out = checked_theme(text).unwrap();
+        assert_eq!(theme_of(&out), "ice");
+        assert!(out.contains("theme = \"fake\""), "the string is untouched: {out}");
+        // The replaced value itself is a multi-line string.
+        let text = "[general]\ntheme = \"\"\"\n[x]\n\"\"\"\noperator = \"o\"\n";
+        let out = checked_theme(text).unwrap();
+        assert_eq!(theme_of(&out), "ice");
+        assert!(!out.contains("[x]") && out.contains("operator"), "{out}");
+    }
+
+    /// The check refuses a result that does not hold the value, whatever the reason.
+    #[test]
+    fn set_value_checked_refuses_unparsable_values() {
+        let text = "[general]\ntheme = \"amber\"\n";
+        assert!(set_value_checked(text, "general", "theme", "\"unterminated").is_err());
+        assert!(set_value_checked(text, "general", "theme", "").is_err());
+        // The file did not parse before: nothing sensible can be written.
+        assert!(checked_theme("[general\ntheme = 1\n").is_err());
+    }
+
+    /// A CRLF file stays CRLF through both rewrites.
+    #[test]
+    fn set_value_and_launchers_keep_crlf() {
+        let text = "[general]\r\ntheme = \"amber\"\r\n\r\n[terminal]\r\nscrollback = 100\r\n";
+        let out = checked_theme(text).unwrap();
+        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+        let out = set_launchers_checked(&out, &default_launchers()).unwrap();
+        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+        let lf = checked_theme("[general]\ntheme = \"amber\"\n").unwrap();
+        assert!(!lf.contains('\r'));
+    }
+
+    /// `[[ launchers ]]` (spaced) is replaced like `[[launchers]]`, not kept and written a second time.
+    #[test]
+    fn set_launchers_replaces_spaced_headers() {
+        let text = "[general]\ntheme = \"amber\"\n\n[[ launchers ]]\nkey = \"x\"\nname = \"OldX\"\ncommand = \"oldx\"\n\n[[launchers]] # c\nkey = \"y\"\nname = \"OldY\"\ncommand = \"oldy\"\n";
+        let mut list = default_launchers();
+        list.truncate(2);
+        let out = set_launchers_checked(text, &list).unwrap();
+        let doc: toml::Table = out.parse().unwrap();
+        assert_eq!(doc["launchers"].as_array().unwrap().len(), 2, "{out}");
+        assert!(!out.contains("OldX") && !out.contains("OldY"), "{out}");
+        assert_eq!(theme_of(&out), "amber");
+    }
+
+    /// An empty list leaves no launcher block; the check accepts it.
+    #[test]
+    fn set_launchers_checked_accepts_an_empty_list() {
+        let out = set_launchers_checked("[general]\ntheme = \"amber\"\n", &[]).unwrap();
+        assert!(!out.contains("launchers"), "{out}");
     }
 
     /// A multi-line array value is replaced as a whole: no orphan continuation lines stay behind.

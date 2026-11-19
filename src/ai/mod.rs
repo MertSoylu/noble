@@ -223,6 +223,8 @@ impl Env {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(10)))
             .http_status_as_error(false)
+            // The agent carries the providers' bearer tokens: never over plain http (every provider URL is https).
+            .https_only(true)
             .user_agent("noble/1.0")
             .build();
         let system_store = dirs::home_dir().as_deref() == Some(home.as_path());
